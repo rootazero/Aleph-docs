@@ -1,0 +1,178 @@
+---
+title: "Terminology"
+description: "Standardized terminology and translations for Aleph concepts"
+---
+
+# Terminology
+
+This page establishes canonical names for Aleph concepts to ensure consistency across documentation, code, and UI.
+
+> **Panel top-level modes** (顶层模式): the desktop panel has seven, in nav order — Chat (`/chat`), Dashboard (`/dashboard`), Memory (`/memory`), Agents (`/agents`), Teams (`/teams`), Extensions (`/extensions`), Settings (`/settings`). Settings groups MCP / Plugins / Skills under an **Advanced** group; the ClawHub settings tab was removed.
+
+## Core Concepts
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Agent** | 智能体 | An AI instance with a specific configuration (model, tools, prompts) |
+| **Harness** | 执行驱动 | The Think→Act loop that drives agent execution |
+| **Thinker** | 思考器 | The LLM interaction layer — prompt building, model routing, streaming |
+| **Orchestrator** | 编排器 | Resolves AgentDef + FlowSpec, assembles dependencies, dispatches to Harness |
+| **Gateway** | 网关 | WebSocket control plane — routing, sessions, events, authentication |
+| **Session** | 会话 | A persistent conversation context identified by a session key |
+| **Turn** | 轮次 | One complete Think→Act cycle within a session |
+| **Flow** | 流程 | A single execution request from ingress to completion |
+| **FlowSpec** | 流程规范 | Defines execution parameters for a single flow |
+| **AgentDef** | 智能体定义 | Static configuration defining an agent's behavior |
+
+## Memory System
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Memory** | 记忆系统 | Persistent knowledge storage (SQLite + sqlite-vec + markdown notes) |
+| **Memory Hub** | 记忆中心 | Unified memory panel hosting Graph view and Table view in one toggle (`/memory`); node identity == note path |
+| **Graph View** | 图谱视图 | Radial node-link canvas of memory notes (formerly the `/memory` canvas) |
+| **Table View** | 表格视图 | Faceted list of memory notes (formerly the `/dashboard/memory` vault) |
+| **Dream Insights** | 梦境洞察 | Read-only panel (Settings > Memory) backed by `dreaming.list_insights` — recent daily synthesis notes + dream-run history |
+| **Corrections** | 纠正记录 | Read-only panel (Settings > Memory) backed by `memory.list_corrections` — surfaces the correction → distillation lifecycle |
+| **Raw Memory (L0)** | 原始记忆 | Ephemeral session data before compression |
+| **Note (L1)** | 笔记 | Persistent markdown knowledge files |
+| **Wikilink** | 维基链接 | Obsidian-compatible `[[note-name]]` cross-references |
+| **Compression** | 压缩 | Converting raw memories into structured notes |
+| **Dream Daemon** | 梦境守护进程 | Background memory consolidation process |
+| **Scratchpad** | 草稿板 | Per-session working memory (discarded on session end) |
+| **User Profile** | 用户画像 | Dialectic user model (`USER.md`) |
+
+## Tool System
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Tool** | 工具 | A callable capability exposed to the LLM |
+| **ToolService** | 工具服务 | Unified façade over all tool sources |
+| **Builtin Tool** | 内置工具 | Native Rust tool implementation |
+| **MCP Tool** | MCP 工具 | External tool via Model Context Protocol |
+| **Extension Tool** | 扩展工具 | Plugin-provided tool (WASM / Node.js) |
+| **Skill** | 技能 | A learned or installed capability that adds tools |
+| **Skill System** | 技能系统 | Framework for skill discovery, registration, and lifecycle |
+| **Dispatcher** | 调度器 | Tool registry, risk evaluation, and semantic retrieval |
+| **Hydration** |  hydrated tools | Semantic tool retrieval based on query context |
+
+## Extensions
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Extension** | 扩展 | User-facing umbrella for Skill + Plugin + MCP server — exactly one **kind** per Extension. See [Extensions Store](/docs/en/concepts/extensions-store) |
+| **Extensions Store** | 扩展商店 | Top-level panel mode (`/extensions`) for browsing/installing Extensions by functional category, with trust tiers and pre-install disclosure |
+| **ExtensionKind** | 扩展类型 | Store-facing kind enum `{Skill, Plugin, Mcp}` — distinct from the runtime `PluginKind {Wasm, Mcp, Static}` of the plugin host |
+| **Store Agent** | 商店智能体 | Built-in protected agent owning discover→curate→install→verify; cannot bypass system rails (specs, trust verdicts, SHA256, secrets) |
+| **Trust Tier** | 信任层级 | Source trust level: Official / Verified / Community / Unverified |
+| **Disclosure** | 披露 | Mandatory pre-install summary (command+args, secrets, network/fs reach, pinned version + SHA256, tier) |
+| **Source** | 源 | A catalog provider (plugin marketplaces, Official MCP Registry, Docker MCP Catalog) cached in SQLite for offline browse |
+
+## Security
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Sandbox** | 沙箱 | Per-session execution isolation with capability enforcement |
+| **Capability** |  capability | Permission declaration (filesystem, network, process) |
+| **Approval Gate** | 审批门 | Human-in-the-loop approval for elevated permissions |
+| **IdentityContext** | 身份上下文 | Immutable identity snapshot flowing through execution |
+| **PolicyEngine** | 策略引擎 | Stateless permission checker |
+| **GuestScope** | 访客范围 | Tool-level restrictions for guest sessions |
+| **Pairing** | 配对 | Device trust establishment via PIN/code |
+
+## Communication
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Interface** | 接口 | A client connection type (CLI, Telegram, Discord, etc.) |
+| **Channel** | 频道 | A specific conversation endpoint within an interface |
+| **Session Key** | 会话密钥 | Unique identifier for a session (e.g., `agent:main:main`) |
+| **Event Bus** | 事件总线 | Pub/sub system for real-time event distribution |
+| **JSON-RPC** | JSON-RPC | Request/response protocol over WebSocket |
+| **Trace** | 追踪 | Execution event stream for observability |
+
+## AI/LLM
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Provider** | 提供商 | LLM API vendor (OpenAI, Anthropic, Gemini, etc.) |
+| **Protocol** | 协议 | Adapter for a specific LLM API format |
+| **Model** | 模型 | A specific LLM instance (e.g., `gpt-4o`, `claude-sonnet`) |
+| **Prompt** | 提示词 | Input text sent to the LLM |
+| **PromptLayer** | 提示层 | One section of the assembled system prompt |
+| **Streaming** | 流式传输 | Real-time token-by-token response delivery |
+| **Thinking** | 思考 | Extended reasoning mode (Claude's extended thinking) |
+
+## Advanced Features
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **A2A** | A2A | Agent-to-Agent protocol for inter-agent communication |
+| **ACP** | ACP | Agent Client Protocol for agent discovery and delegation |
+| **ClawHub** | ClawHub | Legacy registry — no longer a first-class Extensions source; settings tab removed, subsumed into the Extensions Store (long-tail only, read via the Store Agent) |
+| **Team** | 团队 | A leader + members group; on first message the leader plans first ("Team Strata") and the plan is welded into every member's prompt |
+| **Team Strata** | 团队战略协调 | Leader-first strategic planning that coordinates a team's members |
+| **Coord Task** | 协调任务 | A member's assigned task with status `Pending → InProgress → WaitingReview → Completed`, reviewed by the leader via `task_review` |
+| **Group Chat** | 群聊 | The three-panel team chat window (roster · attribution-bubble message flow · workspace), powered by the durable per-team thread (`teams.chat.*`) |
+| **WorldModel** | 世界模型 | Environmental state tracking for proactive behavior |
+| **Proactive Dispatcher** | 主动调度器 | Daemon that dispatches proactive tasks based on world state |
+| **Desktop Bridge** | 桌面桥 | UDS JSON-RPC protocol for desktop automation |
+
+## Naming Conventions
+
+### Code → Docs Mapping
+
+| Code Symbol | Document Name |
+|-------------|---------------|
+| `AgentHarness` | Harness / 执行驱动 |
+| `HarnessDeps` | Harness Dependencies |
+| `HarnessRunner` | Harness Runner |
+| `FlowRequest` | Flow Request |
+| `FlowOutcome` | Flow Outcome |
+| `SessionService` | Session Service |
+| `ToolService` | Tool Service |
+| `AiProvider` | AI Provider |
+| `StopHookHandler` | Stop Hook |
+| `ContextBudget` | Context Budget |
+| `SkillPrefetcher` | Skill Prefetcher |
+| `TraceSink` | Trace Sink |
+| `InProcessActorSessionService` | In-Process Session Service |
+| `WorkspaceSandbox` | Workspace Sandbox |
+| `OsSandboxDriver` | OS Sandbox Driver |
+| `ApprovalGate` | Approval Gate |
+| `PolicyEngine` | Policy Engine |
+| `IdentityContext` | Identity Context |
+| `GuestScope` | Guest Scope |
+| `MultiProviderRegistry` | Multi-Provider Registry |
+| `ProtocolRegistry` | Protocol Registry |
+| `PromptPipeline` | Prompt Pipeline |
+| `MemoryEnvelope` | Memory Envelope |
+| `WorkingMemoryAssembler` | Working Memory Assembler |
+| `HybridAssembler` | Hybrid Assembler |
+| `NoteFactRetrieval` | Note Fact Retrieval |
+| `CompressionService` | Compression Service |
+| `DreamDaemon` | Dream Daemon |
+| `DesktopBridgeClient` | Desktop Bridge Client |
+
+## Deprecated Terms (Do Not Use)
+
+| Old Term | Replacement | Reason |
+|----------|-------------|--------|
+| OTAF | Think→Act | Architecture changed from OTAF to Harness |
+| Agent Loop | Harness | Unified under Harness terminology |
+| LanceDB | SQLite + sqlite-vec | Storage backend changed |
+| JSON5 config | TOML config | Config format changed |
+| `aleph` binary | `aleph-server` | Binary renamed |
+| Skill System v1 | Skill System v2 | Complete rewrite |
+| EvolutionTracker | Registry | Part of old skill system |
+| SolidificationDetector | EligibilityService | Part of old skill system |
+| SubagentTool | FlowRunTool | Architecture changed |
+| LoopToolRegistry | ToolService | Unified tool façade |
+| ClawHub settings tab | Extensions Store | ClawHub demoted to long-tail; settings tab removed |
+| `teams.run` | `teams.chat.send` / Coord Tasks | Method never existed — teams use the chat thread + tasks |
+| `coordination: sequential\|parallel\|hierarchical` | Team Strata (leader-first planning) | Coordination modes were fictional |
+
+## See Also
+
+- [Architecture Overview](/docs/en/architecture/overview) — Where these components fit in the system
+- [Concepts](/docs/en/concepts) — High-level explanation of core ideas

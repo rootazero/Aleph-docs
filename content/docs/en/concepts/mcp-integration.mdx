@@ -1,0 +1,104 @@
+---
+title: "MCP Integration"
+description: "Model Context Protocol integration for external tool servers, supporting stdio, HTTP, and SSE transports with OAuth authentication."
+---
+
+The `mcp` module integrates Aleph with external MCP (Model Context Protocol) servers. It provides transport abstraction, tool discovery, resource management, and prompt templates from third-party MCP servers.
+
+> An MCP server is one of three **Extension** kinds (`Skill`, `Plugin`, `Mcp`). The Official MCP Registry is a **source** in the [Extensions Store](/docs/en/concepts/extensions-store), where MCP servers are browsed and installed by functional category alongside plugins and skills. This page describes the low-level MCP host; for the everyday install/discovery flow, see the Extensions Store.
+
+## Design Philosophy
+
+1. **Transport abstraction** — All MCP transports implement the same `McpTransport` trait
+2. **Runtime detection** — Automatically detects Node.js, Python, and Bun runtimes for local servers
+3. **Security first** — SSRF validation, OAuth token management, and approval workflows
+4. **Unified registry** — External MCP tools are wrapped and registered alongside native tools
+
+## Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                     MCP Integration                         │
+├─────────────────────────────────────────────────────────────┤
+│  McpClient (Registry)                                       │
+│  ├─ ExternalServerConfig (name, command, args, env, cwd)   │
+│  ├─ McpServerConnection (transport + JSON-RPC state)       │
+│  └─ Tool discovery via JSON-RPC `tools/list`               │
+├─────────────────────────────────────────────────────────────┤
+│  Transports (McpTransport trait)                            │
+│  ├─ StdioTransport — Local subprocess via stdio            │
+│  ├─ HttpTransport — Remote server via HTTP POST            │
+│  └─ SseTransport — Remote server via HTTP + SSE            │
+├─────────────────────────────────────────────────────────────┤
+│  Managers                                                   │
+│  ├─ McpResourceManager — Files and data exposed by servers │
+│  ├─ McpPromptManager — Reusable prompt templates           │
+│  └─ McpManagerActor — Orchestration and health checks      │
+├─────────────────────────────────────────────────────────────┤
+│  Auth & Security                                            │
+│  ├─ OAuth token storage and refresh                        │
+│  ├─ SSRF validation on all outbound requests               │
+│  └─ ApprovalHandler — User approval for sensitive ops      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Transports
+
+### StdioTransport
+
+For local MCP servers launched as subprocesses. Used when the server command is specified in config (e.g., `npx @modelcontextprotocol/server-filesystem`).
+
+### HttpTransport
+
+For remote MCP servers communicating via HTTP POST. Validates URLs against SSRF allowlists.
+
+### SseTransport
+
+For remote MCP servers using Server-Sent Events for notifications. Supports bidirectional communication with callback handling.
+
+## Tool Discovery
+
+When an MCP server connects, Aleph sends a `tools/list` JSON-RPC request. Each discovered tool is wrapped in `McpToolWrapper` and registered in the tool registry alongside native tools.
+
+```rust
+// Tool wrapper bridges MCP schema to Aleph's tool system
+pub struct McpToolWrapper {
+    pub server_name: String,
+    pub tool: McpTool,
+}
+```
+
+## Configuration
+
+MCP servers are configured in `providers.toml`:
+
+```toml
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem"]
+env = { HOME = "/Users/alice" }
+```
+
+## Security
+
+- **SSRF validation** — All outbound URLs are validated against allowlists
+- **OAuth token management** — Automatic refresh with `saturating_sub` to prevent integer overflow
+- **Approval workflow** — Sensitive operations require user approval via the approval handler
+- **Health checks** — Periodic server health monitoring with proper lock hygiene
+
+## Key Source Files
+
+- `src/mcp/mod.rs` — Module overview and re-exports
+- `src/mcp/client.rs` — `McpClient` registry and tool discovery
+- `src/mcp/transport/` — Transport implementations (stdio, HTTP, SSE)
+- `src/mcp/auth/` — OAuth and token management
+- `src/mcp/manager/` — Orchestration layer
+- `src/mcp/protocol.rs` — JSON-RPC protocol types
+- `src/mcp/external.rs` — Runtime detection (node, python, bun)
+
+## See Also
+
+- [Builtin Tools](/docs/concepts/builtin-tools) — Native Aleph tools
+- [Capability System](/docs/concepts/capability-system) — Tool permission framework
+- [Extension System](/docs/concepts/extension-system) — Plugin architecture

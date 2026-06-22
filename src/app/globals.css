@@ -1,0 +1,111 @@
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+@import "./docs.css";
+
+/* Let Tailwind scan Fumadocs UI for class names (path relative to this file). */
+@source "../../node_modules/fumadocs-ui/dist/**/*.js";
+
+@theme {
+  /* Brand tokens exposed as utilities (bg-paper, text-ink, text-coral, ...) */
+  --color-paper: var(--paper);
+  --color-paper-deep: var(--paper-deep);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-coral: var(--coral);
+  --color-mustard: var(--mustard);
+  --color-sage: var(--sage);
+  --color-line: var(--line);
+}
+
+/*
+ * Light editorial palette (single source of truth, shared with the homepage).
+ * Aliases (--serif/--display/--sans/--mono) bridge to the next/font variables.
+ * Fumadocs UI reads the mapped --color-fd-* tokens (light).
+ */
+:root {
+  /* paper + ink */
+  --paper: #f0ead9;
+  --paper-deep: #e8e0cc;
+  --panel: #f6f1e4;
+  --ink: #1b1712;
+  --ink-2: #4d4639;
+  --ink-3: #847a64;
+
+  /* accents */
+  --coral: #df4f26;
+  --coral-deep: #bf3d1a;
+  --coral-soft: #ec6a44;
+  --mustard: #d4a23c;
+  --stone: #c8b99c;
+  --stone-deep: #ab9b78;
+  --sage: #5c6f52;
+
+  /* dark sections */
+  --night: #15120d;
+  --night-2: #211c15;
+
+  /* lines */
+  --line: rgba(27, 23, 18, 0.16);
+  --line-soft: rgba(27, 23, 18, 0.09);
+
+  /* Map Aleph tokens -> Fumadocs UI variables (light) */
+  --color-fd-background: var(--paper);
+  --color-fd-foreground: var(--ink);
+  --color-fd-muted: var(--paper-deep);
+  --color-fd-muted-foreground: var(--ink-3);
+  --color-fd-popover: var(--panel);
+  --color-fd-popover-foreground: var(--ink);
+  --color-fd-card: var(--panel);
+  --color-fd-card-foreground: var(--ink);
+  --color-fd-border: var(--line);
+  --color-fd-primary: var(--coral);
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: var(--paper-deep);
+  --color-fd-secondary-foreground: var(--ink);
+  --color-fd-accent: var(--paper-deep);
+  --color-fd-accent-foreground: var(--ink);
+  --color-fd-ring: var(--coral);
+}
+
+:root {
+  background-color: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  margin: 0;
+  /*
+   * Font aliases used throughout docs.css. Declared on body (not :root) so they
+   * resolve the next/font variables, which next/font injects via the body
+   * className. docs.css reads these as var(--sans/--display/--mono).
+   */
+  --serif: var(--font-serif), "Instrument Serif", Georgia, serif;
+  --display: var(--font-display), "Space Grotesk", system-ui, sans-serif;
+  --sans: var(--font-sans), "Archivo", system-ui, sans-serif;
+  --mono: var(--font-mono), "Space Mono", ui-monospace, monospace;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* paper grain overlay */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.05;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+::selection {
+  background-color: var(--coral);
+  color: #fff;
+}
