@@ -113,3 +113,27 @@ description: "健康检查和心跳 RPC 方法"
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### 实化（stubs → real）
+
+26.7.x：历史 stub RPC（`heartbeat.*_stub`）已被**实化**。完整实现：
+
+- `heartbeat.list` / `heartbeat.get` / `heartbeat.create` / `heartbeat.update` / `heartbeat.delete` / `heartbeat.toggle`
+- `heartbeat.wake` —— 主动唤醒
+- `heartbeat.runs` —— 运行历史
+
+### 守护进程端驱动
+
+由 [守护进程](/docs/zh/concepts/daemon) 驱动。`Guardian Judge` 决策唤醒。
+
+### 拒绝危险工具
+
+26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。
+
+### payload 隐藏密钥
+
+`Guardian Judge` payload 必须隐藏密钥。

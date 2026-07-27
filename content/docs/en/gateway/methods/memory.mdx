@@ -203,3 +203,30 @@ All memory methods return structured errors:
 - [Memory System](../../concepts/memory) — Overview
 - [Memory Architecture](../../architecture/memory) — Implementation
 - [Memory Evolution](../../architecture/memory-evolution) — Spec history
+
+---
+
+## 26.7.x Addendum
+
+### `memory.*` Full RPC
+
+- `memory.search` / `memory.delete` / `memory.clear` / `memory.stats` / `memory.compress`
+- `memory.listFacts` / `memory.clearFacts` / `memory.list_corrections` / `memory.trace`
+- `memory.appList`
+- `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace`
+
+### Vault Panel Refactor (26.7.27+)
+
+Card view, batch-action bar, deep links, evidence chain, cross-agent selection, provenance, batch export.
+
+### Real Cost and Token Accounting
+
+26.7.15+ Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort.
+
+### Note Layer
+
+`note_graph_query` tool (bidirectional BFS path, typed relation edges, wikilink supersession, crash-safe index, CJK trigram full-text search).
+
+### SkillOpt Self-Evolution
+
+26.7.x: skill evolution is constrained by the SkillOpt discipline.

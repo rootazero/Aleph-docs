@@ -393,5 +393,40 @@ On restart, the `RecoveryManager` evaluates interrupted tasks and decides whethe
 
 - [Architecture Overview](./overview) -- System diagram with session positioning
 - [Gateway Architecture](./gateway) -- How session keys are resolved from incoming requests
-- [Harness](./harness) -- How sessions feed into the OTAF cycle
+- [Harness](./harness) -- How sessions feed into the Think→Act cycle
 - [Memory System](./memory) -- Where extracted facts are stored during compression
+
+---
+
+## 26.7.x Addendum
+
+### Cross-Session Steering
+
+26.7.x: loop pause/resume is cross-session lifecycle control.
+
+### Real Cost and Token Accounting
+
+26.7.15+: every assistant message carries its real per-message token cost (no double-counting).
+
+### SessionEvent System
+
+26.7.7+ introduces:
+
+- `SessionEvent` / `SessionEventRecord` / `TurnId`
+- `MessageProjector` materializes events into the `messages` table
+- Boot-time `ProjectionReconciler` back-fills
+- `tool_call_id` / `tool_name` + `AssistantRunMeta` stamp
+
+### Live-Hot-Reloadable Execution Caps
+
+26.7.7+: the `[execution]` run-cap section is now Live — arc-swap global semaphore; changes to `max_runs_global` / `max_runs_per_agent` take effect without restart.
+
+### True Multi-Session Parallelism
+
+26.7.7+: the run gate moved from a per-agent lock to a per-session `SessionRunRegistry`. One agent can run in several sessions at once; any single session stays mutually exclusive.
+
+### See Also
+
+- [Session Service](/docs/en/architecture/session-service)
+- [Memory (Architecture)](/docs/en/architecture/memory)
+- [Gateway RPC `sessions.*`](/docs/en/gateway/methods/session)

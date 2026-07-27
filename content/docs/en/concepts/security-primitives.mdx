@@ -176,3 +176,46 @@ pub enum AuditEventType {
 
 - [PII Protection](./pii-protection) — PII detection and filtering
 - [Secret Management](./secret-management) — Encrypted credential storage
+
+---
+
+## 26.7.x Addendum
+
+### Pairing Single-Sourced on the Router
+
+26.7.21+: the channel-local pairing store is retracted; access / pairing / allowlists are **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
+
+### Command-Injection Fixes
+
+- Desktop `open` / `launch` now go through `ShellExecuteW` instead of a shell
+- Bundled-content extraction refuses symlink planting via `symlink_metadata`
+- Skill-download path traversal closed and the scanner file size capped
+
+### Cluster `file.write` No TOCTOU
+
+26.7.21+: cluster `file.write` no longer has a time-of-check-to-time-of-use window.
+
+### Certificate Approval Fingerprint Match
+
+26.7.21+: certificate approval **must** match a fingerprint. WebView microphone permission **must** be origin-restricted on Linux / Windows.
+
+### Path Safety
+
+26.7.15+:
+
+- Symlink-safe delete/move
+- Glob/deny re-checks
+- Collision de-dup
+- Per-path locks
+- Hardened path deny gate (`%APPDATA%` expansion, system/proc guards)
+- `apply_patch` forward cursor that fails honestly
+
+### Process-Isolation Kernel
+
+26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. A legitimate carve-out from R1 (see [Architectural Redlines R1 Process-Isolation Kernel carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
+
+### See Also
+
+- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` details
+- [Security: Pairing](/docs/en/security/pairing) — pairing flow
+- [Architectural Redlines R1](/docs/en/philosophy/redlines#r1-brain-limb-separation) — process-isolation carve-out

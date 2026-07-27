@@ -352,3 +352,41 @@ CREATE TABLE session_metadata (
 - [agent.*](/docs/zh/gateway/methods/agent)——代理执行方法
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [协议](/docs/zh/gateway/protocol)——会话键路由详情
+
+---
+
+## 26.7.x 补充
+
+### `session.*` 完整 RPC
+
+- `session.usage` —— 用量 + 成本（核心定价，shell 不再持有重复价格表）
+- `session.compact` —— `/compact` 等价（每个面都可用）
+- `session.truncate` —— `truncate_to_fit` 底
+- `session.create` / `session.export_html`
+
+### `sessions.*` 完整 RPC
+
+- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
+
+### `chat.*` 优先
+
+26.7.x 优先使用 `chat.*` 而非 `agent.*`：
+
+- `chat.send` —— 发送消息（带 `session_mode` 字段）
+- `chat.abort` —— 中止运行
+- `chat.history` —— 历史
+- `chat.clear` —— 清空
+- `chat.context_estimate` —— 上下文窗口估算
+- `chat.rewind` —— 回滚到之前的 turn
+
+### SessionEvent 体系
+
+26.7.7+：`session_events` 是规范日志；`MessageProjector` 物化到 `messages` 表；启动时 `ProjectionReconciler` 回填转写。
+
+### 实时 hot-reloadable 执行上限
+
+26.7.7+：`[execution]` run-cap 段 Live。
+
+### 真实成本与 token 核算
+
+26.7.15+ Tier-3 硬化。

@@ -129,3 +129,27 @@ Use `run.queue_message` to respond to agent approval requests:
 
 - [agent.*](/docs/en/gateway/methods/agent) -- Start and control agent runs
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `trace.*` Full RPC
+
+- `trace.list` / `trace.get` / `trace.by_runs` — trace events
+
+### `session.usage` / `session.compact` / `session.truncate`
+
+Session runtime RPC — see [session.mdx](/docs/en/gateway/methods/session).
+
+### `tools.in_flight`
+
+List currently-in-flight tool calls.
+
+### `activity.stats`
+
+Activity stats — aggregated by agent / session / tool.
+
+### Real Multi-Session
+
+26.7.7+: the run gate moved from a per-agent lock to a per-session `SessionRunRegistry`.

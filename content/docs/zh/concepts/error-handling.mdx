@@ -206,3 +206,32 @@ impl From<ConfigError> for AlephException {
 - [thiserror](https://docs.rs/thiserror) —— 类型化错误派生宏
 - [anyhow](https://docs.rs/anyhow) —— 灵活的错误处理
 - [日志](./logging) —— 错误如何记录
+
+---
+
+## 26.7.x 补充
+
+### 单源错误回执
+
+26.7.21 修复：网关返回给客户端的**单一来源**用户可读错误。原始错误链不外泄到 Panel——之前的实现会把内部 `serde_json` / sqlx / io 错误直接吐给用户，现在由一个 `ErrorReceipt` 包装。
+
+### 失败关闭
+
+26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。这是「通用约束」的具体落地：默认行为不能是「开放」。
+
+### 死信与 Webhook 反压
+
+26.7.21 修复：
+
+- `broadcast::RecvError::Lagged` 恢复而非永久死亡
+- WebSocket 断开时每个连接的事件转发任务不再泄漏
+- Webhook 接收端在拥塞时返回 503 而不是默默丢弃入站消息
+
+### 派生错误自动 `#[source]` 链
+
+错误枚举（`#[derive(thiserror::Error)]`）的 `#[source]` 或 `#[from]` 字段会自动串成 `std::error::Error::source()` 链。`%e` 占位符（`tracing-subscriber` 0.3+）会按 source chain 逐级打印。
+
+### 见另请参阅
+
+- [网关协议错误段](/docs/zh/gateway/protocol#errors) — `ErrorReceipt` 协议
+- [安全失败关闭](/docs/zh/security/overview#失败关闭) — 通用失败关闭原则

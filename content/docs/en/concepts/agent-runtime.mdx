@@ -211,3 +211,29 @@ Rules are enforced at the Harness layer and can be:
 - [Session Management](./session-service) — Session lifecycle and persistence
 - [Tools](./tools) — Tools available to agents
 - [Orchestrator](./orchestrator) — How agents are dispatched and coordinated
+
+---
+
+## 26.7.x Addendum
+
+### Cross-Subagent Mid-Turn Interruptible
+
+26.7.x: delegated subagents are now **mid-turn interruptible** — `Interrupt` truly cancels fan-out, **not demoted to queue**. Long-running detached members no longer leak (the detached-member leak was fixed).
+
+### Subagent Tree
+
+The `subagent.tree` RPC (26.7.x) returns an agent's subagent tree (node identity + live events + tree RPC).
+
+### Real max_iterations Inheritance
+
+26.7.15+: spawned subagents **inherit** the operator's `[execution] max_iterations`. The `HarnessRunner::default_max_iterations` hook is now correctly overridden. Previously the child fell back to `FALLBACK_MAX_ITERATIONS=200`; the loop was never uncapped, the number just didn't match the config.
+
+### Subagent-Scoped Tool Output
+
+26.7.15+: child harnesses get a `ToolResultStore` handle **scoped to the parent session**. Previously they got the process-wide, *unscoped* store, so Layer-3 spills landed outside any session directory while their `ctx_search` looked in the (parent-scoped) session index — a silent zero-hit recall. The fix is a recall fix, not an isolation fix (before: the child saw nothing, never another session's data).
+
+### See Also
+
+- [Agent Components](/docs/en/concepts/agent-components) — subagent construction
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — resource claims
+- [Gateway RPC `subagent.tree`](/docs/en/gateway/methods/agents) — subagent tree query

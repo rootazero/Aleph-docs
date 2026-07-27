@@ -429,3 +429,28 @@ impl RetryStrategy {
 - [架构概览](./overview) — 路由在整体架构中的位置
 - [会话服务](./session-service) — 有状态会话的路由
 - [工具链](./harness) — 工具执行的路由
+
+---
+
+## 26.7.x 补充
+
+### `routing_rules.*` 完整 RPC
+
+26.7.x 路由规则：
+
+- `routing_rules.create` / `list` / `get` / `update` / `delete` / `move`
+- `route_config.get` / `route_config.update`
+
+### `channels.set_agent` 校验
+
+26.7.15+：`channels.set_agent` 现在**必须**指定真实存在的 agent——之前接受不存在的 agent。
+
+### 跨通道可寻址
+
+26.7.x：配置后的 channel 现在**真的可达且可寻址**。`gateway.credentials` / `channels.set_agent` / `channel.pairing_data` 提供完整寻址 + 凭据。
+
+### 详见
+
+- [协议适配器](/docs/zh/concepts/protocol-adapters)
+- [接口概览](/docs/zh/interfaces/overview)
+- [网关 RPC `routing_rules.*`](/docs/zh/gateway/methods)

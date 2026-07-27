@@ -190,3 +190,35 @@ pub fn build_skills_prompt_xml(
 - [技能](/docs/zh/concepts/skills) — 技能的概念性概述
 - [扩展](/docs/zh/concepts/extensions) — 插件架构
 - [ClawHub](/docs/zh/concepts/clawhub) — 技能注册表集成
+
+---
+
+## 26.7.x 补充
+
+### SkillOpt 自我演化
+
+26.7.x：技能演化现在受 SkillOpt 纪律约束——bounded、validation-gated edit loop 加在 LLM 提出的编辑之上（`src/memory/note_layer/` 的 `doctor_repair_hint` 支撑）。
+
+### 工具调用
+
+- `skills.install` —— 统一入口（从市场 / zip / 路径）安装
+- `skills.install_dep` —— 安装依赖
+- `skills.remove` —— 卸载
+- `skills.status` —— 当前状态
+- `skills.update` —— 更新
+
+### 触发词
+
+详见 `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`：
+
+- BM25 ranker
+- 编辑距离补底
+- 前置元数据驱动
+- `tools.defer_mcp_tools` 协调
+
+### 见另请参阅
+
+- [技能](/docs/zh/concepts/skills) — 概念
+- [扩展](/docs/zh/concepts/extensions) — 插件架构
+- [ClawHub](/docs/zh/concepts/clawhub) — 长尾源
+- [网关 RPC `skills.*`](/docs/zh/gateway/methods/skills) — 协议

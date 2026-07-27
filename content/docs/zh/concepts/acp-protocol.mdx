@@ -133,3 +133,24 @@ ACP 与以下组件集成：
 - [代理运行时](./agent-runtime) —— 代理生命周期管理
 - [网关](../architecture/gateway) —— WebSocket JSON-RPC 接口
 - [事件系统](./event-system) —— 实时事件分发
+
+---
+
+## 26.7.x 补充
+
+### ACP presets + test
+
+26.7.x 完整 RPC：
+
+- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
+- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
+- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
+
+### 进程隔离内核
+
+26.7.x：ACP 会话由进程隔离内核支撑——沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。这是 R1 立意之外的合法开口（详见 [架构红线 R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
+
+### 见另请参阅
+
+- [架构概览](/docs/zh/architecture/overview) — ACP 在系统中的位置
+- [沙箱](/docs/zh/concepts/sandboxing) — 进程隔离

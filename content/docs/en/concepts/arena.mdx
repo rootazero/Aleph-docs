@@ -131,3 +131,36 @@ Arenas are persisted via `ArenaStorage`:
 
 - [Agent Runtime](./agent-runtime) — How agents spawn and manage tasks
 - [Event System](./event-system) — Event distribution patterns
+
+---
+
+## 26.7.x Addendum
+
+### Real-Time Cluster Fleet Feed
+
+26.7.15+: the Panel cluster view is wired to a live feed with a corrected contract, and node identity now persists on the connect verdict.
+
+### Cluster Lifecycle SSOT
+
+26.7.x: cluster enroll / deregister introduces a lifecycle single-source-of-truth:
+
+- Dead cold-start enrollment fixed
+- Deregistration made to stick
+- Reverse RPC hardened
+- `connect` handshake precedes the method in `gateway call`
+- Node keys are Unicode-normalized (CJK node names work)
+
+### `cluster.deregister` / `enroll` / `environments.list`
+
+26.7.x full RPC. See [Cluster Architecture](/docs/en/architecture/cluster).
+
+### Real Cluster Fleet View
+
+- Live fleet feed
+- Node identity persistence
+- Cluster write R8 complete (previously half-done)
+
+### See Also
+
+- [Cluster](/docs/en/architecture/cluster) — full architecture
+- [Cluster R8 writes](/docs/en/gateway/methods/cluster) — protocol

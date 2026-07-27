@@ -198,3 +198,34 @@ description: "工作空间管理 RPC 方法"
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `workspace.*` 完整 RPC
+
+- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
+
+### `projects.*` 完整 RPC
+
+- `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get`
+
+### `agents.bindings` / `channels.set_agent`
+
+agent ↔ channel 绑定——`channels.set_agent` 现在**必须**指定真实存在的 agent（之前接受不存在的 agent）。
+
+### 文件操作路径安全
+
+26.7.15+：
+
+- 符号链接安全的删除/移动
+- glob/deny 复检
+- 冲突去重
+- 逐路径锁
+- 加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）
+- `apply_patch` 前向游标诚实地失败
+
+### Cluster `file.write` 无 TOCTOU
+
+26.7.21+。

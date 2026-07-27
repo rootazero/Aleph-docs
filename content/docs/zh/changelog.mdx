@@ -7,263 +7,266 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 # 更新日志
 
-Aleph 遵循里程碑驱动的开发过程。由于项目尚未达到 1.0，变更按月份和里程碑而非语义版本标签组织。
+Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。
 
 <Callout type="info">
-Aleph 正在积极开发中。里程碑之间可能发生破坏性变更。API 和架构正在稳定但尚未冻结。
+  本页是从 Aleph 主仓库 `CHANGELOG.md` 派生的**文档视角**摘要：突出**用户可见**的变化（特性、CLI/RPC、配置、安全），并省略纯内部重构细节。完整记录请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
 </Callout>
 
 ---
 
-## 2026 年 2 月
+## 26.7.21 — chat / work / code 会话模式 + 治理拓扑层
 
-### 桌面桥接重构
+最大的一次特性合集——282 次提交，三天交付。三条主线交织在一起：
 
-桌面集成层的完整重新设计，从原生 Swift macOS 应用迁移到跨平台 Tauri 桥接架构。
+1. **会话模式 `chat` / `work` / `code`**：与 `exec_tier`、`think_level` 并列的**第三个**用户可调维度。它**只对工具呈现面**做静态分区（progressive-disclosure 核心集 + deferred-tool 层级），不影响权限。可在 Panel composer pill、Settings → Policies（全局默认）或 `session_set_mode` 工具里切换。每个模式还驱动一个独立的右侧面板行为（chat = 徽章、work = 计划面板、code = 工具详情）并附加一行缓存稳定的提示词。
+2. **治理拓扑层**：`loop_graph` 提供一个治理拓扑 store + 一个九动作工具 + 审计环 + 客观 ACL + 提示层 + 根 gate，给单循环的四种失败模式（Goodhart、参考盲、环冲突、测量衰减）一个拓扑答案。
+3. **熵减与硬化扫描**：Telegram/Discord 通道对照参考实现做差距分析，砍掉约 2.8k 行死平行层并把访问控制统一到路由器；macOS 桌面轨道按真机修正；多模块对抗性审查修复了 gateway、providers、extensions、tasks、teams、sessions、skills 中的数十处正确性、并发与安全缺陷。
 
-**以服务器为中心的构建架构**
+### 新增
 
-- 引入 `BridgeSupervisor` — Rust 服务器现在生成并管理 Tauri 桥接作为子进程
-- 实现 `DesktopBridgeManager` 用于服务器端桥接生命周期管理
-- 添加基于 Unix 域套接字 (UDS) 的 JSON-RPC 协议用于服务器到桥接通信
-- 桥接握手与能力协商 (`aleph.handshake`、`system.ping`)
+- **chat / work / code 会话模式**——用户选择的工具呈现面静态分区，与权限正交。单源在 `config/types/policies/session_mode.rs`；请求 > 会话 > 全局三层解析 + 沿 carry 盖戳；落到既有的两种呈现机制（progressive-disclosure 核心集 + deferred-tool 层级），`src/harness/` 净增 0 行。
+- **模式 v2 语义**——族表按 `_` 词边界匹配；MCP 限定的 `{server}__{tool}` 不受内置表约束；`media_understand` 在 chat 与 code 中均保留；chat 的核心减集不会再被排空；子代理以单行提示词继承父模式。
+- **Loop-Graph 治理层**——治理拓扑 store、九动作工具、审计环、客观 ACL、提示层、根 gate。详见 `docs/reference/GRAPH_LAYER.md`。
+- **图 × 多代理融合**——`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher，以及一个内置的 **`loop-auditor`** 智能体。
+- **`governance_metrics` 内核探针**——替代审计传感器法外触不到的沙箱墙 `sqlite` shell 探针，并在 `dream_reports` 上加 notes-era 活动计数。
+- **Discord 交互式审批按钮**——双向 `ApprovalCallbackSink` 流，加基于编辑的回复流。
+- **iMessage 入站 tapback 作为上下文**——用户的 add-tapback 反应会上抛给模型，而不是被丢弃。
+- **macOS 通过 Accessibility 的窗口定位**——公共 AX 窗口解析器（CGWindowID → AX by geometry），焦点提升到**确切**的目标窗口，bounds 设在确切的窗口上，带 osascript 回退。
+- **团队任务审批的接地证据门**——`task_review` 审批现在可要求 grounding，并附带验收元数据辅助函数。
+- **守护进程端计算的会话成本**——`session.usage` 通过核心定价计算成本，shell 里的重复价格表被删除；`plugin.install` 新增统一入口，按源（市场/压缩包/路径）分类处理。
 
-**浏览器自动化**
+### 修复
 
-- 新的 `BrowserTool`，通过 `chromiumoxide` 使用 Chrome DevTools Protocol (CDP) 传输
-- 跨平台 Chromium 发现（macOS、Linux、Windows）
-- ARIA 快照提取与 `ref_id` 解析用于语义元素定位
-- 完整动作集：点击、输入、填充、滚动、悬停，支持 ARIA ref 定位
-- 完整浏览器工作流的集成测试
-
-**视觉与审批系统**
-
-- `VisionTool`，支持可插拔提供商：Claude vision 和平台原生 OCR
-- `ApprovalPolicy` trait 和配置用于控制敏感工具操作
-- 审批检查集成到 `BrowserTool` 和 `DesktopTool`
-
-**桌面能力（第 3 阶段）**
-
-- 实现 12 个桥接方法：`click`、`type_text`、`key_combo`、`launch_app`、`window_list`、`focus_window`、`canvas_overlay`、`tray.update_status`、`ocr`、`ax_tree`、`scroll`、`drag`
-- Windows 支持：通过 WinRT 进行输入模拟、OCR、UI 自动化可访问性树
-- macOS：Vision 框架 OCR、可访问性 API 检查
-
-**破坏性变更**
-
-- 移除 UniFFI Swift 绑定 — 由 UDS IPC 协议替代
-- 弃用并移除 macOS Swift 应用 — Tauri 桥接是唯一的桌面前端
-- 移除 macOS 特定的 CI 工作流和构建脚本
-
-### Cron 系统重新设计
-
-- 用状态机调度引擎替换基于窗口的调度
-- 添加带 `DeliveryTarget` trait 的交付管道（支持 webhook）
-- 模板系统、资源管理和作业链
-- 状态机、弹性、交付和链字段的架构迁移
-
-### 记忆系统增强
-
-- 通过向量相似度进行存储时去重
-- 带滚动保留的 JSONL 备份服务
-- `ScoringPipeline` 接入 `HybridRetrieval` 搜索流
-- `NoiseFilter` 集成到摄取管道
-- `MemoryConfig` 中添加自适应检索和备份设置
+- **每次 Panel 发送都重载了 composer 的缓存模式**——四个发送路径现在只在首条消息上携带模式，`session_updated` 把模式与 `exec_tier` 反向同步回 Panel 状态。
+- **`tool_search` 被 progressive disclosure 折叠掉**，导致模型点向必定 miss 的查找——它现在在注册时进入请求核心集；通过斜杠命令消息承载的模式/层级选择不再被丢弃。
+- **Telegram 忽略运营者配置的访问策略**——入站路由器对 Telegram 回退到了默认；频道本地 pairing store 从未生效。访问、配对、allowlist 现在单源到路由器。~2.8k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）被移除；Discord 中重复的嵌套配置 / account-pool / 解析器层也被清理。
+- **Gateway 泄漏与丢弃**——WebSocket 断开时每个连接的事件转发任务泄漏；`broadcast::RecvError::Lagged` 上 channel forwarder 永久死亡；webhook 反压默默丢弃入站消息而不是返回 503；原始错误链泄漏到 Panel——以上全部修好。
+- **桌面 `open` / `launch` 命令注入**——改为通过 `ShellExecuteW` 而非 shell；打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接；技能下载路径穿越关闭，扫描文件大小加封顶；集群 `file.write` 不再有存在检查与写入之间的 TOCTOU 窗口。
+- **证书审批可能不匹配指纹就被授权**，WebView 麦克风权限在 Linux/Windows 上未做来源限制——均已修复。
+- **策略文件缺失时审批失败开放**，`permissive_default` 与 `Default::default()` 不一致——两者现在都失败关闭；守护者判官 payload 隐藏密钥；heartbeat 探针拒绝危险与确认门控工具。
+- **提示词边界注入**——转写、焦点、之前摘要内容在进入提示词前转义边界标记；`ToolAwareChunker` 断言非零 token 比率而不是算出 `usize::MAX`。
+- **提供商故障转移在每次请求时克隆整段会话**并以非原子方式发布路由状态——约 2,000 行不可达的 provider 代码被删除。
+- **扩展生命周期竞态**——并发 `reload` 现在在 load guard 下串行；格式错误的插件结果不再被掩盖为 `ServiceResult::ok`；`AuthorInfo` 解析使用最左分隔符。
+- **集群节点键按字节切片**，CJK 节点名断裂——现在按 Unicode 归一化。
+- **macOS 截屏与录音轨道**——屏幕录制通过 `setSourceRect` 裁剪到所请求区域（按物理像素而非点）；完成时验证产生了输出再报告成功；OCR、窗口捕获、媒体、输入、截屏轨道上的类型化 bridge 错误被保留而不是扁平化；`screen_record` 序列化错误会向上传播而不是变成 `null`。
+- **Harness ratchet 降到 5008**——通过移除 `DiminishingReturnsDetector` 硬停（R10 禁止循环内确定性完成判断）。卡住的运行受 `max_iterations` + 工具循环验证器 + 模型自身停止控制。
+- **会话与团队完整性**——`retire_from` 原子；关闭超时被上报；活跃团队名通过部分索引保证唯一；团队协议文本与工件内容大小加封顶；`sessions` 与 `tasks` 增加 presence opt-in、加哈希的 carryover 文件名、确定性的模板环境排序。
+- **线缆请求 id 不再用 UUID**——换成原子计数器，从 `aleph-protocol` 移除该依赖；一个编译失败的自定义 regex 不会再把合法的 regex 一并丢弃。
 
 ---
 
-## 2026 年 2 月初
+## 26.7.18 — 自签名 TLS + 客户端 TOFU
 
-### 群体智能架构
+远端访问发布：与 26.7.17 的进程内 gateway TLS 形成闭环。两端在中间相遇。
 
-- 事件总线基础，带 `AgentLoopEvent` 枚举和发布（影子模式）
-- 用于跨 Agent 上下文的语义聚合器
-- 带 `ContextProvider` trait 的上下文注入器集成到 `MessageBuilder`
-- `SwarmContextProvider` 实现
-- 用于多 Agent 共享状态的集体记忆
-- 第 1 阶段影子监控模式完成
+服务端：自签名证书的 SAN **自动发现**主机的非环回接口 IP——远程 `wss://` 连接不再因主机名校验失败；带 SAN 漂移 sidecar（IP 子集复用证书，漂移则原子 regen，永不破坏启动）。客户端：Panel 新增**应用内 TOFU 证书信任**——在应用内通过指纹 + SAN 审批面板审批并固定自签名证书，由共享决策核心 + 已固定信任存储支撑；macOS WKWebView 证书挑战适配器为参考平台，iOS Keychain 信任存储 + 决策镜像并行接入。
 
-### 系统状态总线 (SSB)
+### 新增
 
-- 核心基础设施：事件路由、订阅和状态跟踪
-- 带 PII 过滤的稳健性和隐私层
-- 用于系统事件自动响应的动作调度器
-- 平台抽象层 (PAL)，带 macOS 特定传感器
-- 与 `SystemStateBus` 集成以获取感知数据
+- **自签名证书 SAN 自动发现**——新的 `[gateway.tls] san` 字段加上主机非环回接口 IP 的自动发现，被组装进自签名证书的 SAN，并被串到服务器侧的 `load_or_generate`，让远程 `wss://` 连接干净地通过校验。
+- **SAN 漂移 sidecar**——证书的 SAN 集在一个 sidecar 中被追踪：未变或子集复用既有证书，漂移则原子 regen；带原子 regen marker 与 shrink-reuse 测试。
+- **Panel 应用内证书信任（TOFU）**——共享决策核心 + 已固定 TOFU 信任存储、SHA-256 指纹 + SAN/Subject 解析、审批面板页面（指纹 + SAN + TOFU/change 警告）、pending-cert 状态与 approve/reject Tauri 命令。
+- **macOS WKWebView 证书挑战适配器 + 安装分发**——应用内信任的参考平台，把挑战驱动到共享决策核心。
+- **iOS Keychain 信任存储 + 决策镜像**——单元测试覆盖 Keychain 支撑的 iOS Panel 信任，镜像共享决策状态。
 
-### 控制平面 UI
+### 修复
 
-- 侧边栏窄/宽模式切换
-- 用于警报指示器的 Tooltip 和 StatusBadge 组件
-- 通过 WebSocket 订阅的实时警报系统
-- 带嵌套路由和 `SettingsLayout` 的设置
-- 真实 Gateway RPC 集成（替换模拟数据）
-
-### 协作技能进化
-
-- `SuccessManifest` 数据结构用于跟踪成功的工具模式
-- `ConstraintValidator` 用于技能安全检查
-- `CollaborativeSolidificationPipeline` 用于多 Agent 技能共享
-- 与工具执行集成以进行自动清单创建
+- **Panel token wall 被启动门挡在后面**——现在 token wall 直接浮现（WASM dist 重新构建）。
+- **macOS WKWebView `respondsToSelector` 缓存陈旧**，导致注入的挑战 handler 不触发——安装时清理缓存。
+- **macOS 信任审批通过相对路径跳转**，可能错过页面——现在改为绝对 URL。
+- **`credentialForTrust` 返回 nil** 可能在 FFI 边界 panic——现在失败关闭。
+- **损坏的 `sans.txt` sidecar** 被视为尽力而为，重新生成证书而不是破坏启动。
+- **信任提示挂起时抑制 Lite supervisor 重定位**——审批流程不会被中断。
+- **畸形 DER 指纹解析**永不再 panic（带回归测试）。
 
 ---
 
-## 2026 年 1 月下旬
+## 26.7.17 — 原生 Gateway TLS + MCP 按需发现 + 插件折叠进技能
 
-### POE (原则-操作-评估) 架构
+安全与硬化发布。头条是**原生网关 TLS 用于远程连接**——网关现在进程内终止 TLS（提供证书或自动生成自签名证书）；任何非环回绑定在明文上失败关闭；默认拒绝远程客户端的不安全传输；解析可信反向代理后的真实客户端 IP；Panel 强制远程使用 `wss://`。伴随：**MCP 发现收敛**——回退急切的 resource/prompt 索引层，换成按需发现工具（模型不再 `cat` 文件）；**插件捆绑技能被折叠进技能机制**，并恢复代理 catalog；**深文件操作路径安全**；以及 harness、tools、context、cache、loop、teams、memory 子系统的硬化扫描——大部分由对抗性审查和跨实现差距分析驱动。
 
-用于结构化、验证的 Agent 任务执行的新执行框架。
+### 新增
 
-- 核心类型：原则、操作、评估标准
-- 基于熵的预算管理器用于资源分配
-- 硬验证规则和通过 LLM 裁判的语义验证
-- 结合基于规则和语义检查的复合验证器
-- `POEManager` 用于编排 POE 生命周期
-- 带 `AgentLoopWorker` 集成的工作器抽象
-- Gateway RPC 处理程序：`poe.run`、`poe.status`、`poe.cancel`、`poe.list`
-- 经验结晶输入技能进化系统
+- **进程内 gateway TLS**（新的 `[gateway] tls` / `trusted_proxy` / `allow_insecure_remote` 配置，默认关闭）——使用 `axum-server` 终止 TLS，使用提供的证书或自动生成的自签名证书；并为 TLS-终止的前端提供反向代理信任。
+- **可信代理下的真实客户端 IP 解析器**——抗欺骗的真实客户端地址解析，让容量限制、速率限制、审计、连接认证不再看到代理 IP。
+- **MCP resource/prompt 发现工具**——`mcp_list_*` 让模型按需发现 MCP 资源与提示，而不是盲读文件，并通过 `cat`-guard read-steer 路由到原生 MCP / 技能 / 插件读取。
+- **插件捆绑技能对模型可见**——已安装插件的技能被折叠进技能索引与 `skill_read`，并恢复代理 catalog。
+- **`call_id`-精确的审批关联 + 完成顺序的实时工具事件**——工具并发调度器把每个审批绑定到精确调用，并以完成顺序发出实时工具事件。
+- **`.mjs` 工作流的 interop**——可执行步骤选项与 `.mjs` 导出路径用于跨工具工作流兼容。
+- **网关死信取证轨道**——无法下发的消息可被检查并安全地重投递。
 
-### Agent-动作交互
+### 变更
 
-- `QuestionKind` 类型用于结构化用户交互（确认、选择、输入）
-- `UserAnswer` 类型用于结构化响应
-- Agent 循环中的 `AskUserRich` 决策变体
-- `LoopCallback` trait 中的 `on_user_question` 回调
-- 通过 `inquire` crate 的 CLI 实现
+- **失败关闭的远程传输**——网关在启动时拒绝非环回绑定的明文，并默认拒绝远程客户端的不安全传输（`allow_insecure_remote = false`）；Panel 强制远程主机使用 `wss://`。
+- **MCP 发现收敛到一个按需通道**——`McpResourceIndexLayer` 被回退；按需发现工具替换提示索引。
+- **Harness R10 行预算回收**——死提示层表面被修剪（净约 −3.4k LOC）；加入主动上下文提醒与推理门修复；上限 5035 → 4988。
+- **深上下文层硬化**——16 项 openclaw / hermes / codex / pi 差距分析项，加上上下文缓存硬化轮。
+- **Loop 层第 5–7 轮**——唤醒/恢复通道拒绝层、团队/swarm 的树预算、Guardian 缓存/熔断器、goal 等待屏障、跨策略层级的生命周期焊接。
+- **团队协调任务第 4–5 轮**——快照协议恢复、暂停/恢复门、实时升级 leader 与配置、通知器重武装、过滤器单源。
+- **记忆管理 D1–D4**——ack-inversion 修复、会话端接线、压缩修复、批量 `remember`，加上笔记层的对抗性修复。
+- **文件操作路径安全**——符号链接安全的删除/移动、glob/deny 复检、冲突去重、逐路径锁、加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）、`apply_patch` 前向游标诚实地失败。
 
-### 技能进化系统
+### 修复
 
-- `EvolutionTracker` 用于记录工具执行模式
-- `SolidificationDetector` 用于检测重复的成功模式
-- `SkillGenerator` 用于自动创建 `SKILL.md`
-- `GitCommitter` 用于自动提交进化的技能
-- `SkillCompiler`（第 10 阶段）用于将技能编译为可执行形式
-
-### 规范驱动开发
-
-- `SpecWriter` 用于自动化需求分析
-- `TestWriter` 用于从规范生成测试
-- `LlmJudge` 用于根据规范评估生成的代码
-- `SpecDrivenWorkflow` 编排器将所有内容联系在一起
-
-### 弹性任务执行
-
-- `ResilientTask` trait 用于定义容错任务
-- `ResilientExecutor`，带重试逻辑、指数退避和回退策略
-- 与 `PodcastTask` 示例的 Cron 集成
+- **`skill_read` 拒绝符号链接 / 重复技能**——现在按优先级解析而非报告歧义错误。
+- **网关远程认证轮换 kick + 设备复活**——审计轨道已接入，死的认证代码被剪除。
+- **`serde_json` map-insert 键类型** 修复。
+- **两处既有 `alephcore` lib-suite 测试失败** 被解套。
+- **工作区范围 clippy / rust-doctor 清理**，保持 `-D warnings` 绿。
 
 ---
 
-## 2026 年 1 月中旬
+## 26.7.15 — 三级执行权限 + 知识记忆笔记层 + 真成本与 token 核算
 
-### rig-core 迁移
+硬化与安全发布。头条是**三级执行权限模型**（Ask / Auto / Full）+ 动作感知的审批门——人能看见**确切**的命令，授权键绑定在命令上——作为 Panel 中的内联审批 + `ask_user` clarification 卡片，TUI 中轮询的 HITL 覆盖层。伴随：**成熟的笔记层**（图路径查询、`[[wikilink]]` supersession、CJK 全文搜索、矛盾→supersession 闭环）、**真成本与 token 核算**（之前是部分伪造的）、修复的**集群注册 / 反向 RPC** 路径，以及大量 **Harness R10 回收**——删除零消费者抽象与一个不可达的 ~3,800 行工具水合栈。
 
-从自定义 AI 提供商层到 `rig-core` 框架的重大内部迁移。
+### 新增
 
-- 将 `rig-core` 从 0.6 升级到 0.28
-- 完整的 V1 到 V2 核心迁移（移除 `AetherCore`，`AetherV2Core` 现在是唯一实现）
-- 新的 UniFFI v2 绑定，带异步回调模式
-- `RigAgentManager`，带工具调用 Agent 的处理方法
-- `MemoryStore`，带 SQLite 和用于向量搜索的 `fastembed`
-- `SearchTool`（Tavily API）和 `WebFetchTool`（HTML 提取）作为内置工具
-- 移除旧的路由、语义和工具模块
+- **三级执行权限（Ask / Auto / Full）**——一个面向操作者的旋钮决定工具执行被自动批准多少。它读取每个工具声明的元数据（幂等 / 破坏），不读名字；未知工具在 `Ask` 下失败关闭；`[sandbox.command_policy]` 硬底不能被任何 tier 拉低。门是动作感知的——人能看到真实命令且授权指纹键绑定在命令上——强制点在 `src/tools/scoped/`，斜杠快路径、`tools.invoke`、后台延续旁路全部关闭。Panel 新增 composer tier pill 加内联审批 / `ask_user` 卡片；TUI 新增轮询的 Ask-tier 审批覆盖层。
+- **`note_graph_query` 只读工具 + 笔记图路径查询**——知识记忆笔记层获得图查询表面（双向 BFS 路径、类型化关系边、`[[wikilink]]` supersession 在召回过时笔记时强制浮现纠正笔记）；由抗崩溃索引 + CJK 三元组全文搜索支撑。
+- **窗口内重启更新横幅**——桌面壳在 stage 上注入更新横幅，带自己的 sentinel 控制通道，拦截横幅控制链接并在 Panel 重载之间重新注入。
+- **TUI §5.12 成熟**——`/sessions` 选择器、状态栏的实时上下文窗口仪表、轮询的 Ask-tier 工具审批覆盖（HITL）、连接状态点；`mod.rs` / `app` 按职责拆分。
+- **实时集群舰队 feed**——Panel 集群视图接入实时 feed，节点身份在 connect verdict 上持久化。
 
-### Aether 协作模式
+### 变更
 
-- 任务编排核心（第 1 阶段）
-- 用于任务跟踪的 Swift UI 进度面板
-- 任务编排的 UniFFI 绑定
-- 配置系统和设置 UI
+- **真成本与 token 核算**——网关会话现在携带真实花费账本（之前成本 *与* token 数都是伪造的）；提示缓存纪律恢复；思考深度端到端接线；每条助手消息携带真实的、每消息 token 成本，不重复计算。
+- **非侵入式 computer-use**——桌面应用通过 pid 定向的输入轨道 + 窗口范围捕获来驱动，自动化不再移动用户的鼠标。修复六处 P0 缺陷（escape 陷阱、键组合块、press-hold、滚动单位、粘贴、退化帧）；macOS PIM 与 Chromium AX 接线；macOS 真正不能交付的后台鼠标动作被前置拒绝。
+- **知识记忆笔记层第 2–4 轮**——类别名规范化（单/复数分裂脑修复）；关系词汇清理实体名污染；通过 Leiden 精炼的连通社区；矛盾→supersession 闭环；陈旧笔记归档；默认关闭的治理门接线。
+- **记忆 Tier-3 硬化**——代理范围的召回信号、严重度门控的归档、成熟度队列、若干检索 bug 修复。
+- **集群注册修复**——死的冷启动注册修复；注销能粘住；反向 RPC 加固；`connect` 握手先于 `gateway call` 中的方法。
+- **延迟工具可调用**——渐进式工具披露不再让延迟工具卡死；CJK 工具搜索不破；`off` 推理设置不再暗中买推理。
+- **沙箱硬化**——不可见字符 SSOT、对称熔断器清除、死代码扫描。
+- **目标子系统**——失败关闭的延续门与原子延续认领。
 
-### macOS UI 优化
+### 移除
 
-- 适用于 macOS 26+ 的 Liquid Glass 实现，外观一致
-- 带编码字段的多模态附件架构
-- 记忆存储集成到对话处理
-- 通过 rig-core 将剪贴板图片附件传递给 AI
+- **四个零消费者的 harness 抽象（R10 行预算回收）**：`TraceSink::on_init_seam` + `emit_init_seams`、`HarnessCallback::on_tool_call`、`HarnessCallback::on_complete`、以及 `Harness` trait 本身——见 CHANGELOG 全文了解每个删除的理由。
+- **不可达的工具水合栈（~3,800 行）**——加上从未发生的缓存框架与一个不守信的配置旋钮。
+- **幻影的 4,900 行 harness 目标**——改为由 `budget.rs` 棘轮作为 R10 红线（现已测量，不手工计数；当前 5,043 行）。
 
----
+### 修复
 
-## 2025 年 12 月下旬
-
-### 国际化
-
-- 完整的英文和简体中文本地化支持
-- macOS 应用中的本地化 UI 字符串
-
-### 权限系统
-
-- 启动时的强制权限门控（可访问性、输入监控）
-- 权限授予后自动重启
-- 防抖权限状态监控
-- 应用内权限提示（替换系统对话框）
-
-### 提供商管理
-
-- 提供商激活/停用切换
-- 内联连接测试结果
-- 自定义提供商认证修复
-- 设置窗口布局改进
-
-### macOS 26 窗口设计
-
-- 新窗口 chrome 的第 1 和第 2 阶段实现
-- 最小窗口大小约束
-- 通过 URL scheme 重新打开窗口
+- **梦境守护进程每晚烧 provider 额度**——夜间梦境运行的重试风暴已加边界，不再耗尽 provider 额度。
+- **Panel 自动更新 404**——manifest URL 把版本里的空格归一化为点。
+- **`channels.set_agent` 接受不存在的代理**——网关现在先校验代理存在。
+- **Provider 错误读取可能挂在失速的代理上**——错误响应体读取现在加边界。
+- **跨平台实例锁持有者不可读**——持有者 PID 被记录在一个无锁 sidecar 中。
+- **派生的子代理继承 `[execution] max_iterations`**——`HarnessRunner::default_max_iterations` 现在被正确覆写。
+- **子代理能找到自己 offload 的工具输出**——子 harness 现在拿到一个被父会话 scope 的句柄。
+- **多 provider router 整个 session 深克隆 + 非原子发布**——改为原子 regen marker + 一次克隆。
+- 等等——详见 CHANGELOG 26.7.15 段。
 
 ---
 
-## 2025 年 12 月中旬
+## 26.7.7 — MoA 持续顾问 + 渐进式工具披露 + 真多会话并行
 
-### 记忆模块（第 4 阶段）
+大型能力发布。头条是 **Mixture-of-Agents（MoA）持续顾问**——任何代理轮次现在可被一个顾问模型面板影子化，视图被聚合成回复。伴随：**渐进式工具披露**（per-turn token 节省，把非核心工具 schema 折叠到按需 `tool_search` 之后）；**真多会话并行**（运行闸门从 per-agent 移到 per-session）；**`[[wikilink]]` 笔记生命周期**（带重命名级联与来源）；**深化的记忆星图画布**；**叙述引领的聊天流**配 live-follow 工作区；以及在底层重建的**会话单源真值事件日志**。
 
-- 基于 RAG 的上下文记忆，带向量搜索
-- 记忆保留策略
-- macOS 上下文捕获（Swift）
-- 性能基准和全面测试套件
-- 与对话管道的核心集成
+### 新增
 
-### AI 提供商集成
+- **MoA 持续顾问**——新的虚拟 `MoaProvider` 把一轮 fan-out 到一个可配置的顾问模型面板（带每顾问超时、提示缓存断点、签名缓存），然后一个聚合器模型合成回复。预设完全通过对话由新的 `moa` 工具创作与切换（会话激活 + 预设 CRUD）、`/moa` 一次性命令（操作者门控）以及 Panel 可视化配置页。顾问 token 花费追踪在自己用量桶中，VESR 把聚合器记为执行模型，所以 MoA 永不污染主模型的核算。
+- **渐进式工具披露 + `tool_search`**——非核心工具 schema 现在被折叠成只有 name + description（轻量 catalog），节省了大量 per-turn 工具 schema token；模型通过 `get_tool_schema` 按需拉回完整 schema。新的自包含 `tool_search` 元工具（BM25 ranker，无依赖）让模型发现延迟工具；MCP 工具可通过 `[tools] defer_mcp_tools` 被推入该延迟层级。
+- **真多会话并行**——运行闸门从 per-agent 锁移到 per-session 的 `SessionRunRegistry`，所以一个代理可以在多个会话同时运行，而任意单会话保持互斥。一个 run-lifetime `ConcurrencyLimiter` 强制全局 + 每代理上限，从 `[execution]` 配置热重载；一个服务器权威的 running-set 广播驱动 CLI / TUI / Panel 上统一的 "running" 点与 run-slots 仪表。
+- **`[[wikilink]]` 笔记生命周期**——笔记现在解析 `[[wikilinks]]`（带别名），通过策略链解析并记录来源（`resolved_by` / `status` / `label`），重命名级联（包括类型化关系），用 tombstone 删除语义与定向的入站回填。梦境守护进程物化未链接-提及的软边。
+- **深化的记忆星图画布**——图视图现在按社区重心引力聚类，按近期度与置信度让节点变亮，按关系种类（语义 / 相关 / 共召回 / 关键词 vs. wikilink 骨架）给边上色，加入 pan（shift / middle-drag）到轨道相机。节点详情显示 backlinks 与路径面包屑。
+- **叙述引领的聊天流 + live-follow 工作区**——转写现在读起来像叙述，运行中以紧凑的单行工具行（状态符号、实时用时），完成后 `✓N steps`。工作区窗格变成 live-follow 前台会话（带 pin）的工具详情查看器。
+- **会话单源真值事件日志**——`session_events` 现在是规范日志；`MessageProjector` 把事件物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写，消息携带 `tool_call_id` / `tool_name` + `AssistantRunMeta` 戳。旧会话被回填并在锁定的 invariant 后读取。
+- **Computer-use 语义交互**——新的 `set_value` / `ax_action` 可访问性动作，带无状态定位器评分的写入验证；`observe` 参数融合 act→observe（返回 post-state / 截图），恢复提示被附加到工具失败后让模型自纠正。
+- **消息流汇编器**——单一 `MessageAssembler` reducer 现在拥有装配后的消息，在流排空时实时剥离内联 `<think>>` 块，并把流式与最终文本都通过同一个共享 sanitize 原子路由。
+- **Live-热重载的执行上限**——`[execution]` run-cap 段现在是 Live：通过 arc-swap 全局信号量，改变 `max_runs_global` / `max_runs_per_agent` 不需要重启。
 
-- 基础 AI 提供商接口
-- 多提供商路由器实现
-- AetherCore 和记忆集成
-- 带热重载的配置管理后端
-- 路由规则编辑器
-- 行为设置和热键自定义
-- 隐私 PII 清理
-- 打字机效果输出模式
+### 修复
 
-### Halo 覆盖层
-
-- 增强的 Halo 覆盖层 UI
-- 三种输入模式：剪切、复制和 halo
-- AI 处理前的输入模式选择 UI
-- 剪贴板上下文机制（10 秒窗口）
-- 双 Shift 默认热键（避免输入法冲突）
-
----
-
-## 2025 年 12 月前
-
-### 基础
-
-初始开发期建立了核心 Rust 服务器、Gateway WebSocket 协议、Agent 循环、会话管理和原始 macOS Swift 应用。关键里程碑包括：
-
-- 带异步运行时（Tokio）的 Rust 核心
-- 基于 WebSocket 的 Gateway JSON-RPC 2.0 协议
-- 多提供商 AI 路由（Claude、GPT、Gemini、Ollama）
-- Telegram 和 Discord 频道适配器
-- 三级命令执行安全模型
-- MCP（Model Context Protocol）工具集成
-- SQLite 支持的对话持久化
-- 通过 TOML 配置，支持环境变量覆盖
+- **会话侧栏显示原始 `<system-reminder>`**——per-turn 提醒（工作目录等）现在作为每轮 transient recall 上下文传递，而不是被前缀到持久化的用户消息。
+- **MoA 预设永远不在默认 provider 上激活**——主 provider key 现在被映射到 `named_providers`，`moa` 工具的 args schema 是手写的扁平形式。
+- **`file_ops` glob 路径逃逸**——搜索 / 批量移动现在拒绝绝对与 `..` glob 模式，对每个匹配复检 deny 列表，拒绝 Windows 驱动器相对 / UNC 前缀 glob（`C:foo`）。
+- **Windows 上的会话 epoch 解析**——修了一个 Windows-only 的 epoch 解析失败。
+- **沙箱 stdin / timeout 硬化**——命令沙箱中的 stdin EOF 处理与前台 timeout 钳制被加固。
+- **Windows 独立服务器自更新**——桌面壳在 Windows 上替换自己二进制前停止运行中的守护进程。
+- **Panel "running" 点正确性**——红的 running 点现在是纯服务器权威，带顺序守卫与冷加载种子守卫。
+- 等等——详见 CHANGELOG 26.7.7 段。
 
 ---
 
-## 标签
+## 26.7.1 — 上下文"永不破"保证 + 真实上下文用量仪表
 
-| 标签 | 描述 |
+Harness 可靠性与抛光发布。头条是**上下文"永不破"保证**——代理循环现在总是压缩并继续，而不是在某轮中途切断。伴随**真实、抗重载的上下文用量仪表**、**登录自启在三种产品形态上落地**、以及聊天流中工具调用的扁平化、可折叠重设计。
+
+### 新增
+
+- **上下文"永不破"保证**——之前可能通过 `FinalReply` 提前结束的轮次（critical/strict 预算违规、反应式压缩重试耗尽、分会话失败软化）现在总是路由过 `compact_to_fit` 然后继续。加一个确定性的 `truncate_to_fit` 底作为最后手段——加固反对孤立的 `tool_result` 消息——所以一轮永远不会再中途默默停止。
+- **真实 per-model 上下文用量仪表，抗重载**——聊天上下文用量百分比现在由核心侧计算（遵守任何 `context_window` 配置覆盖）并被持久化在助手消息本身上，所以它在标签切换与历史重载后还在而不是重置。新会话通过本地预算 dry-run（零 LLM 调用）显示 `≈N%` 估算，第一轮后自纠正为真实数字。
+- **登录自启在三种产品形态上落地**——完整桌面 App 与 Lite Panel shell 都获得可工作的 "Launch at Login" 切换（Settings → General / 托盘菜单）；独立 `aleph-server` 获得新的 `service` 子命令加安装器默认，开箱即作为系统服务启动（launchd / systemd-user / Task Scheduler）。
+- **扁平化、可折叠的聊天工具调用展示**——聊天流中的工具调用与结果渲染成紧凑的、单行变化的步骤条（完成后 `✓N steps`），溢出的部分用全详情侧面板代替，而不是嵌套 `<details>`/JSON-tree 部件。
+- **`system.open_path` 桌面能力**——新的跨平台原语，用 OS 默认处理器（`open` / `xdg-open` / `start`）打开文件或 URL。
+- **更广的运行时探测覆盖**——安装目录探测现在额外检查 Homebrew 的 `rustup` keg、MacPorts、asdf shims、Nix profile 路径（macOS/Linux），加上扩展的 Windows 搜索路径（`node` / `playwright-cli`）。
+
+### 修复
+
+- **Linux 上独立服务器自更新**——安装器现在把新 `aleph-server` 二进制下到临时文件并原子重命名到位；原地覆写在 Linux 上会因 `ETXTBSY` 失败。
+- **完整桌面 App 中"登录自启"切换从未出现**——切换到 `tauri-plugin-autostart` 插件命令（带匹配的 capability grant），它们在任意 origin 上都能工作。
+- **Updater 签名密钥轮换**——之前的 Tauri 更新签名密钥对无法使用，两个产品形态的应用内自动更新都坏了；新密钥对通过 CI 接入。
+- 跨平台会话目录命名在文件后端的读路径上自愈，聊天侧栏的 async 读现在抵御 disposed signal，修复快速切会话时的偶发 panic / no-op。
+
+---
+
+## 26.6.29 — iMessage 通道 + iOS Panel + VESR 动态模型路由
+
+大型多日发布。头条是全新的 **iMessage 通道（via BlueBubbles）**（让 Aleph 在任意 OS 上通过 iMessage 触达你）；**iOS Panel 长成真正的 iPhone + iPad 应用**（原生配对、iPad 多任务、TestFlight）；以及 **VESR 动态模型路由**——Aleph 现在从自己验证过的履历中学习哪个模型真正能干活，而不是写死的路由器。加分：一类**网页抓取 provider**、更丰富的**多代理团队 / 看板**表面，以及**在聊天还在跑的时候往里打字**。
+
+### 新增
+
+- **iMessage 通道（BlueBubbles）**——新的消息通道，在任意 OS 上通过 iMessage 触达你（BlueBubbles 传输，本机 macOS 发送被单独门控）。出站文本与附件、入站 webhook + catch-up 轮询（带 offset 对账与 GUID 去重）、群/聊天发送、reactions / typing / read-receipts（门控在 BlueBubbles 私有 API）。
+- **iOS Panel 现在是真正的 iPhone + iPad 应用**——原生配对屏（shake-to-reconfigure、Keychain 支撑的连接存储、加载失败回退）；完整 iPad 支持（设备族、全屏、方向、Split View / Stage Manager 多任务、平板专属布局、触摸人体工学）；内部 **TestFlight** 分发。
+- **VESR 动态模型路由**——替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（k-NN over sqlite-vec），所以模型能看到哪些模型在此类工作上**实际**表现过。
+- **网页抓取 provider 类别**——`crawl4ai` 与 `firecrawl` 现在是 UI 可配的一类抓取 provider（URL → markdown），vault 存储密钥，自动在失败时回退到内置抓取。
+- **更丰富的多代理团队 / 看板**——看板抽屉现在驱动完整任务生命周期（approve / reject，加 waiting-review / paused / skipped 列，任务不再消失），实时子代理树（节点身份、实时事件、树 RPC），操作者可调的广播防风暴守卫，每任务执行超时覆盖。
+- **聊天还在跑的时候往里打字**——队列中的消息渲染为流内 "ghost" 气泡，在下一轮边界通过 steering flush，或立即强制插入（Esc + ⚡）。宽布局与手机布局都可用。
+- **粘性的单聊天 Todo / 计划面板**——输入框上方一个永远可见的计划部件；计划变更时，旧计划沉入聊天流作为一个胶囊。
+- **真实 per-model 上下文用量仪表**——核心权威的占用与窗口（遵守任何 `context_window` 配置覆盖），跨标签持久化。
+- **MCP 增强**——广播 sampling 能力、协商协议版本、接线 `max_failures`、加 `post_install` 字段、出厂 `zhipu-vision` 与 `unreal-engine` 预设。
+- **工具改进**——`file_read` 现在支持图片（`image_read`），未变更的文件读取通过读缓存在轮次间去重。
+- **Panel 中的灵魂原型选择器**，3D 记忆星图的视觉/性能一轮（per-node twinkle、曲贝塞尔边、突出链、bloom 复调、顶点着色器闲置漂移、隐藏时渲染跳过）。
+
+### 修复
+
+- **steering 中途时 "Model returned empty response"**——在工具调用与其结果之间注入消息不再产生非法消息序列；工具结果保持连续，所以 OpenAI 兼容代理不再默默返回空响应。
+- **macOS 本地网络隐私**——守护进程现在嵌入稳定的 `CFBundleIdentifier` Info.plist 并在构建时重新签名，所以它出现在本地网络隐私列表中，自托管 SearXNG / Firecrawl 不再因 "Network error" 失败。
+- **路由故障转移归属**——frozen model + provider 现在从模型指令而不是 `failover` 包装名归因，修复压缩的可用性/归属。
+- `firecrawl` 永不被持久化为 `[fetch]` 后端（它是从 search 配置派生的）；网关在 token 轮换时关闭远程会话，保留环回。
+
+---
+
+## 历史里程碑
+
+26.6 之前的所有重大变更请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
+
+主要历史里程碑（节选）：
+
+- **26.6.x** — 多 provider failover 重构、Telegram/Discord 适配层大改、Panel 内存 Vault 重构、iMessage 通道、iOS Panel、VESR 动态模型路由、MoA 顾问、渐进式工具披露、上下文永不破
+- **26.5.x** — 集群联邦、ACES 集成、Panel 内存星图
+- **26.4.x** — 知识记忆笔记层（graph path、wikilink、CJK 搜索）
+- **26.3.x** — 自我演化纪律、Telegram/Discord 重大清理
+- **26.2.x** — Harness 迁移、R10 红线落实、桌面桥重构
+- **26.1.x** — TOML 配置、记忆系统 RAG 化、POE 架构
+- **2025.12** — 国际化、权限系统、macOS 26 窗口设计
+- **2025.11** — Halo 覆盖层、记忆模块（第 4 阶段）、AI provider 集成
+- **2025.10** — Rust 核心、Gateway WebSocket、Agent 循环、macOS Swift 应用初版
+
+---
+
+## 标签与快照
+
+| 标签 / Tag | 描述 |
 |-----|-------------|
+| `26.7.21` | 当前稳定版；chat/work/code 会话模式 + 治理拓扑层 + 熵减硬化 |
+| `26.7.18` | 自签名 TLS + 客户端 TOFU |
+| `26.7.17` | 原生 gateway TLS + MCP 按需发现 |
+| `26.7.15` | 三级执行权限 + 笔记层 + 真成本核算 |
+| `26.7.7` | MoA 顾问 + 渐进式工具披露 + 真多会话并行 |
+| `26.7.1` | 上下文永不破 + 真实上下文仪表 |
+| `26.6.29` | iMessage 通道 + iOS Panel + VESR 路由 |
 | `pre-aleph-rename` | 项目重命名为 Aleph 之前的快照 |
 | `pre-cleanup-20260131` | 2026 年 1 月代码清理之前的快照 |
-| `phase4-foundation` | 第 4 阶段基础里程碑 |

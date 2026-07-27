@@ -173,3 +173,49 @@ shell_command = "deny"
 
 - [Configuration](./configuration) — How approval policies are configured
 - [Security: Overview](../security/overview) — Security architecture
+
+---
+
+## 26.7.x Addendum
+
+### Action-Aware Three-Tier Execution Permissions
+
+26.7.15+ major change: three-tier execution permissions (Ask / Auto / Full) replace the binary ask/auto:
+
+| Tier | Behavior | Default |
+|------|----------|---------|
+| `ask` | Prompt for approval before every tool execution; unknown tools fail closed | ✓ |
+| `auto` | Idempotent tools auto-allow; destructive tools still need approval | |
+| `full` | All auto-allow (besides the hard security filter) | |
+
+### Tool-Metadata Driven
+
+Reads each tool's declared metadata (idempotent / destructive), **not its name**. Unknown tools **fail closed** under the `ask` tier.
+
+### Action-Aware Grant Fingerprint Keying
+
+The human sees the actual command and the grant fingerprint **keys on it**. Authorization granularity moves from "tool-level" to "command-level".
+
+### Single Choke Point
+
+26.7.15+: the approval gate is forced through the single choke point `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all closed**.
+
+### `[sandbox.command_policy]` Hard Floor
+
+Cannot be lowered by any `exec_tier`. Missing or inconsistent **refuses authorization** (`fail-closed`).
+
+### Discord Interactive Approval Buttons
+
+26.7.21+: two-way `ApprovalCallbackSink` flow; `mcp.respond_approval` / `mcp.cancel_approval` support it.
+
+### Panel / TUI Surface
+
+- Panel: composer tier pill + inline approval / `ask_user` clarification cards
+- TUI: polled Ask-tier tool-approval overlay (HITL)
+
+### See Also
+
+- [Execution Engine](/docs/en/concepts/execution-engine) — full execution flow
+- [Security: Execution Approval](/docs/en/security/exec-approval) — user view
+- [Capability System](/docs/en/concepts/capability-system) — permission declarations
+- [Architectural Redlines R7 / R10](/docs/en/philosophy/redlines) — LLM Sovereignty + Dumb Loop

@@ -3,15 +3,25 @@ title: "配置"
 description: "配置你的 Aleph 设置"
 ---
 
-Aleph 使用位于 `~/.aleph/config.toml` 的 TOML 配置文件。
+Aleph 使用位于 `~/.aleph/aleph.toml` 的 TOML 配置文件。所有字段都支持环境变量插值（`${VAR_NAME}`）。
+
+## 文件位置
+
+| 文件 | 用途 |
+|------|---------|
+| `~/.aleph/aleph.toml` | 主配置文件 |
+| `~/.aleph/defaults.toml` | 默认值覆盖 |
+| `~/.aleph/aleph.toml.bak` | 迁移前的自动备份 |
 
 ## 基本结构
 
 ```toml
 # Agent 配置
-[agent]
-default_model = "anthropic/claude-sonnet-4"
+[agents.defaults]
+model = "anthropic/claude-sonnet-4"
 thinking = "medium"
+session_mode = "work"   # chat / work / code
+exec_tier = "ask"        # ask / auto / full
 
 # Gateway 配置
 [gateway]
@@ -20,11 +30,11 @@ bind = "127.0.0.1"
 require_auth = false
 
 # 频道配置
-[channel.telegram]
+[channels.telegram]
 enabled = false
 token = "BOT_TOKEN"
 
-[channel.discord]
+[channels.discord]
 enabled = false
 token = "BOT_TOKEN"
 
@@ -32,6 +42,13 @@ token = "BOT_TOKEN"
 [session]
 auto_reset_hour = 4
 expiry_days = 30
+
+# 自签名 TLS（可选）
+[gateway.tls]
+# cert 与 key 留空时，核心自动生成自签名证书；
+# SAN 自动覆盖主机非环回接口 IP
+cert = "/path/to/cert.pem"
+key = "/path/to/key.pem"
 ```
 
 ## Agent 配置
@@ -39,17 +56,19 @@ expiry_days = 30
 ### 模型选择
 
 ```toml
-[agent]
+[agents.defaults]
 # 主模型
-model = "anthropic/claude-opus-4-20250514"
+model = "anthropic/claude-opus-4"
 
 # 备用模型（故障转移链）
 models = [
-  "anthropic/claude-opus-4-20250514",
+  "anthropic/claude-opus-4",
   "openai/gpt-4o",
   "google/gemini-pro"
 ]
 ```
+
+故障转移使用原子计数器与原子 regen marker——主模型失败时切到下一档，不克隆整段会话，`session.usage` 由核心定价表统一计算（shell 不再持有重复价格表）。
 
 ### 思考级别
 
@@ -62,14 +81,46 @@ models = [
 | `high` | 深度分析 |
 | `xhigh` | 最大深度 |
 
-### 身份
+### 会话模式（chat / work / code）
+
+与 `exec_tier`、`thinking` 正交的**第三个**用户可调维度。它**只**对工具呈现面（progressive-disclosure 核心集 + deferred-tool 层级）做静态分区，不影响权限。
 
 ```toml
-[agent]
+[agents.defaults]
+session_mode = "work"   # 默认全局默认；可在 Settings → Policies 中改
+```
+
+也支持请求级与会话级覆盖。运行时由模型调用 `session_set_mode` 工具切换。详见 [会话模式](/docs/zh/architecture/overview#第三双生子会话模式)。
+
+| 模式 | 工具集 | 推荐场景 |
+|------|--------|---------|
+| `chat` | 最小核心 | 一般聊天、问答 |
+| `work` | 中等 + 工作流工具 | 文档处理、日常办公 |
+| `code` | 全量 + 开发工具集 | 编程、CI、调试 |
+
+### 执行等级
+
+```toml
+[agents.defaults]
+exec_tier = "ask"
+```
+
+| 等级 | 行为 |
+|------|------|
+| `ask` | 每次工具执行前请求审批；未知工具失败关闭 |
+| `auto` | 幂等工具自动放行，破坏性工具仍需审批 |
+| `full` | 全部自动放行（独立的安全硬过滤除外） |
+
+`[sandbox.command_policy]` 硬底优先级最高，不能被任何等级拉低。
+
+### 身份与群聊
+
+```toml
+[agents.defaults]
 identity = "You are Aleph, a personal AI assistant. Be helpful, concise, and accurate."
 
 # 群聊行为
-[agent.group_chat]
+[agents.defaults.group_chat]
 require_mention = true
 prefix = "@aleph"
 ```
@@ -83,23 +134,33 @@ port = 18790
 
 # 绑定地址
 bind = "127.0.0.1"    # 仅限本地
-# bind = "0.0.0.0"    # 所有接口
+# bind = "0.0.0.0"    # 所有接口（需要 TLS）
 
 # 认证
 require_auth = true
 
-# TLS（可选）
+# 自签名 TLS（启用时，bind = 0.0.0.0 也允许明文禁用）
 [gateway.tls]
 cert = "/path/to/cert.pem"
-key = "/path/to/key.pem"
+key  = "/path/to/key.pem"
+# cert 与 key 留空 → 核心自动生成自签名证书
+# SAN 自动覆盖主机非环回接口 IP；Panel 端通过 TOFU 审批
+
+# 受信的反向代理（决定网关是否读取真实客户端 IP）
+trusted_proxy = ["127.0.0.1", "::1"]
+
+# 远程连接是否允许明文（默认 false；false 时非环回绑定失败关闭）
+allow_insecure_remote = false
 ```
+
+详见 [网关协议](/docs/zh/gateway/protocol)。
 
 ## 频道配置
 
 ### Telegram
 
 ```toml
-[channel.telegram]
+[channels.telegram]
 enabled = true
 token = "123456:ABC..."
 
@@ -107,20 +168,36 @@ token = "123456:ABC..."
 allow_from = ["+1234567890"]
 
 # 群组行为
-[channel.telegram.groups]
+[channels.telegram.groups]
 "*" = { require_mention = true }
 ```
 
 ### Discord
 
 ```toml
-[channel.discord]
+[channels.discord]
 enabled = true
 token = "YOUR_BOT_TOKEN"
 
 # 公会/服务器限制
 allow_guilds = ["guild-id-1", "guild-id-2"]
 ```
+
+### iMessage（BlueBubbles）
+
+```toml
+[channels.imessage]
+enabled = true
+# BlueBubbles 服务器 URL（macOS host 上通常自托管）
+server_url = "http://127.0.0.1:1234"
+password = "${BLUEBUBBLES_PASSWORD}"
+
+# 群组行为
+[channels.imessage.groups]
+"*" = { require_mention = true }
+```
+
+入站 tapback（add-reaction）会被作为上下文上抛给模型，而不是丢弃。
 
 ## 提供商配置
 
@@ -129,16 +206,54 @@ Aleph 支持多个 LLM 提供商。每个提供商配置在 `[provider]` 表下�
 ```toml
 [provider.claude]
 protocol = "anthropic"
-model = "claude-opus-4-20250514"
+model = "claude-opus-4"
 api_key = "sk-ant-..."
 
 [provider.openai]
 protocol = "openai"
 model = "gpt-4o"
 api_key = "sk-..."
+
+[provider.ollama]
+protocol = "ollama"
+model = "llama3"
+base_url = "http://127.0.0.1:11434"
 ```
 
 参见 [提供商](/docs/zh/architecture/providers) 获取支持的提供商完整列表。
+
+## 插件 / 技能 / MCP
+
+```toml
+# 渐进式工具披露（按需加载 schema）
+[tools]
+defer_mcp_tools = true
+enable_tool_search = true
+
+# MCP 服务器
+[[mcp.servers]]
+name = "fetch"
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+# 插件市场
+[[plugin.marketplace]]
+url = "https://marketplace.example.com/index.json"
+```
+
+## Hooks（钩子）
+
+```toml
+[[hook]]
+event = "session.start"
+command = ["echo", "session $SESSION_ID started"]
+
+[[hook]]
+event = "tool.invoke.pre"
+# 注入上下文的限额（避免无界增长）
+context_injection_limit_bytes = 8192
+require_consent = true
+```
 
 ## 会话配置
 
@@ -154,6 +269,9 @@ expiry_days = 30
 [session.compaction]
 enabled = true
 threshold = 50000  # tokens
+
+# 在每个面都可用的 session.compact 工具
+# 等价于 /compact 命令
 ```
 
 ## 环境变量
@@ -161,18 +279,37 @@ threshold = 50000  # tokens
 配置值可以使用环境变量：
 
 ```toml
-[channel.telegram]
+[channels.telegram]
 token = "${TELEGRAM_BOT_TOKEN}"
+
+[provider.claude]
+api_key = "${ANTHROPIC_API_KEY}"
 ```
+
+支持 `${VAR}` 与 `${VAR:-default}` 语法。环境变量优先级高于配置文件中的值。
 
 ## 热重载
 
-配置更改会被自动检测并应用。网关会监视 `config.toml` 的更改并无需重启即可重载。
+配置更改会被自动检测并应用。网关会监视 `aleph.toml` 的更改并无需重启即可重载。可热重载的字段：
 
-## 配置位置
+- 模型目录与故障转移链
+- 提供商配置
+- 频道启停
+- `[execution]` 运行上限（`max_runs_global` / `max_runs_per_agent`）
 
-| 文件 | 用途 |
-|------|---------|
-| `~/.aleph/config.toml` | 主配置文件 |
-| `~/.aleph/defaults.toml` | 默认值覆盖 |
-| `~/.aleph/config.toml.bak` | 迁移前的自动备份 |
+需要重启的字段：核心端口、绑定地址、TLS 证书。
+
+## 备份建议
+
+| 路径 | 内容 | 优先级 |
+|------|----------|-------|
+| `aleph.toml` | 所有配置 | 高 |
+| `sessions/` | 会话数据库 | 中 |
+| `plugins/` | 已安装插件 | 低（可重新安装） |
+| `logs/` | 应用日志 | 低 |
+
+## 下一步
+
+- [部署](./deployment) —— 将 Aleph 作为持久服务运行
+- [网关协议](/docs/zh/gateway/protocol) —— 完整 RPC 协议参考
+- [安全](/docs/zh/security/overview) —— 深入的安全模型

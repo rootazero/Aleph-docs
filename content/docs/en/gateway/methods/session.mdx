@@ -352,3 +352,41 @@ CREATE TABLE session_metadata (
 - [agent.*](/docs/en/gateway/methods/agent) -- Agent execution methods
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [Protocol](/docs/en/gateway/protocol) -- Session key routing details
+
+---
+
+## 26.7.x Addendum
+
+### `session.*` Full RPC
+
+- `session.usage` — usage + cost (core-priced; the shell no longer carries a duplicate price table)
+- `session.compact` — `/compact` equivalent (available on every surface)
+- `session.truncate` — `truncate_to_fit` floor
+- `session.create` / `session.export_html`
+
+### `sessions.*` Full RPC
+
+- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
+
+### `chat.*` Preferred
+
+26.7.x prefer `chat.*` over `agent.*`:
+
+- `chat.send` — send a message (with `session_mode` field)
+- `chat.abort` — abort a run
+- `chat.history` — history
+- `chat.clear` — clear
+- `chat.context_estimate` — context-window estimate
+- `chat.rewind` — rewind to an earlier turn
+
+### SessionEvent System
+
+26.7.7+: `session_events` is the canonical log; `MessageProjector` materializes events into the `messages` table; a boot-time `ProjectionReconciler` back-fills transcripts.
+
+### Live-Hot-Reloadable Execution Caps
+
+26.7.7+: the `[execution]` run-cap section is now Live.
+
+### Real Cost and Token Accounting
+
+26.7.15+ Tier-3 hardening.

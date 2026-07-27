@@ -123,3 +123,27 @@ description: "面板群聊窗口：一个三面板团队聊天界面，配备归
 - [团队](/docs/zh/concepts/teams) — 队长、团队战略协调（Team Strata）规划与协调任务（Coord Task）
 - [代理运行时](/docs/zh/concepts/agent-runtime) — 单个代理如何工作
 - [竞技场](/docs/zh/concepts/arena) — 多代理协作工作区
+
+---
+
+## 26.7.x 补充
+
+### 团队群聊窗口
+
+26.6.29+：三面板团队群聊窗口——花名册 / 归属气泡消息流 / 工作区，由**持久的每团队线程**（`teams.chat.*`）驱动。
+
+### `teams.chat.*` 完整 RPC
+
+- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
+- `teams.usage` —— 团队使用情况
+- `agents.teams` —— 列出所有团队
+
+### 群聊聊天（teams.chat.send）替代 "teams.run"
+
+历史上有方法 `teams.run` 的说法（**从未存在**）——团队使用聊天线程 + 任务。Coord Task 状态由 `task_review` 审核。
+
+### 见另请参阅
+
+- [团队](/docs/zh/concepts/teams) — 队长 + 成员
+- [协调任务](/docs/zh/architecture/teams) — `task_review` 流程
+- [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams) — 协议

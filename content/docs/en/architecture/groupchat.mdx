@@ -126,3 +126,32 @@ The group-chat window is a **three-panel** layout:
 - [Teams](/docs/en/architecture/teams) — Teams, leader, Coord Tasks, Team Strata, and the full `teams.*` RPC surface
 - [A2A](/docs/en/architecture/a2a) — Agent-to-Agent protocol
 - [Gateway](/docs/en/gateway/protocol) — Channel interfaces
+
+---
+
+## 26.7.x Addendum
+
+### Group-Chat Thread
+
+26.6.29+: the durable per-team chat thread (`teams.chat.*`) drives the three-panel group-chat window. `teams.chat.send` / `history` / `thread` / `cancel`.
+
+### Team Coordination
+
+- Leader + members
+- Team Strata — leader plans first on the first message
+- Coord Task — `Pending → InProgress → WaitingReview → Completed`
+- Task templates + tool surface
+
+### Teams Kanban Deep Refactor
+
+26.7.24+: drag-and-drop, shared lifecycle/column sources, richer cards, operator-tunable broadcast storm-prevention guards.
+
+### Grounding Evidence Gate
+
+26.7.21+: `task_review` approvals can require grounding.
+
+### See Also
+
+- [Teams Concept](/docs/en/concepts/teams)
+- [Group Chat Concept](/docs/en/concepts/group-chat)
+- [Gateway RPC `teams.*`](/docs/en/gateway/methods/teams)

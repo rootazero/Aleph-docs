@@ -332,3 +332,46 @@ RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build
 ```
 
 Consider using `cargo check` instead of `cargo build` when you only need to verify compilation without producing a binary.
+
+---
+
+## 26.7.x Addendum
+
+### Rust Toolchain 1.95+
+
+26.7.x: `rust-version` in `Cargo.toml` has been bumped to **1.95**. Use `rustup install 1.95` or `rust-toolchain.toml` in development.
+
+### Harness 12 Files + Line-Count Ratchet
+
+**Code is the authority** — every doc number is just a copy of `CEILING`:
+
+- Top-level 8 + `agent/` 4 = **12 files**
+- Line count gated by `src/harness/tests/budget.rs` ratchet
+- Currently 5,055 lines (2026-07-26 revision)
+- The 3 questions before adding code: scaffolding vs cognition? Will a model upgrade still need it? How many real consumers does it have?
+
+### YAGNI Withdrawal
+
+Any abstraction with zero consumers is deleted immediately. ~5,200 lines of dead code were removed cumulatively during harness dissolution.
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+
+### Process-Isolation Kernel
+
+26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn — a legitimate carve-out from R1.
+
+### `aleph-server prompt-size`
+
+R9 prompt-scaffolding size check command.
+
+### Full RPC ~265
+
+26.7.x the gateway exposes **~265 RPC methods** — when developing new methods, refer to [Gateway Methods Reference](/docs/en/gateway/methods).
+
+### See Also
+
+- [Architectural Redlines R1–R10](/docs/en/philosophy/redlines) — hard constraints
+- [Harness Philosophy](/docs/en/philosophy/harness-philosophy) — full discussion
+- [CHANGELOG](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md) — 26.7.x series changes

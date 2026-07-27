@@ -202,3 +202,30 @@ query → candidate pool → BM25 + vector scores → RRF fusion → cutoff → 
 - [记忆系统](../../concepts/memory) — 概述
 - [记忆架构](../../architecture/memory) — 实现
 - [记忆演进](../../architecture/memory-evolution) — 规范历史
+
+---
+
+## 26.7.x 补充
+
+### `memory.*` 完整 RPC
+
+- `memory.search` / `memory.delete` / `memory.clear` / `memory.stats` / `memory.compress`
+- `memory.listFacts` / `memory.clearFacts` / `memory.list_corrections` / `memory.trace`
+- `memory.appList`
+- `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace`
+
+### Vault 面板重构（26.7.27+）
+
+卡片视图、批量操作栏、深链、证据链、跨代理选择、来源、批量导出。
+
+### 真实成本与 token 核算
+
+26.7.15+ Tier-3 硬化——代理范围召回信号、严重度门控的归档、成熟度队列。
+
+### 笔记层
+
+`note_graph_query` 工具（双向 BFS 路径、类型化关系边、wikilink supersession、抗崩溃索引、CJK trigram 全文搜索）。
+
+### SkillOpt 自我演化
+
+26.7.x：技能演化受 SkillOpt 纪律约束。

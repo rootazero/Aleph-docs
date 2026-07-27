@@ -289,3 +289,30 @@ description: "事件订阅和流式 RPC 方法"
 - [协议](/docs/zh/gateway/protocol)——事件传递格式和 WebSocket 传输
 - [agent.*](/docs/zh/gateway/methods/agent)——发出事件的代理方法
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### 事件主题
+
+26.7.x 事件总线主题包括：
+
+- `stream.*` —— 流式（start/token/tool_call/done/end）
+- `agent.*` —— agent 状态
+- `memory.*` —— 记忆变化
+- `session.*` —— 会话事件
+- `team.*` —— 团队事件
+- `governance.*` —— 治理事件（loop_graph）
+- `tool.*` —— 工具调用
+- `heartbeat.*` —— Heartbeat 触发
+- `cron.*` —— Cron 触发
+- `system.*` —— 系统事件
+
+### `events.subscribe` / `events.unsubscribe`
+
+订阅与取消订阅模式（`patterns` 数组）。
+
+### WS 任务泄漏修复
+
+26.7.21+：每连接事件转发任务不再泄漏；`broadcast::RecvError::Lagged` 恢复而非永久死亡。

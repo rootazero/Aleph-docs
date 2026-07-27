@@ -258,3 +258,25 @@ pub fn accept(name: &str) -> Result<PathBuf>;  // 将草稿提升为活动状态
 - [工具链](./harness) —— 执行每个步骤的 Think→Act 循环
 - [调度器](./dispatcher) —— 任务编排和工具过滤
 - [工具](../tools/overview) —— 工具执行架构
+
+---
+
+## 26.7.x 补充
+
+### `.mjs` / 动态工作流 interop
+
+26.7.17+：可执行步骤选项与 `.mjs` 导出路径用于跨工具工作流兼容。
+
+### 裸扫描 schema-const 解析
+
+R3 兼容：工程格式把 schema hoist 成顶层 `const` 再按名引用；裸扫描经 `interop/consts.rs` 的**有界数据字面量归一化器**解析 hoisted const（及 inline schema），把 JS-lax 写法（裸键 / 单引号 / 尾逗号）归一为 JSON；遇任何表达式值（标识符 / 函数调用 / 模板串 / 计算键）整个 schema **弃权**并记 `dropped`。
+
+### 协调任务
+
+`workflow.interop` 与 `teams.*` 协调任务集成。
+
+### 详见
+
+- [工作流 interop 文档](https://github.com/rootazero/Aleph/blob/main/docs/reference/WORKFLOW_INTEROP.md) — 完整协议
+- [团队架构](/docs/zh/architecture/teams)
+- [MCP 集成](/docs/zh/concepts/mcp-integration)

@@ -304,3 +304,60 @@ Aleph 的记忆系统经历了一系列规格演进：
 - [思考者](./thinker) — 记忆如何被注入提示词
 - [架构：记忆](../architecture/memory) — 存储实现深度解析
 - [记忆演进](../architecture/memory-evolution) — Spec 1-4 和 Spec A-C 详情
+
+---
+
+## 26.7.x 补充
+
+### 笔记层第 2–4 轮
+
+26.7.15+ 知识记忆笔记层成熟：
+
+- 类别名规范化（单/复数分裂脑修复）
+- 关系词汇清理实体名污染
+- 通过 Leiden 精炼的连通社区
+- 矛盾→supersession 闭环
+- 陈旧笔记归档
+- 默认关闭的治理门
+
+### Vault 面板重构（26.7.27+）
+
+- 卡片视图（替代旧表格）
+- 批量操作栏
+- 深链锚点
+- **证据链**（引用本笔记的其他笔记序列）
+- 跨代理选择（原子一致性）
+- **来源**（writer / timestamp / source event）
+- 批量导出为**交付物**
+
+### SkillOpt 自我演化
+
+26.7.x：技能演化受 SkillOpt 纪律约束——bounded、validation-gated edit loop 加在 LLM 提出的编辑之上。
+
+### `note_graph_query` + `memory.retrieve_with_trace`
+
+26.7.15/21+：
+
+- `note_graph_query` 只读工具——双向 BFS 路径、类型化关系边、`[[wikilink]]` supersession
+- `memory.retrieve_with_trace`——真实 scoring-pipeline trace 给 debug 面板
+- CJK trigram 全文搜索
+- 抗崩溃索引
+
+### `memory.list_corrections`
+
+26.7.x：列出纠正 → 蒸馏生命周期的纠正记录。
+
+### `memory.appList`
+
+列出与该应用相关的记忆条目（按 app_key 过滤）。
+
+### 真实成本与 token 核算
+
+26.7.15+：记忆 Tier-3 硬化：代理范围召回信号、严重度门控的归档、成熟度队列、若干检索 bug 修复。
+
+### 见另请参阅
+
+- [记忆系统（架构）](/docs/zh/architecture/memory) — 完整检索架构
+- [记忆演化](/docs/zh/concepts/memory-evolution) — Dreaming + SkillOpt
+- [笔记层 wikilink](/docs/zh/concepts/markdown-utils) — `[[wikilinks]]`
+- [网关 RPC `memory.*`](/docs/zh/gateway/methods/memory) — 协议

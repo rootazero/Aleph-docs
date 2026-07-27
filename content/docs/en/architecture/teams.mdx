@@ -233,3 +233,44 @@ list augmented with a small `members_preview` and `last_message`.
 - [Group Chat](./groupchat) — Multi-persona conversations
 - [A2A](./a2a) — Agent-to-Agent protocol
 - [Orchestrator](./orchestrator) — Agent orchestration
+
+---
+
+## 26.7.x Addendum
+
+### Team Node Fused with Graph
+
+26.7.21+: `team` node kind, live-joined teams in graph status, team pair targets, victory-claim watchers triggered on team disband.
+
+### Teams Kanban Deep Refactor
+
+26.7.24+: drag-and-drop, shared lifecycle/column sources, richer cards, operator-tunable broadcast storm-prevention guards.
+
+### Template Tool Surface
+
+26.7.25+: members of built-in team templates can declare their tool surface (sharing `agents.tools_schema`), no longer hardcoded.
+
+### Grounding Evidence Gate
+
+26.7.21+: `task_review` approvals can require grounding.
+
+### Full `teams.*` RPC
+
+`teams.create` / `delete` / `disband` / `rename` / `get` / `list` / `list_templates` / `usage`
+`teams.create_task` / `update_task` / `list_tasks` / `delete` / `add_task_comment` / `list_task_comments` / `list_task_events` / `list_task_runs`
+`teams.chat.send` / `history` / `thread` / `cancel` / `task.trace`
+`agents.teams`
+
+### Built-in `loop-auditor`
+
+26.7.21+: audit / supervision templates default to independent-context evidence.
+
+### Coord Task Status
+
+`Pending → InProgress → WaitingReview → Completed`, reviewed by the leader via `task_review`. The historical fictional "coordination: sequential|parallel|hierarchical" modes were removed.
+
+### See Also
+
+- [Teams Concept](/docs/en/concepts/teams)
+- [Group Chat Concept](/docs/en/concepts/group-chat)
+- [Gateway RPC `teams.*`](/docs/en/gateway/methods/teams)

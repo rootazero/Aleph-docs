@@ -164,3 +164,36 @@ let configs = manager.find_config_files("aleph.jsonc")?;
 - [Skills](./skills) — How discovered skills are used
 - [Extensions](./extensions) — Plugin architecture
 - [Configuration](./configuration) — Configuration file formats
+
+---
+
+## 26.7.x Addendum
+
+### MCP Discovery: On-Demand
+
+26.7.17+ convergence: `McpResourceIndexLayer` (the eager index layer) has been **retracted** — `src/discovery/mcp.rs` no longer blindly indexes MCP resources/prompts. Replaced with **on-demand discovery tools**:
+
+- `mcp_list_*` tools let the model discover MCP resources/prompts on demand
+- A `cat`-guard read-steer routes to native MCP / skill / plugin reads
+- The model no longer `cat`s entire files to probe structure
+
+### Plugin Marketplace
+
+26.7.x introduces an **indexable plugin directory**:
+
+- `plugin.marketplace.list` / `plugin.marketplace.add` list / add marketplace sources
+- The unified `plugin.install` entry classifies by source (marketplace / zip / path)
+- Trust tiers: Official / Verified / Community / Unverified
+- Pre-install disclosure: command+args, secrets, network/fs reach, pinned version + SHA256, tier
+
+### Skill Discovery
+
+- Trigger-word enhancement (BM25 + edit distance) + Markdown skill author guide
+- Plugin-bundled skills folded into the skill mechanism (26.7.17+), unified with `skill_read`
+- Agent catalog revived
+
+### See Also
+
+- [MCP Integration](./mcp-integration) — on-demand discovery
+- [Extensions](./extensions) — `ExtensionKind` classification
+- [Extensions Store](./extensions-store) — trust tiers and disclosure

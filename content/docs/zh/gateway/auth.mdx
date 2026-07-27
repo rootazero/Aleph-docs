@@ -404,3 +404,71 @@ Aleph 支持基于邀请的访客访问，具有限定权限。访客获得对�
 
 - [协议](/docs/zh/gateway/protocol)——WebSocket JSON-RPC 2.0 协议详情
 - [方法参考](/docs/zh/gateway/methods)——完整的 RPC 方法目录
+
+---
+
+## 26.7.x 补充
+
+### TOFU 证书信任
+
+26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use
+
+- 共享决策核心 + 已固定 TOFU 信任存储
+- SHA-256 指纹 + SAN/Subject 解析
+- 审批面板页面（指纹 + SAN + TOFU/change 警告）
+- pending-cert 状态与 approve/reject 路径
+- macOS WKWebView + iOS Keychain 适配器
+
+### `connect` 握手加固
+
+26.7.15+：`connect` 握手**先于**`gateway call` 中的方法（之前是反过来，导致死锁/竞争）。
+
+### 设备票 / 令牌轮换
+
+26.7.x 完整 RPC：
+
+- `gateway.ticket.create` —— 颁发设备票
+- `gateway.token.current` / `gateway.token.rotate` —— 令牌管理
+- `gateway.devices.list` / `gateway.devices.revoke` —— 设备管理
+
+远程会话在 token 轮换时被关闭，**环回会话保留**。
+
+### 远程认证修复
+
+26.7.17+ 修复：
+
+- 网关远程认证 rotation kick
+- 设备复活
+- 审计轨道已接入
+- 死的认证代码被剪除
+
+### Pairing 单源路由器
+
+26.7.21+：频道本地 pairing store 已被回退——access / pairing / allowlist **单一源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
+
+### 失败关闭
+
+26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
+
+### `signed_operation_ledger`
+
+26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
+
+### 委托角色链
+
+26.7.26+：
+
+- 身份链路生命周期内闭包
+- `SignerKey` 由对应 Agent 持有
+- `OperationLedger` 由签名者所属链路回放
+
+### 真实客户端 IP
+
+26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
+
+### 详见
+
+- [网关协议](/docs/zh/gateway/protocol) — 协议
+- [安全：配对](/docs/zh/security/pairing) — pairing 流程
+- [身份与签名](/docs/zh/concepts/identity-context) — 委托链
+- [架构 / 网关](/docs/zh/architecture/gateway) — 架构

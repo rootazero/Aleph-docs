@@ -163,3 +163,47 @@ The UI talks to a thin `extensions.*` façade that dispatches to the existing pe
 - [MCP Integration](/docs/en/concepts/mcp-integration) — the MCP kind
 - [ClawHub](/docs/en/concepts/clawhub) — long-tail skill source (no longer first-class)
 - [Gateway methods: extensions](/docs/en/gateway/methods/extensions) — the `extensions.*` RPC surface
+
+---
+
+## 26.7.x Addendum
+
+### `plugin.marketplace.list` / `add`
+
+26.7.x introduces indexable plugin directories:
+
+- `plugin.marketplace.list` — list added marketplace sources
+- `plugin.marketplace.add` — add a marketplace (supply URL)
+
+### Trust Tiers
+
+| Tier | Meaning |
+|------|---------|
+| **Official** | Officially maintained (e.g. `Official MCP Registry`) |
+| **Verified** | Verified third parties |
+| **Community** | Community contributions |
+| **Unverified** | Unverified |
+
+### Pre-Install Disclosure (Mandatory)
+
+Every install surfaces the **full disclosure**:
+
+- `command+args` — launch command
+- Secrets — required credentials
+- Network / filesystem reach — permission scope
+- Pinned version + SHA256 — integrity proof
+- Trust tier — source provenance
+
+### Store Agent
+
+`store-agent` (a protected agent) owns discover → curate → install → verify; **cannot bypass system rails** (specs, trust verdicts, SHA256, secrets).
+
+### Panel Navigation
+
+`/extensions` (top-level panel mode) browses/installs by functional category. `/settings` groups MCP / Plugins / Skills under **Advanced**; the ClawHub settings tab was removed (downgraded to long-tail).
+
+### See Also
+
+- [MCP Integration](/docs/en/concepts/mcp-integration) — MCP kind
+- [ClawHub](/docs/en/concepts/clawhub) — long-tail source
+- [Gateway RPC `extensions.*`](/docs/en/gateway/methods/extensions) — protocol

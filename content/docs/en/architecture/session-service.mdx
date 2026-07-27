@@ -227,3 +227,45 @@ A future phase will migrate Gateway RPC directly to `SessionService` and remove 
 - [Gateway Architecture](./gateway) — RPC layer and session routing
 - [Agent Harness](./harness) — How the agent consumes session events
 - [Memory System](./memory) — Memory tools and persistence
+
+---
+
+## 26.7.x Addendum
+
+### `session.compact` Tool
+
+26.7.18+: equivalent to `/compact` available on every surface.
+
+### `session.truncate`
+
+Deterministic `truncate_to_fit` floor — hardened against orphaned `tool_result` messages; the turn can never silently stop.
+
+### `session.usage` Real Cost
+
+26.7.15+: core pricing; the shell no longer carries a duplicate price table.
+
+### `session.export_html`
+
+26.7.21+: render a session / artifact view as a standalone HTML document.
+
+### Session-Event Single-Source-of-Truth
+
+26.7.7+: `session_events` is the canonical log; `MessageProjector` materializes events into the `messages` table; a boot-time `ProjectionReconciler` back-fills transcripts.
+
+### `presence` Opt-In
+
+26.7.x: sessions / tasks can declare presence — used by audit and dashboards.
+
+### Hashed Carryover Filenames
+
+26.7.x: cross-session carryover filenames are hashed to avoid collisions.
+
+### Deterministic Template Env Ordering
+
+26.7.x: template env vars are **deterministically** ordered — builds are reproducible.
+
+### See Also
+
+- [Sessions (Architecture)](/docs/en/architecture/sessions) — full session architecture
+- [Memory (Architecture)](/docs/en/architecture/memory)
+- [Gateway RPC `session.*`](/docs/en/gateway/methods/session)

@@ -383,3 +383,45 @@ impl Session {
 - [认证与授权](../security/auth) — JWT、API key 和权限系统
 - [工具链](./harness) — 代理如何使用会话上下文
 - [CRDT 数据结构](../concepts/crdt) — CRDT 的详细设计
+
+---
+
+## 26.7.x 补充
+
+### `session.compact` 工具
+
+26.7.18+：等价于每个面都能用的 `/compact`。
+
+### `session.truncate`
+
+确定性 `truncate_to_fit` 底——加固反对孤立的 `tool_result` 消息；Turn 永不中断。
+
+### `session.usage` 真成本
+
+26.7.15+：核心定价，shell 不再持有重复价格表。
+
+### `session.export_html`
+
+26.7.21+：把会话/工件的视图渲染为独立的 HTML 文档。
+
+### 会话事件单源真值
+
+26.7.7+：`session_events` 是规范日志；`MessageProjector` 物化到 `messages` 表；启动时 `ProjectionReconciler` 回填转写。
+
+### `presence` opt-in
+
+26.7.x：会话/任务可声明 presence——审计 + 仪表板使用。
+
+### 哈希的 carryover 文件名
+
+26.7.x：跨会话 carryover 文件名加哈希，避免冲突。
+
+### 模板环境排序
+
+26.7.x：模板环境变量**确定性**排序——构建可重现。
+
+### 详见
+
+- [会话（架构）](/docs/zh/architecture/sessions) — 完整会话架构
+- [记忆（架构）](/docs/zh/architecture/memory)
+- [网关 RPC `session.*`](/docs/zh/gateway/methods/session)

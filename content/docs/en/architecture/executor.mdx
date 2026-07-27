@@ -132,3 +132,33 @@ impl<T: AlephTool> AlephToolDyn for T { // Blanket implementation }
 - [Tool Architecture](./tools) — Tool development guide
 - Sandbox — Execution isolation
 - MCP — Model Context Protocol
+
+---
+
+## 26.7.x Addendum
+
+### Action-Aware Approval
+
+26.7.15+ the execution approval gate is **action-aware** — the human sees the actual command and the grant fingerprint **keys on it**.
+
+### Slash Fast-Path Bypass Closed
+
+The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the `src/tools/scoped/` approval gate.
+
+### Three-Tier Execution Permissions
+
+| Tier | Behavior |
+|------|----------|
+| `ask` | Prompt for approval before every tool execution; unknown tools fail closed |
+| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
+| `full` | All auto-allow (besides the hard security filter) |
+
+### Process-Isolation Kernel
+
+Sandbox restricted-token / job-object / AppContainer are issued in-place at spawn (R1 process-isolation carve-out).
+
+### See Also
+
+- [Execution Engine](/docs/en/concepts/execution-engine)
+- [Execution Approval](/docs/en/security/exec-approval)
+- [Architectural Redlines R7 / R10](/docs/en/philosophy/redlines)

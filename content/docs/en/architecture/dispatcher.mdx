@@ -100,3 +100,30 @@ The `HydrationPipeline` coordinates semantic retrieval:
 - [Executor](./executor) — Tool execution engine
 - [Harness](./harness) — Think→Act loop
 - [Tool Architecture](./tools) — Tool development
+
+---
+
+## 26.7.x Addendum
+
+### Resource-Claim Concurrency
+
+26.7.x the Act stage partitions by **resource claim** and dispatches **intra-group** concurrently / **inter-group** serially:
+
+- Tools declare `Shared` / `Exclusive{Global}` / `Exclusive{Paths}` three-state claims
+- Serial mode only falls back on single call / parallelism disabled / duplicate call / no parallel group
+
+### Cross-Batch Dedup
+
+A duplicate `(name, args)` within or across batches reuses the first result.
+
+### Three-State Claim
+
+- `Shared` — no conflict
+- `Exclusive{Global}` — exclusive over the whole execution
+- `Exclusive{Paths}` — exclusive over specific paths
+
+### See Also
+
+- [Tool Architecture](/docs/en/architecture/tools) — tool lifecycle
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — resource claims
+- [Built-in Tools](/docs/en/concepts/builtin-tools) — tool set

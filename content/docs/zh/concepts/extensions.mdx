@@ -453,3 +453,45 @@ node_version = "20"
 - [模型提供商](/docs/zh/concepts/model-providers) -- 自定义 AI 后端的提供商插件
 - [工作区](/docs/zh/concepts/workspaces) -- 插件目录结构和发现路径
 - [架构概览](/docs/zh/architecture/overview) -- 扩展层的系统级视图
+
+---
+
+## 26.7.x 补充
+
+### `plugin.install` 统一入口
+
+26.7.21+：`plugin.install` 不再猜测来源——按源（市场 / 压缩包 / 路径）分类统一处理。`plugin.update` / `plugin.reload` / `plugin.marketplace.list` / `plugin.marketplace.add` 共同支撑。
+
+### 双名空间
+
+- **`plugins.*`**（复数，旧名空间，向后兼容）—— `plugins.list` / `install` / `installFromZip` / `uninstall` / `enable` / `disable` / `load` / `unload` / `callTool` / `executeCommand`
+- **`plugin.*`**（单数，规范 CC-兼容名空间）—— `plugin.list` / `install` / `installFromZip` / `uninstall` / `update` / `enable` / `disable` / `load` / `unload` / `reload` / `callTool` / `executeCommand` / `marketplace.list` / `marketplace.add`
+
+### 生命周期竞态修复
+
+26.7.21+：
+
+- 并发 `reload` 现在在 load guard 下**串行化**
+- 格式错误的插件结果不再被掩盖为 `ServiceResult::ok`
+- `AuthorInfo` 解析使用最左分隔符
+
+### Capability Ledger
+
+26.7.x：每次安装时从磁盘**重建**的可见能力清单（`plugin.install` 提交给披露面板）。重建于 `make_runtime_ledger()`。
+
+### 安装前披露
+
+强制的安装前摘要：
+
+- `command+args`
+- 网络 / 文件系统触达
+- 固定版本 + SHA256
+- 信任层级
+- 密钥
+
+### 见另请参阅
+
+- [扩展系统](/docs/zh/concepts/extension-system) — 加载器
+- [扩展商店](/docs/zh/concepts/extensions-store) — 用户视角
+- [能力系统](/docs/zh/concepts/capability-system) — 能力声明
+- [网关 RPC `extensions.*`](/docs/zh/gateway/methods/extensions) — 协议

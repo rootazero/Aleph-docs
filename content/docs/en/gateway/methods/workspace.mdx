@@ -198,3 +198,34 @@ List files in the workspace.
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `workspace.*` Full RPC
+
+- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
+
+### `projects.*` Full RPC
+
+- `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get`
+
+### `agents.bindings` / `channels.set_agent`
+
+agent ↔ channel binding — `channels.set_agent` now **must** specify an existing agent (previously it accepted non-existent ones).
+
+### File-Op Path Safety
+
+26.7.15+:
+
+- Symlink-safe delete/move
+- Glob/deny re-checks
+- Collision de-dup
+- Per-path locks
+- Hardened path deny gate (`%APPDATA%` expansion, system/proc guards)
+- `apply_patch` forward cursor that fails honestly
+
+### Cluster `file.write` No TOCTOU
+
+26.7.21+.

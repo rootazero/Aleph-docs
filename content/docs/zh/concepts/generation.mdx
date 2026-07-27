@@ -207,3 +207,33 @@ let output = provider.generate(request).await.unwrap();
 
 - [内置工具](/docs/zh/concepts/builtin-tools) — 生成工具如何暴露给代理
 - [媒体处理](/docs/zh/concepts/media-processing) — 生成的媒体如何处理
+
+---
+
+## 26.7.x 补充
+
+### Provider Failover 重构
+
+26.7.21+ 重大重构：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
+
+### `session.usage` 核心定价
+
+`session.usage` 由核心定价表统一计算成本。**Shell 不再持有重复价格表**——之前 shell 重复持有价格表，跨进程不同步。
+
+### VESR 动态模型路由
+
+26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（**k-NN over sqlite-vec**），所以模型能看到哪些模型在此类工作上**实际**表现过。包含 per-agent / per-model 终身聚合、USD 成本增强、子代理路由捕获。
+
+### Provider 预设刷新
+
+26.7.17+ 预设刷新——per-vendor 最新模型；目录重新对齐。
+
+### `[provider.claude]` / `[provider.openai]` / `[provider.ollama]`
+
+TOML 段配置协议 + 模型 + API key / base_url。多个 provider 可并存，`agents.defaults.model` 与 `models` 故障转移链控制使用顺序。
+
+### 见另请参阅
+
+- [AI 提供商](/docs/zh/concepts/ai-providers) — 详细配置
+- [架构 / 提供商](/docs/zh/architecture/providers) — 架构视角
+- [网关 RPC `providers.*`](/docs/zh/gateway/methods/providers) — 协议

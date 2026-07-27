@@ -24,6 +24,30 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **FlowSpec** | 流程规范 | Defines execution parameters for a single flow |
 | **AgentDef** | 智能体定义 | Static configuration defining an agent's behavior |
 
+### The Three Twins (user-adjustable)
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **exec_tier** | 执行等级 | Determines which tools may execute and how they're approved; the permission axis |
+| **think_level** | 思考等级 | LLM reasoning budget and extended-thinking toggle; the inference axis |
+| **session_mode** | 会话模式 | `chat` / `work` / `code` — statically partitions the tool **presentation** surface (progressive-disclosure core set + deferred-tool tier); does not affect permissions |
+| **session_set_mode** | 模式切换工具 | Runtime tool called by the model to switch mode; the new value must be carried on the same send |
+
+### Loop-Graph Governance
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Loop Graph** | 治理拓扑 | The governance topology layer on top of the Harness (`src/loop_graph/`); a topological answer to the four single-loop failure modes (Goodhart, reference blindness, ring conflict, measurement decay) |
+| **Team Node** | 团队节点 | Node kind fusing the multi-agent system into the graph; disband triggers victory-claim watchers |
+| **Audit Ring** | 审计环 | Closed-set audit action log; objective ACL source for graph audits |
+| **Objective ACL** | 客观 ACL | Access control list authorized objectively by graph node identity |
+| **Victory Claim** | 胜利声明 | The action by which a team/loop declares completion; triggers watchers and audit |
+| **Watcher** | 观察器 | Listens for governance events (victory claim, goal settled, team disbanded) and initiates audit |
+| **loop-auditor** | 循环审计员 | Built-in protected agent; audit/supervision templates default to independent-context evidence |
+| **Goal** | 目标 | Persistent goal managed by GoalStore; loop settlement can trigger it |
+| **LoopState** | 循环状态 | State machine of the `looping/` subsystem (Active / Paused / …) |
+| **Pause / Resume** | 暂停 / 恢复 | Cross-session lifecycle control over loops and goals |
+
 ## Memory System
 
 | English | Chinese | Definition |
@@ -32,6 +56,12 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Memory Hub** | 记忆中心 | Unified memory panel hosting Graph view and Table view in one toggle (`/memory`); node identity == note path |
 | **Graph View** | 图谱视图 | Radial node-link canvas of memory notes (formerly the `/memory` canvas) |
 | **Table View** | 表格视图 | Faceted list of memory notes (formerly the `/dashboard/memory` vault) |
+| **Card View** | 卡片视图 | Card list with batch-action bar (the Vault panel's post-refactor list shape) |
+| **Deep Link** | 深链 | In-page anchor that locates a specific note from a card or evidence chain |
+| **Evidence Chain** | 证据链 | Sequence of notes that cite the current note; rendered in the Vault drawer |
+| **Cross-Agent Selection** | 跨代理选择 | Memory selection across multiple agent views; must go through atomic consistency |
+| **Provenance** | 来源 | Source record for a note/evidence (writer, timestamp, source event) |
+| **Batch Export** | 批量导出 | Export multiple cards at once as a deliverable |
 | **Dream Insights** | 梦境洞察 | Read-only panel (Settings > Memory) backed by `dreaming.list_insights` — recent daily synthesis notes + dream-run history |
 | **Corrections** | 纠正记录 | Read-only panel (Settings > Memory) backed by `memory.list_corrections` — surfaces the correction → distillation lifecycle |
 | **Raw Memory (L0)** | 原始记忆 | Ephemeral session data before compression |
@@ -41,6 +71,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Dream Daemon** | 梦境守护进程 | Background memory consolidation process |
 | **Scratchpad** | 草稿板 | Per-session working memory (discarded on session end) |
 | **User Profile** | 用户画像 | Dialectic user model (`USER.md`) |
+| **SkillOpt** | 技能优化 | Self-evolution discipline — the memory side that bakes "good-enough stop" into the self-evolution pipeline |
 
 ## Tool System
 
@@ -54,7 +85,12 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Skill** | 技能 | A learned or installed capability that adds tools |
 | **Skill System** | 技能系统 | Framework for skill discovery, registration, and lifecycle |
 | **Dispatcher** | 调度器 | Tool registry, risk evaluation, and semantic retrieval |
-| **Hydration** |  hydrated tools | Semantic tool retrieval based on query context |
+| **Hydration** | hydrated tools | Semantic tool retrieval based on query context |
+| **Parallel Group** | 并行组 | A bucket of tool calls in the Act phase, partitioned by resource claim and dispatched concurrently; groups are serial, intra-group concurrent |
+| **Resource Claim** | 资源声明 | A tool's concurrency-conflict declaration over fs/network/process |
+| **Memo / Cross-batch Dedup** | 备忘 / 跨批次去重 | Reuse of the first result for a duplicate `(name, args)` within or across batches |
+| **session_compact** | 会话压缩 | `session.compact` tool — equivalent to `/compact` available on every surface |
+| **Slash Command** | 斜杠命令 | Reference-driven single-source alias table supporting `/help` and friendly shortcuts |
 
 ## Extensions
 
@@ -67,29 +103,46 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Trust Tier** | 信任层级 | Source trust level: Official / Verified / Community / Unverified |
 | **Disclosure** | 披露 | Mandatory pre-install summary (command+args, secrets, network/fs reach, pinned version + SHA256, tier) |
 | **Source** | 源 | A catalog provider (plugin marketplaces, Official MCP Registry, Docker MCP Catalog) cached in SQLite for offline browse |
+| **Plugin.install (unified)** | 插件统一入口 | `plugin.install` no longer guesses source; classifies the source (marketplace / zip / path) and routes uniformly |
+| **Plugin Marketplace** | 插件市场 | Indexable directory exposed via `plugin.marketplace.list` / `plugin.marketplace.add` |
 
 ## Security
 
 | English | Chinese | Definition |
 |---------|---------|------------|
 | **Sandbox** | 沙箱 | Per-session execution isolation with capability enforcement |
-| **Capability** |  capability | Permission declaration (filesystem, network, process) |
+| **Capability** | 能力 | Permission declaration (filesystem, network, process) |
+| **Capability Ledger** | 能力账本 | Per-install visible capability list rebuilt from disk (used in pre-install disclosure) |
 | **Approval Gate** | 审批门 | Human-in-the-loop approval for elevated permissions |
+| **fail-closed** | 失败关闭 | Refuses authorization when a policy file is missing or `permissive_default` disagrees with `Default::default()` |
 | **IdentityContext** | 身份上下文 | Immutable identity snapshot flowing through execution |
+| **Per-Agent Signing Key** | 每代理签名密钥 | Each agent owns an independent signing key that writes the operation ledger |
+| **Operation Ledger** | 操作账本 | Signed operation sequence owned by the signer; replayable against the agent's identity chain |
+| **Delegated Role Chain** | 委托角色链 | Delegation chain; lifecycle is closed within the chain |
+| **Signer Ownership** | 签名者所有权 | The private key is held by the corresponding agent; the ledger is replayable against the chain |
 | **PolicyEngine** | 策略引擎 | Stateless permission checker |
 | **GuestScope** | 访客范围 | Tool-level restrictions for guest sessions |
 | **Pairing** | 配对 | Device trust establishment via PIN/code |
+| **TOFU** | 首次使用信任 | Trust-on-First-Use: first encounter with a self-signed cert prompts the user to approve and pin fingerprint + SAN |
+| **SAN Drift** | SAN 漂移 | Change in the host's non-loopback interface IP set; triggers atomic cert regen (never bricks boot) |
+| **Self-Signed TLS** | 自签名 TLS | The gateway terminates TLS in-process; remote connections must use `wss://` |
+| **Trusted Proxy** | 可信代理 | Reverse-proxy trust list — decides whether the gateway reads the real client IP |
+| **Trusted Origin** | 可信来源 | Origin allowlist — used by browsers and WebViews for cert trust and microphone permission |
+| **Guardian Judge** | 守护者判官 | The LLM judge used by heartbeat probes; its payload must mask secrets |
 
 ## Communication
 
 | English | Chinese | Definition |
 |---------|---------|------------|
-| **Interface** | 接口 | A client connection type (CLI, Telegram, Discord, etc.) |
+| **Interface** | 接口 | A client connection type (CLI, Telegram, Discord, iMessage, etc.) |
 | **Channel** | 频道 | A specific conversation endpoint within an interface |
 | **Session Key** | 会话密钥 | Unique identifier for a session (e.g., `agent:main:main`) |
-| **Event Bus** | 事件总线 | Pub/sub system for real-time event distribution |
+| **Event Bus** | 事件总线 | Pub/sub system for real-time event distribution; `broadcast::RecvError::Lagged` must recover rather than die permanently |
 | **JSON-RPC** | JSON-RPC | Request/response protocol over WebSocket |
 | **Trace** | 追踪 | Execution event stream for observability |
+| **Error Receipt** | 错误回执 | Single-sourced user-readable error returned by the gateway; the raw error chain never leaks out |
+| **Dead Letter** | 死信 | Messages that failed to deliver via channel.*; re-drivable from the Panel |
+| **Webhook Backpressure** | Webhook 反压 | Webhook receiver returns 503 under congestion rather than silently dropping |
 
 ## AI/LLM
 
@@ -102,6 +155,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **PromptLayer** | 提示层 | One section of the assembled system prompt |
 | **Streaming** | 流式传输 | Real-time token-by-token response delivery |
 | **Thinking** | 思考 | Extended reasoning mode (Claude's extended thinking) |
+| **In-core Pricing** | 核心定价 | `session.usage` is computed in-core from a single pricing table; the shell no longer carries a duplicate price table |
 
 ## Advanced Features
 
@@ -117,6 +171,10 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **WorldModel** | 世界模型 | Environmental state tracking for proactive behavior |
 | **Proactive Dispatcher** | 主动调度器 | Daemon that dispatches proactive tasks based on world state |
 | **Desktop Bridge** | 桌面桥 | UDS JSON-RPC protocol for desktop automation |
+| **Deliverable** | 交付物 | Work product produced by `tools.publish` — written to the Artifact store; the Panel opens it directly |
+| **Artifact Store** | 工件存储 | `src/artifacts/` — the unified backend for deliverables |
+| **Export Subsystem** | 导出子系统 | `src/export/` — renders a deliverable as a standalone HTML / document |
+| **Voice Subsystem** | 语音子系统 | Transcription (WhisperLiveKit / TWhisperLiveKit) and TTS (multi-provider with fallback) |
 
 ## Naming Conventions
 
@@ -143,7 +201,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `PolicyEngine` | Policy Engine |
 | `IdentityContext` | Identity Context |
 | `GuestScope` | Guest Scope |
-| `MultiProviderRegistry` | Multi-Provider Registry |
+| `MultiProviderRegistry` | Multi Provider Registry |
 | `ProtocolRegistry` | Protocol Registry |
 | `PromptPipeline` | Prompt Pipeline |
 | `MemoryEnvelope` | Memory Envelope |
@@ -153,6 +211,16 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `CompressionService` | Compression Service |
 | `DreamDaemon` | Dream Daemon |
 | `DesktopBridgeClient` | Desktop Bridge Client |
+| `LoopGraph` | Loop-Graph Governance |
+| `GoalStore` | Goal Store |
+| `LoopState` | Loop State |
+| `ArtifactStore` | Artifact Store |
+| `ProjectStore` | Project Store |
+| `Hub` | Hub (Extensions / Secrets / Trust catalog) |
+| `SignerKey` | Per-Agent Signing Key |
+| `OperationLedger` | Operation Ledger |
+| `Verification` | Verifier / Turn-verify context |
+| `Guardrail` | Guardrail (Block / Sanitize / Pass) |
 
 ## Deprecated Terms (Do Not Use)
 
@@ -160,6 +228,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 |----------|-------------|--------|
 | OTAF | Think→Act | Architecture changed from OTAF to Harness |
 | Agent Loop | Harness | Unified under Harness terminology |
+| `src/agent_loop/` | `src/harness/` | Harness migration; the old directory has been removed |
 | LanceDB | SQLite + sqlite-vec | Storage backend changed |
 | JSON5 config | TOML config | Config format changed |
 | `aleph` binary | `aleph-server` | Binary renamed |
@@ -171,6 +240,13 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | ClawHub settings tab | Extensions Store | ClawHub demoted to long-tail; settings tab removed |
 | `teams.run` | `teams.chat.send` / Coord Tasks | Method never existed — teams use the chat thread + tasks |
 | `coordination: sequential\|parallel\|hierarchical` | Team Strata (leader-first planning) | Coordination modes were fictional |
+| DiminishingReturnsDetector | (removed) | Harness ratchet lowered; the hard stop inside the loop violates R10 |
+| Telegram local pairing store | Router-singleton pairing store | Channel-local store never took effect |
+| Discord parallel nested config layers | Router-singleton config | Parallel layers removed |
+| Provider failover deep-clone whole session | Atomic regen marker + single clone | Performance and correctness fix |
+| `aleph.svg` hardcoded static path | `core_path("/aleph.svg")` | Follows the core migration |
+| Hard stops outside `max_iterations` | `max_iterations` + tool-loop verifier only | R10 forbids deterministic completion judgments inside the loop |
+| `EphemeralSession` / dual-layer session | `SessionEventRecord` + `TurnId` | SessionEvent system |
 
 ## See Also
 

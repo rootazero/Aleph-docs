@@ -225,3 +225,26 @@ description: "设置向导 RPC 方法"
 8. **审查** - 配置摘要
 9. **完成** - 应用配置
 10. **完成** - 成功消息
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC 集
+
+- `wizard.start` / `wizard.status` / `wizard.cancel`
+
+### 11 阶段
+
+26.7.21+ 入门向导 11 阶段：欢迎、provider、凭据、主模型、辅助模型、思考级别、**会话模式（chat / work / code）**、**执行等级（ask / auto / full）**、消息应用、**网关 TLS**、完成。
+
+### 子命令
+
+- `aleph wizard` —— 完整 11 阶段
+- `aleph wizard --quick` —— 快速设置
+- `aleph wizard --provider` —— 添加 / 重配单个 provider
+- `aleph wizard --mode` —— 仅切换默认会话模式
+
+### Panel UI 触发
+
+`wizard.*` RPC 可由 Panel 端 UI 触发无需终端。

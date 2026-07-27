@@ -270,3 +270,33 @@ The resulting `Arc<dyn Sandbox>` is threaded through tool registration into ever
 - [Tool Architecture](./tools) — How exec-class tools consume the sandbox
 - [Security Overview](./security/overview) — The broader security model
 - [Sandboxing Deep Dive](./security/sandboxing) — OS-level sandboxing mechanisms
+
+---
+
+## 26.7.x Addendum
+
+### Process-Isolation Kernel
+
+Sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls **must** be issued in-place at spawn — a legitimate carve-out from R1 (see [Architectural Redlines R1 Process-Isolation Kernel carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
+
+### `[sandbox.command_policy]` Hard Floor
+
+26.7.15+: the hard floor cannot be lowered by any `exec_tier`. Missing or inconsistent **refuses authorization**.
+
+### Sandbox Hardening
+
+26.7.15+: invisible-character SSOT, symmetric breaker purge, dead-code sweep.
+
+### Desktop `open` / `launch` Command Injection
+
+26.7.21+ fix: dispatched through `ShellExecuteW` instead of a shell.
+
+### Bundled-Extraction Symlinks
+
+26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata`.
+
+### See Also
+
+- [Security Primitives](/docs/en/concepts/security-primitives)
+- [Security: Sandbox](/docs/en/security/sandboxing)
+- [Architectural Redlines R1 / R3](/docs/en/philosophy/redlines)

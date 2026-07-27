@@ -241,3 +241,42 @@ pub fn resolve_command(
 
 - [扩展](/docs/zh/concepts/extensions) — 插件系统集成
 - [工具系统](/docs/zh/tools/overview) — 技能可以调用的内置工具
+
+---
+
+## 26.7.x 补充
+
+### Markdown 技能作者指南
+
+26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md`——技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写，触发词由 BM25 + 编辑距离检测。`tools.publish` 工具可发布工作产物到工件存储。
+
+### 触发词增强
+
+26.7.x 增强：
+
+- BM25 排序
+- 编辑距离补底
+- 触发词覆盖 Markdown frontmatter
+- 详情见 `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`
+
+### 插件捆绑技能
+
+26.7.17+：已安装插件的技能被**折叠进技能索引**与 `skill_read`，智能体 catalog 复活——之前插件技能与技能机制并行，模型可见度低。
+
+### `skill_read` 解析升级
+
+26.7.17 修复：`skill_read` 之前**拒绝**符号链接 / 重复技能——现按优先级解析而非报告歧义错误。
+
+### SkillOpt 自我演化纪律
+
+26.7.x（memory 自演化）—— SkillOpt 端口的自我演化纪律：
+
+- 「够用即停」原则落进自我演化管线
+- bounded、validation-gated edit loop 加在 LLM 提出的编辑之上
+- 详情见 `docs/reference/memory/DREAM_DAEMON.md`
+
+### 见另请参阅
+
+- [技能系统](/docs/zh/concepts/skill-system) — 技能生命周期
+- [扩展商店](/docs/zh/concepts/extensions-store) — 用户视角
+- [记忆梦境守护进程](/docs/zh/concepts/memory-evolution) — SkillOpt 上下文

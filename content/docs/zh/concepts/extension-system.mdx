@@ -221,3 +221,33 @@ pub trait HookHandler: Send + Sync {
 - [能力系统](./capability-system) —— 插件能力声明
 - [技能系统](./skill-system) —— 技能管理
 - [扩展商店](/docs/zh/concepts/extensions-store) —— 面向用户的伞形概念（技能 + 插件 + MCP）及其商店
+
+---
+
+## 26.7.x 补充
+
+### 双名空间
+
+26.7.x 引入**单数 `plugin.*` 为规范名空间**，复数 `plugins.*` 保留向后兼容。规范名空间与 CC 兼容。
+
+### `plugin.reload` 串行化
+
+26.7.21+：并发 `reload` 现在在 load guard 下**串行**——之前是 race condition 的来源（两个 reload 并发执行，互相覆盖对方的状态）。
+
+### 插件加载器
+
+`src/extension/loader.rs` 的 `register_memory_extension_if_declared`——按声明把 memory 扩展挂上；只在声明了 `memory` 段时挂载，否则跳过。
+
+### 失败开放 → 失败关闭
+
+26.7.21 强化：插件/技能/MCP 服务器的失败默认行为**失败关闭**——之前部分场景是失败开放，引入安全风险。
+
+### 签名操作账本
+
+`~/.aleph/ops.log` 记录每代理签名的操作序列——见 [身份与签名](/docs/zh/concepts/identity-context#26.7.x-补充)。
+
+### 见另请参阅
+
+- [扩展](/docs/zh/concepts/extensions) — 伞形概念
+- [扩展商店](/docs/zh/concepts/extensions-store) — 用户视角
+- [技能系统](/docs/zh/concepts/skill-system) — 与插件平行

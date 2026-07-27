@@ -203,3 +203,37 @@ pub struct Dispatcher {
 
 - [Event System](./event-system) — Event distribution patterns
 - [Configuration](./configuration) — Daemon configuration options
+
+---
+
+## 26.7.x Addendum
+
+### `aleph-server service` Subcommand
+
+26.7.1+: the standalone `aleph-server` binary gains a `service` subcommand; the installer defaults to "launch at login":
+
+```bash
+aleph-server service install     # install (launchd / systemd-user / Task Scheduler)
+aleph-server service start       # start immediately
+aleph-server service status      # check status
+aleph-server service enable      # enable auto-start
+aleph-server service uninstall   # uninstall
+```
+
+### Day-Boundary Log Rotation
+
+26.7.24+: the daemon supports day-boundary log rotation; on startup it writes an `ALEPH-BOOT` marker at the top of the log, so operators can locate each startup's boundary. The sleep inhibitor is silent on stderr, no more noise.
+
+### Guardian Judge
+
+26.7.21+: heartbeat probes use an LLM judge (`Guardian Judge`) to decide whether to wake proactively. **The payload must mask secrets** — secrets are no longer serialized into logs or read by the auditor.
+
+### Heartbeat Refuses Dangerous Tools
+
+26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools. `Heartbeat` is now real (stubs → real) periodic daemon.
+
+### See Also
+
+- [Automation / Heartbeat](/docs/en/automation/heartbeat) — `heartbeat.*` RPC
+- [Deployment `service` subcommand](/docs/en/getting-started/deployment#as-a-system-service-the-service-subcommand) — install and start
+- [Architecture Overview](/docs/en/architecture/overview) — where Heartbeat drives

@@ -152,3 +152,27 @@ Compare results across multiple model runs.
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `dreaming.run_now` / `dreaming.list_insights`
+
+Dreaming-daemon-related — manually trigger the daily synthesis note / list the recent dream-run history.
+
+### `insights.tools`
+
+26.7.x: list tool insights (sorted by activity / success rate).
+
+### `activity.stats`
+
+Activity stats — aggregated by agent / session / tool.
+
+### Cluster Fleet Feed
+
+26.7.15+: the Panel cluster view is wired to a live feed, with node identity persisting on the connect verdict.
+
+### Real Multi-Session
+
+26.7.7+: the run gate moved from a per-agent lock to a per-session `SessionRunRegistry`. `gateway.metrics.run_concurrency` / `gateway.metrics.lanes` give the run slot counts.

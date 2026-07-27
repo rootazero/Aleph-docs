@@ -394,3 +394,23 @@ Tab information includes:
 - [agent.*](/docs/en/gateway/methods/agent) -- Agent uses browser methods as tools
 - [exec.*](/docs/en/gateway/methods/exec) -- Security approval for browser actions
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `browser_config.get` / `browser_config.update`
+
+Browser-config RPC — chromiumoxide path, cross-platform Chromium discovery, CDP settings.
+
+### `fetch_config.get` / `fetch_config.test` / `fetch_config.update`
+
+Web-fetch config — `crawl4ai` / `firecrawl` category, vault-stored keys, automatic fallback to built-in.
+
+### Computer-Use Hardening
+
+26.7.15 fixes six P0 defects (escape trap, key-combo block, press-hold, scroll units, paste, degenerate frames) + macOS PIM and Chromium AX wired.
+
+### Canvas / Browser Inspector Seams Withdrawn
+
+26.7.25: the Panel's Canvas / Browser inspector seams were withdrawn (R10 YAGNI).

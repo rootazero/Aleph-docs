@@ -480,3 +480,37 @@ registry.register("my-protocol", Arc::new(MyProtocol::new(client)))?;
 - [Architecture Overview](./overview) — System-level view of the execution layer
 - [Gateway](./gateway) — How the Gateway routes requests to providers
 - [Thinker](./thinker) — How the Thinker selects and orchestrates providers
+
+---
+
+## 26.7.x Addendum
+
+### Failover Refactor
+
+26.7.21+ major: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
+
+### VESR Dynamic Model Routing
+
+26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (k-NN over sqlite-vec), so the model sees which models have actually performed for this kind of work.
+
+### Provider Presets Refreshed
+
+26.7.17+ presets refreshed — per-vendor latest models; the catalog is realigned.
+
+### Single-Source Pricing
+
+`session.usage` is computed in-core from a single price table; the shell no longer carries a duplicate.
+
+### `runtimes.install` / `list` / `refresh`
+
+26.7.x runtime management: auto-discover and install language runtimes (Node / Python / Bun / uv).
+
+### `route_config.*` / `routing_rules.*`
+
+Fine-grained routing rules (`routing_rules.create` / `list` / `get` / `update` / `delete` / `move`).
+
+### See Also
+
+- [Generation (Concept)](/docs/en/concepts/generation)
+- [AI Providers](/docs/en/concepts/ai-providers)
+- [Gateway RPC `providers.*`](/docs/en/gateway/methods/providers)

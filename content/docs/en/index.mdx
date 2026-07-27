@@ -5,49 +5,67 @@ description: "Technical documentation for Aleph — a self-hosted polymorphic AI
 
 import { Cards, Card } from "fumadocs-ui/components/card";
 
-> *"This is the first time in human history that a machine's soul has been given a body."*
+> *"This is the first time in human history, a machine's soul has been given a body."*
 > — Ghost in the Shell
 
-**Aleph** is a powerful personal AI assistant built in Rust, designed to give AI the ability to interact with the world. It combines a high-performance Gateway control plane with multi-channel messaging support, enabling AI agents to work across various platforms seamlessly.
+**Aleph** is a personal AI assistant built in Rust. It fuses a high-performance Gateway control plane with multi-channel messaging, memory governance, tool execution, and a federation of local/remote executor nodes — all in a single core — so AI agents can work across your platforms on your hardware, with end-to-end visibility.
 
 > **Single-Core Multi-Terminal, Shell-Core Separation; Gateway Interoperability, Access Control.**
 >
-> One `aleph-server` core powers every interface — desktop app, CLI, TUI, Telegram, Discord, and more. The native desktop shell is a thin container with zero business logic; all reasoning, tools, and state live in the core. Every terminal connects through the same authenticated WebSocket gateway, whether local or remote.
+> One `aleph-server` core powers every interface — desktop app, CLI, TUI, Telegram, Discord, iMessage, and more. The native desktop shell is a thin container with zero business logic; all reasoning, tools, and state live in the core. Every terminal connects through the same authenticated WebSocket gateway, whether local or remote.
 
 ## Key Features
 
-- **Multi-Provider AI** - Claude, GPT, Gemini, Ollama with automatic failover
-- **Multi-Channel** - Telegram, Discord, iMessage, Slack, WebChat, Desktop App
-- **Native Performance** - 100% Rust core, no interpreted languages
-- **Shell-Core Separation** - Desktop shell is pure OS integration; core runs standalone
-- **Remote Core** - Connect desktop shell to a remote `aleph-server` over Tailnet/VPN
-- **Cluster Federation** - One center core orchestrates many machines (nodes) as execution arms
-- **Secure Execution** - Three-tier security model for command execution
-- **Extensible** - MCP integration, plugin system, custom tools
-- **Self-Hosted** - Run on your own hardware, full control
+- **Multi-Provider AI** — Claude, GPT, Gemini, Ollama with atomic-counter failover and an atomic regen marker; `session.usage` is computed in-core from a single source of pricing
+- **Multi-Channel** — Telegram, Discord, iMessage, WebChat, Desktop app; Telegram/Discord are now single-sourced on the inbound router
+- **Session Mode (chat / work / code)** — the third twin of `exec_tier` and `think_level`; statically partitions the tool *presentation* surface; switchable at runtime via `session_set_mode`
+- **Native Performance** — 100% Rust core, no interpreted languages
+- **Shell-Core Separation** — desktop shell is pure OS integration; the core runs standalone
+- **Remote Core + Self-Signed TLS** — connect the desktop shell to a remote `aleph-server` over Tailnet/VPN; the SAN auto-discovers the host's non-loopback interface IPs
+- **TOFU Certificate Trust** — fingerprint + SAN approval, pinned locally, surfaced in-app from the Panel
+- **Cluster Federation** — one center core orchestrates many machines (nodes) as execution arms; node keys are Unicode-normalized (CJK node names work)
+- **Three-Tier Security Model** — fail-closed approval / sandbox / pairing, with `exec_tier`, session mode, and a capability ledger
+- **Loop-Graph Governance Layer** — team node / independent-evidence auditor (`loop-auditor`) / victory-claim watchers / objective ACLs
+- **Extensible** — MCP integration (on-demand discovery), plugins (unified `plugin.install` entry), Markdown skills, custom tools
+- **Self-Hosted** — run on your own hardware, full control
 
 ## Architecture
 
 ```
-                               Terminals
-    ┌─────────────────────────────────────────────────────────────┐
-    │  Desktop App  │  Telegram  │  Discord  │  iMessage │  CLI  │
-    │  (Tauri Shell)│            │           │           │       │
-    └───────┬───────┴────────────┴───────────┴───────────┴───┬───┘
-            │                                                │
-            │  WebSocket (JSON-RPC 2.0)                      │
-            │  ws://127.0.0.1:18790/ws                       │
-            │                                                │
-    ┌───────▼────────────────────────────────────────────────▼───┐
-    │                    Aleph Core (aleph-server)                │
-    │  ┌─────────┐  ┌───────────┐  ┌─────────┐  ┌─────────────┐ │
-    │  │  Agent  │  │  Session  │  │  Tools  │  │   Gateway   │ │
-    │  │  Loop   │  │  Manager  │  │ Registry│  │  (Auth)     │ │
-    │  └─────────┘  └───────────┘  └─────────┘  └─────────────┘ │
+                          Terminals
+    ┌────────────────────────────────────────────────────────────┐
+    │ Desktop │   CLI    │ Telegram │ Discord │ iMessage │  TUI  │
+    │(Tauri v2)│         │          │         │          │       │
+    └────┬─────┴────┬─────┴────┬────┴────┬────┴────┬─────┴──┬────┘
+         │          │          │         │         │         │
+         │       WebSocket (JSON-RPC 2.0, optional wss://)    │
+         │          │          │         │         │         │
+    ┌────▼──────────▼──────────▼─────────▼─────────▼─────────▼───┐
+    │                  Aleph Core (aleph-server)                  │
+    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
+    │  │  Gateway    │  │  Harness     │  │  Tool Registry      │ │
+    │  │  (TLS/TOFU) │  │ (Think→Act)  │  │ (builtin/MCP/plugin)│ │
+    │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
+    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
+    │  │  Thinker    │  │  Session     │  │  Memory + Loop      │ │
+    │  │ (PromptBuilder)│ │ Service      │  │  Graph (governance) │ │
+    │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
+    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
+    │  │  Approval / │  │  Extension   │  │  Heartbeat / Cron   │ │
+    │  │  Guardrails │  │  / Skill     │  │  (stub→real)        │ │
+    │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
     └────────────────────────────────────────────────────────────┘
+                                  │
+                                  │ RPC over UDS / cluster lane
+                                  ▼
+                        Cluster Nodes (remote executors)
 ```
 
-**Shell-Core Separation.** The desktop app is a thin Tauri v2 shell — window, tray, notifications, auto-update, global hotkey. It contains **no business logic and no business UI**. All product UI lives in the Leptos Panel (served by the core at `http://127.0.0.1:18790`). All reasoning, tools, and state live in `aleph-server`. The shell can connect to a local core or a remote one over Tailnet/VPN.
+**Shell-Core Separation.** The desktop app is a thin Tauri v2 shell — window, tray, notifications, auto-update, global hotkey. It contains **no business logic and no business UI**. All product UI lives in the Leptos Panel (served by the core at `http://127.0.0.1:18790`). All reasoning, tools, and state live in `aleph-server`. The shell can connect to a local core or a remote one (self-signed TLS with client-side TOFU pinning).
+
+**The Third Twin: Session Mode.** `chat` / `work` / `code` is the third user-adjustable dimension alongside `exec_tier` (execution approval tier) and `think_level` (thinking budget). It statically partitions the tool *presentation* surface only (progressive-disclosure core set + deferred-tool tier); permissions remain controlled by `exec_tier` and the approval gate. Switchable from the Panel composer pill, from Settings → Policies, or via the `session_set_mode` tool.
+
+**Loop-Graph Governance Layer.** `loop_graph` adds a governance topology on top of the harness: team nodes / audit ring / objective ACLs / victory-claim watchers / built-in `loop-auditor` agent. It gives the four single-loop failure modes (Goodhart, reference blindness, ring conflict, measurement decay) a topological answer.
 
 ## Quick Start
 
@@ -55,8 +73,11 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 # Install via cargo
 cargo install aleph-cli
 
-# Run the setup wizard
+# Run the setup wizard (now includes chat/work/code mode and TLS selection)
 aleph wizard
+
+# Start the core
+aleph-server start
 
 # Start chatting
 aleph chat "Hello, Aleph!"
@@ -68,67 +89,67 @@ aleph chat "Hello, Aleph!"
   <Card
     icon="🚀"
     title="Getting Started"
-    description="Installation, setup wizard, and initial configuration"
+    description="Installation, setup wizard, initial configuration, and deployment"
     href="./getting-started/installation"
   />
   <Card
     icon="🧭"
     title="Philosophy"
-    description="Design philosophy, five layers of emergence, and agent thinking model"
+    description="Design philosophy, five layers of emergence, agent thinking, and redlines R1–R10"
     href="./philosophy/overview"
   />
   <Card
     icon="💡"
     title="Concepts"
-    description="Agent runtime, messages, model providers, skills, workspaces, extensions"
+    description="Agent runtime, messages, model providers, skills, workspaces, extensions, memory"
     href="./concepts/agent-runtime"
   />
   <Card
     icon="🏗️"
     title="Architecture"
-    description="System design, gateway, agent loop, session management"
+    description="System design, gateway, agent loop, sessions, memory, and loop-graph governance"
     href="./architecture/overview"
   />
   <Card
     icon="🔌"
     title="Gateway RPC"
-    description="WebSocket protocol, authentication, JSON-RPC methods"
+    description="WebSocket protocol, TLS + TOFU, authentication, the complete JSON-RPC method set"
     href="./gateway/protocol"
   />
   <Card
     icon="💬"
     title="Interfaces"
-    description="Telegram, Discord, iMessage, WebChat integrations"
+    description="Telegram, Discord, iMessage, WebChat, desktop integration"
     href="./interfaces/overview"
   />
   <Card
     icon="🔧"
     title="Tools & Extensions"
-    description="Built-in tools, MCP integration, creating custom tools"
+    description="Built-in tools, MCP (on-demand discovery), plugins, custom tools, and Markdown skills"
     href="./tools/overview"
   />
   <Card
     icon="🔒"
     title="Security"
-    description="Execution approval, IPC protocol, device pairing"
+    description="Execution approval, fail-closed policies, TLS / TOFU, pairing, signed operation ledger"
     href="./security/exec-approval"
   />
   <Card
     icon="⚡"
     title="Automation"
-    description="Cron jobs, hooks, and event-driven workflows"
+    description="Cron (now real), Hooks (bound context + consent + inventory), and events"
     href="./automation/cron-jobs"
   />
   <Card
     icon="⌨️"
     title="CLI Reference"
-    description="Commands, gateway management, agent interaction"
+    description="Commands, gateway management, agent interaction, session mode switching"
     href="./cli/commands"
   />
   <Card
     icon="🛠️"
     title="Development"
-    description="Building from source, testing, and contributing"
+    description="Building from source (Rust 1.95+), testing, contributing, and design patterns"
     href="./development/building"
   />
   <Card
@@ -140,8 +161,14 @@ aleph chat "Hello, Aleph!"
   <Card
     icon="📋"
     title="Changelog"
-    description="Release history, milestones, and notable changes"
+    description="26.7.x release history and notable changes from the last three months"
     href="./changelog"
+  />
+  <Card
+    icon="📖"
+    title="Terminology"
+    description="Standardized terminology for Aleph concepts (EN/ZH bilingual)"
+    href="./terminology"
   />
 </Cards>
 
@@ -149,13 +176,13 @@ aleph chat "Hello, Aleph!"
 
 Aleph is built on a five-layer emergence architecture:
 
-1. **Sea of Knowledge** - AI's pre-training foundation
-2. **Domain Classification** - Organized expertise
-3. **Atomic Skills** - Know-what to Know-how
-4. **Functional Modules** - Composable capabilities
-5. **Polymorphic Agents** - Soul gains body
+1. **Sea of Knowledge** — AI's pre-training foundation
+2. **Domain Classification** — Organized expertise
+3. **Atomic Skills** — Know-what to Know-how
+4. **Functional Modules** — Composable capabilities
+5. **Polymorphic Agents** — Soul gains body
 
-The goal is not just to build a tool, but to explore a path toward AGI - when intelligence gains the ability to act.
+The goal is not just to build a tool, but to explore a path toward AGI — when intelligence gains the ability to act.
 
 ## License
 

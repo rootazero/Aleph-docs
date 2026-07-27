@@ -113,3 +113,27 @@ Check health of a specific component.
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### Realized (stubs → real)
+
+26.7.x: the historical stub RPCs (`heartbeat.*_stub`) have been **realized**. Full implementation:
+
+- `heartbeat.list` / `heartbeat.get` / `heartbeat.create` / `heartbeat.update` / `heartbeat.delete` / `heartbeat.toggle`
+- `heartbeat.wake` — proactive wake
+- `heartbeat.runs` — run history
+
+### Daemon-Side Driver
+
+Driven by the [Daemon](/docs/en/concepts/daemon). `Guardian Judge` decides to wake.
+
+### Refuses Dangerous Tools
+
+26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
+
+### Payload Masks Secrets
+
+`Guardian Judge` payload must mask secrets.

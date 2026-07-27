@@ -310,3 +310,43 @@ The Gateway watches `~/.aleph/config.json` for changes using a filesystem watche
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [Protocol](/docs/en/gateway/protocol) -- JSON-RPC 2.0 transport
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+26.7.x config RPC:
+
+- `config.get` / `config.get_full_config` / `config.path` / `config.schema` / `config.patch` / `config.validate` / `config.reload` / `config.reload_with_subsystems` / `config.get_tool_permissions` / `config.update_tool_permissions`
+- `behavior_config.get` / `update`
+- `browser_config.get` / `update`
+- `embedding_providers.add` / `get` / `list` / `presets` / `remove` / `test` / `update`
+- `execution_config.get` / `update`
+- `fetch_config.get` / `test` / `update`
+- `general_config.get` / `update`
+- `generation_config.get` / `update`
+- `generation_providers.create` / `delete` / `get` / `list` / `list_presets` / `test` / `update` / `voices`
+- `memory_config.get` / `update`
+- `mcp_config.create` / `delete` / `get` / `list` / `update`
+- `providers.catalog` / `providers.create` / `delete` / `get` / `list` / `healthcheck` / `providers.test` / `update`
+- `rerank_config.get` / `test` / `update`
+- `route_config.get` / `update`
+- `routing_rules.create` / `delete` / `get` / `list` / `move` / `update`
+- `search_config.get` / `test` / `update`
+- `security_config.get` / `update`
+- `runtimes.install` / `list` / `refresh`
+
+### New Config Sections
+
+`[gateway.tls]` / `trusted_proxy` / `allow_insecure_remote` / `[agents.defaults] session_mode` / `[agents.defaults] exec_tier` / `[sandbox.command_policy]` / `[tools] defer_mcp_tools` / `[tools] enable_tool_search` / `[[hook]]` / `[[mcp.servers]]` / `[[plugin.marketplace]]` / `[projects]` / `[runtimes]` / `[voice]`.
+
+### Fail-Closed
+
+26.7.21: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+
+### Hot Reload
+
+- **Hot-reloadable**: model catalog + failover chain; provider config; channel on/off; `[execution]` run caps
+- **Requires restart**: core port, bind address, TLS certificate

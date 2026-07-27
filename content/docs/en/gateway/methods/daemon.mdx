@@ -157,3 +157,27 @@ aleph-server status   # Check status
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [Getting Started: Quick Start](/docs/en/getting-started/quick-start) -- Daemon setup
+
+---
+
+## 26.7.x Addendum
+
+### `daemon.logs` / `daemon.shutdown` / `daemon.status`
+
+26.7.x: daemon-management RPC.
+
+### `aleph-server service` Subcommand
+
+26.7.1+: install / start / enable auto-start / uninstall system service (launchd / systemd-user / Task Scheduler).
+
+### Day-Boundary Log Rotation
+
+26.7.24+: the daemon supports day-boundary log rotation; on startup it writes an `ALEPH-BOOT` marker. The sleep inhibitor is silent on stderr.
+
+### Heartbeat Refuses Dangerous Tools
+
+26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
+
+### Guardian Judge Payload Masks Secrets
+
+26.7.21+: the LLM judge used by heartbeat probes (`Guardian Judge`) must mask secrets in its payload.

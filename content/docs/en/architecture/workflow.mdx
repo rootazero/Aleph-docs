@@ -258,3 +258,25 @@ Workflows are stored in `$ALEPH_HOME/workflows/` (falls back to `~/.aleph/workfl
 - [Harness](./harness) — Think→Act loop that executes each step
 - [Dispatcher](./dispatcher) — Task orchestration and tool filtering
 - [Tools](../tools/overview) — Tool execution architecture
+
+---
+
+## 26.7.x Addendum
+
+### `.mjs` / Dynamic Workflow Interop
+
+26.7.17+: executable-step options and a `.mjs` export path for cross-tool workflow compatibility.
+
+### Bare-Scan schema-const Resolution
+
+R3-compliant: the engineering format hoists schema to a top-level `const` and references it by name; the bare scan resolves hoisted consts (and inline schemas) through a **bounded data-literal normalizer** in `interop/consts.rs`, normalizing JS-lax forms (bare keys / single quotes / trailing commas) to JSON. When it hits any expression value (identifier / function call / template string / computed key), the whole schema is **deprecated** and recorded as `dropped`.
+
+### Coord Task Integration
+
+`workflow.interop` integrates with the `teams.*` coord task system.
+
+### See Also
+
+- [Workflow Interop Doc](https://github.com/rootazero/Aleph/blob/main/docs/reference/WORKFLOW_INTEROP.md) — full protocol
+- [Teams Architecture](/docs/en/architecture/teams)
+- [MCP Integration](/docs/en/concepts/mcp-integration)

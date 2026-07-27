@@ -232,3 +232,30 @@ The `tasks::shared` module provides cross-cutting infrastructure:
 
 - [Agent Runtime](./agent-runtime) — How sub-agents are spawned and managed
 - [Arena](./arena) — Multi-agent collaboration workspace
+
+---
+
+## 26.7.x Addendum
+
+### Cron Now Real (stubs → real)
+
+26.7.x: the historical `cron.*_stub` placeholder RPCs (`cron.list_stub` / `cron.get_stub` / ...) have been **realized**. `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status` / `cron.run` / `cron.runs` / `cron.toggle` now have real implementations (previously they were error-stubs).
+
+### Heartbeat Now Real
+
+Similarly: `heartbeat.list` / `heartbeat.get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` now have real implementations.
+
+### Daemon-Side Complete Chain
+
+Cron / Heartbeat's real implementation is driven by the [Daemon](/docs/en/concepts/daemon), including:
+
+- Day-boundary log rotation
+- `ALEPH-BOOT` marker
+- Silent sleep inhibitor
+- `Guardian Judge` proactive-wake decisions
+
+### See Also
+
+- [Daemon](/docs/en/concepts/daemon) — Cron / Heartbeat driver
+- [Automation / Cron Jobs](/docs/en/automation/cron-jobs) — full RPC
+- [Heartbeat](/docs/en/automation/heartbeat) — full RPC

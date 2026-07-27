@@ -259,3 +259,41 @@ The `thinking` parameter controls how much reasoning the agent performs before r
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [events.*](/docs/en/gateway/methods/events) -- Subscribe to agent events
 - [session.*](/docs/en/gateway/methods/session) -- Session management
+
+---
+
+## 26.7.x Addendum
+
+### `agent.run` / `agent.status` / `agent.cancel` / `agent.list`
+
+26.7.x: base agent RPC. `chat.send` / `chat.abort` / `chat.history` / `chat.clear` are the more modern entry points.
+
+### `chat.*` Preferred
+
+26.7.x prefer `chat.*` over `agent.*`:
+
+- `chat.send` — send a message (with `session_mode` field)
+- `chat.abort` — abort a run
+- `chat.history` — history
+- `chat.clear` — clear
+- `chat.context_estimate` — context-window estimate
+- `chat.rewind` — rewind to an earlier turn
+
+### `session.*` / `sessions.*`
+
+- `session.usage` — usage + cost (core-priced)
+- `session.compact` — `/compact` equivalent
+- `session.truncate` — `truncate_to_fit` floor
+- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
+
+### `agents.*`
+
+- `agents.list` / `agents.get` / `agents.create` / `agents.update` / `agents.delete` / `agents.set_default`
+- `agents.files.list` / `get` / `set` / `delete`
+- `agents.tools_schema` — tool schema
+- `agents.teams` — list the agent's teams
+- `agents.bindings` — agent ↔ channel binding
+
+### `subagent.tree`
+
+26.7.x: returns the subagent tree (node identity + live events + tree RPC).

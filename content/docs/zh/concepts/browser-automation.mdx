@@ -141,3 +141,44 @@ pub struct BrowserProfile {
 
 - [内置工具](./builtin-tools) —— 暴露给代理的浏览器工具
 - [安全原语](./security-primitives) —— 浏览器请求的 SSRF 保护
+
+---
+
+## 26.7.x 补充
+
+### 计算机使用大幅硬化
+
+26.7.15 修复六处 P0 缺陷：
+
+- escape 陷阱
+- 键组合块
+- press-hold
+- 滚动单位
+- 粘贴
+- 退化帧
+
+macOS PIM 与 Chromium AX 接线；macOS 真正不能交付的后台鼠标动作被**前置拒绝**。
+
+### 非侵入式
+
+26.7.15+：桌面应用通过 **pid 定向的输入轨道** + 窗口范围捕获来驱动。自动化不再移动用户的鼠标；六处 P0 缺陷已修。
+
+### 窗口 / 屏幕
+
+26.7.21+：
+
+- macOS 通过 Accessibility 的窗口定位（CGWindowID → AX by geometry）
+- 焦点提升到**确切**的目标窗口
+- bounds 设在确切的窗口上
+- 屏幕录制裁剪到所请求区域（按物理像素而非点）
+- OCR / 窗口捕获 / 媒体 / 输入 / 截屏轨道的类型化 bridge 错误被保留（不再扁平化）
+
+### Canvas / Browser inspector 撤除
+
+26.7.25：Panel 的 Canvas / Browser inspector seams 撤回（R10 YAGNI——零消费者立即撤）。
+
+### 见另请参阅
+
+- [内置工具](/docs/zh/concepts/builtin-tools) — 浏览器工具位置
+- [安全原语](/docs/zh/concepts/security-primitives) — SSRF 保护
+- [桌面桥](/docs/zh/architecture/desktop-bridge) — macOS 平台桥

@@ -85,3 +85,25 @@ When extracting skills, the system checks `SkillOrigin`:
 - [Skill System](/docs/concepts/skill-system) — Skill architecture
 - [Extension System](/docs/concepts/extension-system) — Plugin architecture
 - [Configuration](/docs/concepts/configuration) — Config file locations
+
+---
+
+## 26.7.x Addendum
+
+### `bundled.sync` RPC
+
+26.7.x adds a `bundled.sync` RPC — syncs bundled content with disk; consistent across workspaces.
+
+### Symlink Planting Refused
+
+26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata` — preventing attack vectors implanted at extract time.
+
+### Path
+
+`~/.aleph/bundled/` — Aleph's built-in default skills / plugins / templates. `bundled.sync` is distinct from `skills.install` / `plugin.install`: bundled is read-only built-in, install is user-level.
+
+### See Also
+
+- [Skills](/docs/en/concepts/skills) — user-level skills
+- [Extensions](/docs/en/concepts/extensions) — user-level plugins
+- [Gateway RPC `bundled.*`](/docs/en/gateway/methods/skills) — protocol

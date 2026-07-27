@@ -181,3 +181,27 @@ require_approval_above = "high"
 - [任务分派器](./dispatcher) —— 任务调度 DAG（不同组件）
 - [守护进程](../concepts/daemon) —— 后台服务管理
 - [安全](../security/overview) —— 策略和权限系统
+
+---
+
+## 26.7.x 补充
+
+### Heartbeat / Cron 实化
+
+26.7.x：历史 stub RPC（`heartbeat.*_stub` / `cron.*_stub`）已被**实化**。完整 `heartbeat.*` / `cron.*` RPC 由 [守护进程](/docs/zh/concepts/daemon) 驱动。
+
+### 主动唤醒
+
+`heartbeat.wake` —— 主动唤醒触发。`Guardian Judge` LLM 判官决定是否需要主动唤醒（**payload 隐藏密钥**）。
+
+### 主动决策
+
+- Day-boundary 日志轮转
+- `ALEPH-BOOT` marker
+- 睡眠抑制剂在 stderr 静默
+
+### 详见
+
+- [守护进程](/docs/zh/concepts/daemon)
+- [Cron 作业](/docs/zh/automation/cron-jobs)
+- [Heartbeat](/docs/zh/automation/heartbeat)

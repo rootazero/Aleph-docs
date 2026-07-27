@@ -456,3 +456,22 @@ Cron 方法管理按计划执行代理提示的计划任务。任务持久化在
 - [agent.*](/docs/zh/gateway/methods/agent)——代理执行（由 cron 触发）
 - [events.*](/docs/zh/gateway/methods/events)——订阅 cron 事件
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### 实化（stubs → real）
+
+26.7.x：历史 stub RPC（`cron.*_stub`）已被**实化**。完整实现：
+
+- `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status`
+- `cron.run` / `cron.runs` / `cron.toggle`
+
+### 守护进程端驱动
+
+由 [守护进程](/docs/zh/concepts/daemon) 驱动，包括 day-boundary 日志轮转、`ALEPH-BOOT` marker、Guardian Judge 主动唤醒决策。
+
+### 完整状态机
+
+调度引擎（`src/scheduler/cron.rs`）——窗口式调度已被替换为状态机调度。

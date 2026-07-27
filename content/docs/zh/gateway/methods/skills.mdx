@@ -224,3 +224,28 @@ description: "技能系统 v2 管理 RPC 方法"
 - [概念：扩展商店](/docs/zh/concepts/extensions-store)——统一的扩展概念（技能 / 插件 / MCP）
 - [extensions.*](/docs/zh/gateway/methods/extensions)——路由到各类型后端的统一门面
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `skills.*` 完整 RPC
+
+- `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install`
+- `markdown_skills.handle_install`
+
+### `bundled.sync`
+
+26.7.x：把内置内容与磁盘同步——避免陈旧的 bundled 内容。
+
+### Markdown 技能作者指南
+
+26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md`——技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写。
+
+### 触发词增强
+
+26.7.x：BM25 ranker + 编辑距离补底。
+
+### 插件捆绑技能
+
+26.7.17+：已安装插件的技能被折叠进技能索引与 `skill_read`。

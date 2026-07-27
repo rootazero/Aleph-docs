@@ -322,3 +322,28 @@ src/routing/
 ├── config.rs           # RouteBinding, MatchRule, SessionConfig
 └── identity_links.rs   # Cross-channel identity resolution
 ```
+
+---
+
+## 26.7.x Addendum
+
+### `routing_rules.*` Full RPC
+
+26.7.x routing rules:
+
+- `routing_rules.create` / `list` / `get` / `update` / `delete` / `move`
+- `route_config.get` / `route_config.update`
+
+### `channels.set_agent` Validation
+
+26.7.15+: `channels.set_agent` now **must** specify an existing agent — previously it accepted non-existent agents.
+
+### Cross-Channel Addressability
+
+26.7.x: configured channels are now **truly reachable and addressable**. `gateway.credentials` / `channels.set_agent` / `channel.pairing_data` provide full addressing + credentials.
+
+### See Also
+
+- [Protocol Adapters](/docs/en/concepts/protocol-adapters)
+- [Interfaces Overview](/docs/en/interfaces/overview)
+- [Gateway RPC `routing_rules.*`](/docs/en/gateway/methods)

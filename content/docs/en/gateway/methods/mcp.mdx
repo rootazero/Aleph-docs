@@ -367,3 +367,38 @@ Cancel a pending MCP approval request.
 - [extensions.* Methods](/docs/en/gateway/methods/extensions) -- Unified Extension façade (`Skill` / `Plugin` / `Mcp`)
 - [Extensions Store](/docs/en/concepts/extensions-store) -- Browse and install Extensions by category
 - [Architecture: Gateway](/docs/en/architecture/gateway) -- Gateway architecture
+
+---
+
+## 26.7.x Addendum
+
+### `mcp.*` Full RPC
+
+- `mcp.cancel_approval` / `mcp.respond_approval` — Discord interactive approval buttons
+- `mcp_list_*` — on-demand discovery of MCP resources / prompts
+- `mcp.read_approval` — read approval state
+
+### `mcp_config.*` Full RPC
+
+- `mcp_config.create` / `delete` / `get` / `list` / `update`
+
+### `McpResourceIndexLayer` Retracted
+
+26.7.17+ convergence: the eager resource/prompt index layer is **retracted**, replaced by **on-demand discovery**.
+
+### Protocol-Version Negotiation + Capability Broadcast
+
+26.6.29+:
+
+- Advertises the sampling capability
+- Negotiates the protocol version
+- `max_failures` wired
+- `post_install` field
+
+### `cat`-Guard Read-Steer
+
+On-demand discovery + read-path steer — the model no longer `cat`s entire files.
+
+### MCP Longest-Prefix Match
+
+26.7.18+ resource longest-prefix resolution.

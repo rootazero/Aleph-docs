@@ -189,3 +189,30 @@ max_memory_chars = 20000
 - [Thinker](./thinker) —— LLM 交互与流式传输
 - [Harness](./harness) —— Think→Act 循环执行
 - [Memory](./memory) —— RAG、事实与检索
+
+---
+
+## 26.7.x 补充
+
+### Layers 大改（prompt 极简化）
+
+26.7.17/20 多次 **prune-the-prompt** 轮次：死提示层表面被修剪（净约 −3.4k LOC），`scaffold_bytes_ratchet`（实测骨架天花板，只减不增），`no_sentence_is_stated_twice` 三件套约束。**R9「智慧在 Prompt 中」**两把尺已建进架构：
+
+- **第一把尺**：模型做不到的运行时事实 vs 教强模型怎么思考——后者别进 prompt
+- **第二把尺（pi 之镜）**：某句话如果有工具拥有它，写进该工具 `DESCRIPTION`（随 schema 发，且只发给真能调它的请求），别写进 system prompt
+
+`src/thinker/prompt_contract.rs` 的 `reachable_layers`（层必须能开口，否则带理由进白名单）作为强制门。`aleph-server prompt-size` 命令给出当前实际骨架字节数。
+
+### Layers 数量
+
+旧的 6 层心智模型（身份 / 技能 / 内存 / 工具 / 规则 / 对话）已被 ~28 个更细的层替代（位于 `src/thinker/layers/`）：`agent_role`、`chain_context`、`citation_standards`、`curated_memory`、`doctor_repair_hint`、`environment`、`execution_plan`、`extra_files`、`graph_topology`、`guidelines`、`identity_files`、`language`、`mcp_instructions`、`memory_protocol`、`multi_step_conduct`、`operational_guidelines`、`profile`、`protocol_tokens`、`provider_guidance`、`role`、`runtime_capabilities`、`runtime_context`、`security`、`session_budget`、`session_context_guide`、`skill_instructions`、`soul`、`special_actions`、`standing_goal`、`strategy`、`strategy_pointer`、`timer_loop`、`tool_runtime_state`、`voice_mode` 等。
+
+### `session_mode` 在 prompt 中的体现
+
+每个会话模式在 prompt 中加一行缓存稳定的提示行（chat / work / code 各自不同）。
+
+### 见另请参阅
+
+- [思考器](/docs/zh/concepts/thinker) — 实际层
+- [架构红线 R9](/docs/zh/philosophy/redlines#r9-智慧在-prompt-中-intelligence-lives-in-the-prompt) — 两把尺
+- [架构概览](/docs/zh/architecture/thinker) — 层细节

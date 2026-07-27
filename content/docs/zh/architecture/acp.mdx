@@ -158,3 +158,23 @@ args = []
 
 - [A2A](./a2a) —— 用于内部代理的代理到代理协议
 - [工具](../tools/overview) —— 内置工具系统
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC
+
+- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
+- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
+- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
+
+### 进程隔离内核
+
+26.7.x：ACP 会话由进程隔离内核支撑——沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起（[R1 例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
+
+### 见另请参阅
+
+- [ACP 概念](/docs/zh/concepts/acp-protocol) — 完整概念
+- [沙箱](/docs/zh/architecture/sandbox) — 隔离机制
+- [网关 RPC `acp.*`](/docs/zh/gateway/methods)

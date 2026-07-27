@@ -1,144 +1,156 @@
 ---
 title: Design Philosophy
-description: The foundational principles behind Aleph — why it exists, what makes it different, and the design goals that shape every architectural decision.
+description: The principles behind Aleph — why it exists, what makes it different, and the design goals that shape every architectural decision.
 ---
 
-Aleph is not just another AI assistant. It is the product of deliberate, first-principles thinking about what a personal AI should be: self-hosted, private, adaptive, and polymorphic. This page explains the philosophical foundation that drives every design decision in the project.
+Aleph is more than just another AI assistant. It is the product of thoughtful, first-principles thinking about what a personal AI should be: self-hosted, private, adaptive, and polymorphic. This page explains the philosophical foundation that drives every design decision in the project.
 
 Every technical choice in Aleph traces back to a small set of core beliefs about intelligence, autonomy, and the relationship between humans and AI systems.
 
 ## Why Aleph Exists
 
-The current landscape of AI assistants is dominated by cloud-hosted, vendor-locked services. They are powerful, but they come with fundamental trade-offs:
+Today's AI assistant landscape is dominated by cloud-hosted, vendor-locked services. They are powerful, but they come with fundamental trade-offs:
 
-- **Privacy**: Your conversations, memories, and behavioral patterns live on someone else's servers.
-- **Control**: You cannot modify the system's behavior, extend its capabilities, or decide how it processes your data.
-- **Dependence**: If the service shuts down, changes pricing, or alters its policies, you lose everything.
-- **Uniformity**: Every user gets the same assistant with the same personality, the same constraints, and the same limitations.
+- **Privacy**: your conversations, memories, and behavioral patterns live on someone else's servers
+- **Control**: you can't modify the system's behavior, extend its capabilities, or decide how it handles your data
+- **Dependency**: if the service shuts down, changes pricing, or alters its policies, you lose everything
+- **Uniformity**: every user gets the same assistant with the same personality, same constraints, same limits
 
-Aleph exists because these trade-offs are not inevitable. A personal AI assistant can be truly personal — running on your own hardware, learning from your specific context, and evolving with your needs over time.
+Aleph exists because these trade-offs are not inevitable. A personal AI assistant can be genuinely personal — running on your own hardware, learning from your specific context, and evolving with your needs over time.
 
 > *"The Aleph is one of the points in space that contains all other points."*
-> -- Jorge Luis Borges, "El Aleph"
+> — Jorge Luis Borges, "El Aleph"
 
-Like Borges' Aleph — a crystalline point containing the entire universe — Aleph the project aims to be a single system that contains all the capabilities you need, unified in one coherent architecture.
+Like Borges's Aleph — a crystalline point containing the entire universe — the Aleph project aims to be a single system containing all the capabilities you need, unified under one coherent architecture.
 
 ## First Principles
 
-Before writing a single line of code, Aleph anchors on a fundamental question: **what does success look like for a personal AI assistant?**
+Before writing a single line of code, Aleph anchored itself in one fundamental question: **what does success look like for a personal AI assistant?**
 
-This is the same "First Principles Thinking" that drives Aleph's agent behavior. Rather than copying what existing assistants do and hoping for the best, Aleph defines explicit success criteria:
-
-1. **It must be self-hosted.** Your data, your hardware, your rules. No cloud dependency for core functionality.
+1. **It must be self-hosted.** Your data, your hardware, your rules. Core capabilities do not depend on the cloud.
 2. **It must be adaptive.** The system should learn from experience and genuinely improve over time — not just accumulate chat history.
-3. **It must be polymorphic.** One intelligence, many manifestations. The same core should work across CLI, desktop, mobile, messaging platforms, and voice interfaces.
+3. **It must be polymorphic.** One intelligence, many forms. The same core should work on CLI, desktop, mobile, messaging platforms, and voice.
 4. **It must be extensible.** Users and developers should be able to add new capabilities without modifying the core system.
-5. **It must be secure by default.** Every tool execution, every external call, every plugin action should pass through explicit approval workflows.
+5. **It must be secure by default.** Every tool execution, every external call, every plugin action goes through an explicit approval workflow — missing policy files must fail closed, not open.
 
-These are not aspirational goals — they are hard constraints that shape every architectural decision.
+These are not aspirational goals — they are hard constraints that shape every architectural decision. See [Architectural Redlines](./redlines).
 
 ## What Makes Aleph Different
 
-### Rust-Native Core
+### Native Rust Core
 
-Aleph is built in Rust from the ground up. This is not a Python script wrapped in a web framework — it is a systems-level application designed for reliability, performance, and safety.
+Aleph is built from the ground up in Rust. This is not a Python script wrapped in a web framework — it is a systems-level application designed for reliability, performance, and security.
 
 Rust provides:
 
-- **Memory safety without garbage collection** — critical for a long-running server that manages state, connections, and concurrent tool executions.
-- **Fearless concurrency** — the Gateway handles multiple simultaneous interface connections, agent loops, and tool executions without data races.
-- **Zero-cost abstractions** — the trait-based architecture (Entity, AggregateRoot, ValueObject) adds no runtime overhead.
-- **Single binary deployment** — the entire server compiles to one binary. No dependency hell, no runtime version conflicts.
+- **Memory safety without garbage collection** — essential for a long-running server managing state, connections, and concurrent tool executions
+- **Fearless concurrency** — the Gateway handles multiple simultaneous interface connections, agent loops, and tool executions without data races
+- **Zero-cost abstractions** — trait-based architecture adds no runtime overhead
+- **Single-binary deployment** — the entire server compiles to one binary, no dependency hell, no runtime version conflicts
 
 ### Polymorphic Architecture
 
 Most AI assistants are monolithic: one interface, one interaction model. Aleph takes a fundamentally different approach with its server-centric architecture:
 
 ```
-                    ┌──────────────────────────────┐
-                    │        ALEPH SERVER           │
-                    │   (Brain + Hands + Memory)    │
-                    └──────────────┬───────────────┘
-                                   │
-                    ┌──────────────┴───────────────┐
-                    │     GATEWAY (WebSocket)       │
-                    └──┬────┬────┬────┬────┬───────┘
-                       │    │    │    │    │
-                    CLI  Desktop  macOS  Telegram  Discord
+                     ┌──────────────────────────────┐
+                     │        ALEPH SERVER           │
+                     │   (brain + hands + memory)     │
+                     └──────────────┬───────────────┘
+                                    │
+                     ┌──────────────┴───────────────┐
+                     │     GATEWAY (WebSocket)       │
+                     └──┬────┬────┬────┬────┬───────┘
+                        │    │    │    │    │
+                     CLI  Desktop  Telegram  Discord  iMessage
 ```
 
-The server is the brain and hands — it does all the thinking, remembering, and acting. Interfaces are lightweight I/O layers that handle input and display. This means:
-
-- All interfaces share the same memory, the same context, the same personality.
-- You can start a conversation on Telegram and continue it on the desktop app.
-- Adding a new interface requires only implementing a thin WebSocket client — no AI logic needed.
+The server is the brain and hands — it does all the thinking, remembering, and acting. The interfaces are lightweight I/O layers that handle input and display.
 
 ### Emergence-Driven Design
 
-Aleph is organized around the [Five Layers of Emergence](./five-layers) model, which describes how intelligence builds from raw knowledge to autonomous behavior. Rather than trying to hard-code every capability, Aleph creates the conditions for intelligent behavior to emerge from simpler components.
+Aleph is organized around the [Five Layers of Emergence](./five-layers) model, which describes how intelligence is built up from raw knowledge through to autonomous behavior. Rather than trying to hard-code every capability, Aleph creates conditions under which intelligent behavior emerges from simpler components.
 
-This is reflected in concrete mechanisms:
+Concrete mechanisms include:
 
-- **Experience crystallization**: Successful task completions are recorded, and recurring patterns are automatically promoted to reusable skills.
-- **Skill evolution**: What starts as a one-off solution can become an atomic skill, then a composable module, then part of a polymorphic agent.
-- **Adaptive behavior**: The system genuinely changes its approach based on what has worked before — it does not simply retrieve chat history.
+- **Experience crystallization**: successful task completions are logged, and repeated patterns are automatically promoted into reusable skills
+- **Skill evolution**: what starts as a one-off solution can become an atomic skill, then a composable module, then part of a polymorphic agent
+- **Adaptive behavior**: the system genuinely changes its approach based on what worked before
 
 ### Self-Hosted Privacy
 
-Aleph runs entirely on your own hardware. The server, the memory database, the vector store, the configuration — everything lives on your machine. The only external calls are to LLM providers (which you configure yourself) and to tools that inherently require network access.
+Aleph runs entirely on your own hardware. The server, memory database, vector store, configuration — everything lives on your machine. The only external calls are to LLM providers (which you configure yourself) and tools that inherently need network access.
 
-This is not a philosophical stance — it is an architectural guarantee. There is no telemetry, no cloud sync, no external analytics. Your data stays where you put it.
+This is not a philosophical stance — it is an architectural guarantee. No telemetry, no cloud sync, no external analytics. Your data stays where you put it.
 
 ## Design Goals
 
+### The Three Axes (user-adjustable)
+
+`exec_tier`, `thinking`, and `session_mode` are the **three user-adjustable** dimensions in Aleph, forming the core axes for classifying user preference:
+
+| Axis | Range | Default | Adjustable via |
+|------|-------|---------|---------------|
+| `exec_tier` (execution tier) | ask / auto / full | ask | Settings → Policies; `agents.defaults.exec_tier` |
+| `thinking` (thinking level) | off / minimal / low / medium / high / xhigh | medium | Settings → Policies; `agents.defaults.thinking` |
+| `session_mode` (session mode) | chat / work / code | work | composer pill; `agents.defaults.session_mode` |
+
+The three are **orthogonal**:
+
+- `exec_tier` controls **permissions** (whether a tool can run, and whether it's approved)
+- `thinking` controls **inference** (how long the model thinks)
+- `session_mode` controls the **tool presentation surface** (progressive-disclosure core set + deferred-tool tier), **never permissions**
+
+`session_mode` can be switched at runtime via the `session_set_mode` tool, resolved request > session > global with stamp-on-carry.
+
 ### Autonomy
 
-The agent should be capable of complex, multi-step tasks without constant human intervention. The [POE architecture](./agent-thinking#poe-architecture) (Principle-Operation-Evaluation) enables goal-directed behavior where the agent can plan, execute, evaluate, and iterate on its own.
+Agents should be able to complete complex multi-step tasks without constant human intervention. The Think→Act loop paired with **Thin Harness, Dumb Loop** (R10) makes this possible — all intelligent decisions are made by a single LLM reasoning call.
 
-However, autonomy is bounded. The security system ensures that potentially dangerous operations (shell commands, file modifications, network requests) require explicit approval. Autonomy does not mean uncontrolled.
+But autonomy has boundaries. The three-tier execution permissions (Ask / Auto / Full) combined with the approval gate ensure potentially-dangerous operations (shell commands, file modifications, network requests) require explicit approval. Autonomy doesn't mean uncontrolled.
 
 ### Security
 
-Security is not an afterthought — it is baked into the execution pipeline. Every tool call passes through a guard system that checks against configurable allowlists and approval rules. The default posture is deny: if a tool execution is not explicitly permitted, it requires human approval.
+Security is not an afterthought — it is baked into the execution pipeline (R1–R7 are its concrete form). Every tool call goes through guards that check the configurable allowlist and approval rules. The default posture is **fail-closed**: if a tool execution isn't explicitly allowed, it requires human approval; if a policy file is missing, the system refuses authorization.
 
-For details on the security model, see [Security](/docs/en/security).
+See [Security](/docs/en/security/overview).
 
 ### Extensibility
 
 Aleph supports multiple extension mechanisms:
 
-- **Tools**: Built-in tools (19+) for common operations, plus custom tool registration.
-- **MCP Protocol**: Model Context Protocol support for standardized tool integration.
-- **Plugins**: WASM and Node.js runtime support for sandboxed extensions.
-- **Skills**: Higher-level capabilities that compose tools and knowledge into reusable workflows.
+- **Tools**: a built-in toolset (see [Tools Overview](/docs/en/tools/overview)) plus custom tool registration
+- **MCP protocol**: standardized external tools (with **on-demand discovery** — no more blind resource/prompt indexing)
+- **Plugins**: a unified `plugin.install` entry (classified by source: marketplace / zip / path); folded with Markdown skills
+- **Skills**: a higher-level capability that combines tools and knowledge into reusable workflows
 
-For details on extending Aleph, see [Tools](/docs/en/tools).
+### Many-Channel Presence
 
-### Multi-Channel Presence
+The Gateway protocol (~265 JSON-RPC methods) provides a unified control plane for every interface:
 
-The Gateway protocol (30+ JSON-RPC methods over WebSocket) provides a unified control plane for all interfaces. This means Aleph can be present wherever you need it:
-
-- Command line for development workflows
+- CLI for development workflows
 - Desktop app for focused work sessions
-- Native macOS app with system integration
-- Telegram and Discord for messaging-native interaction
-- Voice and Canvas interfaces (planned)
+- Telegram, Discord, iMessage for message-native interactions
+- WebChat for browser sessions
 
-For details on the Gateway, see [Gateway](/docs/en/gateway).
+See [Interfaces Overview](/docs/en/interfaces/overview).
+
+### Loop-Graph Governance
+
+The newest `loop_graph` module adds a governance topology on top of the Harness: team nodes, audit ring, objective ACLs, victory-claim watchers, and a built-in `loop-auditor` agent. It gives the four single-loop failure modes (Goodhart, reference blindness, ring conflict, measurement decay) a topological answer. See [Architecture Overview](/docs/en/architecture/overview).
 
 ## The Name
 
 **Aleph** draws from three sources:
 
-- **Mathematics**: The aleph numbers (ℵ₀, ℵ₁, ℵ₂...) represent progressively larger infinities. Aleph's intelligence evolves through discrete levels, each transcending the previous.
-- **Literature**: In Borges' story "El Aleph," the Aleph is a point in space containing all other points — a metaphor for a system that contains all capabilities in one unified architecture.
-- **Hebrew**: As the first letter of the Hebrew alphabet (א), Aleph represents origin, unity, and the silent breath that enables all speech.
-
-The name captures the project's ambition: a single point that contains all points, a system that starts at the origin and climbs toward ever-greater intelligence.
+- **Mathematics**: the aleph numbers (ℵ₀, ℵ₁, ℵ₂…) represent progressively larger infinities. Aleph's intelligence evolves through discrete levels, each transcending the previous one
+- **Literature**: in Borges's story "El Aleph", the Aleph is the point in space that contains all other points — a metaphor for a system containing all capabilities under one unified architecture
+- **Hebrew**: as the first letter of the Hebrew alphabet (א), Aleph represents origin, unity, and the silent breath that makes all language possible
 
 ## Further Reading
 
-- [Five Layers of Emergence](./five-layers) — The L1-L5 model of intelligence emergence
-- [Agent Thinking Model](./agent-thinking) — How Aleph's agent observes, thinks, acts, and learns
-- [Domain Modeling](./domain-modeling) — The DDD-based structure of Aleph's codebase
-- [Architecture](/docs/en/architecture) — Technical system architecture
+- [Five Layers of Emergence](./five-layers) — the L1–L5 model of how intelligence emerges
+- [Agent Thinking Model](./agent-thinking) — how Aleph's agents observe, think, act, and learn
+- [Domain Modeling](./domain-modeling) — the DDD foundation of Aleph's codebase
+- [Architectural Redlines](./redlines) — the ten non-negotiable hard constraints
+- [Architecture](/docs/en/architecture) — the technical system architecture

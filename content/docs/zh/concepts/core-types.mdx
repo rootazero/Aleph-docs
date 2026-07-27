@@ -123,3 +123,29 @@ pub struct MemoryEntry {
 - [内存系统](/docs/zh/concepts/memory) — 记忆如何存储和压缩
 - [桌面桥接](/docs/zh/concepts/desktop-bridge) — 如何从原生应用捕获 CapturedContext
 - [思考器](/docs/zh/concepts/thinker) — 如何将上下文注入提示词
+
+---
+
+## 26.7.x 补充
+
+### 新增类型
+
+- **`SessionEvent` / `SessionEventRecord` / `TurnId`**（`src/session/events.rs`）—— 26.7.7 起 `session_events` 是规范事件日志；`TurnId` 区分同一会话内的不同轮次。
+- **`UnifiedMessage` / `ProviderDelta`**（`src/providers/`）—— 26.7.7+ 引入的 LLM 无关消息中间表示。`TextDelta` / `ThinkingDelta` / `ToolCallDelta` 三个变体覆盖流式输出。
+- **`LoopState`**（`src/looping/types.rs`）—— 26.7.25 引入的循环状态机（Active / Paused / …）。`Pause / Resume` 跨会话控制。
+- **`Goal` / `GoalStore`**（`src/goal/types.rs`）—— 26.7.x 新增的目标子系统。
+- **`ArtifactRecord`**（`src/artifacts/store.rs`）—— 工件存储的记录类型；`tools.publish` 的产物。
+- **`SignerKey` / `OperationLedger`**（`src/identity/signer.rs`）—— 每代理签名密钥 + 签名操作账本。
+- **`NoteRelation`**（`src/memory/note_layer/`）—— 类型化关系边；26.7.15 起的 `note_graph_query` 工具的返回。
+- **`EvidenceChainEntry`** —— 26.7.27 起面板 Vault 抽屉中的证据链条目。
+- **`CapabilityLedger`** —— 每次安装时从磁盘重建的可见能力清单（`plugin.install` / `runtimes.install` 的支撑）。
+
+### `MemoryEntry` 字段扩展
+
+26.7.x：`MemoryEntry` 现在带 `session_id` 字段（之前在投影时丢失，dashboard 查询能选到但序列化时丢了）。`user_input` / `ai_output` 保持分离，使面板能对两半独立样式。
+
+### 见另请参阅
+
+- [消息](/docs/zh/concepts/messages) — `UnifiedMessage` 与 `ProviderDelta` 协议
+- [记忆](/docs/zh/concepts/memory) — 笔记层与关系词汇
+- [架构红线](/docs/zh/philosophy/redlines) — R10 限制 `src/harness/` 行数

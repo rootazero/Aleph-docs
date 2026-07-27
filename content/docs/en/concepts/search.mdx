@@ -172,3 +172,44 @@ for result in results {
 
 - [Builtin Tools](./builtin-tools) — Search tool exposed to agents
 - [Configuration](./configuration) — Search provider configuration
+
+---
+
+## 26.7.x Addendum
+
+### Memory `memory.retrieve_with_trace`
+
+26.7.21+: new `memory.retrieve_with_trace` — real scoring-pipeline trace for the debug panel.
+
+### Knowledge Graph
+
+26.7.15+ `note_graph_query`:
+
+- Bidirectional BFS path finding
+- Typed relation edges
+- `[[wikilink]]` supersession that force-surfaces a correcting note
+- CJK trigram full-text search
+- Crash-safe index
+
+### 26.7.27 Vault Panel
+
+- Card view (replaces the old table)
+- Batch-action bar
+- Deep-link anchors
+- Evidence chain (sequence of other notes that cite this note)
+- Cross-agent selection (atomic consistency)
+- Provenance (writer / timestamp / source event)
+- Batch export as a deliverable
+
+### Real Scoring and Hybrid Retrieval
+
+26.7.15+: `ScoringPipeline` wired into the `HybridRetrieval` search flow; `NoiseFilter` integrated into the ingestion pipeline; adaptive retrieval and backup settings added to `MemoryConfig`.
+
+### Web Fetch
+
+26.6.29+ class of `crawl4ai` / `firecrawl` providers (URL → markdown), vault-stored keys; automatically falls back to the built-in fetch on failure.
+
+### See Also
+
+- [Memory System](/docs/en/concepts/memory) — full retrieval architecture
+- [Gateway RPC `memory.*`](/docs/en/gateway/methods/memory) — protocol

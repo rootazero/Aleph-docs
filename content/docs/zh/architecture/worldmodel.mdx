@@ -144,3 +144,29 @@ confidence_threshold = 0.7
 
 - [分派器](./dispatcher) —— 主动行动分派
 - [守护进程](../concepts/daemon) —— 后台服务管理
+
+---
+
+## 26.7.x 补充
+
+### 与治理拓扑层并列
+
+26.7.21+：`worldmodel` 与 `loop_graph` 并列——前者追踪环境状态（用于主动行为），后者追踪图节点 / 治理事件。两者均不参与完成度判断。
+
+### 系统状态总线
+
+`SystemStateBus` 集成：
+
+- PII 过滤
+- 稳健性 + 隐私层
+- 动作调度器
+- 平台抽象层（PAL）macOS 特定传感器
+
+### Heartbeat 主动唤醒
+
+基于世界状态 + Guardian Judge 决策的主动任务。
+
+### 详见
+
+- [主动调度器](/docs/zh/architecture/proactive-dispatcher)
+- [守护进程](/docs/zh/concepts/daemon)

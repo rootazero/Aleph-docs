@@ -227,3 +227,47 @@ pub struct TeamArtifact {
 - [Agent Runtime](/docs/en/concepts/agent-runtime) — How agents spawn and manage tasks
 - [Group Chat](/docs/en/concepts/group-chat) — Three-panel team chat with attribution bubbles
 - [Arena](/docs/en/concepts/arena) — Multi-agent collaboration workspace
+
+---
+
+## 26.7.x Addendum
+
+### Team Node Fused with Graph
+
+26.7.21+: the graph (loop_graph) fuses with the multi-agent system — `team` node kind, live-joined teams in graph status, team pair targets, victory-claim watchers triggered on team disband.
+
+### Teams Kanban Deep Refactor
+
+26.7.24+: the Panel teams kanban deep refactor — drag-and-drop, shared lifecycle/column sources, richer cards, operator-tunable broadcast storm-prevention guards.
+
+### Team Template Tool Surface
+
+26.7.25+: built-in team templates declare their tool surface — members can **declare** their own tool surface (sharing `agents.tools_schema`), no longer hardcoded.
+
+### Built-in `loop-auditor`
+
+26.7.21+: built-in protected agent; audit / supervision templates default to independent-context evidence.
+
+### Grounding Evidence Gate
+
+26.7.21+: `task_review` approvals can now require grounding, with acceptance metadata helpers.
+
+### Full `teams.*` RPC
+
+- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
+- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
+- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
+- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
+- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
+- `teams.task.trace`
+- `agents.teams` — list an agent's teams
+
+### Coord Tasks
+
+Coord Task status: `Pending → InProgress → WaitingReview → Completed`, reviewed by the leader via `task_review`. The historical fictional "coordination: sequential|parallel|hierarchical" modes were removed.
+
+### See Also
+
+- [Group Chat](/docs/en/concepts/group-chat) — three-panel UI
+- [Architecture / Teams](/docs/en/architecture/teams) — full flow
+- [Gateway RPC `teams.*`](/docs/en/gateway/methods/teams) — protocol

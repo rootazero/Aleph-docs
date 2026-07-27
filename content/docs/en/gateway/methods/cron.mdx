@@ -456,3 +456,22 @@ Jobs can be chained so that completion of one triggers another:
 - [agent.*](/docs/en/gateway/methods/agent) -- Agent execution (triggered by cron)
 - [events.*](/docs/en/gateway/methods/events) -- Subscribe to cron events
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### Realized (stubs → real)
+
+26.7.x: the historical stub RPCs (`cron.*_stub`) have been **realized**. Full implementation:
+
+- `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status`
+- `cron.run` / `cron.runs` / `cron.toggle`
+
+### Daemon-Side Driver
+
+Driven by the [Daemon](/docs/en/concepts/daemon), including day-boundary log rotation, `ALEPH-BOOT` marker, and `Guardian Judge` proactive-wake decisions.
+
+### Full State Machine
+
+The scheduling engine (`src/scheduler/cron.rs`) — window-based scheduling has been replaced by a state-machine scheduler.

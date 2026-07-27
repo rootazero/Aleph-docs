@@ -284,3 +284,30 @@ User Input
 ```
 
 After classification, the `IntentRouter` wraps the result for the Agent Loop: slash commands and direct tools become `DirectRoute` (bypassing LLM thinking entirely), while category-matched and ambiguous inputs become `NeedsThinking` with optional category hints that guide tool filtering and prompt selection.
+
+---
+
+## 26.7.x Addendum
+
+### Intent Detection Largely Retired (R7 LLM Sovereignty)
+
+The historical three-tier intent classification (keyword → enhanced keyword → AI detector) is **retired** after the R7 landing. Intent parsing is a judgment the LLM excels at; a single LLM reasoning call naturally covers it:
+
+- **Old**: rule engine + keyword matching + confidence thresholds
+- **New**: a single LLM call naturally parses intent; the Harness does not classify intent (**R10 "Don't #1**)
+- Middleware tax (extra LLM calls / classifiers / filters) has been withdrawn
+
+### Tool Filtering
+
+The historical multi-layer Tool Filter (intent-based tool filtering / relevance scoring) is also retired. **R10 "Don't #2"**: "Don't filter tools / score relevance by **message intent**".
+
+The exception is **progressive tool disclosure** (26.7.7+) — a **message-content-blind static partition**; the loading decision is 100% model-initiated (via the `tool_search` meta-tool), the same nature as the existing allowlist / permission Deny / health three static `retain`s in `src/tools/scoped/`.
+
+### Tool Surface After Chat
+
+`session_mode` (chat / work / code) is also a static partition, on the tool-presentation layer (orthogonal to progressive disclosure); R10's file budget grows by zero.
+
+### See Also
+
+- [Architectural Redlines R7 / R10](/docs/en/philosophy/redlines#r7-llm-sovereignty) — LLM Sovereignty + Dumb Loop
+- [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode) — the `session_mode` static partition

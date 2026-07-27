@@ -1,54 +1,57 @@
 ---
 title: "Quick Start"
-description: "Get up and running with Aleph"
+description: "Get Aleph running in 5 minutes"
 ---
 
-Get Aleph running in under 5 minutes.
+Get Aleph running in 5 minutes.
 
 ## Option 1: Desktop App (Fastest)
 
-Download the latest release for your platform:
+Download the latest version for your platform:
 
 | Platform | Download |
-|----------|----------|
+|------|------|
 | **macOS** | `.dmg` from [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
 | **Linux** | `.deb` or `.AppImage` from [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
 | **Windows** | `.msi` from [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
 
 1. Install and launch the app
-2. Complete the setup wizard (API key, model selection)
+2. Complete the setup wizard (API keys, model selection, **session mode**, **exec tier**, **TLS**)
 3. Start chatting
 
-The desktop app bundles the core server as a background daemon. The shell stays in your system tray; closing the window does **not** stop the server.
+The desktop app bundles the core server as a background daemon. The shell lives in your system tray; closing the window **doesn't** stop the server.
 
 **Global hotkey:** `CmdOrCtrl+Shift+A` summons the window from anywhere.
 
-### Connect to a Remote Core
+### Connecting to a Remote Core
 
-The desktop shell can connect to a remote `aleph-server` over Tailnet or VPN:
+The desktop shell can connect to a remote `aleph-server` over Tailnet or VPN — **only** when the remote core uses self-signed TLS (SAN auto-discovers the host's non-loopback interface IPs; the Panel prompts TOFU fingerprint + SAN approval on first connect).
 
 ```bash
-# On the remote machine, ensure the gateway is accessible
-aleph gateway run --bind 0.0.0.0 --port 18790
+# On the remote machine, enable self-signed TLS
+aleph-server start \
+  --gateway-bind 0.0.0.0 \
+  --gateway-port 18790 \
+  --gateway-tls-auto-cert
 ```
 
-Then point your local shell at the remote origin (advanced — see [Configuration](./configuration)).
+Then in the local shell, enter `wss://remote-host:18790` and approve the TOFU prompt.
 
 ---
 
 ## Option 2: From Source (Development)
 
-### 1. Build and Run
+### 1. Build & Run
 
 ```bash
-# Clone the repository
+# Clone the repo
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
 
-# Run in development mode (rebuilds WASM automatically)
+# Run in dev mode (auto-rebuilds WASM)
 just dev
 
-# Or build and run manually
+# Or build & run manually
 cargo run --bin aleph-server
 ```
 
@@ -56,13 +59,16 @@ The server starts on `ws://127.0.0.1:18790` by default.
 
 ### 2. Configure
 
-Create your configuration file at `~/.aleph/config.toml`:
+Create `~/.aleph/aleph.toml`:
 
 ```bash
 mkdir -p ~/.aleph
-cat > ~/.aleph/config.toml << 'EOF'
-[agent]
+cat > ~/.aleph/aleph.toml << 'EOF'
+[agents.defaults]
 model = "anthropic/claude-sonnet-4"
+thinking = "medium"
+session_mode = "work"
+exec_tier = "ask"
 
 [provider.claude]
 protocol = "anthropic"
@@ -82,18 +88,18 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 ### 3. Connect via WebChat
 
-Open the WebChat interface at `http://localhost:18790` (or the port configured in `gateway.port`).
+Open `http://localhost:18790` in a browser (or whatever port `gateway.port` is set to).
 
-The WebChat is a WASM-based UI that connects to the Gateway WebSocket.
+WebChat is a WASM-based UI that connects to the Gateway WebSocket.
 
-### 4. Connect a Messaging Channel (Optional)
+### 4. Connect Messaging Channels (optional)
 
 #### Telegram
 
-Add to `~/.aleph/config.toml`:
+Add to `~/.aleph/aleph.toml`:
 
 ```toml
-[channel.telegram]
+[channels.telegram]
 enabled = true
 token = "YOUR_BOT_TOKEN"
 ```
@@ -103,9 +109,18 @@ Restart the server to pick up the new channel.
 #### Discord
 
 ```toml
-[channel.discord]
+[channels.discord]
 enabled = true
 token = "YOUR_BOT_TOKEN"
+```
+
+#### iMessage (BlueBubbles)
+
+```toml
+[channels.imessage]
+enabled = true
+server_url = "http://127.0.0.1:1234"
+password = "${BLUEBUBBLES_PASSWORD}"
 ```
 
 ### 5. Verify
@@ -113,30 +128,32 @@ token = "YOUR_BOT_TOKEN"
 Check that the server is running:
 
 ```bash
-# Server logs show "Gateway listening on ws://127.0.0.1:18790"
+# Server log shows "Gateway listening on ws://127.0.0.1:18790"
 tail -f ~/.aleph/logs/aleph.log
-```
 
-Test the WebSocket connection:
-
-```bash
+# Or query the RPC endpoint
 curl http://localhost:18790/health
 ```
+
+### 6. Session Mode and Exec Tier
+
+After WebChat opens, switch **session mode** (chat / work / code) and **exec tier** (Ask / Auto / Full) in the top-right. You can also set global defaults in Settings → Policies.
 
 ---
 
 ## Architecture at a Glance
 
-> **Single-Core Multi-Terminal, Shell-Core Separation; Gateway Interoperability, Access Control.**
+> **One core, many channels, shell-core separation, gateway interop, access control; three user-adjustable axes: exec_tier × thinking × session_mode.**
 
-- **One core** (`aleph-server`) powers every interface
-- **Shell** (desktop app) = pure OS integration; **Core** = all business logic
-- All terminals speak the same authenticated WebSocket protocol
-- Desktop shell can connect to local or remote core
+- **One core** (`aleph-server`) drives every interface
+- **Shells** (desktop app) = pure OS integration; **core** = all business logic
+- Every terminal uses the same authenticated WebSocket protocol
+- The desktop shell can connect to a local or remote core (remote must use `wss://` + TOFU)
+- Three user-adjustable axes: `exec_tier` (permissions) / `thinking` (inference) / `session_mode` (tool presentation)
 
 ## Next Steps
 
-- [Configuration](./configuration) - Full configuration reference
-- [Gateway Protocol](../gateway/protocol) - WebSocket JSON-RPC API
-- [Interfaces](../interfaces/overview) - Connect more platforms
-- [Architecture](../architecture/overview) - Deep dive into shell-core separation
+- [Configuration](./configuration) — full config reference
+- [Gateway Protocol](../gateway/protocol) — WebSocket JSON-RPC API
+- [Interfaces](../interfaces/overview) — connect more platforms
+- [Architecture](../architecture/overview) — deeper shell-core separation

@@ -195,3 +195,31 @@ pub struct UserProfile {
 - [提示词系统](/docs/zh/concepts/prompt-system) — 提示词概念
 - [内存](/docs/zh/concepts/memory) — 知识库集成
 - [技能](/docs/zh/concepts/skills) — 技能提示词注入
+
+---
+
+## 26.7.x 补充
+
+> 注：本页与 `architecture/thinker.mdx` 主题重叠；详细层定义见 [架构 / 思考器](/docs/zh/architecture/thinker)。本页保留**概念视角**。
+
+### Layers 重组
+
+26.7.x：~28 个细层替代旧 6 层心智模型（位于 `src/thinker/layers/`）：`agent_role`、`chain_context`、`citation_standards`、`curated_memory`、`doctor_repair_hint`、`environment`、`execution_plan`、`extra_files`、`graph_topology`、`guidelines`、`identity_files`、`language`、`mcp_instructions`、`memory_protocol`、`multi_step_conduct`、`operational_guidelines`、`profile`、`protocol_tokens`、`provider_guidance`、`role`、`runtime_capabilities`、`runtime_context`、`security`、`session_budget`、`session_context_guide`、`skill_instructions`、`soul`、`special_actions`、`standing_goal`、`strategy`、`strategy_pointer`、`timer_loop`、`tool_runtime_state`、`voice_mode`。
+
+### 两把尺（R9）
+
+`src/thinker/prompt_contract.rs` 的 `reachable_layers`（层必须能开口，否则带理由进白名单）/ `scaffold_bytes_ratchet`（实测骨架天花板，只减不增）/ `no_sentence_is_stated_twice`。`aleph-server prompt-size` 给出实际骨架字节数。
+
+### `session_mode` 行
+
+每个会话模式加一行缓存稳定的提示词行（chat / work / code 各自不同）。
+
+### `thinker::PromptBuilder` 与 `PromptPipeline`
+
+唯一的公共入口点是 `thinker::PromptBuilder`，它包装了 `PromptPipeline`。`PromptLayer` 是组装系统提示词一段的 trait。`InteractionManifest` 用于频道能力感知。
+
+### 见另请参阅
+
+- [架构 / 思考器](/docs/zh/architecture/thinker) — 详细层定义
+- [架构红线 R9](/docs/zh/philosophy/redlines#r9-智慧在-prompt-中-intelligence-lives-in-the-prompt) — 两把尺
+- [提示系统](/docs/zh/concepts/prompt-system) — Layers 视角

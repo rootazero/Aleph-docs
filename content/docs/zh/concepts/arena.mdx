@@ -131,3 +131,36 @@ pub enum ArenaEvent {
 
 - [代理运行时](./agent-runtime) —— 代理如何生成和管理任务
 - [事件系统](./event-system) —— 事件分发模式
+
+---
+
+## 26.7.x 补充
+
+### 实时集群舰队 feed
+
+26.7.15+：Panel 集群视图接入实时 feed，**正确的 contract**，节点身份在 connect verdict 上持久化。
+
+### Cluster 生命周期 SSOT
+
+26.7.x：集群注册 / 注销 / deregister 引入生命周期 SSOT：
+
+- 死的冷启动注册已修复
+- 注销能粘住
+- 反向 RPC 加固
+- `connect` 握手先于 `gateway call` 中的方法
+- 节点键按 Unicode 归一化（CJK 节点名正确）
+
+### `cluster.deregister` / `enroll` / `environments.list`
+
+26.7.x 完整 RPC。详见 [集群架构](/docs/zh/architecture/cluster)。
+
+### 真实集群舰队视图
+
+- 实时舰队 feed
+- 节点身份持久化
+- 集群写入 R8 完整化（之前是半完成）
+
+### 见另请参阅
+
+- [集群](/docs/zh/architecture/cluster) — 完整架构
+- [集群 R8 写入](/docs/zh/gateway/methods/cluster) — 协议

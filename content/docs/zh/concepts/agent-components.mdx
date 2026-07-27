@@ -110,3 +110,33 @@ description: "代理循环的核心事件处理程序组件：意图分析、任
 - [代理运行时](/docs/zh/concepts/agent-runtime) — 运行时配置
 - [思考器](/docs/zh/concepts/thinker) — 提示词构建
 - [任务调度](/docs/zh/concepts/task-scheduling) — 任务队列
+
+---
+
+## 26.7.x 补充
+
+### Act 阶段并行组
+
+26.7.x 之前的顺序执行被**资源声明**分桶并行取代：
+
+- 工具声明 `Shared` / `Exclusive{Global, Paths}` 三态资源 claim
+- 资源群分并行（**桶内**并发、**桶间**串行）—— 不是任务依赖图
+- `batch_parallelizable` 检查调用是否可并行
+- 串行模式仅在单调用 / 并发禁用 / 重复调用 / 无并行组时回退
+
+### Guardrail + 并行
+
+26.7.x：串行回退不再因 wired guardrail 触发。工具调用 guardrail（Block / Sanitize / Pass）在 `act_parallel` 的 PASS 0 中串行应用，与 Pi 的串行 validate + approval 模式一致。
+
+### 合作 steering 断点
+
+每个串行组（并行组）前 Act 重检 `has_unanswered_user_message`；若有用户消息则让模型先回应。
+
+### 工具循环验证器
+
+26.7.15+：工具循环验证器（`src/verification/`）对每个 Turn 的工具调用做后置校验；只有模型显式 stop 才会结束一个 Turn（**R10「5 个不」之 3**）。`max_iterations` 仍是安全上限。
+
+### 见另请参阅
+
+- [Harness 架构](/docs/zh/architecture/harness) — Think→Act 实现
+- [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop) — 5 个「不」

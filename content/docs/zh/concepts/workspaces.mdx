@@ -304,3 +304,40 @@ impl SwapManager {
 - [消息](/docs/zh/concepts/messages) -- 会话存储和消息持久化
 - [扩展](/docs/zh/concepts/extensions) -- 插件目录布局和发现
 - [架构概览](/docs/zh/architecture/overview) -- 存储层的系统级视图
+
+---
+
+## 26.7.x 补充
+
+### Workspace RPC
+
+26.7.x 工作区由以下 RPC 方法支撑：
+
+- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
+- `channels.set_agent` —— 把通道绑到指定 agent（**现要求 agent 存在**——`channels.set_agent` 接受不存在的 agent 已被修复）
+- `projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` —— 项目存储
+
+### 文件操作路径安全
+
+26.7.15+：
+
+- 符号链接安全的删除/移动
+- glob/deny 复检
+- 冲突去重
+- 逐路径锁
+- 加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）
+- `apply_patch` 前向游标诚实地失败
+
+### Cluster `file.write` 无 TOCTOU 窗口
+
+26.7.21 修复：集群 `file.write` 不再有存在检查与写入之间的 TOCTOU（time-of-check-to-time-of-use）窗口。
+
+### 节点键 Unicode 归一化
+
+26.7.20+：集群 `normalize_node_key` 现在按 Unicode 归一化，CJK 节点名正确工作。之前按字节切片，CJK 节点名断裂。
+
+### 见另请参阅
+
+- [网关 RPC `workspace.*`](/docs/zh/gateway/methods/workspace) — 完整 RPC
+- [网关 RPC `projects.*`](/docs/zh/gateway/methods/workspace#projects) — 项目存储
+- [集群](/docs/zh/architecture/cluster) — 节点键归一化

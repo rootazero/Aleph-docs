@@ -198,3 +198,33 @@ bus.publish(MemoryCreated {
 - [Gateway](../architecture/gateway) — How events are forwarded to WebSocket clients
 - [Session Service](../architecture/session-service) — Session lifecycle events
 - [Memory System](../architecture/memory) — Memory update events
+
+---
+
+## 26.7.x Addendum
+
+### `broadcast::RecvError::Lagged` Must Recover
+
+26.7.21 fix: the channel forwarder no longer dies permanently on `broadcast::RecvError::Lagged`. The per-connection event-forward task no longer leaks on WebSocket disconnect. Webhook receivers return 503 under congestion rather than silently dropping inbound messages.
+
+### Single-Source Error Receipt
+
+26.7.21 fix: the gateway returns a **single-source** user-readable error to the client. The raw error chain never leaks out to the Panel.
+
+### SessionEvent
+
+26.7.7+ `session_events` is the canonical event log — `MessageProjector` materializes events into the `messages` table; a boot-time `ProjectionReconciler` back-fills transcripts. `SessionEventRecord` + `TurnId` are the new payloads.
+
+### Dead-Letter and Re-Drive
+
+26.7.17+: messages that failed to deliver via `channel.*` are collected in a **dead-letter** queue and can be re-driven from the Panel. `channel.pairing_data` provides pairing context.
+
+### Loop-Graph Governance Events
+
+26.7.21+ governance events (victory claim, goal settled, team disbanded, watcher triggered) flow over the same event bus, subscribed by watchers in the `loop_graph` layer.
+
+### See Also
+
+- [Gateway Protocol](/docs/en/gateway/protocol) — error-receipt single-source
+- [Messages](./messages) — `SessionEvent` and `MessageProjector`
+- [Architecture Overview](/docs/en/architecture/overview#loop-graph-governance-layer) — how governance events flow through the graph

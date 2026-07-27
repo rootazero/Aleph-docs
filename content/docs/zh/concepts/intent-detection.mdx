@@ -284,3 +284,30 @@ pub struct CalibratedSignal {
 ```
 
 分类后，`IntentRouter` 将结果包装给代理循环：斜杠命令和直接工具变成 `DirectRoute`（完全绕过 LLM 思考），而类别匹配和模糊输入变成 `NeedsThinking`，带有可选的类别提示，指导工具过滤和提示词选择。
+
+---
+
+## 26.7.x 补充
+
+### Intent Detection 已大幅缩水（R7 LLM 主权）
+
+历史的三层意图分类（关键词 → 增强关键词 → AI 检测器）**在 R7 落地后已退役**。意图理解是 LLM 擅长的判断，由 LLM 一次推理调用自然覆盖：
+
+- **旧**：规则引擎 + 关键词匹配 + 置信度阈值
+- **新**：LLM 一次调用自然解析意图；Harness 不参与判断意图（**R10「5 个不」之 1**）
+- 中间件税（额外的 LLM 调用 / 分类器 / 过滤器）已被撤回
+
+### 工具筛选
+
+历史的多层 Tool Filter（基于意图的工具过滤 / 相关性评分）也已退役。**R10「5 个不」之 2**：「不按**消息意图**做工具过滤 / 相关性评分」。
+
+例外是**渐进式工具披露**（26.7.7 引入）—— 这是**不看消息内容的静态分区**，加载决策 100% 由模型发起（通过 `tool_search` 元工具），与 `src/tools/scoped/` 已有的 allowlist / 权限 Deny / 健康三道静态 `retain` 同层同性质。
+
+### Chat 后的工具面
+
+`session_mode`（chat / work / code）也是静态分区，落在工具呈现层（与渐进式披露正交）；R10 文件预算零增长。
+
+### 见另请参阅
+
+- [架构红线 R7 / R10](/docs/zh/philosophy/redlines#r7-llm-主权原则-llm-sovereignty) — LLM 主权 + 笨循环
+- [会话模式](/docs/zh/architecture/overview#第三双生子会话模式) — `session_mode` 静态分区

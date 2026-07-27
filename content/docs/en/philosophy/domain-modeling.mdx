@@ -197,48 +197,38 @@ The Intent context handles the perception side of the agent — analyzing user i
 
 Note that the Intent context uses only value objects — intents are classified, not tracked. An intent does not have a lifecycle; it is a snapshot of the agent's understanding at a point in time.
 
-### POE Context
+### POE Context (Retired)
 
-**Responsibility**: Success contracts, validation rules, evaluation results.
+> **The POE (Principle-Operation-Evaluation) architecture was retired in 26.5+**. Its "intelligence" migrated to system prompt templates (R9); success definition, validation, and evaluation are now naturally covered by a single LLM call. The Harness does not judge completion (**R10's "Don't #3**), nor does it participate in evaluation. R10 deleted the historical `DiminishingReturnsDetector` hard stop because it was a deterministic completion judgment inside the loop.
 
-The POE context handles the evaluation side of the agent — defining what success looks like and validating whether it was achieved.
-
-| Type | DDD Role | Location |
-|------|----------|----------|
-| `SuccessManifest` | AggregateRoot | `poe/types.rs` |
-| `ValidationRule` | ValueObject | `poe/types.rs` |
-| `Verdict` | ValueObject | `poe/types.rs` |
-
-The `SuccessManifest` aggregate root ensures that:
-- Validation rules are consistent and complete.
-- Verdicts are produced by evaluating all rules against the actual output.
-- The manifest cannot be modified after evaluation begins (immutable during assessment).
+Historical responsibility (archaeology only): success contracts, validation rules, evaluation results.
 
 ## Context Relationships
 
 The bounded contexts interact through well-defined interfaces, not direct dependencies:
 
 ```
-                 ┌────────────────┐
-                 │  Intent Context │
-                 │  (Perception)   │
-                 └───────┬────────┘
-                         │ classified intent
-                         v
+                  ┌────────────────┐
+                  │  Intent Context │
+                  │  (Perception)   │
+                  └───────┬────────┘
+                          │ classified intent
+                          v
 ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-│  POE Context   │<──│  Dispatcher    │──>│  Memory Context│
-│  (Evaluation)  │   │  Context       │   │  (Knowledge)   │
-│                │   │  (Execution)   │   │                │
+│  Thinker/      │<──│  Dispatcher    │──>│  Memory Context│
+│  PromptLayer   │   │  Context       │   │  (Knowledge)   │
+│  (Evaluation   │   │  (Execution)   │   │                │
+│  via prompt)   │   │                │   │                │
 └────────────────┘   └────────────────┘   └────────────────┘
-        │                                         ^
-        │          experience crystallization      │
-        └─────────────────────────────────────────┘
+         │                                         ^
+         │          experience crystallization      │
+         └─────────────────────────────────────────┘
 ```
 
 - **Intent --> Dispatcher**: Classified intents are passed to the Dispatcher for task graph construction.
 - **Dispatcher --> Memory**: The Dispatcher queries Memory for relevant context during execution.
-- **Dispatcher --> POE**: Completed tasks are evaluated against the Success Manifest.
-- **POE --> Memory**: Successful evaluations trigger experience crystallization into Memory.
+- **Dispatcher --> Thinker / PromptLayer**: LLM-driven evaluation replaces the old POE pipeline; the verdict is the model's natural output, not middleware output.
+- **Thinker / PromptLayer --> Memory**: Successful evaluations trigger experience crystallization into Memory.
 
 Each context owns its models and does not import types from other contexts. Communication happens through shared interfaces (traits, message types) defined at the boundary.
 
@@ -340,6 +330,6 @@ Rust's ownership model, trait system, and type-level programming align naturally
 ## Further Reading
 
 - [Design Philosophy](./overview) — The foundational principles that DDD serves
-- [Agent Thinking Model](./agent-thinking) — How the POE context drives agent evaluation
+- [Agent Thinking Model](./agent-thinking) — How the Thinker / PromptLayer replaced the old POE pipeline
 - [Five Layers of Emergence](./five-layers) — How bounded contexts map to the L1-L5 model
 - [Architecture](/docs/en/architecture) — Technical system architecture

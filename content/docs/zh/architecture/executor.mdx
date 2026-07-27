@@ -132,3 +132,33 @@ impl<T: AlephTool> AlephToolDyn for T { // 空实现 }
 - [工具架构](./tools) — 工具开发指南
 - 沙箱 — 执行隔离
 - MCP — 模型上下文协议
+
+---
+
+## 26.7.x 补充
+
+### Action-aware Approval
+
+26.7.15+ 执行审批门是**动作感知的**——人看到真实命令且授权指纹键**绑定在命令上**。
+
+### Slash 快路径旁路关闭
+
+斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走 `src/tools/scoped/` 审批门。
+
+### 三级执行权限
+
+| 等级 | 行为 |
+|------|------|
+| `ask` | 每次工具执行前请求审批；未知工具失败关闭 |
+| `auto` | 幂等工具自动放行，破坏性工具仍需审批 |
+| `full` | 全部自动放行（独立的安全硬过滤除外） |
+
+### 进程隔离内核
+
+沙箱 restricted-token / job-object / AppContainer 在 spawn 时就地发起（R1 进程隔离例外）。
+
+### 详见
+
+- [执行引擎](/docs/zh/concepts/execution-engine)
+- [执行审批](/docs/zh/security/exec-approval)
+- [架构红线 R7 / R10](/docs/zh/philosophy/redlines)

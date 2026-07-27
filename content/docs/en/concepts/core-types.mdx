@@ -123,3 +123,29 @@ pub struct MemoryEntry {
 - [Memory System](./memory) — How memories are stored and compressed
 - [Desktop Bridge](./desktop-bridge) — How CapturedContext is captured from native apps
 - [Thinker](./thinker) — How context is injected into prompts
+
+---
+
+## 26.7.x Addendum
+
+### New Types
+
+- **`SessionEvent` / `SessionEventRecord` / `TurnId`** (`src/session/events.rs`) — 26.7.7+ `session_events` is the canonical event log; `TurnId` distinguishes turns within a session.
+- **`UnifiedMessage` / `ProviderDelta`** (`src/providers/`) — 26.7.7+ LLM-agnostic intermediate message representation. `TextDelta` / `ThinkingDelta` / `ToolCallDelta` three variants cover streaming output.
+- **`LoopState`** (`src/looping/types.rs`) — 26.7.25+ loop state machine (Active / Paused / …). `Pause / Resume` for cross-session control.
+- **`Goal` / `GoalStore`** (`src/goal/types.rs`) — 26.7.x new goal subsystem.
+- **`ArtifactRecord`** (`src/artifacts/store.rs`) — the artifact store record type; the product of `tools.publish`.
+- **`SignerKey` / `OperationLedger`** (`src/identity/signer.rs`) — per-agent signing key + signed operation ledger.
+- **`NoteRelation`** (`src/memory/note_layer/`) — typed relation edge; the return of `note_graph_query` since 26.7.15.
+- **`EvidenceChainEntry`** — since 26.7.27, an evidence-chain entry in the panel Vault drawer.
+- **`CapabilityLedger`** — per-install visible capability list rebuilt from disk (underpins `plugin.install` / `runtimes.install`).
+
+### `MemoryEntry` Field Expansion
+
+26.7.x: `MemoryEntry` now carries a `session_id` field (previously selected by the dashboard query but dropped on serialization). `user_input` / `ai_output` stay separate so the panel can style the two halves independently.
+
+### See Also
+
+- [Messages](./messages) — `UnifiedMessage` and `ProviderDelta` protocols
+- [Memory](./memory) — the note layer and relation vocabulary
+- [Architectural Redlines](/docs/en/philosophy/redlines) — R10 caps the `src/harness/` line count

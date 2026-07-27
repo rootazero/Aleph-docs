@@ -216,3 +216,44 @@ require_plan_approval = true
 - [群聊](./groupchat) —— 多角色对话
 - [A2A](./a2a) —— 代理到代理协议
 - [编排器](./orchestrator) —— 代理编排
+
+---
+
+## 26.7.x 补充
+
+### Team 节点融合 Graph
+
+26.7.21+：`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher。
+
+### Teams Kanban 深度重构
+
+26.7.24+：拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
+
+### 模板工具面
+
+26.7.25+：内置团队模板的成员可声明工具面（`agents.tools_schema` 共享），不再硬编码。
+
+### 接地证据门
+
+26.7.21+：`task_review` 审批可要求 grounding。
+
+### 完整 `teams.*` RPC
+
+`teams.create` / `delete` / `disband` / `rename` / `get` / `list` / `list_templates` / `usage`
+`teams.create_task` / `update_task` / `list_tasks` / `delete` / `add_task_comment` / `list_task_comments` / `list_task_events` / `list_task_runs`
+`teams.chat.send` / `history` / `thread` / `cancel` / `task.trace`
+`agents.teams`
+
+### 内置 `loop-auditor`
+
+26.7.21+：审计 / 监督模板默认走独立上下文证据。
+
+### 协调任务状态
+
+`Pending → InProgress → WaitingReview → Completed`，由队长通过 `task_review` 审核。历史虚构的 `coordination: sequential|parallel|hierarchical` 模式已删除。
+
+### 详见
+
+- [团队概念](/docs/zh/concepts/teams)
+- [群聊概念](/docs/zh/concepts/group-chat)
+- [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams)

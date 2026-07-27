@@ -231,3 +231,21 @@ listens = ["session.start"]
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [Architecture: Plugins](/docs/en/architecture/plugins) -- Plugin system architecture
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+- `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall`
+- `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload`
+- `plugins.callTool` / `plugins.executeCommand`
+
+### `plugin.*` Canonical Namespace
+
+26.7.21+ introduces the canonical `plugin.*` namespace — `plugins.*` is kept for backward compatibility. See [Extensions](/docs/en/gateway/methods/extensions).
+
+### Fail-Open → Fail-Closed
+
+26.7.21+ hardening: plugin failure default behavior changes to **fail-closed**.

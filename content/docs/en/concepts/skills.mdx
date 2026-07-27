@@ -241,3 +241,42 @@ Example: `/code-review` activates the code-review skill for the current session.
 
 - [Extensions](./extensions) — Plugin system integration
 - [Tool System](../tools/overview) — Built-in tools skills can invoke
+
+---
+
+## 26.7.x Addendum
+
+### Markdown Skill Authoring Guide
+
+26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM, with trigger words detected via BM25 + edit distance. The `tools.publish` tool publishes a work product to the artifact store.
+
+### Trigger-Word Enhancement
+
+26.7.x:
+
+- BM25 ranker
+- Edit-distance backstop
+- Trigger words come from Markdown frontmatter
+- See `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`
+
+### Plugin-Bundled Skills
+
+26.7.17+: installed-plugin skills are **folded into the skill index** and `skill_read`; the agent catalog is revived — previously plugin skills paralleled the skill mechanism with low model visibility.
+
+### `skill_read` Resolution Upgrade
+
+26.7.17 fix: `skill_read` previously **refused** symlinked/duplicate skills — now it resolves by precedence instead of reporting ambiguity.
+
+### SkillOpt Self-Evolution Discipline
+
+26.7.x (memory self-evolution) — the SkillOpt port:
+
+- "good-enough stop" principle embedded into the self-evolution pipeline
+- Bounded, validation-gated edit loop layered over LLM-proposed edits
+- See `docs/reference/memory/DREAM_DAEMON.md`
+
+### See Also
+
+- [Skill System](/docs/en/concepts/skill-system) — skill lifecycle
+- [Extensions Store](/docs/en/concepts/extensions-store) — user perspective
+- [Memory Dream Daemon](/docs/en/concepts/memory-evolution) — SkillOpt context

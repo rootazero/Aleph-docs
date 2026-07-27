@@ -211,3 +211,33 @@ Report usage (tokens, cost) for a team.
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [group_chat.*](/docs/en/gateway/methods/group_chat) -- Group-chat session primitive
 - [Architecture: Teams](/docs/en/architecture/teams) -- Team orchestration architecture
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
+- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
+- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
+- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
+- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
+- `teams.task.trace`
+- `agents.teams` — list the agent's teams
+
+### Grounding Evidence Gate
+
+26.7.21+: `task_review` approvals can require grounding.
+
+### Teams Kanban Deep Refactor
+
+26.7.24+: drag-and-drop, shared lifecycle/column sources, richer cards, operator-tunable broadcast storm-prevention guards.
+
+### Team Node Fused with Graph
+
+26.7.21+: graph fuses with multi-agent system — `team` node kind, live-joined teams in graph status, team pair targets, victory-claim watchers on team disband.
+
+### Built-in `loop-auditor`
+
+26.7.21+: audit / supervision templates default to independent-context evidence.

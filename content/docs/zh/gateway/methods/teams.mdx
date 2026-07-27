@@ -211,3 +211,33 @@ description: "团队与多代理编排 RPC 方法"
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [group_chat.*](/docs/zh/gateway/methods/group_chat)——群聊会话原语
 - [架构：团队](/docs/zh/architecture/teams)——团队编排架构
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC 集
+
+- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
+- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
+- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
+- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
+- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
+- `teams.task.trace`
+- `agents.teams` —— 列出 agent 的团队
+
+### 接地证据门
+
+26.7.21+：`task_review` 审批可要求 grounding。
+
+### Teams Kanban 深度重构
+
+26.7.24+：拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
+
+### Team 节点融合 Graph
+
+26.7.21+：图与多代理系统融合——`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher。
+
+### 内置 `loop-auditor`
+
+26.7.21+：审计 / 监督模板默认走独立上下文证据。

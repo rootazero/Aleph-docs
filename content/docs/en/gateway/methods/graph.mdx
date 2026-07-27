@@ -157,3 +157,24 @@ Delete an entity and its relations.
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [Architecture: Knowledge Graph](/docs/en/architecture/graph) -- Graph system architecture
+
+---
+
+## 26.7.x Addendum
+
+### Loop-Graph Governance Layer
+
+26.7.21+: `loop_graph` adds governance topology on top of the harness.
+
+### `graph.*` Full RPC
+
+- `graph.query` — graph query
+- `graph.search` — graph search
+- `graph.node_detail` — node detail
+- `graph.update_note` — update a note
+- `graph.rename_note` — rename a note
+- `graph.delete_note` — delete a note
+
+### Governance Events
+
+Victory claim, goal settled, team disbanded, watcher triggered — subscribe via `events.subscribe` on the `governance.*` topic.

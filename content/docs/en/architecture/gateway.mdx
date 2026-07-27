@@ -485,3 +485,46 @@ Each interface has its own authentication and scope configuration. Telegram can 
 - [Agent Harness](./harness) -- What happens after the Gateway dispatches to the agent
 - [Session Service](./session-service) -- Session key resolution and persistence
 - [Tool Architecture](./tools) -- Tool execution triggered by agent requests
+---
+
+## 26.7.x Addendum
+
+### Gateway Core Status
+
+The in-process gateway in `aleph-server` handles:
+
+- **WebSocket protocol** (JSON-RPC 2.0 over ws/wss)
+- **TLS** (self-signed or user-supplied)
+- **Authentication** (TOFU, token, device ticket, pairing)
+- **Routing** (chat / config / memory / agents / tools / mcp / skills / plugins / extensions / channels / teams / projects / workspaces / runtimes / ...)
+- **Full ~265 RPCs**
+
+### Single-Source Error Receipt
+
+26.7.21+: the gateway returns a **single-source** user-readable error. The raw error chain never leaks to the Panel.
+
+### WS Task-Leak Fixes
+
+26.7.21+: per-connection event-forward tasks no longer leak; `broadcast::RecvError::Lagged` recovers rather than dies permanently; webhook backpressure returns 503.
+
+### Self-Signed TLS + TOFU
+
+- `[gateway] tls` — self-signed or user-supplied cert
+- `[gateway] trusted_proxy` — real reverse-proxy IP
+- `[gateway] allow_insecure_remote` — fail closed
+- Client-side TOFU: fingerprint + SAN approval
+
+### Device / Credentials / Ticket / Token
+
+- `gateway.ticket.create`
+- `gateway.token.current` / `gateway.token.rotate`
+- `gateway.devices.list` / `gateway.devices.revoke`
+- `gateway.credentials`
+- `gateway.identity.get`
+- `gateway.metrics.lanes` / `gateway.metrics.run_concurrency`
+
+### See Also
+
+- [Gateway Protocol](/docs/en/gateway/protocol) — protocol
+- [Gateway Auth](/docs/en/gateway/auth) — auth / pairing / TOFU
+- [Gateway Methods Reference](/docs/en/gateway/methods) — full RPC

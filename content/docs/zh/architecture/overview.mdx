@@ -603,3 +603,55 @@ Aleph 通过分层协议适配器架构支持多个 AI 提供商：
 ## 参考文档
 
 有关权威系统架构，请参阅源仓库中的规范[架构参考](https://github.com/rootazero/Aleph/blob/main/docs/reference/ARCHITECTURE.md)。
+
+---
+
+## 26.7.x 补充
+
+### 第三双生子：会话模式
+
+`chat` / `work` / `code` 是与 `exec_tier`、`think_level` 并列的**第三个**用户可调维度。它**只对工具呈现面**做静态分区（progressive-disclosure 核心集 + deferred-tool 层级），不影响权限。可在 Panel composer pill、Settings → Policies（全局默认）或 `session_set_mode` 工具里切换。每个模式还驱动一个独立的右侧面板行为（chat = 徽章、work = 计划面板、code = 工具详情）并附加一行缓存稳定的提示词。
+
+### 治理拓扑层（loop_graph）
+
+`loop_graph` 在 harness 之上叠加一层治理拓扑：
+
+- **团队节点** —— 将多代理系统融合进图
+- **审计环** —— 闭环审计动作日志
+- **客观 ACL** —— 按图节点身份客观授权
+- **胜利声明 watcher** —— 团队/循环宣告完成触发
+- **内置 `loop-auditor` 智能体** —— 审计/监督默认走独立上下文
+
+它给单循环的四种失败模式（Goodhart、参考盲、环冲突、测量衰减）一个拓扑答案。
+
+### 自签名 TLS + TOFU
+
+26.7.17/18+：
+
+- 网关进程内终止 TLS（自签名或用户提供）
+- 自签名证书 SAN 自动覆盖主机非环回接口 IP
+- 漂移 sidecar + 原子 regen marker
+- 客户端 TOFU（fingerprint + SAN 审批 + 固定信任存储）
+- macOS WKWebView + iOS Keychain 适配器
+
+### 真成本与 token 核算
+
+26.7.15+：`session.usage` 现在携带真实花费账本（之前部分伪造）；提示缓存纪律恢复；思考深度端到端接线。
+
+### 守护进程端计算的会话成本
+
+`session.usage` 通过核心定价计算成本，shell 里的重复价格表被删除。
+
+### 完整 RPC 计数
+
+26.7.x 网关暴露 **~265 个 RPC 方法**——详见 [网关方法参考](/docs/zh/gateway/methods)。
+
+### 完整模块清单
+
+`aleph-server` 进程内 ~76 个 `src/<module>` 目录 + 几个顶层 `.rs` 文件。详见 `src/` 目录树。
+
+### 详见
+
+- [架构 1-2-3-4 模型](/docs/zh/architecture/1-2-3-4-model) — 稳定骨架
+- [架构红线 R1–R10](/docs/zh/philosophy/redlines) — 硬约束
+- [网关协议](/docs/zh/gateway/protocol) — 协议

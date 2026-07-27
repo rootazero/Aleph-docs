@@ -150,3 +150,36 @@ pub struct ProviderSetupFlow;
 
 - [Configuration](../getting-started/configuration) — Configuration system
 - [Installation](../getting-started/installation) — Initial setup
+
+---
+
+## 26.7.x Addendum
+
+### 26.7.21+ New Stages
+
+The `aleph wizard` flow expands to 11 stages in 26.7.21, adding:
+
+- **Stage 7 — Session Mode (chat / work / code)**: the third user-adjustable axis, orthogonal to `exec_tier` and `thinking`
+- **Stage 8 — Exec Tier (ask / auto / full)**: defaults to `ask`; unknown tools fail closed
+- **Stage 10 — Gateway TLS**: pick from loopback-only / self-signed / trusted-proxy
+
+### Subcommands
+
+```bash
+aleph wizard              # full 11-stage
+aleph wizard --quick      # quick setup
+aleph wizard --provider   # add / reconfigure a single provider
+aleph wizard --mode       # switch the default session mode only
+```
+
+### Gateway RPC
+
+The wizard flow can also be launched via gateway RPC:
+
+- `wizard.start` / `wizard.status` / `wizard.cancel`
+- Triggered from the Panel UI without a terminal
+
+### See Also
+
+- [Setup Wizard](/docs/en/getting-started/wizard) — user perspective
+- [Gateway RPC `wizard.*`](/docs/en/gateway/methods/wizard) — protocol layer

@@ -459,3 +459,41 @@ These five tools form its private tool set. They are **internal / agent-only** a
 - [plugins.*](/docs/en/gateway/methods/plugins) -- Plugin host backend (kind `Plugin`)
 - [mcp.*](/docs/en/gateway/methods/mcp) -- MCP server backend (kind `Mcp`)
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+- `extensions.catalog` — extension catalog
+- `extensions.configure` — configuration
+- `extensions.disclosure` — pre-install disclosure
+- `extensions.install` / `extensions.installed` / `extensions.uninstall` / `extensions.toggle`
+
+### `plugin.*` Canonical Namespace
+
+- `plugin.list` / `plugin.install` / `plugin.installFromZip` / `plugin.uninstall` / `plugin.update`
+- `plugin.enable` / `plugin.disable` / `plugin.load` / `plugin.unload` / `plugin.reload`
+- `plugin.callTool` / `plugin.executeCommand`
+- `plugin.marketplace.list` / `plugin.marketplace.add`
+
+### `plugins.*` Legacy Namespace (backward-compatible)
+
+`plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall` / `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload` / `plugins.callTool` / `plugins.executeCommand`
+
+### `plugin.install` Unified Entry
+
+26.7.21+: classifies by source (marketplace / zip / path) and routes uniformly.
+
+### Lifecycle Race Fixes
+
+26.7.21+:
+
+- Concurrent `reload` is serialized under the load guard
+- Malformed plugin results are no longer masked as `ServiceResult::ok`
+- `AuthorInfo` parsing uses the leftmost separator
+
+### Capability Ledger
+
+26.7.x: per-install visible capability list rebuilt from disk — pre-install disclosure.

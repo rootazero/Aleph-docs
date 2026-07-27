@@ -108,3 +108,37 @@ SQLite 数据库提供 CRUD 操作：
 - [代理运行时](/docs/zh/concepts/agent-runtime) — 代理执行循环
 - [任务调度](/docs/zh/concepts/task-scheduling) — 任务队列和调度
 - [事件系统](/docs/zh/concepts/event-system) — 事件总线架构
+
+---
+
+## 26.7.x 补充
+
+### Guardian Judge Payload 隐藏密钥
+
+26.7.21+：Heartbeat 探针使用的 LLM 判官（`Guardian Judge`）其 payload 必须隐藏密钥——密钥不会再被序列化到日志或被审计员读取。
+
+### Heartbeat 拒绝危险工具
+
+26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。`Heartbeat` 现在是实化（stubs → real）的周期守护。
+
+### Provider 错误读取加边界
+
+26.7.15+：Provider 错误响应体读取现在加边界——之前可能挂在失速的代理上。
+
+### 影子模式事件总线
+
+26.7.x 影子模式：系统状态总线带 PII 过滤、稳健性和隐私层；用于系统事件自动响应的动作调度器；平台抽象层（PAL）带 macOS 特定传感器。
+
+### Dreaming Daemon 不再烧额度
+
+26.7.15 修复：梦境守护进程夜间梦境运行的重试风暴已加边界，不再耗尽 provider 额度。
+
+### 失败关闭
+
+26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时拒绝授权。
+
+### 见另请参阅
+
+- [守护进程](/docs/zh/concepts/daemon) — Heartbeat 驱动
+- [错误处理](/docs/zh/concepts/error-handling) — 失败关闭
+- [安全概览](/docs/zh/security/overview) — 失败关闭原则

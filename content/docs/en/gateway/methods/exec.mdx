@@ -199,3 +199,35 @@ The IPC protocol uses HMAC-SHA256 for authentication:
 2. Server responds with nonce
 3. Client signs with shared secret
 4. Server verifies and proceeds
+
+---
+
+## 26.7.x Addendum
+
+### `tools.*` Full RPC
+
+- `tools.catalog` — tool catalog (with name + description)
+- `tools.effective` — the tool surface effective for the current session
+- `tools.invoke` — tool invocation
+- `tools.cancel_call` — cancel an in-flight call
+- `tools.in_flight` — list in-flight tool calls
+
+### `tools.search` (Progressive Tool Disclosure)
+
+26.7.7+ `tool_search` meta-tool — BM25 ranker lookup in the catalog.
+
+### Resource-Claim Three-State
+
+`Shared` / `Exclusive{Global}` / `Exclusive{Paths}` — Act stage partitions by claim and dispatches intra-group concurrently.
+
+### Cross-Batch Dedup
+
+`Memo / Cross-batch Dedup` — a duplicate `(name, args)` reuses the first result.
+
+### Action-Aware Approval
+
+26.7.15+ approval gate at the single choke point `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
+
+### Fail-Closed
+
+Unknown tools **fail closed** under the `ask` tier.

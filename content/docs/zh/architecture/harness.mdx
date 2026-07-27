@@ -110,3 +110,39 @@ pmset -g assertions | grep "Aleph agent loop"
 - [分发器](./dispatcher) — 任务编排
 - [会话服务](./session-service) — 仅追加事件日志
 - 沙箱 — 执行环境
+
+---
+
+## 26.7.x 补充
+
+### `src/harness/` 锁 12 文件 + 行数 ratchet
+
+**代码是权威**——任何文档数字都只是 `CEILING` 的副本。当前 5055 行（2026-07-26 修订）。
+
+### Act 阶段并行组
+
+26.7.x：资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）驱动**桶内**并发、**桶间**串行。
+
+### 工具循环验证器
+
+`src/verification/` 提供 Turn-level 后置验证：仅模型显式 stop 结束一个 Turn。
+
+### 5 个「不」
+
+R10 具体落地：
+
+1. 不判断意图分类
+2. 不按消息意图做工具过滤（progressive tool disclosure 例外）
+3. 不做完成度判断（除模型显式 stop）
+4. 不做内容审查 / 安全打分
+5. 不做错误恢复策略选择
+
+### `DiminishingReturnsDetector` 已删
+
+26.7.20+：硬停被删除（违反 R10）。Stuck 由 `max_iterations` + 工具循环验证器 + 模型自身 stop 共同控制。
+
+### 详见
+
+- [Harness 哲学](/docs/zh/philosophy/harness-philosophy) — 完整论述
+- [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop)
+- [验证器](/docs/zh/concepts/supervisor-verification)

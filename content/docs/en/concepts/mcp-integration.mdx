@@ -102,3 +102,41 @@ env = { HOME = "/Users/alice" }
 - [Builtin Tools](/docs/concepts/builtin-tools) — Native Aleph tools
 - [Capability System](/docs/concepts/capability-system) — Tool permission framework
 - [Extension System](/docs/concepts/extension-system) — Plugin architecture
+
+---
+
+## 26.7.x Addendum
+
+### `McpResourceIndexLayer` Retracted
+
+26.7.17+ convergence: the eager resource/prompt index layer is **retracted**. That layer used single-prefix ids (which didn't round-trip); now replaced with **on-demand discovery tools**.
+
+### On-Demand Discovery Tools
+
+`mcp_list_*` tools (in `src/gateway/handlers/mcp.rs`) let the model discover MCP resources/prompts on demand, instead of blindly reading files. A `cat`-guard read-steer routes to native MCP / skill / plugin reads.
+
+### Protocol-Version Negotiation + Capability Broadcast
+
+26.6.29+:
+
+- Advertises the sampling capability
+- Negotiates the protocol version
+- `max_failures` wired
+- `post_install` field
+
+### `mcp.respond_approval` / `cancel_approval`
+
+26.7.21+: Discord interactive approval buttons; a two-way `ApprovalCallbackSink` flow.
+
+### `mcp_config.*`
+
+26.7.x full RPC:
+
+- `mcp_config.create` / `mcp_config.delete` / `mcp_config.get` / `mcp_config.list` / `mcp_config.update`
+
+### See Also
+
+- [Built-in Tools](/docs/en/concepts/builtin-tools) — native counterpart
+- [Capability System](/docs/en/concepts/capability-system) — permissions
+- [Extension System](/docs/en/concepts/extension-system) — parallel to plugins
+- [Gateway RPC `mcp.*`](/docs/en/gateway/methods/mcp) — protocol

@@ -1,238 +1,258 @@
 ---
 title: Architectural Redlines
-description: Seven inviolable design constraints that govern all development decisions in Aleph — the highest priority rules that no code may violate.
+description: The ten non-negotiable design constraints that govern every development decision in Aleph — the highest-priority rules no code may violate.
 ---
 
-Aleph's architecture is governed by seven **redlines** — non-negotiable constraints that take absolute precedence over all other design considerations. These are not guidelines or best practices. They are hard boundaries. Code that violates any redline cannot be merged, regardless of how useful the feature it enables might be.
+Aleph's architecture is governed by **ten redlines** — non-negotiable constraints that take priority over all other design considerations. These are not guidelines or best practices. They are hard boundaries. Code that violates any redline cannot be merged, regardless of how useful the feature it enables is.
 
-Redlines exist because certain architectural mistakes are catastrophic and irreversible. Once a core module depends on a platform API, or an interface layer accumulates business logic, the damage compounds with every subsequent commit. Redlines prevent these failure modes before they start.
+Redlines exist because certain architectural mistakes are catastrophic and irreversible. Once core modules depend on platform APIs, or interface layers accumulate business logic, the damage compounds with every subsequent commit. Redlines prevent these failure modes before they start.
 
-Every contributor, every pull request reviewer, and every automated check must treat these seven rules as axioms.
+Every contributor, every PR reviewer, and every automated check must treat these ten rules as axioms.
 
-## R1. Brain-Limb Separation
+> **Full discussion and exceptions**: This page summarizes the redlines. The full discussion and the carve-outs live in the Aleph repo at [`CLAUDE.md`](https://github.com/rootazero/Aleph/blob/main/CLAUDE.md) §「架构红线」, and in [`docs/reference/HARNESS_PHILOSOPHY.md`](https://github.com/rootazero/Aleph/blob/main/docs/reference/HARNESS_PHILOSOPHY.md).
 
-**The Core never touches platform APIs. It only defines capability contracts.**
+---
 
-Aleph's Rust Core (`src/`) is a pure reasoning engine. It decides what to do, manages state, and routes tasks. It must never know — or care — what operating system it runs on.
+## R1. Brain–Limb Separation
 
-### The Rule
+**The core never touches platform APIs. It only defines capability contracts.**
 
-The Core defines abstract traits (capability contracts) for platform-specific operations. Physical implementations live in the Desktop Bridge (Tauri-Rust layer), which communicates with Core over IPC.
+### Rule
 
-### Rationale
+The core defines abstract traits (capability contracts) for platform-specific operations. Physical implementations live in native bridges (the Tauri-Rust layer), which communicate with the core over IPC.
 
-If Core imports `AppKit` to capture a screenshot, it becomes a macOS application. If it calls `windows-rs` to read a window title, it becomes a Windows application. Platform coupling in the brain destroys the "One Core, Many Shells" promise and makes every new platform a fork rather than an integration.
+### Principle
+
+If the core imports `AppKit` to capture a screenshot, it becomes a macOS application. If it calls `windows-rs` to read a window title, it becomes a Windows application. Platform coupling in the brain breaks the "one core, many shells" promise and makes every new platform a fork rather than an integration.
 
 ### Forbidden
 
 - Importing `AppKit`, `Vision`, `CoreGraphics`, `windows-rs`, or any platform-specific system API in `src/`
-- Calling OS-level APIs directly from Core for screenshots, window management, accessibility, or input simulation
-- Conditional compilation (`#[cfg(target_os)]`) in Core that introduces platform-specific behavior
+- Calling OS-level APIs from the core for screen capture, window management, accessibility, or input simulation
+- Introducing `#[cfg(target_os)]`-gated platform behavior in the core
 
 ### Allowed
 
-- Defining traits like `ScreenCapture`, `WindowManager`, `InputSimulator` in Core
-- Desktop Bridge implementing those traits via platform-native APIs
-- Core invoking capabilities through the trait interface over IPC (UDS JSON-RPC)
+- Defining traits like `ScreenCapture`, `WindowManager`, `InputSimulator` in the core
+- Native bridges implement those traits against platform-native APIs
+- The core invokes capabilities over IPC (UDS JSON-RPC) through the trait interface
+
+### Carve-out · Process-Isolation Kernel
+
+Sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls **must** be issued by the parent process at spawn time **in-place** — they cannot be delegated over IPC. Local PID liveness probes (`OpenProcess` / `GetExitCodeProcess`) are the same. So the platform FFI in `src/sandbox/*` and `src/builtin_tools/desktop/session_lock.rs` (`windows-sys`) is a legitimate carve-out, **not a violation** — R1's intent targets desktop UI / screen / Vision **limbs**, while the security kernel is not "a capability the bridge can provide".
 
 ---
 
 ## R2. Single Source of UI Truth
 
-**All business UI lives in Leptos/WASM. Native shells are window containers, nothing more.**
+**All business UI lives in the Leptos/WASM Panel. The native shell is just a window container, nothing more.**
 
-Aleph has one UI implementation, written in Leptos and compiled to WebAssembly. This single implementation runs everywhere — web, macOS, Windows, Linux. The native application shells (Tauri) provide the window frame, system tray integration, and native animations. They never implement business logic or complex UI.
+### Rule
 
-### The Rule
+Complex settings pages, forms, lists, dashboards, and any UI carrying business logic must be implemented in the Leptos (WASM) Panel. The native shell (Tauri, Swift, Kotlin, etc.) provides only: the window container, native menu items, native animations, and system-level integration (notifications, file dialogs).
 
-Complex settings pages, forms, lists, dashboards, and any UI with business logic must be implemented in Leptos (WASM). Tauri shells provide only: window containers, native menu bar items, native animations, and system-level integration (notifications, file dialogs).
+### Principle
 
-### Rationale
-
-Duplicating UI logic across platforms is a maintenance disaster. Every bug must be fixed N times, every feature implemented N times, and behavioral consistency becomes impossible to guarantee. A single Leptos/WASM codebase eliminates this entire class of problems.
+Duplicated cross-platform UI logic is a maintenance disaster. Each bug must be fixed N times, each feature implemented N times, and behavior consistency becomes impossible to guarantee. A single Leptos/WASM codebase eliminates the entire class.
 
 ### Forbidden
 
-- Implementing settings pages, task lists, conversation views, or any business-logic-bearing UI in Tauri/Swift/Kotlin
-- Building complex forms or interactive components in the native shell layer
-- Rendering data-driven views (memory browser, tool configuration) outside of Leptos
-
-### Allowed
-
-- Tauri providing a `WebView` container that hosts the Leptos/WASM application
-- Native menu bar items and system tray interactions (these are platform integration, not business UI)
-- Native window chrome, animations, and OS-level affordances (drag regions, vibrancy effects)
-- Simple native dialogs (file picker, alert) delegated through Tauri APIs
+- Implementing settings pages, task lists, conversation views, or any business-logic-bearing UI in the native bridge
+- Building complex forms or interactive components in the shell layer
+- Rendering data-driven views (memory browser, tool config) outside Leptos
 
 ---
 
 ## R3. Core Minimalism
 
-**The Core dispatches. It does not do heavy lifting for non-core features.**
+**The core schedules. It does not do heavy lifting for non-core features.**
 
-Aleph's Core must remain lean. If a capability is not fundamental to reasoning, state management, or routing, it does not belong in Core. Non-core features are implemented as Skills (Python/Bash scripts) or MCP Servers — external processes that Core orchestrates but does not contain.
+### Rule
 
-### The Rule
+Don't add heavyweight third-party libraries to the core for features that can be delivered as a skill or MCP integration. The core is a scheduler and coordinator — it invokes specialized workers, not absorbs their complexity.
 
-Do not add heavy third-party libraries to `core/` for features that can be delivered as Skills or MCP integrations. The Core is a scheduler and coordinator. It calls out to specialized workers rather than absorbing their complexity.
+### Principle
 
-### Rationale
-
-Every dependency added to Core increases compile times, binary size, attack surface, and cognitive load. A 200MB image-processing library added for one feature penalizes every build, every deployment, and every developer — even those who never use that feature. Skills and MCP servers are isolated, independently deployable, and can be written in any language.
+Every dependency added to the core grows compile time, binary size, attack surface, and cognitive load. The 200 MB image-processing library added for one feature punishes every build, every deployment, and every developer — even those who never use the feature. Skills and MCP servers are isolated, independently deployable, and writable in any language.
 
 ### Forbidden
 
-- Adding large crates to `core/Cargo.toml` for single-use non-core features (e.g., a PDF rendering library, a video transcoder)
-- Implementing domain-specific expertise (PowerPoint generation, code review heuristics) directly in Rust Core
-- Growing Core's dependency tree without clear justification that the functionality is fundamental to reasoning, state, or routing
+- Adding large crates (PDF rendering, video transcoding, bundled ONNX backends) to core for one-off non-core features
+- Implementing domain-specific expertise in the core directly (PowerPoint generation, code-review heuristics)
 
 ### Allowed
 
-- Core defining tool interfaces and dispatching calls to external Skills/MCP servers
-- Lightweight, widely-used crates that serve Core's fundamental responsibilities (serialization, async runtime, database drivers)
-- The Occam's Razor principle for code organization (splitting large files, removing dead code) — this complements Core Minimalism, it does not conflict with it
+- The core defines tool interfaces and dispatches calls to external skills / MCP servers
+- Lightweight, widely-used crates that serve core essentials (serialization, async runtime, database driver)
 
 ---
 
 ## R4. I/O-Only Interfaces
 
-**Interface layers are pure I/O. They convert input to JSON-RPC and render responses. That is all.**
+**The interface layer is pure I/O. It converts input to JSON-RPC and renders responses. Nothing more.**
 
-Every interface — the CLI, the Telegram bot, the Discord bot, the desktop app — is a thin translation layer. It receives user input, converts it into a JSON-RPC call to the Core, receives the response, and renders it for the user. No interface layer may perform data persistence, memory retrieval, task planning, or any form of business logic.
+### Rule
 
-### The Rule
+Every interface — CLI, Telegram bot, Discord bot, WebChat, iMessage, desktop shell — is a thin conversion layer. It receives user input, converts it to a JSON-RPC call to the core, receives the response, and renders it for the user. No interface layer may perform data persistence, memory retrieval, task planning, or any business logic.
 
-Interface code (in `apps/` and gateway interfaces) handles only two responsibilities: (1) translating user input into JSON-RPC messages for the Core, and (2) rendering Core responses back to the user in the appropriate format.
+### Principle
 
-### Rationale
-
-If the Telegram bot implements its own memory search, it diverges from the CLI's memory search. If the desktop app manages its own task queue, it becomes a parallel brain. Intelligence must be centralized in Core so that every interface provides an identical experience, differing only in presentation.
+If the Telegram bot implements its own memory search, it will differ from the CLI's memory search. If the desktop app manages its own task queue, it becomes a parallel brain. Intelligence must be centralized in the core so every interface provides the same experience, differing only in presentation.
 
 ### Forbidden
 
-- Persisting data (writing to databases, files, or caches) from interface code
-- Implementing memory retrieval, RAG search, or knowledge queries in an interface layer
-- Building task planners, schedulers, or multi-step execution logic outside of Core
+- Persisting data from interface code (databases, files, caches)
+- Implementing memory retrieval, RAG search, or knowledge queries in the interface layer
+- Building task planners, dispatchers, or multi-step execution logic outside the core
 - Making LLM API calls from interface code
 
 ### Allowed
 
-- Converting user messages into JSON-RPC `request` objects
-- Rendering streamed responses (markdown, code blocks, images) in the interface's native format
-- Maintaining ephemeral UI state (scroll position, input buffer, animation state) that has no business meaning
-- Caching rendered content for display performance (not business data)
+- Translating user messages into JSON-RPC `request` objects
+- Rendering streaming responses in the interface's native format (markdown, code blocks, images)
+- Maintaining transient UI state with no business meaning (scroll position, input buffer, animation state)
 
 ---
 
-## R5. Menu Bar First
+## R5. AI Comes to You
 
-**On macOS, Aleph lives in the menu bar. No Dock icon. The Halo overlay is the primary interaction surface.**
+**Reduce context switching. AI helps inside the user's current environment.**
 
-Aleph's default presence on macOS is invisible — a menu bar icon and a floating Halo overlay. It does not occupy Dock space, does not demand a permanent window, and does not compete with the user's active applications for screen real estate.
+### Rule
 
-### The Rule
+Design every interaction to minimize context switching. Prefer overlays, inline suggestions, and ambient notifications over modal dialogs and dedicated windows. AI should feel like a layer over the user's work, not a separate destination.
 
-The macOS application launches as a menu bar resident with no Dock icon. The Halo floating overlay serves as the primary quick-interaction surface. Full windows (settings, extended conversations, debug panels) open on demand but are not the default state.
+### Boundary
 
-### Rationale
-
-A personal AI assistant should be ambient — always available but never intrusive. Dock icons imply a "heavy" application that the user must actively manage. Menu bar residency communicates that Aleph is a system-level service, always ready but never in the way. The Halo overlay provides instant access without the overhead of window management.
-
-### Forbidden
-
-- Showing a Dock icon by default on macOS
-- Requiring a visible window for basic interactions (quick questions, status checks, notifications)
-- Sacrificing usability for the sake of invisibility — complex tasks that genuinely need a full window must have one
-
-### Allowed
-
-- Menu bar icon with dropdown for status, quick actions, and preferences
-- Halo floating overlay as the primary conversational interface
-- Full application windows for settings, long conversations, debug panels, and other complex scenarios
-- User preference to optionally show a Dock icon if they prefer traditional window management
+Don't disturb the user (don't steal focus, don't pop modal dialogs), but don't refuse necessary interaction surfaces for the sake of stealth.
 
 ---
 
-## R6. AI Comes to You
+## R6. One Core, Many Channels
 
-**Reduce context switching. The AI helps in the user's current environment, not in its own window.**
+**The Rust core is the only brain. Many-channel endpoints only handle I/O and rendering.**
 
-Aleph does not ask users to come to it. It goes to the user — appearing as a floating overlay in their current workspace, surfacing suggestions inline, sending notifications at the right moment. The user should never need to leave their current task to interact with their AI assistant.
+### Rule
 
-### The Rule
-
-Design all interactions to minimize context switches. Prefer overlays, inline suggestions, and ambient notifications over modal dialogs and dedicated windows. The AI should feel like a layer on top of the user's work, not a separate destination.
-
-### Rationale
-
-Every context switch has a cognitive cost. Switching from a code editor to a chat window, typing a question, reading the response, and switching back disrupts flow state. Aleph should integrate into the user's environment so seamlessly that interacting with it feels like thinking out loud, not operating a separate application.
-
-### Forbidden
-
-- Stealing focus from the user's active application without explicit user action
-- Displaying modal dialogs that block the user's workflow
-- Requiring the user to navigate to a specific window or screen to access core functionality
-
-### Allowed
-
-- Halo overlay appearing at the cursor or in a consistent screen position
-- Non-intrusive notifications that the user can act on or dismiss
-- Inline suggestions that appear in context (e.g., code completions, writing assistance)
-- Full windows for tasks the user explicitly initiates (settings, long-form interaction, debugging)
-- Respecting the boundary: do not withhold necessary UI just to avoid showing a window — usability always wins
+All intelligence, planning, memory, and decisions live in the Rust core. Many-channel endpoints (CLI / bot / WebChat Panel / native bridge) only handle I/O and rendering, not business reasoning. R1, R2, and R4 express this principle on different facets — R6 is the product-level restatement.
 
 ---
 
-## R7. One Core, Many Shells
+## R7. LLM Sovereignty
 
-**Rust Core is the only brain. Leptos/WASM is the only UI logic. Native shells are only containers.**
+**Never replace LLM-strength reasoning with deterministic code.**
 
-This redline is the architectural thesis statement. It synthesizes R1 (Brain-Limb Separation) and R2 (Single Source of UI Truth) into a product-level commitment: Aleph has exactly one brain (Rust Core), exactly one UI implementation (Leptos/WASM), and as many native shells as needed — each being a thin container that hosts the WASM UI and bridges to platform capabilities.
+### Rule
 
-### The Rule
+Minimal system + strong prompt = full release of the LLM's reasoning capacity. Keep the complex for the model, keep the simple for the system.
 
-All intelligence, planning, memory, and decision-making live in Rust Core. All business UI lives in Leptos/WASM. Native shells (Tauri on desktop, potential mobile shells in the future) provide window hosting and platform API bridging. No exceptions.
+### Judgment Standard
 
-### Rationale
+For every module, ask — "Is this **empowering** the LLM (giving it a capability it doesn't have) or **usurping** it (making the reasoning decision for it)?"
 
-This constraint is what makes Aleph truly cross-platform without the fragmentation that plagues most multi-platform applications. Adding a new platform means writing a new shell (window container + platform bridge), not reimplementing intelligence or UI. The marginal cost of each new platform approaches the minimum possible.
+- **Empowerment layers (kept)**: Gateway multi-channel reach; Memory persistence; Daemon event sensing; Soul persona; multi-Provider routing; Tool execution; MCP external services; Extension plugin ecosystem; context compression; hard security filters
+- **Usurpation (forbidden)**: intent-detection rule engines; POE goal-validation pipelines; multi-layer tool filters; context-aggregation multi-layer merges; dispatcher intent analysis
 
-### Forbidden
+---
 
-- Implementing reasoning, planning, or memory logic outside of Rust Core
-- Building business UI outside of Leptos/WASM
-- Creating platform-specific "smart" shells that make autonomous decisions
-- Forking the codebase to support a new platform
+## R8. Everything is a Tool
 
-### Allowed
+**All of Aleph's own configurable operations must be exposed as tools, so the LLM completes configuration through natural-language dialogue.**
 
-- Rust Core as the single source of truth for all intelligence
-- Leptos/WASM as the single source of truth for all business UI
-- Thin native shells that host WebView (for WASM UI) and expose platform APIs via IPC
-- Adding new platforms by writing new shells without touching Core or UI code
+### Rule
+
+Agent management (create / switch / delete); provider configuration; channel configuration; skill / MCP install / uninstall; daemon subscription rules — all Tools.
+
+### Core Loop
+
+`User natural language → LLM parses intent → LLM picks tool → Tool executes → Result returns to LLM → LLM replies to user`
+
+### Effect
+
+Conversation **is** the admin panel. Users don't need to learn config files or APIs; natural language drives everything.
+
+---
+
+## R9. Intelligence Lives in the Prompt
+
+**The "intelligence" of removed middleware is not discarded — it migrates to system prompt templates.**
+
+### Rule
+
+The main loop's single LLM call naturally covers every judgment (intent parsing + tool selection + safety evaluation + completion judgment). Zero extra LLM calls, zero middleware tax, full release of the model's reasoning capacity.
+
+### Prune-the-Prompt Principle
+
+Migrating intelligence to the prompt ≠ writing a thick prompt. Stronger models need **less** direction / constraint / examples — few-shots become cages (the model imitates examples instead of understanding the problem space); low-density redundancy dilutes attention. After a new model releases, the first thing to do is **prune context**; build validation / self-correction into **architecture (runtime signals)**, not prompts.
+
+Before adding prompt bytes, pass **two rulers**:
+
+1. **First ruler**: is this a runtime fact the model **can't know**, or am I **teaching a strong model how to think**? The latter doesn't belong in the prompt.
+2. **Second ruler** (Pi's mirror, 2026-07-26): **does a tool own this sentence**? If yes → write it into that tool's `DESCRIPTION` (sent with its schema, and only to requests that can actually call it), not the system prompt — the system prompt only carries **things no single tool can say** (cross-tool tradeoffs / runtime facts / safety boundaries). This ruler catches "perfectly correct, perfectly necessary, just in the wrong place" duplication.
+
+**Both rulers are baked into the architecture**: `src/thinker/prompt_contract.rs` exposes `reachable_layers` (a layer must be able to speak, otherwise whitelist with reason) / `scaffold_bytes_ratchet` (measured scaffolding ceiling, only decreases) / `no_sentence_is_stated_twice`. Measure with `aleph-server prompt-size`.
+
+---
+
+## R10. Thin Harness, Dumb Loop
+
+> *"If you're not the model, you're the harness."* — Vivek Trivedy
+> *"Models get stronger → harness gets thinner."* — Anthropic
+
+### Thin Harness Philosophy
+
+Aleph follows the Anthropic school — minimal runtime, trust the model. The harness is scaffolding, not cognition. **The stronger the model, the thinner the harness** — a good harness must pass the **Future-Proof Test**: swap in a stronger model, performance naturally improves, no harness code change required.
+
+### Dumb Loop
+
+`src/harness/` only carries Think→Act turn scheduling — **it does no reasoning**. All intelligent decisions (intent parsing, tool selection, safety evaluation, completion judgment) are made by a single LLM call.
+
+### Core Boundaries
+
+- `src/harness/` is locked at **12 files**; the line count is gated by the ratchet in `src/harness/tests/budget.rs` (measured, not hand-counted, only decreases, increases must answer the 3 questions below). **Code is the authority** — every doc number is just a copy of `CEILING`
+- Top-level (8): `mod.rs` / `agent.rs` / `deps.rs` / `trait_def.rs` / `callback.rs` / `chain_context.rs` / `trace.rs` / `trace_sink.rs`
+- `agent/` subdirectory (4): `think.rs` / `act.rs` / `guardrails.rs` / `prompt.rs` (Tasks 8/9/10 split `agent.rs` into Think / Act / Guardrails / Prompt)
+
+### The Five "Don'ts" Inside the Loop
+
+1. Don't classify intent
+2. Don't filter tools / score relevance by **message intent** (progressive tool disclosure exception below)
+3. Don't judge completion (other than the model's explicit stop)
+4. Don't do content moderation / safety scoring
+5. Don't pick an error-recovery strategy
+
+> **Progressive tool disclosure exception**: static core tool set + full tool catalog + `tool_search` meta-tool for on-demand schema loading is a **message-content-blind static partition**; the loading decision is 100% model-initiated. The partition lands on the tool-presentation layer, **not in `src/harness/`**, so R10's file budget grows by zero.
+
+### YAGNI Withdrawal Mode
+
+Any abstraction with zero current consumers is deleted / withdrawn immediately — never "left for the future". During harness dissolution, ~5,200 lines of dead code were removed cumulatively.
+
+### The 3 Questions Before Adding Code
+
+1. Is this scaffolding or cognition? Cognition must move to the prompt
+2. Will a model-upgrade-still-need-it? If not, delete
+3. How many real consumers does it have today? Zero → withdraw
+
+### Relationship
+
+R10 is the concrete embodiment of R3 (Core Minimalism) + R7 (LLM Sovereignty) + R9 (Intelligence in the Prompt) in the Agent Harness engineering layer.
 
 ---
 
 ## North Star
 
-The seven redlines define what Aleph must never do. The North Star defines where Aleph is going. These three principles guide all forward-looking decisions.
+The ten redlines define what Aleph must never do. The North Star defines where Aleph is going. Three principles guide every forward-looking decision.
 
-### Architecture Is Set — Fill, Don't Rebuild
+### Architecture is settled — fill, don't rebuild
 
-The 1-2-3-4 architecture model (1 Core, 2 Faces, 3 Limbs, 4 Nerves) is stable and proven. The redlines above protect it. Future work is about filling in capabilities within this structure, not redesigning the structure itself.
+The 1-2-3-4 architectural model (1 core, 2 faces, 3 limbs, 4 nerves) is stable and proven. Future work **fills** capability inside this structure, not redesigning the structure itself.
 
-This means: when facing a new requirement, the first question is always "where does this fit in the existing architecture?" — not "do we need a new architecture?" The answer to the second question is no.
+This means: when facing a new requirement, the first question is always "where does this fit in the existing architecture?" — not "do we need a new architecture?" The answer to the second is no.
 
-### Desktop Bridge Protocol Is Complete
+### Skills drive the future
 
-The Desktop Bridge protocol — the UDS JSON-RPC 2.0 interface between Core and native shells — is fully defined and implemented in the Tauri version. It covers screen capture, window management, input simulation, OCR, and canvas rendering.
+Architecture is the skeleton. Skills are the flesh. Once the 1-2-3-4 structure is stable and the redlines are enforced, the primary vector for making Aleph more useful is **adding skills**.
 
-Future work focuses on cross-platform coverage (ensuring Windows and Linux bridges match macOS capabilities) and performance optimization, not protocol redesign.
+Skills are independently deployable units of domain expertise — Python scripts, Bash workflows, MCP servers — orchestrated by the core through its tool system. They determine how much real work Aleph can save a user. Every hour invested in well-designed skills pays back across every interface and every platform, because skills run through the core, and the core serves every shell equally.
 
-### Skills Drive the Future
-
-The architecture is the skeleton. Skills are the flesh. Once the 1-2-3-4 structure is solid and the seven redlines are enforced, the primary vector for making Aleph more useful is adding Skills.
-
-Skills are independently deployable units of domain expertise — Python scripts, Bash workflows, MCP servers — that Core orchestrates through its tool system. They determine how much real-world work Aleph can save its user. Every hour invested in a well-designed Skill pays dividends across every interface and every platform, because Skills run through Core, and Core serves all shells equally.
-
-The future of Aleph is not more architecture. It is more Skills.
+Aleph's future isn't more architecture. It's more skills.

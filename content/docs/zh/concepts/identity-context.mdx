@@ -89,11 +89,11 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 | 组件 | 位置 | 职责 |
 |-----------|----------|----------------|
-| **IdentityContext** | `shared/protocol/src/auth.rs` | 不可变的身份快照 |
-| **SessionIdentityMeta** | `src/gateway/session_manager.rs` | 持久化身份元数据 |
-| **PolicyEngine** | `src/gateway/security/policy_engine.rs` | 无状态权限检查器 |
-| **InvitationManager** | `src/gateway/security/invitation_manager.rs` | 访客邀请生命周期 |
-| **SessionManager** | `src/gateway/session_manager.rs` | 身份构建 |
+| **IdentityContext** | `src/identity/` | 不可变的身份快照 |
+| **SessionIdentityMeta** | `src/session/` | 持久化身份元数据 |
+| **PolicyEngine** | `src/security/policy_engine.rs` | 无状态权限检查器 |
+| **SignerKey / OperationLedger** | `src/identity/signer.rs` | 每代理签名密钥 + 签名操作账本 |
+| **IdentityLoader** | `src/gateway/identity_loader.rs` | 网关侧身份加载 |
 | **Orchestrator** | `src/orchestrator/` | 身份注入到 FlowRequest |
 
 ## 角色类型
@@ -232,3 +232,41 @@ let result2 = executor.execute(&action2, &identity).await;
 
 - [工具系统](/docs/zh/concepts/tool-system) -- 工具如何声明能力和执行
 - [安全概述](/docs/zh/security/overview) -- 纵深防御安全架构
+
+---
+
+## 26.7.x 补充
+
+### 委托角色链（Delegated Role Chain）
+
+26.7.26+ 引入委托角色链：
+
+- 身份链路**生命周期内闭包**——委托关系一旦建立就在链内完成所有签发
+- `SignerKey` 由对应的 Agent 持有，私钥不出节点
+- `OperationLedger` 由签名者所属链路回放验证
+
+### 失败关闭
+
+26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时，授权**失败关闭**而不是开放。`/sandbox.command_policy` 硬底优先级最高，不能被任何 `exec_tier` 拉低。
+
+### 真实客户端 IP
+
+26.7.17+：`[gateway] trusted_proxy` 反向代理信任列表决定网关是否读取真实客户端 IP——容量限制、速率限制、审计、连接认证都依赖此值。配置错误时所有这些指标都会用代理 IP。
+
+### 设备票与令牌轮换
+
+26.7.17+ 网关侧远程认证：
+
+- `gateway.ticket.create` 颁发设备票
+- `gateway.token.current` / `gateway.token.rotate` 管理令牌
+- `gateway.devices.list` / `gateway.devices.revoke` 管理设备清单
+- 远程会话在 token 轮换时被关闭，**环回会话保留**
+
+### TOFU 信任
+
+26.7.18+ 客户端对自签名证书的首次使用信任（Trust-on-First-Use）：
+
+- 共享决策核心 + 已固定 TOFU 信任存储
+- SHA-256 指纹 + SAN/subject 解析
+- 审批 splash 页面（指纹 + SAN + TOFU/change 警告）
+- pending-cert 状态与 approve/reject 路径

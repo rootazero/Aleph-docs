@@ -168,3 +168,23 @@ description: "系统日志和诊断 RPC 方法"
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `logs.getLevel` / `logs.setLevel` / `logs.getDirectory`
+
+日志 RPC——`RUST_LOG` 风格的级别控制 + 日志目录查询。
+
+### Day-boundary 日志轮转
+
+26.7.24+：守护进程支持 day-boundary 日志轮转；启动时写 `ALEPH-BOOT` marker。
+
+### PII 清理
+
+26.7.x 对抗性修复——模式识别（正则 / ML 混合）、替换策略、审计轨迹。
+
+### Guardian Judge 隐藏密钥
+
+`Guardian Judge` payload 隐藏密钥。

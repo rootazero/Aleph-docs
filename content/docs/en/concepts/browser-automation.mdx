@@ -141,3 +141,44 @@ Profiles are isolated — each profile has its own cookie jar and storage.
 
 - [Builtin Tools](./builtin-tools) — Browser tools exposed to agents
 - [Security Primitives](./security-primitives) — SSRF protection for browser requests
+
+---
+
+## 26.7.x Addendum
+
+### Computer-Use Major Hardening
+
+26.7.15 fixes six P0 defects:
+
+- Escape trap
+- Key-combo block
+- Press-hold
+- Scroll units
+- Paste
+- Degenerate frames
+
+macOS PIM and Chromium AX wired; background mouse acts macOS can't actually deliver are **refused up front**.
+
+### Non-Intrusive
+
+26.7.15+: desktop apps driven through a **pid-targeted input rail** + window-scoped capture, so automation no longer moves the user's cursor; six P0 defects fixed.
+
+### Window / Screen
+
+26.7.21+:
+
+- macOS window targeting via Accessibility (CGWindowID → AX by geometry)
+- Focus raises the **specific** target window
+- Bounds are set on the exact window
+- Screen recording is cropped to the requested region (physical pixels, not points)
+- Typed bridge errors are preserved (not flattened) on OCR, window-capture, media, input, and screenshot rails
+
+### Canvas / Browser Inspector Seams Withdrawn
+
+26.7.25: the Panel's Canvas / Browser inspector seams were withdrawn (R10 YAGNI — zero-consumer, immediate withdrawal).
+
+### See Also
+
+- [Built-in Tools](/docs/en/concepts/builtin-tools) — where the browser tool lives
+- [Security Primitives](/docs/en/concepts/security-primitives) — SSRF protection
+- [Desktop Bridge](/docs/en/architecture/desktop-bridge) — the macOS platform bridge

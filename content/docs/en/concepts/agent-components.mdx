@@ -110,3 +110,33 @@ Manages context window limits through compaction:
 - [Agent Runtime](/docs/concepts/agent-runtime) — Runtime configuration
 - [Thinker](/docs/concepts/thinker) — Prompt construction
 - [Task Scheduling](/docs/concepts/task-scheduling) — Task queue
+
+---
+
+## 26.7.x Addendum
+
+### Act-Stage Parallel Groups
+
+The pre-26.7.x serial execution is now replaced by **resource-claim bucketed** parallelism:
+
+- Tools declare `Shared` / `Exclusive{Global}` / `Exclusive{Paths}` three-state resource claims
+- Resource-scope parallel dispatch (**intra-group** concurrent, **inter-group** serial) — not a task-dependency graph
+- `batch_parallelizable` checks whether calls admit parallel dispatch
+- Serial mode only falls back on single call / parallelism disabled / duplicate call / no parallel group
+
+### Guardrail + Parallel
+
+26.7.x: serial fallback no longer triggers from a wired guardrail registry. The tool-call guardrail (Block / Sanitize / Pass) is applied sequentially in `act_parallel`'s PASS 0 — the same prep/execute split Pi uses (sequential validate + approval, then concurrent execute).
+
+### Cooperative Steer Checkpoint
+
+Before each serial group (and before each parallel group), Act re-checks `has_unanswered_user_message`; if the user has injected a message, the model is let respond first.
+
+### Tool-Loop Verifier
+
+26.7.15+: the tool-loop verifier (`src/verification/`) post-validates each turn's tool calls. Only the model's explicit stop ends a turn (**R10 "Don't #3**). `max_iterations` remains a safety cap.
+
+### See Also
+
+- [Harness Architecture](/docs/en/architecture/harness) — Think→Act implementation
+- [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop) — the five "Don'ts"

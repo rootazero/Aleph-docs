@@ -221,3 +221,33 @@ The `PluginWatcher` monitors these directories for changes and triggers hot relo
 - [Capability System](./capability-system) — Plugin capability declarations
 - [Skill System](./skill-system) — Skill management
 - [Extensions Store](/docs/en/concepts/extensions-store) — The user-facing umbrella concept (skill + plugin + MCP) and its store
+
+---
+
+## 26.7.x Addendum
+
+### Two Namespaces
+
+26.7.x introduces the **singular `plugin.*` as the canonical** namespace; the plural `plugins.*` is kept for backward compatibility. The canonical namespace is CC-compatible.
+
+### `plugin.reload` Serialized
+
+26.7.21+: concurrent `reload` is now **serialized** under the load guard — previously a source of race conditions (two reloads ran concurrently and overwrote each other's state).
+
+### Plugin Loader
+
+`src/extension/loader.rs::register_memory_extension_if_declared` mounts the memory extension when declared; only mounts when a `memory` section is present, otherwise skips.
+
+### Fail-Open → Fail-Closed
+
+26.7.21 hardening: the default failure behavior for plugins / skills / MCP servers **fails closed** — some scenarios were previously fail-open, introducing security risks.
+
+### Signed Operation Ledger
+
+`~/.aleph/ops.log` records the per-agent signed operation sequence — see [Identity & Signing](/docs/en/concepts/identity-context#26.7.x-addendum).
+
+### See Also
+
+- [Extensions](/docs/en/concepts/extensions) — umbrella concept
+- [Extensions Store](/docs/en/concepts/extensions-store) — user perspective
+- [Skill System](/docs/en/concepts/skill-system) — parallel to plugins

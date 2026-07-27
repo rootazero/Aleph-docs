@@ -311,3 +311,29 @@ Aleph 从 `chat.db` 中的三个主要表读取：
 | 响应时间慢 | 减少 `poll_interval_ms`（例如到 500）；注意这会增加 SQLite 读取频率 |
 | "Invalid target" 错误 | 确保收件人是有效的电话号码（带国家代码）或电子邮件地址 |
 | 群组消息被忽略 | 检查 `group_policy` 和 `group_allow_from`；验证 `require_mention` 设置 |
+
+---
+
+## 26.7.x 补充
+
+> 注：本节以用户视角补充 26.7.x 的新内容；具体 RPC 与实现细节见 [协议适配器（概念）](/docs/zh/concepts/protocol-adapters) 与 [网关 RPC](/docs/zh/gateway/methods)。
+
+### 跨通道可达性
+
+26.7.x：所有配置的 channel 现在真的可达且可寻址——之前有些配置从未生效。
+
+### Telegram 平行层清理
+
+26.7.21 砍掉 ~2.6k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）。access / pairing / allowlist **单源到路由器**。
+
+### Discord 平行层清理
+
+26.7.21 移除重复的嵌套配置 / account-pool / 解析器层。
+
+### iMessage
+
+26.7.21+ 增强：入站 add-tapback（add-reaction）会上抛为模型上下文。
+
+### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
+
+详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。

@@ -198,3 +198,33 @@ bus.publish(MemoryCreated {
 - [网关](/docs/zh/architecture/gateway) — 事件如何转发到 WebSocket 客户端
 - [会话服务](/docs/zh/architecture/session-service) — 会话生命周期事件
 - [内存系统](/docs/zh/architecture/memory) — 内存更新事件
+
+---
+
+## 26.7.x 补充
+
+### `broadcast::RecvError::Lagged` 必须恢复
+
+26.7.21 修复：Channel forwarder 在 `broadcast::RecvError::Lagged` 上不再永久死亡。WebSocket 断开时每个连接的事件转发任务不再泄漏；webhook 拥塞时返回 503 而不是默默丢弃。
+
+### 单源错误回执
+
+26.7.21 修复：网关返回给客户端的**单一来源**用户可读错误；原始错误链不外泄到 Panel。
+
+### SessionEvent
+
+26.7.7+ `session_events` 是规范事件日志——`MessageProjector` 物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写。`SessionEventRecord` + `TurnId` 是新引入的载荷。
+
+### 死信与重投递
+
+26.7.17+：channel.* 未能成功下发的消息被收集在**死信**队列中，可在 Panel 内重投递。`channel.pairing_data` 提供配对上下文。
+
+### Loop-Graph 治理事件
+
+26.7.21+ 治理事件（胜利声明、目标结算、团队解散、watcher 触发）通过同一事件总线传递，由 `loop_graph` 层的 watcher 订阅。
+
+### 见另请参阅
+
+- [网关协议](/docs/zh/gateway/protocol) — 错误回执 single-source
+- [消息](/docs/zh/concepts/messages) — `SessionEvent` 与 `MessageProjector`
+- [架构概览](/docs/zh/architecture/overview#治理拓扑层) — 治理事件如何流过图

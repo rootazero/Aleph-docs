@@ -131,3 +131,28 @@ pub enum PiiAction {
 
 - [Security Primitives](./security-primitives) — Runtime guard integration
 - [Secret Management](./secret-management) — Encrypted credential storage
+
+---
+
+## 26.7.x Addendum
+
+### Adversarial-Review Fixes
+
+26.7.x PII protection received an adversarial-review pass (the `pii:` commit family), covering:
+
+- Pattern recognition (regex / ML hybrid)
+- Replacement strategy (semantic-preserving vs full)
+- Audit trail
+
+### Fail-Closed
+
+26.7.21+: the PII detector **refuses to allow** on failure — previously fail-open (detection failure still allowed), introducing leakage risk.
+
+### Integration with Hooks
+
+26.7.x: PII cleanup can hook in as a `tool.invoke.post` Hook — the audit trail records every cleanup.
+
+### See Also
+
+- [Security Primitives](/docs/en/concepts/security-primitives) — the full primitive set
+- [Error Handling](/docs/en/concepts/error-handling) — fail-closed

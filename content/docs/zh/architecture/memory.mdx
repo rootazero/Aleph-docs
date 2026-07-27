@@ -477,3 +477,38 @@ pub enum IsolationLevel {
 - [记忆演进](memory-evolution) — 规范历史（规范 1-4、A-C）
 - [网关：记忆方法](../gateway/methods/memory) — API 参考
 - [思考器](../concepts/thinker) — 记忆如何注入提示
+
+---
+
+## 26.7.x 补充
+
+### Vault 面板重构（26.7.27+）
+
+- 卡片视图（替代旧表格）
+- 批量操作栏 + 深链 + **证据链** + 跨代理选择
+- 来源（provenance）字段
+- 批量导出为**交付物**
+
+### `note_graph_query` 工具
+
+26.7.15+ 只读工具：
+
+- 双向 BFS 路径查找
+- 类型化关系边
+- `[[wikilink]]` supersession 强制浮现纠正笔记
+- 抗崩溃索引
+- CJK trigram 全文搜索
+
+### `memory.retrieve_with_trace`
+
+26.7.21+ 真实 scoring-pipeline trace 给 debug 面板。
+
+### 真实成本与 token 核算
+
+26.7.15+ Tier-3 硬化：代理范围召回信号、严重度门控的归档、成熟度队列。
+
+### 详见
+
+- [记忆（概念）](/docs/zh/concepts/memory) — 概念视角
+- [记忆演化](/docs/zh/architecture/memory-evolution) — SkillOpt
+- [网关 RPC `memory.*`](/docs/zh/gateway/methods/memory)

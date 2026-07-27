@@ -129,3 +129,27 @@ description: "运行生命周期和队列 RPC 方法"
 
 - [agent.*](/docs/zh/gateway/methods/agent)——启动和控制代理运行
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `trace.*` 完整 RPC
+
+- `trace.list` / `trace.get` / `trace.by_runs` —— 追踪事件
+
+### `session.usage` / `session.compact` / `session.truncate`
+
+会话运行时 RPC——见 [session.mdx](/docs/zh/gateway/methods/session)。
+
+### `tools.in_flight`
+
+列出当前正在运行的工具调用。
+
+### `activity.stats`
+
+活动统计——按代理 / 会话 / 工具聚合。
+
+### 实时多会话
+
+26.7.7+：运行闸门从 per-agent 移到 per-session `SessionRunRegistry`。

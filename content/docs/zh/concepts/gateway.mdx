@@ -193,3 +193,51 @@ pub struct RateLimiter {
 - [会话管理](./session-service) —— 会话生命周期
 - [事件系统](./event-system) —— 事件分发
 - [思考器](./thinker) —— 提示词构造
+
+---
+
+## 26.7.x 补充
+
+### 错误链 Single-Source
+
+26.7.21+：网关返回给客户端的**单一来源**用户可读错误。原始错误链不外泄到 Panel——之前的实现会把内部 `serde_json` / sqlx / io 错误直接吐给用户。
+
+### WS 任务泄漏修复
+
+26.7.21+：WebSocket 断开时每个连接的事件转发任务**不再泄漏**；channel forwarder 在 `broadcast::RecvError::Lagged` 上**恢复**而非永久死亡。
+
+### Webhook 反压
+
+26.7.21+：webhook 接收端在拥塞时返回 503 而不是默默丢弃入站消息。
+
+### 死信与重投递
+
+26.7.17+：`channel.dead_letters` 收集未送达消息；`channel.redrive_dead_letters` 重投递。
+
+### 自签名 TLS + TOFU
+
+26.7.17/18+：
+
+- 进程内 gateway TLS（`[gateway] tls` / `trusted_proxy` / `allow_insecure_remote`）
+- 自签名证书 SAN 自动覆盖主机非环回接口 IP
+- 漂移检测 sidecar + 原子 regen marker
+- 客户端 TOFU（fingerprint + SAN 审批 + 固定信任存储）
+- macOS WKWebView + iOS Keychain 适配器
+
+### 真实客户端 IP
+
+26.7.17+：`[gateway] trusted_proxy` 反向代理信任列表——决定网关是否读取真实客户端 IP（容量限制、速率限制、审计、连接认证）。
+
+### `gateway.ticket.create` / `token.rotate` / `devices.*`
+
+26.7.x 完整设备票 / 令牌轮换 / 设备管理 RPC。远程会话在 token 轮换时关闭，**环回会话保留**。
+
+### 完整 RPC
+
+26.7.x Gateway 暴露 **~265 个 RPC 方法**——详见 [网关方法参考](/docs/zh/gateway/methods)。
+
+### 见另请参阅
+
+- [网关协议](/docs/zh/gateway/protocol) — WebSocket 协议
+- [网关认证](/docs/zh/gateway/auth) — 认证 / 配对 / TOFU
+- [网关方法](/docs/zh/gateway/methods) — 完整 RPC

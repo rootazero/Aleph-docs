@@ -480,3 +480,37 @@ registry.register("my-protocol", Arc::new(MyProtocol::new(client)))?;
 - [架构概览](./overview) —— 执行层的系统级视图
 - [网关](./gateway) —— 网关如何将请求路由到提供商
 - [思考器](./thinker) —— 思考器如何选择和编排提供商
+
+---
+
+## 26.7.x 补充
+
+### Failover 重构
+
+26.7.21+ 重大：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
+
+### VESR 动态模型路由
+
+26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（k-NN over sqlite-vec），所以模型能看到哪些模型在此类工作上**实际**表现过。
+
+### Provider 预设刷新
+
+26.7.17+ 预设刷新——per-vendor 最新模型；目录重新对齐。
+
+### 单源价格表
+
+`session.usage` 在核心内用统一价格表计算成本。shell 不再持有重复价格表。
+
+### `runtimes.install` / `list` / `refresh`
+
+26.7.x 运行时管理：自动发现与安装语言运行时（Node / Python / Bun / uv）。
+
+### `route_config.*` / `routing_rules.*`
+
+细粒度路由规则（`routing_rules.create` / `list` / `get` / `update` / `delete` / `move`）。
+
+### 详见
+
+- [生成（概念）](/docs/zh/concepts/generation)
+- [AI 提供商](/docs/zh/concepts/ai-providers)
+- [网关 RPC `providers.*`](/docs/zh/gateway/methods/providers)

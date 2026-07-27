@@ -176,3 +176,46 @@ pub enum AuditEventType {
 
 - [PII 保护](/docs/zh/concepts/pii-protection) — PII 检测和过滤
 - [秘密管理](/docs/zh/concepts/secret-management) — 加密凭据存储
+
+---
+
+## 26.7.x 补充
+
+### Pairing 单源路由器
+
+26.7.21+：频道本地 pairing store 已被回退，**单一源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
+
+### 命令注入修复
+
+- 桌面 `open` / `launch` 改为通过 `ShellExecuteW` 而非 shell
+- 打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接
+- 技能下载路径穿越关闭，扫描文件大小加封顶
+
+### Cluster `file.write` 无 TOCTOU
+
+26.7.21+：集群 `file.write` 不再有存在检查与写入之间的 TOCTOU 窗口。
+
+### 证书审批指纹匹配
+
+26.7.21+：证书审批**必须**匹配指纹才授权。WebView 麦克风权限在 Linux/Windows 上**必须**做来源限制。
+
+### 路径安全
+
+26.7.15+：
+
+- 符号链接安全的删除/移动
+- glob/deny 复检
+- 冲突去重
+- 逐路径锁
+- 加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）
+- `apply_patch` 前向游标诚实地失败
+
+### 进程隔离内核
+
+26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口（详见 [架构红线 R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
+
+### 见另请参阅
+
+- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 详细
+- [安全：配对](/docs/zh/security/pairing) — pairing 流程
+- [架构红线 R1](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation) — 进程隔离例外

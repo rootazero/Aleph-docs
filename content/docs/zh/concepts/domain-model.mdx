@@ -176,3 +176,24 @@ impl Email {
 - [架构概览](/docs/zh/architecture/overview) — 领域在 5 层模型中的位置
 - [设计模式](/docs/zh/development/design-patterns) — Context、Newtype、Builder 模式
 - [会话管理](/docs/zh/architecture/session-service) — 身份和会话领域概念
+
+---
+
+## 26.7.x 补充
+
+### POE 上下文已退役
+
+POE（Principle-Operation-Evaluation）架构在 26.5+ 退役。其「智慧」已迁移到 system prompt 模板（R9）；成功定义、验证、评估现在由 LLM 一次调用自然完成。Harness 不做完成度判断（**R10「5 个不」之 3**），不参与评估。
+
+历史 POE 上下文中 `SuccessManifest` 聚合根、`ValidationRule` 与 `Verdict` 值对象（位于 `src/poe/types.rs`）仍可作为只读历史参考，但**不参与运行时评估**。
+
+### 新增限界上下文
+
+- **Loop-Graph Governance 上下文**（`src/loop_graph/`）—— 团队节点 / 审计环 / 客观 ACL / 胜利声明 watcher / 内置 `loop-auditor`
+- **Goal 上下文**（`src/goal/`）—— 持久目标；由 GoalStore 管理
+- **Artifact 上下文**（`src/artifacts/`）—— 交付物（`tools.publish` 的产物）
+- **Signing 上下文**（`src/identity/signer.rs`）—— 每代理签名密钥 + 签名操作账本
+
+### Harness 12 文件
+
+26.7.x：`src/harness/` 锁 **12 文件**，行数由 `src/harness/tests/budget.rs` 的棘轮守（**代码是权威**——任何文档数字都只是 `CEILING` 的副本）。详见 [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop)。

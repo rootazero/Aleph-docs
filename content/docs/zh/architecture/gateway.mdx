@@ -485,3 +485,47 @@ EventBus 提供用于实时事件分发的发布/订阅机制。客户端使用 
 - [代理工具链](./harness) — 网关分发到代理后会发生什么
 - [会话服务](./session-service) — 会话键解析和持久化
 - [工具架构](./tools) — 代理请求触发的工具执行
+
+---
+
+## 26.7.x 补充
+
+### 网关核心地位
+
+`aleph-server` 进程内 gateway 处理：
+
+- **WebSocket 协议**（JSON-RPC 2.0 over ws/wss）
+- **TLS**（自签名或用户提供）
+- **认证**（TOFU、token、device ticket、pairing）
+- **路由**（chat / config / memory / agents / tools / mcp / skills / plugins / extensions / channels / teams / projects / workspaces / runtimes / ...）
+- **完整 RPC ~265 个**
+
+### 单源错误回执
+
+26.7.21+：网关返回客户端的**单一来源**用户可读错误。原始错误链不外泄到 Panel。
+
+### WS 任务泄漏修复
+
+26.7.21+：每连接事件转发任务不再泄漏；`broadcast::RecvError::Lagged` 恢复而非永久死亡；webhook 反压返回 503。
+
+### 自签名 TLS + TOFU
+
+- `[gateway] tls` —— 自签名或用户证书
+- `[gateway] trusted_proxy` —— 反向代理真实 IP
+- `[gateway] allow_insecure_remote` —— 失败关闭
+- 客户端 TOFU：fingerprint + SAN 审批
+
+### 设备 / 凭据 / 票 / 令牌
+
+- `gateway.ticket.create`
+- `gateway.token.current` / `gateway.token.rotate`
+- `gateway.devices.list` / `gateway.devices.revoke`
+- `gateway.credentials`
+- `gateway.identity.get`
+- `gateway.metrics.lanes` / `gateway.metrics.run_concurrency`
+
+### 详见
+
+- [网关协议](/docs/zh/gateway/protocol) — 协议
+- [网关认证](/docs/zh/gateway/auth) — 认证 / 配对 / TOFU
+- [网关方法参考](/docs/zh/gateway/methods) — 完整 RPC

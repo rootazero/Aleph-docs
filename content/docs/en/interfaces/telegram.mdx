@@ -316,3 +316,29 @@ If either check fails, the channel reports a `ConfigError` or `AuthFailed` error
 | "Failed to verify bot token" | Verify your token with `curl https://api.telegram.org/bot<TOKEN>/getMe` |
 | Messages are delayed | Decrease `polling_interval_secs` or switch to webhook mode |
 | Formatting looks broken | Aleph uses MarkdownV2; check that special characters are not double-escaped |
+
+---
+
+## 26.7.x Addendum
+
+> Note: this section supplements 26.7.x from the user view; RPC and implementation details are in [Protocol Adapters (Concept)](/docs/en/concepts/protocol-adapters) and [Gateway RPC](/docs/en/gateway/methods).
+
+### Cross-Channel Reachability
+
+26.7.x: configured channels are now truly reachable and addressable — previously some configurations never took effect.
+
+### Telegram Parallel-Layer Cleanup
+
+26.7.21 shed ~2.6k lines of dead code (an uncompiled webhook server, an unconstructed session manager, a dead draft API, duplicated status reactions). Access / pairing / allowlist **single-sourced on the router**.
+
+### Discord Parallel-Layer Cleanup
+
+26.7.21 removed duplicated nested-config / account-pool / resolver layers.
+
+### iMessage
+
+26.7.21+ enhancement: inbound add-tapbacks (add-reactions) surface to the model as context.
+
+### Full `channel.*` / `channels.*` / `channel.pairing.*` RPC
+
+See [Gateway RPC channels](/docs/en/gateway/methods/channels).

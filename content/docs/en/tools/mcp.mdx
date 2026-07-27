@@ -384,3 +384,39 @@ When `transport` is set to `auto`, Aleph defaults to HTTP. Future versions may a
 4. **Use environment variables** for secrets — never hardcode API keys in configuration
 5. **Monitor events** via the manager's event system for operational visibility
 6. **Group related tools** into a single MCP server to reduce connection overhead
+
+---
+
+## 26.7.x Addendum
+
+### Toolset Reorganized
+
+26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`.
+
+### Parallel Execution
+
+`src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
+
+### `tools.defer_mcp_tools` / `enable_tool_search`
+
+26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
+
+### MCP On-Demand Discovery
+
+26.7.17+: `McpResourceIndexLayer` is retracted. `mcp_list_*` tools discover on demand; a `cat`-guard read-steer routes to native MCP / skill / plugin reads.
+
+### `file_read` Supports Images
+
+26.6.29+: `file_read` now supports images (`image_read`); unchanged file reads are de-duplicated across turns via a read cache.
+
+### Fail-Closed
+
+Unknown tools **fail closed** under the `ask` tier.
+
+### `plugin.install` Unified Entry
+
+26.7.21+: classifies by source (marketplace / zip / path) and routes uniformly.
+
+### Full `tools.*` / `mcp.*` / `extensions.*` RPC
+
+See [Gateway Methods Reference](/docs/en/gateway/methods).

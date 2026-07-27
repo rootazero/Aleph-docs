@@ -172,3 +172,83 @@ ws://127.0.0.1:18790
   }
 }
 ```
+
+---
+
+## 26.7.x 补充
+
+### TLS
+
+26.7.17+ 引入 `[gateway] tls`：
+
+```toml
+[gateway]
+bind = "0.0.0.0"
+allow_insecure_remote = false  # 默认 false；非环回绑定失败关闭
+
+[gateway.tls]
+# cert 与 key 留空 → 自动生成自签名证书
+# SAN 自动覆盖主机非环回接口 IP
+# cert = "/path/to/cert.pem"
+# key  = "/path/to/key.pem"
+```
+
+启用 TLS 后连接地址变为 `wss://...`，端口不变。
+
+### 真实客户端 IP
+
+26.7.17+：
+
+```toml
+[gateway]
+trusted_proxy = ["127.0.0.1", "::1"]
+```
+
+被列入可信代理时，网关从 `X-Forwarded-For` / `X-Real-IP` 解析真实客户端 IP（容量限制、速率限制、审计、连接认证都依赖此值）。
+
+### 原子 regen marker
+
+26.7.18+：自签名证书 SAN 漂移时**原子 regen**——原子写一个 marker 文件，再 regen 证书，regen 失败时仍使用旧证书。
+
+### 错误回执 Single-Source
+
+26.7.21+：网关返回客户端的**单一来源**用户可读错误。原始错误链不外泄到 Panel。
+
+```json
+// 错误回执示例
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "工具 'shell_exec' 失败：exit code 1",
+    "data": {
+      "receipt_id": "err-...",
+      "category": "tool_execution",
+      "user_message": "命令失败（exit 1）"
+    }
+  }
+}
+```
+
+### WS 任务泄漏修复
+
+26.7.21+：
+
+- 每连接事件转发任务不再泄漏
+- `broadcast::RecvError::Lagged` 恢复而非永久死亡
+- webhook 拥塞返回 503 而不是默默丢弃
+
+### 请求 ID 改用原子计数器
+
+26.7.21+：线缆请求 id 不用 UUID（`aleph-protocol` 移除 `uuid` 依赖），改用**原子计数器**。请求 id 不再随机化，按递增。
+
+### 完整 RPC ~265
+
+26.7.x 网关暴露 **~265 个 RPC 方法**——详见 [方法参考](/docs/zh/gateway/methods)。
+
+### 详见
+
+- [网关方法参考](/docs/zh/gateway/methods) — 完整 RPC
+- [网关认证](/docs/zh/gateway/auth) — 认证 / 配对 / TOFU
+- [架构 / 网关](/docs/zh/architecture/gateway) — 架构

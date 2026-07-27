@@ -245,12 +245,13 @@ pub struct IdentityContext {
 ```json
 {
   "jsonrpc": "2.0",
-  "id": "msg-001",
-  "method": "agent.run",
+  "id": 1,
+  "method": "chat.send",
   "params": {
     "message": "解释 Rust 借用检查器",
     "session_key": "agent:main:main",
-    "thinking": "medium"
+    "thinking": "medium",
+    "session_mode": "work"
   }
 }
 ```
@@ -272,6 +273,55 @@ pub struct IdentityContext {
 
 ## 相关页面
 
-- [网关概览](/docs/zh/gateway/overview) -- WebSocket 协议和事件总线
+- [网关协议](/docs/zh/gateway/protocol) -- WebSocket 协议和事件总线
 - [代理运行时](/docs/zh/concepts/agent-runtime) -- 代理如何处理消息
 - [工作区](/docs/zh/concepts/workspaces) -- 会话存储和状态目录
+
+---
+
+## 26.7.x 补充
+
+### 会话事件单源真值
+
+26.7.7 引入 `session_events` 作为**规范**事件日志：
+
+- `MessageProjector` 把 `SessionEvent` 物化到 `messages` 表
+- 启动时 `ProjectionReconciler` 回填转写
+- 消息携带 `tool_call_id` / `tool_name` + `AssistantRunMeta` 戳
+- 旧会话被回填并在锁定的 invariant 后读取
+
+### UnifiedMessage 与 ProviderDelta
+
+26.7.7+ 的 `src/providers/` 引入 `UnifiedMessage` 与 `ProviderDelta`：
+
+- `UnifiedMessage` 是 LLM 无关的中间消息表示（OpenAI / Anthropic / Gemini / Ollama 都适配到它）
+- `ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallDelta` / ...）
+- `MessageAssembler` 单一 reducer 拥有装配后的消息，实时剥离内联 `<think>` 块
+- 流式与最终文本通过同一个共享 sanitize atom 路由
+
+### 消息流
+
+26.7.7 引入**叙述引领**的聊天流：
+
+- 紧凑单行工具行（状态符号、实时用时）
+- 完成后 `✓N steps` 一行汇总
+- 工作区窗格变成 live-follow 前台会话（带 pin）的工具详情查看器
+- 工具事件以完成顺序（而非输入顺序）发出
+
+### Steering 中途
+
+26.6.29+ 起支持在聊天还在跑的时候往里打字：
+
+- 队列中的消息渲染为流内 "ghost" 气泡
+- 在下一轮边界通过 steering flush，或立即强制插入（Esc + ⚡）
+- 注入的消息**不再产生非法消息序列**；工具结果保持连续，所以 OpenAI 兼容代理不再默默返回空响应
+
+### iMessage tapback
+
+26.7.21 起：iMessage 入站 add-tapback（add-reaction）会上抛为模型上下文，而不是被丢弃。
+
+### 见另请参阅
+
+- [网关协议](/docs/zh/gateway/protocol) — JSON-RPC 与事件总线
+- [会话模式](/docs/zh/architecture/overview#第三双生子会话模式) — `session_mode` 字段
+- [思考器](/docs/zh/concepts/thinker) — UnifiedMessage → ProviderDelta 的实际位置

@@ -191,18 +191,9 @@ description: "WebSocket JSON-RPC 2.0 接口的完整方法参考"
 | `markdown_skills.list` | 列出已加载的技能 | -- | `{ skills[] }` |
 | `markdown_skills.unload` | 卸载技能 | `name` | `{ unloaded }` |
 
-### poe.* — 原则-操作-评估
+### poe.* — 原则-操作-评估（**已退役**）
 
-| 方法 | 描述 | 关键参数 | 返回 |
-|--------|-------------|----------------|---------|
-| `poe.run` | 运行 POE 任务 | `spec`, `agent_id?` | `{ run_id }` |
-| `poe.status` | 获取 POE 运行状态 | `run_id` | `{ status, progress }` |
-| `poe.cancel` | 取消 POE 运行 | `run_id` | `{ cancelled }` |
-| `poe.list` | 列出 POE 运行 | -- | `{ runs[] }` |
-| `poe.prepare` | 准备 POE 合同 | `spec` | `{ contract_id, terms }` |
-| `poe.sign` | 签署 POE 合同 | `contract_id` | `{ signed }` |
-| `poe.reject` | 拒绝 POE 合同 | `contract_id` | `{ rejected }` |
-| `poe.pending` | 列出待处理合同 | -- | `{ contracts[] }` |
+> **POE（Principle-Operation-Evaluation）架构在 26.5+ 退役**。其「智慧」已迁移到 system prompt 模板（R9），由 LLM 一次调用自然完成。Harness 不参与完成度判断（**R10「5 个不」之 3**）。所有 `poe.*` 方法不再存在——由 `chat.send` / `chat.abort` / `chat.history` 等自然承担。
 
 ### identity.* — 身份/灵魂管理
 
@@ -307,3 +298,70 @@ description: "WebSocket JSON-RPC 2.0 接口的完整方法参考"
 - [Rust API](/docs/zh/api/rust) — 库使用的核心 crate 参考
 - [Gateway 概览](/docs/zh/gateway/overview) — 架构和连接详情
 - [协议](/docs/zh/gateway/protocol) — 传输格式和认证流程
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC ~265
+
+26.7.x 网关暴露 **~265 个 JSON-RPC 方法**——按主题分布在 [网关方法参考](/docs/zh/gateway/methods) 各子页。
+
+### 请求 ID 改用原子计数器
+
+26.7.21+：线缆请求 id 不用 UUID（`aleph-protocol` 移除 `uuid` 依赖），改用**原子计数器**。
+
+### 错误回执 Single-Source
+
+26.7.21+：网关返回客户端的**单一来源**用户可读错误。原始错误链不外泄到 Panel。
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "工具 'shell_exec' 失败",
+    "data": {
+      "receipt_id": "err-...",
+      "category": "tool_execution",
+      "user_message": "Command failed (exit 1)"
+    }
+  }
+}
+```
+
+### 协议版本
+
+`connect.minProtocol` / `connect.maxProtocol` —— 当前双方都是 1。
+
+### 跨通道可达性
+
+26.7.x：所有配置的 channel 现在真的可达且可寻址。
+
+### 完整方法表
+
+| 主题 | RPC 数 | 主题 | RPC 数 |
+|------|--------|------|--------|
+| Core (health/echo/version/system.info/request.state) | 5 | Streaming events | ~12 |
+| Config (config.*) | ~12 | providers / embedding / generation / rerank / search | ~25 |
+| Logs (logs.*) | 3 | Service start/stop (services.*) | 4 |
+| Daemon (daemon.*) | 3 | Hooks (hooks.*) | 6 |
+| Gateway credentials (gateway.ticket/token/devices/credentials/identity/metrics) | ~10 | Wizard flow (wizard.*) | 3 |
+| Memory (memory.*) | ~15 | Skills (skills.*) | 5 |
+| MCP (mcp.* + mcp_config.*) | ~12 | Plugins/Extensions (plugin.* + plugins.* + extensions.*) | ~30 |
+| Heartbeat / Cron | ~18 | Channels (channel.* + channels.* + channel.pairing.*) | ~15 |
+| Workspace / Projects | ~10 | Tools (tools.*) | 5 |
+| Teams (teams.* + teams.chat.*) | ~25 | Subagent (subagent.tree) | 1 |
+| Chat / Session (chat.* + session.* + sessions.*) | ~20 | Graph (graph.*) | 6 |
+| Group chat | 6 | Activities (activity.stats / insights.tools) | 2 |
+| Agents (agents.* + agent.*) | ~20 | Clusters / Runtimes | 8 |
+| Dreams / Dreaming | 2 | Acp (acp.*) | 12 |
+| Clawhub | 4 | Trace (trace.*) | 3 |
+| Events | 1 | 总计 | ~265 |
+
+### 详见
+
+- [网关方法参考](/docs/zh/gateway/methods) — 完整 RPC
+- [网关协议](/docs/zh/gateway/protocol) — 协议层
+- [网关认证](/docs/zh/gateway/auth) — 认证 / 配对 / TOFU

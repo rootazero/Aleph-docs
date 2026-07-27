@@ -168,3 +168,23 @@ Set the log level for a component.
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `logs.getLevel` / `logs.setLevel` / `logs.getDirectory`
+
+Logs RPC — `RUST_LOG`-style level control + log-directory query.
+
+### Day-Boundary Log Rotation
+
+26.7.24+: the daemon supports day-boundary log rotation; on startup it writes an `ALEPH-BOOT` marker.
+
+### PII Scrubbing
+
+26.7.x adversarial-review fixes — pattern recognition (regex / ML hybrid), replacement strategy, audit trail.
+
+### Guardian Judge Masks Secrets
+
+`Guardian Judge` payload masks secrets.

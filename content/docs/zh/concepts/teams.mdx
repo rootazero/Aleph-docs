@@ -227,3 +227,47 @@ pub struct TeamArtifact {
 - [代理运行时](/docs/zh/concepts/agent-runtime) — 代理如何生成和管理任务
 - [群聊](/docs/zh/concepts/group-chat) — 带归属气泡的三面板团队群聊
 - [竞技场](/docs/zh/concepts/arena) — 多代理协作工作区
+
+---
+
+## 26.7.x 补充
+
+### Team 节点融合 Graph
+
+26.7.21+：图（loop_graph）与多代理系统融合——`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher。
+
+### Teams Kanban 深度重构
+
+26.7.24+：Panel 团队看板深度重构——拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
+
+### 团队模板工具面
+
+26.7.25+：内置团队模板的工具面——成员**可声明**自己的工具面（`agents.tools_schema` 共享），不再硬编码。
+
+### `team` 内置的 `loop-auditor`
+
+26.7.21+：内置受保护智能体；审计 / 监督模板默认走独立上下文证据。
+
+### 接地证据门
+
+26.7.21+：`task_review` 审批现在可要求 grounding，并附带验收元数据辅助函数。
+
+### 完整 teams.* RPC
+
+- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
+- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
+- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
+- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
+- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
+- `teams.task.trace`
+- `agents.teams` —— 列出 agent 的团队
+
+### 协调任务
+
+Coord Task 状态：`Pending → InProgress → WaitingReview → Completed`，由队长通过 `task_review` 审核。历史虚构的「coordination: sequential|parallel|hierarchical」模式已删除。
+
+### 见另请参阅
+
+- [群聊](/docs/zh/concepts/group-chat) — 三面板 UI
+- [架构 / 团队](/docs/zh/architecture/teams) — 完整流程
+- [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams) — 协议

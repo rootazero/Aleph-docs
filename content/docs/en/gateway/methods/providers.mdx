@@ -172,3 +172,31 @@ model = "text-embedding-3-small"
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [Getting Started: Configuration](/docs/en/getting-started/configuration) -- Provider setup
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+- `providers.catalog` / `providers.create` / `providers.delete` / `providers.get` / `providers.list` / `providers.healthcheck` / `providers.test` / `providers.update`
+- `embedding_providers.add` / `get` / `list` / `presets` / `remove` / `test` / `update`
+- `generation_providers.create` / `delete` / `get` / `list` / `list_presets` / `test` / `update` / `voices`
+- `rerank_config.get` / `test` / `update`
+- `runtimes.install` / `runtimes.list` / `runtimes.refresh`
+
+### VESR Dynamic Model Routing
+
+26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (k-NN over sqlite-vec).
+
+### Provider Failover Refactor
+
+26.7.21+ major: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
+
+### Single-Source Pricing
+
+`session.usage` is computed in-core from a single price table; the shell no longer carries a duplicate.
+
+### Real Cost and Token Accounting
+
+26.7.15+: `session.usage` now carries a real spend ledger (previously partly fabricated).

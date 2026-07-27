@@ -89,11 +89,11 @@ Every request that enters Aleph carries an identity -- whether from the owner, a
 
 | Component | Location | Responsibility |
 |-----------|----------|----------------|
-| **IdentityContext** | `shared/protocol/src/auth.rs` | Immutable identity snapshot |
-| **SessionIdentityMeta** | `src/gateway/session_manager.rs` | Persistent identity metadata |
-| **PolicyEngine** | `src/gateway/security/policy_engine.rs` | Stateless permission checker |
-| **InvitationManager** | `src/gateway/security/invitation_manager.rs` | Guest invitation lifecycle |
-| **SessionManager** | `src/gateway/session_manager.rs` | Identity construction |
+| **IdentityContext** | `src/identity/` | Immutable identity snapshot |
+| **SessionIdentityMeta** | `src/session/` | Persistent identity metadata |
+| **PolicyEngine** | `src/security/policy_engine.rs` | Stateless permission checker |
+| **SignerKey / OperationLedger** | `src/identity/signer.rs` | Per-agent signing key + signed operation ledger |
+| **IdentityLoader** | `src/gateway/identity_loader.rs` | Gateway-side identity loading |
 | **Orchestrator** | `src/orchestrator/` | Identity injection into FlowRequest |
 
 ## Role Types
@@ -232,3 +232,41 @@ let result2 = executor.execute(&action2, &identity).await;
 
 - [Tool System](/docs/en/concepts/tool-system) -- How tools declare capabilities and execute
 - [Security Overview](/docs/en/security/overview) -- Defense-in-depth security architecture
+
+---
+
+## 26.7.x Addendum
+
+### Delegated Role Chain
+
+26.7.26+ introduces a delegated role chain:
+
+- The identity chain is **closed within the chain's lifecycle** — once a delegation is established, all signing happens within the chain
+- `SignerKey` is held by the corresponding Agent; the private key never leaves the node
+- `OperationLedger` is replay-verifiable against the chain the signer belongs to
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization **fails closed** rather than opens. The `[sandbox.command_policy]` hard floor has the highest priority; no `exec_tier` can lower it.
+
+### Real Client IP
+
+26.7.17+: the `[gateway] trusted_proxy` list decides whether the gateway reads the real client IP. Capacity limits, rate limits, audit, and connect-auth all depend on this. When misconfigured, all of these metrics use the proxy's IP.
+
+### Device Tickets and Token Rotation
+
+26.7.17+ remote-auth on the gateway side:
+
+- `gateway.ticket.create` issues device tickets
+- `gateway.token.current` / `gateway.token.rotate` manage tokens
+- `gateway.devices.list` / `gateway.devices.revoke` manage the device list
+- Remote sessions are closed on token rotation; **loopback sessions are preserved**
+
+### TOFU Trust
+
+26.7.18+ client-side Trust-on-First-Use for self-signed certificates:
+
+- Shared decision core + pinned TOFU trust store
+- SHA-256 fingerprint + SAN/Subject parsing
+- Approval splash page (fingerprint + SAN + TOFU/change warning)
+- Pending-cert state with approve/reject paths

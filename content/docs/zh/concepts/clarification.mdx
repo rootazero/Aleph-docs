@@ -115,3 +115,23 @@ pub struct SessionConfig {
 - [向导](/docs/concepts/wizard) —— 分步交互构建器
 - [意图检测](/docs/concepts/intent-detection) —— 意图分类
 - [消息](/docs/concepts/messages) —— 消息类型和内容块
+
+---
+
+## 26.7.x 补充
+
+### `clarification.resolve` / `clarification.pending`
+
+26.7.x 完整 clarification RPC：
+
+- `clarification.resolve` —— 解决一个待澄清问题
+- `clarification.pending` —— 列出当前 pending
+
+### 集成到 `ask_user`
+
+26.7.15+ 审批：Ask-tier 工具执行在 Panel 中通过 `ask_user` clarification 卡片呈现。clarification 是其底层支撑。
+
+### 见另请参阅
+
+- [审批](/docs/zh/concepts/approval) — Ask-tier 审批
+- [安全：执行审批](/docs/zh/security/exec-approval) — 用户视角

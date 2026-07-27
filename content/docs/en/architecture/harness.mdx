@@ -110,3 +110,39 @@ Implementation files:
 - [Dispatcher](./dispatcher) — Task orchestration
 - [Session Service](./session-service) — Append-only event log
 - Sandbox — Execution environment
+
+---
+
+## 26.7.x Addendum
+
+### `src/harness/` Locked at 12 Files + Line-Count Ratchet
+
+**Code is the authority** — every doc number is just a copy of `CEILING`. Currently 5,055 lines (2026-07-26 revision).
+
+### Act-Stage Parallel Groups
+
+26.7.x: the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) drives **intra-group** concurrent / **inter-group** serial.
+
+### Tool-Loop Verifier
+
+`src/verification/` provides Turn-level post-validation: only the model's explicit stop ends a turn.
+
+### The Five "Don'ts"
+
+R10 in concrete form:
+
+1. Don't classify intent
+2. Don't filter tools / score relevance by message intent (progressive tool disclosure exception)
+3. Don't judge completion (other than the model's explicit stop)
+4. Don't do content moderation / safety scoring
+5. Don't pick an error-recovery strategy
+
+### `DiminishingReturnsDetector` Removed
+
+26.7.20+: the hard stop was removed (violates R10). Stuck is bounded by `max_iterations` + tool-loop verifier + the model's own stop.
+
+### See Also
+
+- [Harness Philosophy](/docs/en/philosophy/harness-philosophy) — full discussion
+- [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop)
+- [Verifier](/docs/en/concepts/supervisor-verification)

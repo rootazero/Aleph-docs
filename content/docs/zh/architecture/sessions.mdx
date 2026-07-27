@@ -313,3 +313,38 @@ let results = index.full_text.search("Rust 错误处理", 10);
 - [会话服务](./session-service) — Actor 模型和 CRDT 持久化
 - [架构概览](./overview) — 会话在整体架构中的位置
 - [CRDT 数据结构](../concepts/crdt) — CRDT 的数学保证
+
+---
+
+## 26.7.x 补充
+
+### 跨会话 Steering
+
+26.7.x：loop pause/resume 跨会话生命周期控制。
+
+### 真实成本与 token 核算
+
+26.7.15+：每条助手消息携带真实 per-message token 成本（不重复计算）。
+
+### SessionEvent 体系
+
+26.7.7+ 引入：
+
+- `SessionEvent` / `SessionEventRecord` / `TurnId`
+- `MessageProjector` 物化到 `messages` 表
+- 启动时 `ProjectionReconciler` 回填
+- `tool_call_id` / `tool_name` + `AssistantRunMeta` 戳
+
+### 实时 hot-reloadable 执行上限
+
+26.7.7+：`[execution]` run-cap 段 Live：arc-swap 全局信号量；改 `max_runs_global` / `max_runs_per_agent` 不需要重启。
+
+### 真多会话并行
+
+26.7.7+：运行闸门从 per-agent 锁移到 per-session `SessionRunRegistry`。一个代理可以在多个会话同时运行；单会话保持互斥。
+
+### 详见
+
+- [会话服务](/docs/zh/architecture/session-service)
+- [记忆（架构）](/docs/zh/architecture/memory)
+- [网关 RPC `sessions.*`](/docs/zh/gateway/methods/session)

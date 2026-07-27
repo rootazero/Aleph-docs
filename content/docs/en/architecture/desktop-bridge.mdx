@@ -312,3 +312,34 @@ src/desktop/
 ├── client.rs   # DesktopBridgeClient: UDS connection and JSON-RPC
 └── error.rs    # DesktopError types
 ```
+
+---
+
+## 26.7.x Addendum
+
+### macOS Screen Recording Fixes
+
+26.7.21+:
+
+- Screen capture cropped to requested region via `setSourceRect` (physical pixels, not points)
+- Completion verified to have produced output before reporting success
+- Typed bridge errors preserved on OCR / window-capture / media / input / screenshot rails
+- `screen_record` serialization errors propagate instead of becoming `null`
+
+### macOS Window Targeting
+
+26.7.21+ public AX window resolver (CGWindowID → AX by geometry); focus raises the **specific** target window.
+
+### iOS WKWebView / Keychain
+
+26.7.18+ certificate-trust adapter + iOS Keychain trust store + decision mirror.
+
+### Bridge Protocol Unchanged
+
+The UDS JSON-RPC 2.0 interface is stable. See [Architecture 1-2-3-4 Model](/docs/en/architecture/1-2-3-4-model).
+
+### See Also
+
+- [Architectural Redlines R1](/docs/en/philosophy/redlines#r1-brain-limb-separation) — platform-bridge constraint
+- [Browser Automation](/docs/en/concepts/browser-automation) — desktop tools
+- [Gateway Protocol TLS](/docs/en/gateway/protocol#tls--tofu) — self-signed + TOFU

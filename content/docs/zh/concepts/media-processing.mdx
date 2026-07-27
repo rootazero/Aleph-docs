@@ -257,3 +257,33 @@ pub struct WhisperTranscriber {
 
 - [生成](/docs/zh/concepts/generation) — 如何生成图像/音频
 - [内置工具](/docs/zh/concepts/builtin-tools) — 使用媒体处理的工具
+
+---
+
+## 26.7.x 补充
+
+### 多模态附件架构
+
+26.7.x：`MediaAttachment` 体系带 `encoding` 字段（`base64` / `utf8`）。`image_read` 工具是 `file_read` 的图片特例。
+
+### 视觉
+
+26.7.x：Vision 工具带可插拔 provider（Claude vision / 平台原生 OCR）。macOS 走 Vision 框架；Linux / Windows 走 Tesseract 等。
+
+### OCR 错误保留
+
+26.7.21+：OCR / 窗口捕获 / 媒体 / 输入 / 截屏轨道的**类型化** bridge 错误被保留——之前会被扁平化为通用错误，现在可恢复。
+
+### 屏幕录制
+
+26.7.21+：`screen_record` 序列化错误会向上传播而不是变成 `null`；完成时验证产生了输出再报告成功。
+
+### 交付物（Artifact）
+
+26.7.21+：`tools.publish` 产出的工作产物由 `src/artifacts/store.rs` 存储；`src/export/` 把它渲染为独立的 HTML / 文档；Panel 可直接打开（无需下载）。
+
+### 见另请参阅
+
+- [生成](/docs/zh/concepts/generation) — 媒体生成
+- [浏览器自动化](/docs/zh/concepts/browser-automation) — 视觉/OCR
+- [架构 / 桌面桥](/docs/zh/architecture/desktop-bridge) — 屏幕录制

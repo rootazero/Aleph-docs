@@ -154,3 +154,27 @@ pub fn unix_ms_to_rfc3339(ts: i64) -> String
 - [扩展商店](/docs/zh/concepts/extensions-store) —— 取代 ClawHub、用于浏览和安装扩展的统一面板
 - [技能](./skills) —— 技能在 Aleph 中的工作原理
 - [扩展](./extensions) —— 用于添加能力的插件架构
+
+---
+
+## 26.7.x 补充
+
+### ClawHub 降级为长尾
+
+ClawHub **不再是一级扩展源**：
+
+- 设置标签页**已移除**（并入 Settings → Advanced）
+- 降级为长尾，只由商店智能体 `store-agent` 在 `/extensions` 浏览时读取
+- 不再维护为独立面板模式
+
+### 完整 RPC（已实化）
+
+- `clawhub.search` —— 搜索（按源 / 关键词）
+- `clawhub.browse` —— 浏览分类
+- `clawhub.detail` —— 单个扩展详情
+- `clawhub.install` —— 安装（统一走 `plugin.install` 或 `skills.install`）
+
+### 见另请参阅
+
+- [扩展商店](/docs/zh/concepts/extensions-store) — 替代品
+- [网关 RPC `extensions.*`](/docs/zh/gateway/methods/extensions) — 协议

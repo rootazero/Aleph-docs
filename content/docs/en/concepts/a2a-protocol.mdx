@@ -149,3 +149,20 @@ The A2A adapter integrates with:
 - [Agent Runtime](./agent-runtime) — How agents spawn and manage tasks
 - [Orchestrator](./orchestrator) — Task routing and delegation decisions
 - [Security: Overview](../security/overview) — Trust levels and approval
+
+---
+
+## 26.7.x Addendum
+
+### A2A Interrupt and Cancel
+
+26.7.24+: A2A stream interrupt and cancel — `Interrupt` truly cancels fan-out, **not demoted to queue**. Long-running detached members no longer leak (the detached-member leak was fixed).
+
+### Subagent Authorization Restored
+
+A2A subagents can now **be re-authorized** — previously a failed authorization was permanent; now managed by the chain-internal closed lifecycle (consistent with the `Identity` delegation chain).
+
+### See Also
+
+- [Agent Runtime](/docs/en/concepts/agent-runtime) — 26.7.x subagent interruptible
+- [Identity & Signing](/docs/en/concepts/identity-context) — delegation chain

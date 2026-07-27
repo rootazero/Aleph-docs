@@ -534,3 +534,46 @@ bin/aleph_server/commands/
 5. 根据需要实现 `Deref`, `Display`, `From<T>`
 6. 更新所有使用点以使用 newtype
 7. 将类型添加到 newtype 目录
+
+---
+
+## 26.7.x 补充
+
+### Rust toolchain 1.95+
+
+26.7.x：`rust-version` 在 Cargo.toml 已抬到 **1.95**。开发时使用 `rustup install 1.95` 或 `rust-toolchain.toml`。
+
+### Harness 12 文件 + 行数 ratchet
+
+**代码是权威**——任何文档数字都只是 `CEILING` 的副本：
+
+- 顶层 8 + `agent/` 4 = **12 文件**
+- 行数由 `src/harness/tests/budget.rs` 的 ratchet 守
+- 当前 5055 行（2026-07-26 修订）
+- 加代码前必答 3 问：脚手架 vs 认知？模型升级后是否还需要？真实消费者有几个？
+
+### YAGNI 撤回
+
+任何零消费者抽象立即删除。Harness dissolution 期间累计删除 ~5,200 行死代码。
+
+### 失败关闭
+
+26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
+
+### 进程隔离内核
+
+26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起——R1 立意之外的合法开口。
+
+### `aleph-server prompt-size`
+
+R9 提示词骨架大小校验命令。
+
+### 完整 RPC ~265
+
+26.7.x 网关暴露 **~265 个 RPC 方法**——开发新方法时参考 [网关方法参考](/docs/zh/gateway/methods)。
+
+### 详见
+
+- [架构红线 R1–R10](/docs/zh/philosophy/redlines) — 硬约束
+- [Harness 哲学](/docs/zh/philosophy/harness-philosophy) — 完整论述
+- [CHANGELOG](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md) — 26.7.x 系列变更

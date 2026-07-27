@@ -259,3 +259,41 @@ description: "代理执行和控制 RPC 方法"
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [events.*](/docs/zh/gateway/methods/events)——订阅代理事件
 - [session.*](/docs/zh/gateway/methods/session)——会话管理
+
+---
+
+## 26.7.x 补充
+
+### `agent.run` / `agent.status` / `agent.cancel` / `agent.list`
+
+26.7.x：基础 agent RPC。`chat.send` / `chat.abort` / `chat.history` / `chat.clear` 是更现代的入口。
+
+### `chat.*` 优先
+
+26.7.x 优先使用 `chat.*` 而非 `agent.*`：
+
+- `chat.send` —— 发送消息（带 `session_mode` 字段）
+- `chat.abort` —— 中止运行
+- `chat.history` —— 历史
+- `chat.clear` —— 清空
+- `chat.context_estimate` —— 上下文窗口估算
+- `chat.rewind` —— 回滚到之前的 turn
+
+### `session.*` / `sessions.*`
+
+- `session.usage` —— 用量 + 成本（核心定价）
+- `session.compact` —— `/compact` 等价
+- `session.truncate` —— `truncate_to_fit` 底
+- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
+
+### `agents.*`
+
+- `agents.list` / `agents.get` / `agents.create` / `agents.update` / `agents.delete` / `agents.set_default`
+- `agents.files.list` / `get` / `set` / `delete`
+- `agents.tools_schema` —— 工具 schema
+- `agents.teams` —— 列出 agent 的团队
+- `agents.bindings` —— agent ↔ channel 绑定
+
+### `subagent.tree`
+
+26.7.x：返回子代理树（节点身份 + 实时事件 + 树 RPC）。

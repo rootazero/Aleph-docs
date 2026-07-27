@@ -270,3 +270,33 @@ pub fn build_sandbox(
 - [工具架构](./tools) —— exec 类工具如何使用沙箱
 - [安全概览](./security/overview) —— 更广泛的安全模型
 - [沙箱深度解析](./security/sandboxing) —— OS 级沙箱机制
+
+---
+
+## 26.7.x 补充
+
+### 进程隔离内核
+
+沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用**必须**在 spawn 时就地发起——R1 立意之外的合法开口（详见 [架构红线 R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
+
+### `[sandbox.command_policy]` 硬底
+
+26.7.15+：硬底不能被任何 `exec_tier` 拉低。缺失或不一致**拒绝授权**。
+
+### 沙箱硬化
+
+26.7.15+：不可见字符 SSOT、对称熔断器清除、死代码扫描。
+
+### 桌面 `open` / `launch` 命令注入
+
+26.7.21+ 修复：通过 `ShellExecuteW` 而非 shell。
+
+### Bundled 解压符号链接
+
+26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接。
+
+### 详见
+
+- [安全原语](/docs/zh/concepts/security-primitives)
+- [安全：沙箱](/docs/zh/security/sandboxing)
+- [架构红线 R1 / R3](/docs/zh/philosophy/redlines)

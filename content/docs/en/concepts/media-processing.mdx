@@ -257,3 +257,33 @@ pub struct WhisperTranscriber {
 
 - [Generation](./generation) — How images/audio are generated
 - [Builtin Tools](./builtin-tools) — Tools that use media processing
+
+---
+
+## 26.7.x Addendum
+
+### Multi-Modal Attachment Architecture
+
+26.7.x: `MediaAttachment` carries an `encoding` field (`base64` / `utf8`). The `image_read` tool is an image-specific case of `file_read`.
+
+### Vision
+
+26.7.x: the Vision tool has pluggable providers (Claude vision / platform-native OCR). macOS uses the Vision framework; Linux / Windows use Tesseract or similar.
+
+### OCR Error Preservation
+
+26.7.21+: typed bridge errors on the OCR / window-capture / media / input / screenshot rails are **preserved** — previously they were flattened to generic errors; now they are recoverable.
+
+### Screen Recording
+
+26.7.21+: `screen_record` serialization errors propagate instead of becoming `null`; completion is verified to have produced output before reporting success.
+
+### Deliverables (Artifact)
+
+26.7.21+: the work product produced by `tools.publish` is stored by `src/artifacts/store.rs`; `src/export/` renders it as a standalone HTML / document; the Panel can open it directly (no download needed).
+
+### See Also
+
+- [Generation](/docs/en/concepts/generation) — media generation
+- [Browser Automation](/docs/en/concepts/browser-automation) — vision/OCR
+- [Architecture / Desktop Bridge](/docs/en/architecture/desktop-bridge) — screen recording

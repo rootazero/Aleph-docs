@@ -150,3 +150,36 @@ pub struct ProviderSetupFlow;
 
 - [配置](/docs/zh/getting-started/configuration) — 配置系统
 - [安装](/docs/zh/getting-started/installation) — 初始设置
+
+---
+
+## 26.7.x 补充
+
+### 26.7.21+ 新增阶段
+
+`aleph wizard` 流程在 26.7.21 扩展为 11 阶段，新增：
+
+- **阶段 7 — 会话模式（chat / work / code）**：与 exec_tier、thinking 正交的第三维度
+- **阶段 8 — 执行等级（ask / auto / full）**：默认 `ask`；未知工具失败关闭
+- **阶段 10 — 网关 TLS**：仅环回 / 自签名 / 受信代理三选一
+
+### 子命令
+
+```bash
+aleph wizard              # 完整 11 阶段
+aleph wizard --quick      # 快速设置
+aleph wizard --provider   # 添加 / 重配单个 provider
+aleph wizard --mode       # 仅切换默认会话模式
+```
+
+### 网关 RPC
+
+向导流程也可通过网关 RPC 启动：
+
+- `wizard.start` / `wizard.status` / `wizard.cancel`
+- 由 Panel 端 UI 触发无需终端
+
+### 见另请参阅
+
+- [设置向导](/docs/zh/getting-started/wizard) —— 用户视角
+- [网关 RPC `wizard.*`](/docs/zh/gateway/methods/wizard) —— 协议层

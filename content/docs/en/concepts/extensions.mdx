@@ -453,3 +453,45 @@ node_version = "20"
 - [Model Providers](/docs/en/concepts/model-providers) -- Provider plugins for custom AI backends
 - [Workspaces](/docs/en/concepts/workspaces) -- Plugin directory structure and discovery paths
 - [Architecture Overview](/docs/en/architecture/overview) -- System-level view of the extension layer
+
+---
+
+## 26.7.x Addendum
+
+### `plugin.install` Unified Entry
+
+26.7.21+: `plugin.install` no longer guesses the source — it classifies by source (marketplace / zip / path) and routes uniformly. `plugin.update` / `plugin.reload` / `plugin.marketplace.list` / `plugin.marketplace.add` are the supporting set.
+
+### Two Namespaces
+
+- **`plugins.*`** (plural, legacy namespace, backward-compatible) — `plugins.list` / `install` / `installFromZip` / `uninstall` / `enable` / `disable` / `load` / `unload` / `callTool` / `executeCommand`
+- **`plugin.*`** (singular, canonical CC-compatible namespace) — `plugin.list` / `install` / `installFromZip` / `uninstall` / `update` / `enable` / `disable` / `load` / `unload` / `reload` / `callTool` / `executeCommand` / `marketplace.list` / `marketplace.add`
+
+### Lifecycle Race Fixes
+
+26.7.21+:
+
+- Concurrent `reload` is now **serialized** under the load guard
+- Malformed plugin results are no longer masked as `ServiceResult::ok`
+- `AuthorInfo` parsing uses the leftmost separator
+
+### Capability Ledger
+
+26.7.x: per-install visible capability list rebuilt from disk (`plugin.install` submits to the disclosure panel). Rebuilt by `make_runtime_ledger()`.
+
+### Pre-Install Disclosure
+
+Mandatory pre-install summary:
+
+- `command+args`
+- Network / filesystem reach
+- Pinned version + SHA256
+- Trust tier
+- Secrets
+
+### See Also
+
+- [Extension System](/docs/en/concepts/extension-system) — loader
+- [Extensions Store](/docs/en/concepts/extensions-store) — user perspective
+- [Capability System](/docs/en/concepts/capability-system) — capability declarations
+- [Gateway RPC `extensions.*`](/docs/en/gateway/methods/extensions) — protocol

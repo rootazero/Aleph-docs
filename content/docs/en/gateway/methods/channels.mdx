@@ -190,3 +190,35 @@ Send a message through a channel.
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+26.7.x channel RPC:
+
+- `channel.create` / `delete` / `list` / `start` / `stop` / `status` / `health` / `send`
+- `channel.pairing_data` — pairing context
+- `channel.dead_letters` — dead-letter list
+- `channel.redrive_dead_letters` — re-drive
+- `channels.set_agent` — bind channel to a specific agent (**must** specify an existing agent)
+- `channels.list` / `channels.status`
+- `channel.pairing.approve` / `approved` / `list` / `reject` / `revoke`
+
+### Telegram Parallel-Layer Cleanup
+
+26.7.21 shed ~2.6k lines of dead code (an uncompiled webhook server, an unconstructed session manager, a dead draft API, duplicated status reactions). Access / pairing / allowlist **single-sourced on the router**.
+
+### Discord Parallel-Layer Cleanup
+
+26.7.21 removed duplicated nested-config / account-pool / resolver layers.
+
+### iMessage
+
+26.7.x: BlueBubbles channel full lifecycle (`channel.create` / `start` etc. support iMessage). Inbound add-tapbacks surface to the model as context.
+
+### Cross-Channel Reachability
+
+26.7.x: configured channels are now truly reachable and addressable — previously some configurations never took effect.

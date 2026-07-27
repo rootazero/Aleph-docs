@@ -85,3 +85,25 @@ pub const BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
 - [技能系统](/docs/concepts/skill-system) —— 技能架构
 - [扩展系统](/docs/concepts/extension-system) —— 插件架构
 - [配置](/docs/concepts/configuration) —— 配置文件位置
+
+---
+
+## 26.7.x 补充
+
+### `bundled.sync` RPC
+
+26.7.x 新增 `bundled.sync` RPC——把内置内容与磁盘同步，跨工作空间一致。
+
+### 符号链接拒收
+
+26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接——避免解压阶段植入的攻击载体。
+
+### 完整路径
+
+`~/.aleph/bundled/` —— Aleph 安装时附带的默认技能 / 插件 / 模板。`bundled.sync` 与 `skills.install` / `plugin.install` 区分：bundled 是只读内置，install 是用户级覆盖。
+
+### 见另请参阅
+
+- [技能](/docs/zh/concepts/skills) — 用户级技能
+- [扩展](/docs/zh/concepts/extensions) — 用户级插件
+- [网关 RPC `bundled.*`](/docs/zh/gateway/methods/skills) — 协议

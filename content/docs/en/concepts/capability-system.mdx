@@ -138,3 +138,37 @@ file_ops = "allow"
 
 - [Extensions](./extensions) — Plugin architecture
 - [Approval](./approval) — Desktop/browser approval system
+
+---
+
+## 26.7.x Addendum
+
+### `CapabilityLedger`
+
+26.7.x — per-install visible capability list rebuilt from disk (for `plugin.install` / `runtimes.install` pre-install disclosure):
+
+- Rebuild logic lives in `make_runtime_ledger()`
+- **Decoupled** from the runtime claim check (not the same thing)
+- Plugins that fail rebuild are refused before install
+
+### Action-Aware Approval
+
+26.7.15+ `ApprovalPolicy` is **action-aware** — the human sees the actual command and the grant fingerprint **keys on it**. Authorization granularity moves from "tool-level" to "command-level".
+
+### Three-Tier Execution Permissions
+
+| Tier | Behavior |
+|------|----------|
+| `ask` | Prompt for approval before every tool execution; unknown tools fail closed |
+| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
+| `full` | All auto-allow (besides the hard security filter) |
+
+### `[sandbox.command_policy]` Hard Floor
+
+Cannot be lowered by any `exec_tier`. `fail-closed` (missing/inconsistent refuses authorization).
+
+### Details
+
+- [Security Overview](/docs/en/security/overview) — the fail-closed principle
+- [Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and action-aware approval
+- [Extensions](/docs/en/concepts/extensions) — plugin capabilities

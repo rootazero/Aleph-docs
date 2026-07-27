@@ -7,12 +7,12 @@ description: "在你的系统上安装 Aleph"
 
 ## 前置条件
 
-- **Rust 1.92+** - 从源代码构建需要（参见 `Cargo.toml` 中的 `rust-version`）
-- **just** - 命令运行器（`cargo install just`）
-- **npm** - 用于构建 WASM 面板 UI
-- **wasm-bindgen** - WASM JS 绑定（`cargo install wasm-bindgen-cli`）
-- **macOS 14+**、**Linux** 或 **Windows** - 主要支持的平台
-- **SQLite** - 通过 `rusqlite` 捆绑（无需单独安装）
+- **Rust 1.95+** — 从源代码构建需要（参见 `Cargo.toml` 中的 `rust-version`）
+- **just** — 命令运行器（`cargo install just`）
+- **npm** — 用于构建 WASM 面板 UI
+- **wasm-bindgen** — WASM JS 绑定（`cargo install wasm-bindgen-cli`）
+- **macOS 14+**、**Linux** 或 **Windows** — 主要支持的平台
+- **SQLite** — 通过 `rusqlite` 捆绑（无需单独安装）
 
 ### 平台特定要求
 
@@ -23,7 +23,7 @@ description: "在你的系统上安装 Aleph"
 **Linux：**
 - `build-essential` 或等效工具
 - `pkg-config`
-- `libssl-dev`
+- `libssl-dev`（TLS 由 `ring` 提供；R3 重量级依赖已避免）
 
 **Windows：**
 - Visual Studio 生成工具
@@ -46,7 +46,8 @@ description: "在你的系统上安装 Aleph"
 - 在原生 webview 中托管 Leptos Panel
 - 提供系统托盘、OS 通知、全局热键（`CmdOrCtrl+Shift+A`）
 - 通过 GitHub Releases 静默自动更新
-- 支持开机自启
+- 支持开机自启（Settings → General / 托盘菜单；Windows 通过 Task Scheduler）
+- 通过 `[gateway.tls] cert/key` 留空自动生成自签名证书；SAN 自动覆盖本机非环回接口 IP；Panel 端通过 TOFU 审批并固定指纹
 
 ### 使用 Just（开发）
 
@@ -106,6 +107,9 @@ just test
 
 # 检查所有 crate，包括桌面端
 just check-desktop
+
+# 提示词骨架大小（受 R9 两把尺约束）
+aleph-server prompt-size
 ```
 
 ## 目录结构
@@ -116,11 +120,16 @@ Aleph 在 `~/.aleph/` 创建以下目录：
 |------|---------|
 | `~/.aleph/` | 主配置目录 |
 | `~/.aleph/aleph.toml` | 主配置文件 |
-| `~/.aleph/logs/` | 服务器日志 |
-| `~/.aleph/skills/` | 用户安装的 skill |
-| `~/.aleph/plugins/` | 扩展 |
+| `~/.aleph/logs/` | 服务器日志（day-boundary 自动轮转 + `ALEPH-BOOT` marker） |
+| `~/.aleph/skills/` | 用户安装的 Markdown 技能 |
+| `~/.aleph/plugins/` | 扩展插件 |
+| `~/.aleph/mcp/` | MCP 服务器配置与凭据 |
+| `~/.aleph/memory/` | 记忆存储（SQLite + sqlite-vec + 笔记） |
+| `~/.aleph/cron/` | Cron 作业持久化（实化） |
+| `~/.aleph/artifacts/` | 工件存储（交付物） |
+| `~/.aleph/ops.log` | 签名操作账本 |
 
 ## 下一步
 
-- [快速上手](./quick-start) - 立即开始运行
-- [配置](./configuration) - 配置你的设置
+- [快速上手](./quick-start) — 立即开始运行
+- [配置](./configuration) — 配置你的设置

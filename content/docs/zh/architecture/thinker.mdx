@@ -207,3 +207,33 @@ Event: StreamChunk { content, block_type }
 - [工具链](./harness) — Think→Act 循环
 - [分发器](./dispatcher) — 任务编排
 - [记忆系统](./memory) — 上下文增强
+
+---
+
+## 26.7.x 补充
+
+### Layers 重组
+
+26.7.x：~28 个细层替代旧 6 层心智模型（位于 `src/thinker/layers/`）。详见 [提示系统](/docs/zh/concepts/prompt-system) 与 [思考器（概念）](/docs/zh/concepts/thinker)。
+
+### R9 两把尺
+
+`reachable_layers` / `scaffold_bytes_ratchet` / `no_sentence_is_stated_twice`——`aleph-server prompt-size` 给出实际字节数。
+
+### `session_mode` 行
+
+每个会话模式加一行缓存稳定的提示词。
+
+### UnificationMessage / ProviderDelta
+
+`UnifiedMessage` 是 LLM 无关的中间消息表示；`ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallDelta`）。`MessageAssembler` 单一 reducer 装配消息并实时剥离 `<think>` 块。
+
+### `tool_search` 元工具
+
+26.7.7+ 渐进式工具披露——core 工具静态常驻，全量工具目录 + `tool_search` 元工具按需加载 schema。
+
+### 详见
+
+- [思考器（概念）](/docs/zh/concepts/thinker)
+- [提示系统](/docs/zh/concepts/prompt-system)
+- [架构红线 R9](/docs/zh/philosophy/redlines#r9-智慧在-prompt-中-intelligence-lives-in-the-prompt)

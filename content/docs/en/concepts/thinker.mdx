@@ -195,3 +195,31 @@ User profiles override default behavior without modifying the soul.
 - [Prompt System](./prompt-system) — Prompt concepts
 - [Memory](./memory) — Knowledge base integration
 - [Skills](./skills) — Skill prompt injection
+
+---
+
+## 26.7.x Addendum
+
+> Note: this page overlaps with `architecture/thinker.mdx`; for the full layer definitions, see [Architecture / Thinker](/docs/en/architecture/thinker). This page keeps the **concept perspective**.
+
+### Layers Reorganized
+
+26.7.x: ~28 finer layers replace the legacy 6-layer mental model (in `src/thinker/layers/`): `agent_role`, `chain_context`, `citation_standards`, `curated_memory`, `doctor_repair_hint`, `environment`, `execution_plan`, `extra_files`, `graph_topology`, `guidelines`, `identity_files`, `language`, `mcp_instructions`, `memory_protocol`, `multi_step_conduct`, `operational_guidelines`, `profile`, `protocol_tokens`, `provider_guidance`, `role`, `runtime_capabilities`, `runtime_context`, `security`, `session_budget`, `session_context_guide`, `skill_instructions`, `soul`, `special_actions`, `standing_goal`, `strategy`, `strategy_pointer`, `timer_loop`, `tool_runtime_state`, `voice_mode`.
+
+### Two Rulers (R9)
+
+`src/thinker/prompt_contract.rs` exposes `reachable_layers` (a layer must be able to speak, otherwise whitelist with reason) / `scaffold_bytes_ratchet` (measured scaffolding ceiling, only decreases) / `no_sentence_is_stated_twice`. `aleph-server prompt-size` reports the actual scaffolding byte count.
+
+### `session_mode` Lines
+
+Each session mode adds one cache-stable prompt line (chat / work / code, each different).
+
+### `thinker::PromptBuilder` and `PromptPipeline`
+
+The single public entry point is `thinker::PromptBuilder`, which wraps `PromptPipeline`. `PromptLayer` is the trait for one section of the assembled system prompt. `InteractionManifest` is for channel-capability awareness.
+
+### See Also
+
+- [Architecture / Thinker](/docs/en/architecture/thinker) — full layer definitions
+- [Architectural Redlines R9](/docs/en/philosophy/redlines#r9-intelligence-lives-in-the-prompt) — the two rulers
+- [Prompt System](/docs/en/concepts/prompt-system) — the Layers view

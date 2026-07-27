@@ -172,3 +172,31 @@ model = "text-embedding-3-small"
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [入门：配置](/docs/zh/getting-started/configuration)——提供商设置
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC 集
+
+- `providers.catalog` / `providers.create` / `providers.delete` / `providers.get` / `providers.list` / `providers.healthcheck` / `providers.test` / `providers.update`
+- `embedding_providers.add` / `get` / `list` / `presets` / `remove` / `test` / `update`
+- `generation_providers.create` / `delete` / `get` / `list` / `list_presets` / `test` / `update` / `voices`
+- `rerank_config.get` / `test` / `update`
+- `runtimes.install` / `runtimes.list` / `runtimes.refresh`
+
+### VESR 动态模型路由
+
+26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（k-NN over sqlite-vec）。
+
+### Provider Failover 重构
+
+26.7.21+ 重大：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
+
+### 单源价格表
+
+`session.usage` 在核心内用统一价格表计算成本。shell 不再持有重复价格表。
+
+### 真实成本与 token 核算
+
+26.7.15+：`session.usage` 现在携带真实花费账本（之前部分伪造）。

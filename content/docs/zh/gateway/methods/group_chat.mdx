@@ -167,3 +167,19 @@ description: "群聊和多方对话 RPC 方法"
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [teams.*](/docs/zh/gateway/methods/teams)——持久化按团队聊天线程（`teams.chat.*`）与协调
 - [架构：群聊](/docs/zh/architecture/groupchat)——群聊架构
+
+---
+
+## 26.7.x 补充
+
+### `group_chat.*` 完整 RPC
+
+- `group_chat.start` / `group_chat.end` / `group_chat.history` / `group_chat.list` / `group_chat.mention` / `group_chat.continue`
+
+### 团队聊天线程
+
+26.6.29+：持久的每团队聊天线程（`teams.chat.*`）驱动三面板群聊窗口。`teams.chat.send` / `history` / `thread` / `cancel` 替代旧的 `group_chat.*`。
+
+### `teams.usage`
+
+26.7.x：团队使用情况。

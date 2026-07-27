@@ -206,3 +206,32 @@ This trades detail for simplicity — UniFFI consumers get a string message, not
 - [thiserror](https://docs.rs/thiserror) — Typed error derive macro
 - [anyhow](https://docs.rs/anyhow) — Flexible error handling
 - [Logging](./logging) — How errors are logged
+
+---
+
+## 26.7.x Addendum
+
+### Single-Source Error Receipt
+
+26.7.21 fix: the gateway returns a **single-source** user-readable error to the client. The raw error chain never leaks out to the Panel — the previous implementation would surface raw `serde_json` / sqlx / io errors directly to the user; now they're wrapped in an `ErrorReceipt`.
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization is **refused**. This is the concrete form of the "common constraint" rule: the default must not be "open".
+
+### Dead-Letter and Webhook Backpressure
+
+26.7.21 fix:
+
+- `broadcast::RecvError::Lagged` recovers rather than dying permanently
+- Per-connection event-forward tasks no longer leak on WebSocket disconnect
+- Webhook receivers return 503 under congestion rather than silently dropping inbound messages
+
+### Derived Error Auto-`#[source]` Chains
+
+Error enums (`#[derive(thiserror::Error)]`) with `#[source]` or `#[from]` fields automatically string together into `std::error::Error::source()` chains. The `%e` placeholder (`tracing-subscriber` 0.3+) prints the chain level by level.
+
+### See Also
+
+- [Gateway Protocol Errors](/docs/en/gateway/protocol#errors) — the `ErrorReceipt` protocol
+- [Security Fail-Closed](/docs/en/security/overview#fail-closed) — the common fail-closed principle

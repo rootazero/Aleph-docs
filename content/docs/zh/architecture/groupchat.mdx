@@ -120,3 +120,32 @@ GroupChatBroadcaster::dispatch_user
 - [团队](/docs/zh/architecture/teams) —— 团队、队长、协调任务、团队战略协调，以及完整的 `teams.*` RPC 界面
 - [A2A](/docs/zh/architecture/a2a) —— 智能体到智能体协议
 - [网关](/docs/zh/gateway/protocol) —— 频道接口
+
+---
+
+## 26.7.x 补充
+
+### 群聊聊天线程
+
+26.6.29+：持久的每团队聊天线程（`teams.chat.*`）驱动三面板群聊窗口。`teams.chat.send` / `history` / `thread` / `cancel`。
+
+### 团队协调
+
+- 队长 + 成员
+- 团队战略协调（Team Strata）—— 首条消息时队长先规划
+- Coord Task —— `Pending → InProgress → WaitingReview → Completed`
+- 任务模板 + 工具面
+
+### 团队看板深度重构
+
+26.7.24+：拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
+
+### 接地证据门
+
+26.7.21+：`task_review` 审批可要求 grounding。
+
+### 详见
+
+- [团队概念](/docs/zh/concepts/teams)
+- [群聊概念](/docs/zh/concepts/group-chat)
+- [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams)

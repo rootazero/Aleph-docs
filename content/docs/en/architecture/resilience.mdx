@@ -400,3 +400,44 @@ src/resilience/
     ├── recovery_tests.rs      # Recovery integration tests
     └── governance_tests.rs    # Governance policy tests
 ```
+
+---
+
+## 26.7.x Addendum
+
+### Gateway Error Chain Single-Source
+
+26.7.21+: the raw error chain never leaks to the Panel; `ErrorReceipt` is the single-source user-readable error.
+
+### WS Task-Leak Fixes
+
+26.7.21+: per-connection event-forward tasks no longer leak; `broadcast::RecvError::Lagged` recovers rather than dies permanently; webhook backpressure returns 503.
+
+### Cluster Fixes
+
+- Dead cold-start enrollment fixed
+- Deregistration made to stick
+- Reverse RPC hardened
+- `connect` handshake precedes the method in `gateway call`
+
+### Cluster `file.write` No TOCTOU
+
+26.7.21+: no time-of-check-to-time-of-use window between the existence check and the write.
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization is refused.
+
+### Guardian Judge
+
+26.7.21+: the LLM judge for heartbeat probes — **payload masks secrets**.
+
+### Heartbeat Refuses Dangerous Tools
+
+26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
+
+### See Also
+
+- [Security Overview](/docs/en/security/overview)
+- [Fail-Closed Principle](/docs/en/security/overview#fail-closed)
+- [Daemon](/docs/en/concepts/daemon)

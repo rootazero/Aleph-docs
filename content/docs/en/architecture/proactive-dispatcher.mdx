@@ -181,3 +181,27 @@ require_approval_above = "high"
 - [Task Dispatcher](./dispatcher) — Task scheduling DAG (different component)
 - [Daemon](../concepts/daemon) — Background service management
 - [Security](../security/overview) — Policy and permission system
+
+---
+
+## 26.7.x Addendum
+
+### Heartbeat / Cron Realized
+
+26.7.x: the historical stub RPCs (`heartbeat.*_stub` / `cron.*_stub`) have been **realized**. The full `heartbeat.*` / `cron.*` RPC is driven by the [Daemon](/docs/en/concepts/daemon).
+
+### Proactive Wake
+
+`heartbeat.wake` — proactive wake trigger. The `Guardian Judge` LLM judge decides whether proactive wake is needed (**payload masks secrets**).
+
+### Proactive Decisions
+
+- Day-boundary log rotation
+- `ALEPH-BOOT` marker
+- Sleep inhibitor silent on stderr
+
+### See Also
+
+- [Daemon](/docs/en/concepts/daemon)
+- [Cron Jobs](/docs/en/automation/cron-jobs)
+- [Heartbeat](/docs/en/automation/heartbeat)

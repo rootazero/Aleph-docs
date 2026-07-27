@@ -298,3 +298,39 @@ The `aleph cron status` command shows a dashboard view of all jobs including las
 - [Events](/docs/en/automation/events) — Subscribe to cron lifecycle events
 - [Hooks](/docs/en/automation/hooks) — Trigger actions on agent lifecycle events
 - [CLI Reference](/docs/en/cli/commands) — `aleph cron` command details
+
+---
+
+## 26.7.x Addendum
+
+### Cron / Heartbeat Realized (stubs → real)
+
+26.7.x: the historical stub RPCs (`cron.*_stub` / `heartbeat.*_stub`) have been **realized**.
+
+### `hooks.*` Full RPC
+
+- `hooks.list` / `hooks.registry` / `hooks.add` / `hooks.remove` / `hooks.reload` / `hooks.events`
+
+### Hooks: Bounded Injection, Consent, Inventory
+
+26.7.x Hooks hardening:
+
+- `context_injection_limit_bytes` — bound injected context (avoid unbounded growth)
+- `require_consent` — consent gate
+- Runtime inventory — list registered hooks
+
+### Guardian Judge
+
+26.7.21+: the LLM judge for heartbeat probes — **payload masks secrets**.
+
+### Heartbeat Refuses Dangerous Tools
+
+26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
+
+### Day-Boundary Log Rotation
+
+26.7.24+: the daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
+
+### Full RPC
+
+See [Gateway Methods Reference](/docs/en/gateway/methods) for cron / heartbeat / hooks.

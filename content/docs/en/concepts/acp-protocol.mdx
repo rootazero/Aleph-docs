@@ -133,3 +133,24 @@ ACP integrates with:
 - [Agent Runtime](./agent-runtime) — Agent lifecycle management
 - [Gateway](../architecture/gateway) — WebSocket JSON-RPC interface
 - [Event System](./event-system) — Real-time event distribution
+
+---
+
+## 26.7.x Addendum
+
+### ACP Presets + Test
+
+26.7.x full RPC:
+
+- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
+- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
+- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
+
+### Process-Isolation Kernel
+
+26.7.x: ACP sessions are backed by the process-isolation kernel — sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. This is a legitimate carve-out from R1 (see [Architectural Redlines R1 Process-Isolation Kernel carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
+
+### See Also
+
+- [Architecture Overview](/docs/en/architecture/overview) — where ACP sits in the system
+- [Sandboxing](/docs/en/concepts/sandboxing) — process isolation

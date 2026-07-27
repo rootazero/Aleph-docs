@@ -382,3 +382,39 @@ ws.onmessage = (msg) => {
 - [钩子](/docs/zh/automation/hooks) —— 使用 shell 命令和提示对生命周期事件做出反应
 - [Cron 作业](/docs/zh/automation/cron-jobs) —— 发出 cron 事件的计划重复任务
 - [网关协议](/docs/zh/gateway/protocol) —— WebSocket 传输和事件交付格式
+
+---
+
+## 26.7.x 补充
+
+### Cron / Heartbeat 实化（stubs → real）
+
+26.7.x：历史 stub RPC（`cron.*_stub` / `heartbeat.*_stub`）已被**实化**。
+
+### `hooks.*` 完整 RPC
+
+- `hooks.list` / `hooks.registry` / `hooks.add` / `hooks.remove` / `hooks.reload` / `hooks.events`
+
+### Hooks 注入限额 / 同意 / 库存
+
+26.7.x Hooks 加固：
+
+- `context_injection_limit_bytes` —— 注入上下文限额（避免无界增长）
+- `require_consent` —— 同意门
+- 运行时库存（runtime inventory）—— 列出已注册 hook
+
+### Guardian Judge
+
+26.7.21+：Heartbeat 探针的 LLM 判官——**payload 隐藏密钥**。
+
+### Heartbeat 拒绝危险工具
+
+26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。
+
+### Day-boundary 日志轮转
+
+26.7.24+：守护进程支持 day-boundary 日志轮转；`ALEPH-BOOT` marker。
+
+### 完整 RPC
+
+详见 [网关方法参考](/docs/zh/gateway/methods) 中 cron / heartbeat / hooks。

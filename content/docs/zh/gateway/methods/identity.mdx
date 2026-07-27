@@ -159,3 +159,31 @@ I am Aleph, a polymorphic AI assistant.
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `identity.*` RPC
+
+- `identity.get` / `identity.list` / `identity.set` / `identity.clear`
+
+### `gateway.identity.get` / `gateway.credentials`
+
+网关侧身份与凭据。
+
+### `agents.bindings` / `channels.set_agent`
+
+agent ↔ channel 绑定。
+
+### 委托角色链
+
+26.7.26+：身份链路生命周期内闭包；`SignerKey` 由对应 Agent 持有；`OperationLedger` 由签名者所属链路回放。
+
+### 真实客户端 IP
+
+26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
+
+### 失败关闭
+
+26.7.21+：策略文件缺失或不一致**拒绝授权**。

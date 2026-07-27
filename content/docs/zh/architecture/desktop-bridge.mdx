@@ -312,3 +312,34 @@ src/desktop/
 ├── client.rs   # DesktopBridgeClient：UDS 连接和 JSON-RPC
 └── error.rs    # DesktopError 类型
 ```
+
+---
+
+## 26.7.x 补充
+
+### macOS 屏幕录制修复
+
+26.7.21+：
+
+- 截屏按 `setSourceRect` 裁剪到所请求区域（按物理像素而非点）
+- 完成时验证产生了输出再报告成功
+- 类型化 bridge 错误被保留（OCR / 窗口捕获 / 媒体 / 输入 / 截屏轨道）
+- `screen_record` 序列化错误向上传播而不是 `null`
+
+### macOS 窗口定位
+
+26.7.21+ 公共 AX 窗口解析器（CGWindowID → AX by geometry），焦点提升到确切的目标窗口。
+
+### iOS WKWebView / Keychain
+
+26.7.18+ 证书信任适配器 + iOS Keychain 信任存储 + 决策镜像。
+
+### Bridge 协议不变
+
+UDS JSON-RPC 2.0 接口稳定，详见 [架构 1-2-3-4 模型](/docs/zh/architecture/1-2-3-4-model)。
+
+### 见另请参阅
+
+- [架构红线 R1](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation) — 平台桥约束
+- [浏览器自动化](/docs/zh/concepts/browser-automation) — 桌面工具
+- [网关协议 TLS](/docs/zh/gateway/protocol#tls--tofu) — 自签名 + TOFU

@@ -199,3 +199,35 @@ IPC 协议使用 HMAC-SHA256 进行认证：
 2. 服务器响应 nonce
 3. 客户端使用共享密钥签名
 4. 服务器验证并继续
+
+---
+
+## 26.7.x 补充
+
+### `tools.*` 完整 RPC
+
+- `tools.catalog` —— 工具目录（带 name + description）
+- `tools.effective` —— 当前会话生效的工具集
+- `tools.invoke` —— 工具调用
+- `tools.cancel_call` —— 取消正在运行的工具
+- `tools.in_flight` —— 列出正在运行的工具调用
+
+### `tools.search`（progressive tool disclosure）
+
+26.7.7+ `tool_search` 元工具——按 BM25 ranker 在 catalog 中按需查找。
+
+### 资源声明三态
+
+`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`——Act 阶段按声明分桶并行。
+
+### 跨批次去重
+
+`Memo / Cross-batch Dedup` —— 相同 `(name, args)` 复用首次结果。
+
+### Action-aware Approval
+
+26.7.15+ 审批门在 `src/tools/scoped/` 单一强点。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
+
+### 失败关闭
+
+未知工具在 `ask` tier 下**失败关闭**。

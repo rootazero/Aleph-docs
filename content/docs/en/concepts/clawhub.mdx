@@ -154,3 +154,27 @@ The client uses `reqwest` for HTTP and returns `Result<T, ClawHubError>` from al
 - [Extensions Store](/docs/en/concepts/extensions-store) — The unified panel that replaced ClawHub as the way to browse and install Extensions
 - [Skills](./skills) — How skills work within Aleph
 - [Extensions](./extensions) — Plugin architecture for adding capabilities
+
+---
+
+## 26.7.x Addendum
+
+### ClawHub Demoted to Long-Tail
+
+ClawHub is **no longer a first-class extension source**:
+
+- The settings tab has been **removed** (folded into Settings → Advanced)
+- Demoted to long-tail, only read by the store-agent `store-agent` when browsing `/extensions`
+- No longer maintained as a separate panel mode
+
+### Full RPC (now real)
+
+- `clawhub.search` — search by source / keyword
+- `clawhub.browse` — browse by category
+- `clawhub.detail` — single-extension detail
+- `clawhub.install` — install (routes uniformly through `plugin.install` or `skills.install`)
+
+### See Also
+
+- [Extensions Store](/docs/en/concepts/extensions-store) — the replacement
+- [Gateway RPC `extensions.*`](/docs/en/gateway/methods/extensions) — protocol

@@ -24,6 +24,30 @@ description: "Aleph 概念的标准化术语和翻译"
 | **FlowSpec** | 流程规范 | 定义单个流程的执行参数 |
 | **AgentDef** | 智能体定义 | 定义 Agent 行为的静态配置 |
 
+### 三对维度（用户可调）
+
+| English | 中文 | 定义 |
+|---------|---------|------------|
+| **exec_tier** | 执行等级 | 决定哪些工具可被执行及如何审批；权限维度 |
+| **think_level** | 思考等级 | LLM 推理预算与扩展思考开关；推理维度 |
+| **session_mode** | 会话模式 | `chat` / `work` / `code` 三档，**静态分区**工具呈现面（progressive-disclosure 核心集 + deferred-tool 层级）；不影响权限 |
+| **session_set_mode** | 模式切换工具 | 由模型调用的运行时模式切换工具；切回后必须被下一次 send 沿同一消息携带 |
+
+### 治理拓扑层（loop_graph）
+
+| English | 中文 | 定义 |
+|---------|---------|------------|
+| **Loop Graph** | 治理拓扑 | 叠加在 Harness 之上的治理拓扑层（`src/loop_graph/`）；给单循环的四种失败模式（Goodhart、参考盲、环冲突、测量衰减）一个拓扑答案 |
+| **Team Node** | 团队节点 | 将多代理系统融合进图的节点类型——团队解散时胜利声明会触发 watcher |
+| **Audit Ring** | 审计环 | 闭环审计动作日志；图审计的客观 ACL 来源 |
+| **Objective ACL** | 客观 ACL | 按图节点身份客观授权的访问控制表 |
+| **Victory Claim** | 胜利声明 | 团队/循环宣告完成的动作；触发 watcher 与审计 |
+| **Watcher** | 观察器 | 监听治理事件（胜利声明、目标结算、团队解散）并发起审计 |
+| **loop-auditor** | 循环审计员 | 内置受保护智能体；审计/监督模板默认走独立上下文证据 |
+| **Goal** | 目标 | 由 GoalStore 管理的持久目标；可被循环结算触发 |
+| **LoopState** | 循环状态 | `looping/` 子系统的状态机（Active/Paused/...） |
+| **Pause / Resume** | 暂停 / 恢复 | 循环/目标的跨会话生命周期控制 |
+
 ## 记忆系统
 
 | English | 中文 | 定义 |
@@ -32,6 +56,12 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Memory Hub** | 记忆中心 | 在单一切换中同时承载图谱视图与表格视图的统一记忆面板 (`/memory`)；节点身份 == 笔记路径 |
 | **Graph View** | 图谱视图 | 记忆笔记的放射状节点-连线画布（原 `/memory` 画布） |
 | **Table View** | 表格视图 | 记忆笔记的分面列表（原 `/dashboard/memory` 库） |
+| **Card View** | 卡片视图 | 笔记的卡片列表与批量操作栏（Vault 面板重构后的列表形态） |
+| **Deep Link** | 深链 | 从卡片或证据链直接定位到对应笔记的页内锚点 |
+| **Evidence Chain** | 证据链 | 引用本笔记的其他笔记序列；面板抽屉中呈现 |
+| **Cross-Agent Selection** | 跨代理选择 | 跨多个代理视图的记忆选择操作，需走原子一致性 |
+| **Provenance** | 来源 | 笔记/证据的来源记录（写入者、写入时间、来源事件） |
+| **Batch Export** | 批量导出 | 一次性导出多张卡片为可交付物 |
 | **Dream Insights** | 梦境洞察 | 只读面板（Settings > Memory），由 `dreaming.list_insights` 支撑——近期每日综合笔记 + dream-run 历史 |
 | **Corrections** | 纠正记录 | 只读面板（Settings > Memory），由 `memory.list_corrections` 支撑——呈现纠正 → 蒸馏的生命周期 |
 | **Raw Memory (L0)** | 原始记忆 | 压缩前的短暂会话数据 |
@@ -41,6 +71,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Dream Daemon** | 梦境守护进程 | 后台记忆整合过程 |
 | **Scratchpad** | 草稿板 | 每会话工作记忆（会话结束时丢弃） |
 | **User Profile** | 用户画像 | 辩证用户模型 (`USER.md`) |
+| **SkillOpt** | 技能优化 | 自我演化纪律——记忆侧把"够用即停"的原则落进自我演化管线 |
 
 ## 工具系统
 
@@ -54,7 +85,12 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Skill** | 技能 | 添加工具的学习或安装能力 |
 | **Skill System** | 技能系统 | 技能发现、注册和生命周期的框架 |
 | **Dispatcher** | 调度器 | 工具注册表、风险评估和语义检索 |
-| **Hydration** |  hydrated tools | 基于查询上下文的语义工具检索 |
+| **Hydration** | hydrated tools | 基于查询上下文的语义工具检索 |
+| **Parallel Group** | 并行组 | Act 阶段按资源声明分桶后并行执行的一组工具调用；组内并发、组间串行 |
+| **Resource Claim** | 资源声明 | 工具对文件系统/网络/进程的并发冲突声明 |
+| **Memo / Cross-batch Dedup** | 备忘 / 跨批次去重 | 在一个批次或跨批次内对相同 `(name, args)` 的二次调用复用首次结果 |
+| **session_compact** | 会话压缩 | `session.compact` 工具——等价于每个面都能用的 `/compact` |
+| **Slash Command** | 斜杠命令 | 由 reference-driven 单源别名表支持的 `/help` 等命令 |
 
 ## 扩展
 
@@ -67,29 +103,46 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Trust Tier** | 信任层级 | 源的信任级别：Official / Verified / Community / Unverified |
 | **Disclosure** | 披露 | 强制的安装前摘要（command+args、密钥、网络/文件系统触达、固定版本 + SHA256、层级） |
 | **Source** | 源 | 目录提供方（插件市场、Official MCP Registry、Docker MCP Catalog），在 SQLite 中缓存以供离线浏览 |
+| **Plugin.install (unified)** | 插件统一入口 | `plugin.install` 不再猜测来源；按源（市场 / 压缩包 / 路径）分类统一处理 |
+| **Plugin Marketplace** | 插件市场 | 列入 `plugin.marketplace.list` / `plugin.marketplace.add` 的可索引目录 |
 
 ## 安全
 
 | English | 中文 | 定义 |
 |---------|---------|------------|
 | **Sandbox** | 沙箱 | 带有能力强制执行的每会话执行隔离 |
-| **Capability** |  capability | 权限声明（文件系统、网络、进程） |
+| **Capability** | 能力 | 权限声明（文件系统、网络、进程） |
+| **Capability Ledger** | 能力账本 | 每次安装时从磁盘重建的可见能力清单（用于安装前披露） |
 | **Approval Gate** | 审批门 | 提升权限的人机回环审批 |
+| **fail-closed** | 失败关闭 | 缺失策略文件或默认值不一致时拒绝授权（`permissive_default` 必须等于 `Default::default()`） |
 | **IdentityContext** | 身份上下文 | 流经执行的不可变身份快照 |
+| **Per-Agent Signing Key** | 每代理签名密钥 | 每个 Agent 独立的签名密钥，写入操作账本 |
+| **Operation Ledger** | 操作账本 | 由签名者拥有的签名操作序列 |
+| **Delegated Role Chain** | 委托角色链 | 委托权限的角色链；身份链路生命周期内闭包 |
+| **Signer Ownership** | 签名者所有权 | 私钥由对应的 Agent 持有，账本由签名者所属链路回放验证 |
 | **PolicyEngine** | 策略引擎 | 无状态权限检查器 |
 | **GuestScope** | 访客范围 | 访客会话的工具级限制 |
 | **Pairing** | 配对 | 通过 PIN/代码进行设备信任建立 |
+| **TOFU** | 首次使用信任 | Trust-on-First-Use：首次见到自签名证书时提示用户审批并固定指纹 + SAN |
+| **SAN Drift** | SAN 漂移 | 主机非环回接口 IP 集变化；触发证书原子 regen（不破坏启动） |
+| **Self-Signed TLS** | 自签名 TLS | 网关内进程终止 TLS；远程连接必须 `wss://` |
+| **Trusted Proxy** | 可信代理 | 反向代理信任列表——决定网关是否读取真实客户端 IP |
+| **Trusted Origin** | 可信来源 | Origin 白名单；用于浏览器与 WebView 的证书信任与麦克风权限 |
+| **Guardian Judge** | 守护者判官 | heartbeat 探针使用的 LLM 判官；其 payload 必须隐藏密钥 |
 
 ## 通信
 
 | English | 中文 | 定义 |
 |---------|---------|------------|
-| **Interface** | 接口 | 客户端连接类型（CLI、Telegram、Discord 等） |
+| **Interface** | 接口 | 客户端连接类型（CLI、Telegram、Discord、iMessage 等） |
 | **Channel** | 频道 | 接口内的特定对话端点 |
 | **Session Key** | 会话密钥 | 会话的唯一标识符（例如 `agent:main:main`） |
-| **Event Bus** | 事件总线 | 用于实时事件分发的发布/订阅系统 |
+| **Event Bus** | 事件总线 | 用于实时事件分发的发布/订阅系统；`broadcast::RecvError::Lagged` 必须恢复而非永久死亡 |
 | **JSON-RPC** | JSON-RPC | 基于 WebSocket 的请求/响应协议 |
 | **Trace** | 追踪 | 用于可观察性的执行事件流 |
+| **Error Receipt** | 错误回执 | 网关返回给客户端的**单一来源**用户可读错误；原始错误链不外泄 |
+| **Dead Letter** | 死信 | channel.* 未能成功下发的消息，可在 Panel 内重投递 |
+| **Webhook Backpressure** | Webhook 反压 | webhook 接收端在拥塞时返回 503 而不是默默丢弃 |
 
 ## AI/LLM
 
@@ -102,6 +155,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **PromptLayer** | 提示层 | 组装系统提示词的一个部分 |
 | **Streaming** | 流式传输 | 实时逐令牌响应交付 |
 | **Thinking** | 思考 | 扩展推理模式（Claude 的扩展思考） |
+| **In-core Pricing** | 核心定价 | `session.usage` 在核心内用统一价格表计算成本；shell 不再持有重复价格表 |
 
 ## 高级特性
 
@@ -117,6 +171,10 @@ description: "Aleph 概念的标准化术语和翻译"
 | **WorldModel** | 世界模型 | 用于主动行为的环境状态跟踪 |
 | **Proactive Dispatcher** | 主动调度器 | 基于世界状态调度主动任务的守护进程 |
 | **Desktop Bridge** | 桌面桥 | 用于桌面自动化的 UDS JSON-RPC 协议 |
+| **Deliverable** | 交付物 | 由 `tools.publish` 产出的工作产物——写入工件存储，Panel 可直接打开 |
+| **Artifact Store** | 工件存储 | `src/artifacts/`——交付物的统一存储后端 |
+| **Export Subsystem** | 导出子系统 | `src/export/`——把交付物渲染成独立的 HTML / 文档 |
+| **Voice Subsystem** | 语音子系统 | 语音转录（TWhisperLiveKit / WhisperLiveKit）与 TTS（多提供商含回退） |
 
 ## 命名约定
 
@@ -143,7 +201,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | `PolicyEngine` | Policy Engine |
 | `IdentityContext` | Identity Context |
 | `GuestScope` | Guest Scope |
-| `MultiProviderRegistry` | Multi-Provider Registry |
+| `MultiProviderRegistry` | Multi Provider Registry |
 | `ProtocolRegistry` | Protocol Registry |
 | `PromptPipeline` | Prompt Pipeline |
 | `MemoryEnvelope` | Memory Envelope |
@@ -153,6 +211,16 @@ description: "Aleph 概念的标准化术语和翻译"
 | `CompressionService` | Compression Service |
 | `DreamDaemon` | Dream Daemon |
 | `DesktopBridgeClient` | Desktop Bridge Client |
+| `LoopGraph` | Loop-Graph Governance |
+| `GoalStore` | Goal Store |
+| `LoopState` | Loop State |
+| `ArtifactStore` | Artifact Store |
+| `ProjectStore` | Project Store |
+| `Hub` | Hub (Extensions / Secrets / Trust catalog) |
+| `SignerKey` | Per-Agent Signing Key |
+| `OperationLedger` | Operation Ledger |
+| `Verification` | Verifier / Turn-verify context |
+| `Guardrail` | Guardrail (Block / Sanitize / Pass) |
 
 ## 已弃用术语（请勿使用）
 
@@ -160,6 +228,7 @@ description: "Aleph 概念的标准化术语和翻译"
 |----------|-------------|--------|
 | OTAF | Think→Act | 架构从 OTAF 改为 Harness |
 | Agent Loop | Harness | 统一在 Harness 术语下 |
+| `src/agent_loop/` | `src/harness/` | 工具链迁移；旧目录已删除 |
 | LanceDB | SQLite + sqlite-vec | 存储后端更改 |
 | JSON5 config | TOML config | 配置格式更改 |
 | `aleph` 二进制文件 | `aleph-server` | 二进制文件重命名 |
@@ -171,6 +240,13 @@ description: "Aleph 概念的标准化术语和翻译"
 | ClawHub 设置标签页 | 扩展商店 | ClawHub 降级为长尾；设置标签页已移除 |
 | `teams.run` | `teams.chat.send` / 协调任务 | 该方法从不存在——团队使用聊天线程 + 任务 |
 | `coordination: sequential\|parallel\|hierarchical` | 团队战略协调（队长先行规划） | 协调模式纯属虚构 |
+| DiminishingReturnsDetector | （已移除） | harness ratchet 从 5008 降到 5008 之下；该硬停违反 R10 |
+| Telegram 本地 pairing store | 路由器单源 pairing store | 频道本地 store 从未生效 |
+| Discord 平行嵌套配置层 | 路由器单源配置 | 平行层已删除 |
+| Provider 故障转移深克隆全会话 | 原子 regen marker + 单次克隆 | 性能/正确性修复 |
+| `aleph.svg` 静态路径硬编码 | `core_path("/aleph.svg")` | 跟随核心迁移 |
+| `max_iterations` 之外硬停 | 仅 `max_iterations` + 工具循环验证器 | R10 禁止循环内确定性完成判断 |
+| `EphemeralSession` / 双层 session | `SessionEventRecord` + TurnId | SessionEvent 体系 |
 
 ## 另请参阅
 

@@ -190,3 +190,35 @@ Discovered → Evaluated → Eligible → Loaded → Active
 - [Skills](./skills) — Conceptual overview of skills
 - [Extensions](./extensions) — Plugin architecture
 - [ClawHub](./clawhub) — Skill registry integration
+
+---
+
+## 26.7.x Addendum
+
+### SkillOpt Self-Evolution
+
+26.7.x: skill evolution is now constrained by the SkillOpt discipline — a bounded, validation-gated edit loop layered over LLM-proposed edits (the `doctor_repair_hint` in `src/memory/note_layer/` backs this).
+
+### Tool Calls
+
+- `skills.install` — unified entry (from marketplace / zip / path)
+- `skills.install_dep` — install dependencies
+- `skills.remove` — uninstall
+- `skills.status` — current status
+- `skills.update` — update
+
+### Trigger Words
+
+See `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`:
+
+- BM25 ranker
+- Edit-distance backstop
+- Frontmatter-driven
+- Coordinates with `tools.defer_mcp_tools`
+
+### See Also
+
+- [Skills](/docs/en/concepts/skills) — concept
+- [Extensions](/docs/en/concepts/extensions) — plugin architecture
+- [ClawHub](/docs/en/concepts/clawhub) — long-tail source
+- [Gateway RPC `skills.*`](/docs/en/gateway/methods/skills) — protocol

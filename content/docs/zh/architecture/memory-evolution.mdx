@@ -197,3 +197,29 @@ pub trait MemoryExtension: Send + Sync {
 - [记忆系统](../concepts/memory) —— 当前系统概览
 - [记忆架构](memory) —— 实现细节
 - [网关：记忆方法](../gateway/methods/memory) —— API 参考
+
+---
+
+## 26.7.x 补充
+
+### SkillOpt 自我演化纪律
+
+26.7.x 端口自 SkillOpt（arXiv 2605.23904）：bounded、validation-gated edit loop 加在 LLM 提出的编辑之上（R7：*content* is the model's; this layer only enforces discipline）。
+
+### 笔记层第 2–4 轮
+
+26.7.15+ 知识记忆笔记层成熟——详见 [记忆（架构）](/docs/zh/architecture/memory)。
+
+### 不再烧额度
+
+26.7.15+ 修复梦境守护进程每晚烧 provider 额度——夜间梦境运行的重试风暴已加边界。
+
+### 真实成本与 token 核算
+
+26.7.15+：提示缓存纪律恢复；思考深度端到端接线；每条助手消息携带真实 token 成本。
+
+### 详见
+
+- [记忆（架构）](/docs/zh/architecture/memory) — 笔记层
+- [笔记层 wikilink](/docs/zh/concepts/markdown-utils) — `[[wikilinks]]`
+- [SkillOpt 来源](https://arxiv.org/abs/2605.23904) — 自我演化纪律

@@ -120,3 +120,25 @@ The `HarnessRunner::run` function takes ownership of both the `FlowRequest` and 
 - [Harness](./harness) — Think→Act loop runtime
 - [Session Service](./session-service) — Append-only event log
 - [Thinker](./thinker) — LLM interaction layer
+
+---
+
+## 26.7.x Addendum
+
+### Real `max_iterations`
+
+26.7.15+: spawned subagents **inherit** the operator's `[execution] max_iterations` (previously falling back to 200). The `HarnessRunner::default_max_iterations` hook is now correctly overridden.
+
+### Subagent Interruptible
+
+26.7.x: A2A subagents are mid-turn interruptible — `Interrupt` truly cancels fan-out.
+
+### Subagent-Scoped Tool Output
+
+26.7.15+: child harnesses get a `ToolResultStore` handle **scoped to the parent session** — previously process-wide, causing silent zero-hit recall.
+
+### See Also
+
+- [Agent Runtime](/docs/en/concepts/agent-runtime)
+- [Harness Architecture](/docs/en/architecture/harness)
+- [Session Service](/docs/en/architecture/session-service)

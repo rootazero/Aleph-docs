@@ -152,3 +152,47 @@ UI 与一层薄的 `extensions.*` 门面通信，由它分派到既有的各类�
 - [MCP 集成](/docs/zh/concepts/mcp-integration) —— MCP 类型
 - [ClawHub](/docs/zh/concepts/clawhub) —— 长尾技能源（不再是一等的）
 - [网关方法：extensions](/docs/zh/gateway/methods/extensions) —— `extensions.*` RPC 接口
+
+---
+
+## 26.7.x 补充
+
+### `plugin.marketplace.list` / `add`
+
+26.7.x 引入索引式插件目录：
+
+- `plugin.marketplace.list` —— 列出已添加的市场源
+- `plugin.marketplace.add` —— 添加市场（提供 URL）
+
+### 信任层级
+
+| 层级 | 含义 |
+|------|------|
+| **Official** | 官方维护（`Official MCP Registry` 等） |
+| **Verified** | 经过验证的第三方 |
+| **Community** | 社区贡献 |
+| **Unverified** | 未验证 |
+
+### 安装前披露（强制）
+
+每次安装都给出**完整披露**：
+
+- `command+args` —— 启动命令
+- 密钥 —— 需要的密钥清单
+- 网络 / 文件系统触达 —— 权限范围
+- 固定版本 + SHA256 —— 完整性证明
+- 信任层级 —— 来源
+
+### 商店智能体
+
+`store-agent`（受保护智能体）负责 discover → curate → install → verify，**无法绕过系统约束**（specs、信任裁决、SHA256、密钥）。
+
+### 面板导航
+
+`/extensions`（顶层面板模式）按功能类别浏览/安装扩展。`/settings` 把 MCP / Plugins / Skills 归入 **Advanced** 组；ClawHub 设置标签页已移除（降级为长尾）。
+
+### 见另请参阅
+
+- [MCP 集成](/docs/zh/concepts/mcp-integration) — MCP 类型
+- [ClawHub](/docs/zh/concepts/clawhub) — 长尾源
+- [网关 RPC `extensions.*`](/docs/zh/gateway/methods/extensions) — 协议

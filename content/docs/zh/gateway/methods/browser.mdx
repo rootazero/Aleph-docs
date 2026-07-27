@@ -394,3 +394,23 @@ cdp_port = 9222
 - [agent.*](/docs/zh/gateway/methods/agent)——代理将浏览器方法用作工具
 - [exec.*](/docs/zh/gateway/methods/exec)——浏览器操作的安全审批
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `browser_config.get` / `browser_config.update`
+
+浏览器配置 RPC——chromiumoxide 路径、跨平台 Chromium 发现、CDP 设置。
+
+### `fetch_config.get` / `fetch_config.test` / `fetch_config.update`
+
+网页抓取配置——`crawl4ai` / `firecrawl` 类别、vault 存储密钥、自动回退到内置。
+
+### 计算机使用硬化
+
+26.7.15 修复六 P0 缺陷（escape 陷阱、键组合块、press-hold、滚动单位、粘贴、退化帧）+ macOS PIM 与 Chromium AX 接线。
+
+### Canvas / Browser inspector 撤除
+
+26.7.25：Panel 的 Canvas / Browser inspector seams 撤回（R10 YAGNI）。

@@ -157,3 +157,24 @@ description: "知识图谱 RPC 方法"
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [架构：知识图谱](/docs/zh/architecture/graph)——图谱系统架构
+
+---
+
+## 26.7.x 补充
+
+### Loop-Graph 治理层
+
+26.7.21+：`loop_graph` 在 harness 之上叠加治理拓扑。
+
+### `graph.*` 完整 RPC
+
+- `graph.query` —— 图查询
+- `graph.search` —— 图搜索
+- `graph.node_detail` —— 节点详情
+- `graph.update_note` —— 更新笔记
+- `graph.rename_note` —— 重命名笔记
+- `graph.delete_note` —— 删除笔记
+
+### 治理事件
+
+胜利声明、目标结算、团队解散、watcher 触发——通过 `events.subscribe` 订阅 `governance.*` 主题。

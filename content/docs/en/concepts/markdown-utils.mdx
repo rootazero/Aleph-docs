@@ -173,3 +173,39 @@ Useful for deserializing config fields that can be either `"value"` or `["value1
 
 - [Builtin Tools](./builtin-tools) — Tools that use markdown parsing
 - [PII Protection](./pii-protection) — Gateway-level PII filtering
+
+---
+
+## 26.7.x Addendum
+
+### `[[wikilink]]` Lifecycle
+
+26.7.7+ note layer wikilinks:
+
+- Parse `[[wikilinks]]` (with aliases)
+- Resolve through a strategy chain recording provenance (`resolved_by` / `status` / `label`)
+- Rename cascades (including typed relations)
+- Tombstone delete semantics with targeted inbound back-fill
+- The dreaming daemon materializes unlinked-mention soft edges
+
+### CJK Trigram Full-Text Search
+
+26.7.15+ crash-safe index + CJK trigram full-text search.
+
+### Wikilink Supersession
+
+26.7.15+: `[[wikilink]]` supersession force-surfaces a correcting note — when an outdated note is recalled, the model sees the correct one.
+
+### Note-Layer Leiden Refinement
+
+26.7.15+: connected communities via Leiden refinement — clustering, relation-kind edge tinting, contradiction→supersession closure.
+
+### `MARKDOWN_SKILL_AUTHORING.md`
+
+26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM.
+
+### See Also
+
+- [Memory System](/docs/en/concepts/memory) — the note layer
+- [Skill System](/docs/en/concepts/skill-system) — `SKILL.md` form
+- [Memory Evolution](/docs/en/concepts/memory-evolution) — note layer + dreaming

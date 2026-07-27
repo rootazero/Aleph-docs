@@ -3,15 +3,25 @@ title: "Configuration"
 description: "Configure your Aleph setup"
 ---
 
-Aleph uses a TOML configuration file at `~/.aleph/config.toml`.
+Aleph uses a TOML configuration file at `~/.aleph/aleph.toml`. All fields support environment-variable interpolation (`${VAR_NAME}`).
+
+## File Locations
+
+| File | Purpose |
+|------|---------|
+| `~/.aleph/aleph.toml` | Main configuration |
+| `~/.aleph/defaults.toml` | Defaults override |
+| `~/.aleph/aleph.toml.bak` | Auto-backup before migration |
 
 ## Basic Structure
 
 ```toml
 # Agent configuration
-[agent]
-default_model = "anthropic/claude-sonnet-4"
+[agents.defaults]
+model = "anthropic/claude-sonnet-4"
 thinking = "medium"
+session_mode = "work"   # chat / work / code
+exec_tier = "ask"        # ask / auto / full
 
 # Gateway configuration
 [gateway]
@@ -20,11 +30,11 @@ bind = "127.0.0.1"
 require_auth = false
 
 # Channel configuration
-[channel.telegram]
+[channels.telegram]
 enabled = false
 token = "BOT_TOKEN"
 
-[channel.discord]
+[channels.discord]
 enabled = false
 token = "BOT_TOKEN"
 
@@ -32,6 +42,13 @@ token = "BOT_TOKEN"
 [session]
 auto_reset_hour = 4
 expiry_days = 30
+
+# Self-signed TLS (optional)
+[gateway.tls]
+# cert and key left empty → core auto-generates a self-signed cert;
+# SAN auto-discovers the host's non-loopback interface IPs
+cert = "/path/to/cert.pem"
+key = "/path/to/key.pem"
 ```
 
 ## Agent Configuration
@@ -39,19 +56,21 @@ expiry_days = 30
 ### Model Selection
 
 ```toml
-[agent]
+[agents.defaults]
 # Primary model
-model = "anthropic/claude-opus-4-20250514"
+model = "anthropic/claude-opus-4"
 
-# Fallback models (failover chain)
+# Fallback chain (failover)
 models = [
-  "anthropic/claude-opus-4-20250514",
+  "anthropic/claude-opus-4",
   "openai/gpt-4o",
   "google/gemini-pro"
 ]
 ```
 
-### Thinking Levels
+Failover uses an atomic counter and an atomic regen marker — the primary failing switches to the next entry without cloning the whole session. `session.usage` is computed from a single pricing table in core (the shell no longer carries a duplicate).
+
+### Thinking Level
 
 | Level | Description |
 |-------|-------------|
@@ -60,16 +79,48 @@ models = [
 | `low` | Quick analysis |
 | `medium` | Balanced (default) |
 | `high` | Deep analysis |
-| `xhigh` | Maximum depth |
+| `xhigh` | Max depth |
 
-### Identity
+### Session Mode (chat / work / code)
+
+The **third** user-adjustable dimension — orthogonal to `exec_tier` and `thinking`. It statically partitions the tool **presentation** surface only (progressive-disclosure core set + deferred-tool tier); it never affects permissions.
 
 ```toml
-[agent]
+[agents.defaults]
+session_mode = "work"   # global default; override in Settings → Policies
+```
+
+Also overridable per-request and per-session. The model switches at runtime via the `session_set_mode` tool. See [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode).
+
+| Mode | Tool surface | Best for |
+|------|--------------|----------|
+| `chat` | Minimal core | General chat, Q&A |
+| `work` | Medium + workflow tools | Documents, office work |
+| `code` | Full + dev tool set | Coding, CI, debugging |
+
+### Exec Tier
+
+```toml
+[agents.defaults]
+exec_tier = "ask"
+```
+
+| Tier | Behavior |
+|------|----------|
+| `ask` | Prompt for approval before every tool execution; unknown tools fail closed |
+| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
+| `full` | All auto-allow (besides the hard security filter) |
+
+The `[sandbox.command_policy]` hard floor has the highest priority; no tier can lower it.
+
+### Identity and Group Chat
+
+```toml
+[agents.defaults]
 identity = "You are Aleph, a personal AI assistant. Be helpful, concise, and accurate."
 
-# Group chat behavior
-[agent.group_chat]
+# Group-chat behavior
+[agents.defaults.group_chat]
 require_mention = true
 prefix = "@aleph"
 ```
@@ -78,28 +129,38 @@ prefix = "@aleph"
 
 ```toml
 [gateway]
-# Port to listen on
+# Listening port
 port = 18790
 
 # Bind address
 bind = "127.0.0.1"    # localhost only
-# bind = "0.0.0.0"    # all interfaces
+# bind = "0.0.0.0"    # all interfaces (requires TLS)
 
 # Authentication
 require_auth = true
 
-# TLS (optional)
+# Self-signed TLS (when enabled, plain text is still refused on non-loopback binds)
 [gateway.tls]
 cert = "/path/to/cert.pem"
-key = "/path/to/key.pem"
+key  = "/path/to/key.pem"
+# cert and key left empty → core auto-generates a self-signed cert
+# SAN auto-discovers non-loopback interface IPs; Panel approves via TOFU
+
+# Trusted reverse proxies (decides whether the gateway reads the real client IP)
+trusted_proxy = ["127.0.0.1", "::1"]
+
+# Allow insecure transport to remote clients (default false; non-loopback binds fail closed when false)
+allow_insecure_remote = false
 ```
+
+See [Gateway Protocol](/docs/en/gateway/protocol).
 
 ## Channel Configuration
 
 ### Telegram
 
 ```toml
-[channel.telegram]
+[channels.telegram]
 enabled = true
 token = "123456:ABC..."
 
@@ -107,14 +168,14 @@ token = "123456:ABC..."
 allow_from = ["+1234567890"]
 
 # Group behavior
-[channel.telegram.groups]
+[channels.telegram.groups]
 "*" = { require_mention = true }
 ```
 
 ### Discord
 
 ```toml
-[channel.discord]
+[channels.discord]
 enabled = true
 token = "YOUR_BOT_TOKEN"
 
@@ -122,29 +183,83 @@ token = "YOUR_BOT_TOKEN"
 allow_guilds = ["guild-id-1", "guild-id-2"]
 ```
 
+### iMessage (BlueBubbles)
+
+```toml
+[channels.imessage]
+enabled = true
+# BlueBubbles server URL (typically self-hosted on macOS)
+server_url = "http://127.0.0.1:1234"
+password = "${BLUEBUBBLES_PASSWORD}"
+
+# Group behavior
+[channels.imessage.groups]
+"*" = { require_mention = true }
+```
+
+Inbound add-tapbacks are surfaced to the model as context rather than dropped.
+
 ## Provider Configuration
 
-Aleph supports multiple LLM providers. Each provider is configured under the `[provider]` table:
+Aleph supports multiple LLM providers. Each is configured under `[provider]`:
 
 ```toml
 [provider.claude]
 protocol = "anthropic"
-model = "claude-opus-4-20250514"
+model = "claude-opus-4"
 api_key = "sk-ant-..."
 
 [provider.openai]
 protocol = "openai"
 model = "gpt-4o"
 api_key = "sk-..."
+
+[provider.ollama]
+protocol = "ollama"
+model = "llama3"
+base_url = "http://127.0.0.1:11434"
 ```
 
-See [Providers](/docs/en/architecture/providers) for the full list of supported providers.
+See [Providers](/docs/en/architecture/providers) for the full list.
+
+## Plugins / Skills / MCP
+
+```toml
+# Progressive tool disclosure (on-demand schema loading)
+[tools]
+defer_mcp_tools = true
+enable_tool_search = true
+
+# MCP servers
+[[mcp.servers]]
+name = "fetch"
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+# Plugin marketplaces
+[[plugin.marketplace]]
+url = "https://marketplace.example.com/index.json"
+```
+
+## Hooks
+
+```toml
+[[hook]]
+event = "session.start"
+command = ["echo", "session $SESSION_ID started"]
+
+[[hook]]
+event = "tool.invoke.pre"
+# Bound injected context (avoid unbounded growth)
+context_injection_limit_bytes = 8192
+require_consent = true
+```
 
 ## Session Configuration
 
 ```toml
 [session]
-# Auto-reset hour (0-23, local time)
+# Auto-reset hour (0–23, local time)
 auto_reset_hour = 4
 
 # Session expiry
@@ -154,6 +269,8 @@ expiry_days = 30
 [session.compaction]
 enabled = true
 threshold = 50000  # tokens
+
+# The session.compact tool — equivalent to /compact, available on every surface
 ```
 
 ## Environment Variables
@@ -161,18 +278,33 @@ threshold = 50000  # tokens
 Configuration values can use environment variables:
 
 ```toml
-[channel.telegram]
+[channels.telegram]
 token = "${TELEGRAM_BOT_TOKEN}"
+
+[provider.claude]
+api_key = "${ANTHROPIC_API_KEY}"
 ```
+
+Supports `${VAR}` and `${VAR:-default}`. Environment variables take precedence over values in the config file.
 
 ## Hot Reload
 
-Configuration changes are automatically detected and applied. The gateway watches `config.toml` for changes and reloads without restart.
+Config changes are auto-detected and applied. The gateway watches `aleph.toml` and reloads without a restart.
 
-## Configuration Locations
+- **Hot-reloadable**: model catalog + failover chain; provider config; channel on/off; `[execution]` run caps (`max_runs_global` / `max_runs_per_agent`)
+- **Requires restart**: core port, bind address, TLS certificate
 
-| File | Purpose |
-|------|---------|
-| `~/.aleph/config.toml` | Main configuration file |
-| `~/.aleph/defaults.toml` | Default value overrides |
-| `~/.aleph/config.toml.bak` | Automatic backup before migrations |
+## Backup Recommendations
+
+| Path | Contents | Priority |
+|------|----------|----------|
+| `aleph.toml` | All configuration | High |
+| `sessions/` | Session database | Medium |
+| `plugins/` | Installed plugins | Low (re-installable) |
+| `logs/` | Application logs | Low |
+
+## Next Steps
+
+- [Deployment](./deployment) — run Aleph as a persistent service
+- [Gateway Protocol](/docs/en/gateway/protocol) — full RPC reference
+- [Security](/docs/en/security/overview) — deeper security model

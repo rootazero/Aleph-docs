@@ -367,3 +367,38 @@ MCP（模型上下文协议）方法管理外部 MCP 服务器——添加、更
 - [extensions.* 方法](/docs/zh/gateway/methods/extensions)——统一扩展门面（`Skill` / `Plugin` / `Mcp`）
 - [扩展商店](/docs/zh/concepts/extensions-store)——按类别浏览和安装扩展
 - [架构：网关](/docs/zh/architecture/gateway)——网关架构
+
+---
+
+## 26.7.x 补充
+
+### `mcp.*` 完整 RPC
+
+- `mcp.cancel_approval` / `mcp.respond_approval` —— Discord 交互式审批按钮
+- `mcp_list_*` —— 按需发现 MCP 资源/提示
+- `mcp.read_approval` —— 读取审批状态
+
+### `mcp_config.*` 完整 RPC
+
+- `mcp_config.create` / `delete` / `get` / `list` / `update`
+
+### `McpResourceIndexLayer` 已回退
+
+26.7.17+ 收敛：eager 资源/提示索引层被回退，改用**按需发现**。
+
+### 协议版本协商 + 能力广播
+
+26.6.29+：
+
+- 广播 sampling 能力
+- 协商协议版本
+- `max_failures` 接线
+- `post_install` 字段
+
+### `cat`-guard read-steer
+
+按需发现 + 读路径 steer——模型不再 `cat` 整个文件。
+
+### MCP 最长前缀匹配
+
+26.7.18+ 资源最长前缀解析。

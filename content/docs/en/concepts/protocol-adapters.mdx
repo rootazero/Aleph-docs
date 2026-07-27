@@ -203,3 +203,38 @@ custom:
 
 - [Providers](./providers) — Provider presets, failover, and health monitoring
 - [Gateway](./gateway) — How the Gateway routes requests to providers
+
+---
+
+## 26.7.x Addendum
+
+### Telegram Parallel-Layer Cleanup
+
+26.7.21 major change: the Telegram adapter shed **~2.6k lines of dead code** — previously it contained an **uncompiled** webhook server, an **unconstructed** session manager, a **dead** draft API, and duplicated status reactions. Access / pairing / allowlists are now **single-sourced on the inbound router** — the channel-local pairing store never took effect.
+
+### Discord Parallel-Layer Cleanup
+
+26.7.21: Discord's parallel nested-config / account-pool / resolver layers were removed. **Only** the router-aligned entry path remains.
+
+### Cross-Channel Reachability / Addressability
+
+26.7.x: configured channels are now **truly reachable and addressable** — previously some configurations never took effect. `gateway.credentials` / `channels.set_agent` / `channel.pairing_data` provide the full addressing + credentials.
+
+### iMessage
+
+26.7.21+ enhancement: inbound iMessage add-tapbacks (add-reactions) are surfaced to the model as context, not dropped.
+
+### Unified Channel Calls
+
+`channels.*` / `channel.*` namespace aggregation:
+
+- `channel.create` / `delete` / `health` / `list` / `start` / `status` / `stop` / `send` / `pairing_data`
+- `channels.set_agent` / `channels.list` / `channels.status` / `channels.dead_letters` / `channels.redrive_dead_letters`
+- `channel.pairing.approve` / `approved` / `list` / `reject` / `revoke`
+
+### See Also
+
+- [Interfaces Overview](/docs/en/interfaces/overview) — channels at a glance
+- [Telegram](/docs/en/interfaces/telegram) — after the big cleanup
+- [Discord](/docs/en/interfaces/discord) — after the big cleanup
+- [iMessage](/docs/en/interfaces/imessage) — new channel

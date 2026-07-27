@@ -236,3 +236,39 @@ watcher.watch(config_path, RecursiveMode::NonRecursive)?;
 - [入门: 配置](/docs/zh/getting-started/configuration) — 面向用户的配置指南
 - [网关](/docs/zh/architecture/gateway) — 运行时配置更新的管理 API
 - [错误处理](/docs/zh/concepts/error-handling) — 配置错误如何传播
+
+---
+
+## 26.7.x 补充
+
+### 新增配置段
+
+- **`[gateway.tls]`**（26.7.17+）—— 自签名 TLS。`cert` / `key` 留空时核心自动生成；SAN 自动覆盖主机非环回接口 IP；`san` 字段手动覆盖。
+- **`[gateway] trusted_proxy`**（26.7.17+）—— 反向代理信任列表，决定网关是否读取真实客户端 IP。
+- **`[gateway] allow_insecure_remote`**（26.7.17+）—— 默认 false；false 时非环回绑定失败关闭。
+- **`[agents.defaults] session_mode`**（26.7.21+）—— `chat` / `work` / `code` 三档。
+- **`[agents.defaults] exec_tier`**（26.7.15+）—— `ask` / `auto` / `full` 三级。
+- **`[sandbox.command_policy]`** —— 硬底；不能被任何 `exec_tier` 拉低。
+- **`[tools] defer_mcp_tools`**（26.7.7+）—— MCP 工具是否进入 deferred-tier（按需 `tool_search`）。
+- **`[tools] enable_tool_search`**（26.7.7+）—— 启用 `tool_search` 元工具。
+- **`[[hook]]` 段**（26.7.x）—— Hooks；`context_injection_limit_bytes` 注入限额，`require_consent` 同意门。
+- **`[[mcp.servers]]` 段**（26.7.x）—— MCP 服务器配置。
+- **`[[plugin.marketplace]]` 段**（26.7.x）—— 插件市场源。
+- **`[projects]` / `[[project]]`**（26.7.x）—— 项目存储；`projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` 支撑。
+- **`[runtimes]`**（26.7.x）—— 运行时管理；`runtimes.install` / `list` / `refresh`。
+- **`[voice]`**（26.7.x）—— 语音子系统（WhisperLiveKit、TTS 多提供商）。
+
+### 失败关闭与单源
+
+26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时拒绝授权。`aleph.toml` 是**唯一**配置文件——`aleph-core` 中不再持有重复价格表（shell 也不再有）。
+
+### 热重载
+
+- 可热重载：模型目录与故障转移链、provider 配置、channels 启停、`[execution]` 运行上限（`max_runs_global` / `max_runs_per_agent`）
+- 需重启：核心端口、绑定地址、TLS 证书
+
+### 详细参考
+
+- [配置入门](/docs/zh/getting-started/configuration) —— `aleph.toml` 完整字段
+- [网关协议 TLS 段](/docs/zh/gateway/protocol#tls--tofu) —— 自签名 + TOFU
+- [执行审批](/docs/zh/security/exec-approval) —— `exec_tier` 与硬底

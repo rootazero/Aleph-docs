@@ -28,7 +28,7 @@ The crate is organized into domain-specific modules. All public modules are re-e
 
 ```text
 alephcore
-  ├── agent_loop      # OTAF execution engine
+  ├── harness         # Think→Act execution engine (`AgentHarness`)
   ├── agents          # Agent definitions, sub-agents, swarm
   ├── approval        # User approval workflows
   ├── browser         # CDP browser automation
@@ -60,7 +60,11 @@ alephcore
   ├── payload         # Request/response payloads
   ├── permission      # Permission management
   ├── pii             # PII detection & scrubbing
-  ├── poe             # Principle-Operation-Evaluation tasks
+  ├── loop_graph       # governance topology layer (team / audit ring / victory-claim watchers)
+  ├── looping          # loop pause / resume
+  ├── goal             # goal subsystem
+  ├── artifacts        # artifact store
+  ├── verification     # tool-loop verifier
   ├── prompt          # Prompt construction
   ├── providers       # AI provider abstraction
   ├── resilient       # Resilient task execution
@@ -97,19 +101,19 @@ Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) b
 | `RoutingRuleConfig` | `config` | Intent routing rules |
 | `GeneralConfig` | `config` | General application settings |
 
-### Agent Loop
+### Harness (Think→Act)
 
 | Type | Module | Description |
 |------|--------|-------------|
-| `AgentLoop` | `agent_loop` | Core OTAF execution engine |
-| `AgentLoopBuilder` | `agent_loop::builder` | Builder pattern for `AgentLoop` construction |
-| `LoopConfig` | `agent_loop::config` | Loop execution parameters (max iterations, timeouts) |
-| `LoopResult` | `agent_loop` | Final result of an agent loop run |
-| `LoopState` | `agent_loop::state` | Mutable state carried across iterations |
-| `RequestContext` | `agent_loop::state` | Per-request metadata (session, identity, attachments) |
-| `Message` | `agent_loop::message_builder` | Chat message with role and content |
-| `ToolCall` | `agent_loop::message_builder` | Tool invocation record |
-| `Decision` | `agent_loop::decision` | Parsed LLM decision (respond, call tool, delegate, stop) |
+| `AgentHarness` | `harness::AgentHarness` | Core Think→Act execution engine (locked at 12 files / 5,055 lines) |
+| `AgentHarness::new` | `harness::AgentHarness` | Construct with `HarnessDeps` |
+| `HarnessDeps` | `harness::deps` | Injected dependencies (session, tool, provider, callback) |
+| `HarnessRunner` | `harness::HarnessRunner` | Polymorphic seam (replaces the legacy `Harness` trait) |
+| `HarnessCallback` | `harness::callback` | Live event callback (delta, reasoning, tool_call_start/done, complete_with_outcome) |
+| `TurnState` / `TurnStep` | `harness::trait_def` | Turn / step state |
+| `ChainContext` | `harness::chain_context` | Per-turn execution context |
+| `HarnessError` | `harness::trait_def` | Harness error |
+| `TurnPhase` | `harness::trait_def` | Turn phase |
 
 ### Thinker (LLM Layer)
 
@@ -250,12 +254,12 @@ alephcore = { path = "...", features = ["gateway", "all-channels", "cron", "plug
 
 ```rust
 use alephcore::{
-    AgentLoop, AgentLoopConfig, RequestContext,
+    AgentHarness, HarnessDeps, HarnessRunner, HarnessCallback,
     Thinker, ThinkerConfig, SingleProviderRegistry,
     ContextCompressor,
 };
-use alephcore::agent_loop::NoOpLoopCallback;
-use alephcore::providers::{create_provider, ProviderConfig};
+use alephcore::harness::callback::BroadcastCallback;
+use alephcore::providers::{create_provider, ProviderConfig, UnifiedMessage, ProviderDelta};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -274,13 +278,19 @@ async fn main() -> alephcore::Result<()> {
         ThinkerConfig::default(),
     );
 
-    // 4. Create the Agent Loop
-    let loop_config = AgentLoopConfig::default();
-    let compressor = ContextCompressor;
-    let agent = AgentLoop::new(thinker, compressor, loop_config);
+    // 4. Create the Harness
+    let deps = HarnessDeps::new(
+        session_service,
+        tool_service,
+        sandbox,
+        ai_provider,
+    );
+    let callback = Arc::new(BroadcastCallback::new(event_bus));
+    let harness = AgentHarness::new(deps);
+    let runner: Arc<dyn HarnessRunner> = Arc::new(harness);
 
     // 5. Run
-    let result = agent.run(
+    let result = runner.run(
         "What is the weather in Tokyo?".to_string(),
         RequestContext::empty(),
         vec![], // tools
@@ -386,3 +396,39 @@ Aleph uses Tokio with the `rt-multi-thread` feature. All public async APIs retur
 - [Architecture](/docs/en/architecture/overview) -- System architecture overview
 - [Tool System](/docs/en/tools/overview) -- Tool design and built-in tools
 - [Gateway](/docs/en/gateway/overview) -- Gateway server documentation
+
+---
+
+## 26.7.x Addendum
+
+### Module Inventory
+
+The `alephcore` crate exposes ~76 `src/<module>` directories plus a few top-level `.rs` files (`alephcore::error` / `pricing` / `canvas_io` / `event_handler` / `sync_primitives`).
+
+### Key Exports
+
+```rust
+use alephcore::identity::IdentityContext;
+use alephcore::session::events::{SessionEvent, SessionEventRecord, TurnId};
+use alephcore::providers::{UnifiedMessage, ProviderDelta, TextDelta, ThinkingDelta};
+use alephcore::looping::{LoopState, PauseReason};
+use alephcore::goal::{Goal, GoalStore};
+use alephcore::artifacts::ArtifactRecord;
+use alephcore::identity::signer::{SignerKey, OperationLedger};
+use alephcore::memory::note_layer::NoteRelation;
+use alephcore::loop_graph::{AuditRing, VictoryClaim, Watcher};
+use alephcore::tools::concurrency::ResourceClaim;
+use alephcore::verification::{ToolCallSummary, TurnVerifyContext, VerifierVerdict};
+```
+
+### Harness API
+
+`alephcore::harness::AgentHarness` — locked at 12 files / 5,055 lines. `run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`.
+
+### Thinker API
+
+`alephcore::thinker::PromptBuilder` / `PromptPipeline` / `PromptLayer` / `InteractionManifest` / `SoulManifest` / `IdentityResolver` / `MemoryContextProvider` / `TokenBudget`.
+
+### Full Module Reference
+
+See `cargo doc --open --package alephcore` and the `src/` directory tree.

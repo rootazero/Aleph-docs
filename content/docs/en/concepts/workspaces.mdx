@@ -304,3 +304,40 @@ No restart is required for most configuration changes. Provider credentials, int
 - [Messages](/docs/en/concepts/messages) -- Session storage and message persistence
 - [Extensions](/docs/en/concepts/extensions) -- Plugin directory layout and discovery
 - [Architecture Overview](/docs/en/architecture/overview) -- System-level view of the storage layer
+
+---
+
+## 26.7.x Addendum
+
+### Workspace RPC
+
+26.7.x workspaces are backed by these RPC methods:
+
+- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
+- `channels.set_agent` — bind a channel to a specific agent (**now requires the agent to exist** — the prior `channels.set_agent` accepting non-existent agents was fixed)
+- `projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` — project store
+
+### File-Op Path Safety
+
+26.7.15+:
+
+- Symlink-safe delete/move
+- Glob/deny re-checks
+- Collision de-dup
+- Per-path locks
+- Hardened path deny gate (`%APPDATA%` expansion, system/proc guards)
+- `apply_patch` forward cursor that fails honestly on unplaceable additions
+
+### Cluster `file.write` No TOCTOU Window
+
+26.7.21 fix: cluster `file.write` no longer has a time-of-check-to-time-of-use window between the existence check and the write.
+
+### Unicode-Normalized Node Keys
+
+26.7.20+: cluster `normalize_node_key` is now Unicode-aware. CJK node names work correctly. Previously, byte-slicing broke CJK node names.
+
+### See Also
+
+- [Gateway RPC `workspace.*`](/docs/en/gateway/methods/workspace) — full RPC
+- [Gateway RPC `projects.*`](/docs/en/gateway/methods/workspace#projects) — project store
+- [Cluster](/docs/en/architecture/cluster) — node-key normalization

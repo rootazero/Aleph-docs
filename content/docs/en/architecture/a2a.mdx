@@ -138,3 +138,25 @@ sub_agent_timeout = 300  # seconds
 - [Orchestrator](./orchestrator) — Parent agent orchestration
 - [Teams](./teams) — Multi-agent team management
 - [ACP](./acp) — Agent Client Protocol for external tools
+
+---
+
+## 26.7.x Addendum
+
+### Interrupt Truly Cancels
+
+`Interrupt` now **truly cancels fan-out**, not demoted to queue. Long-running detached members no longer leak.
+
+### Subagent Authorization Restored
+
+Closed within the delegation chain — A2A subagents can be re-authorized.
+
+### `subagent.tree` RPC
+
+Returns an agent's subagent tree (node identity + live events + tree RPC).
+
+### See Also
+
+- [A2A Concept](/docs/en/concepts/a2a-protocol) — full concept
+- [Teams](/docs/en/architecture/teams) — team coordination
+- [Gateway RPC `subagent.tree`](/docs/en/gateway/methods/agents)

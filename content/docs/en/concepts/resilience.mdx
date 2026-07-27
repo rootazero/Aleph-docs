@@ -108,3 +108,37 @@ The schema is versioned with migration utilities in `migration.rs`. Key indexes:
 - [Agent Runtime](/docs/concepts/agent-runtime) — Agent execution loop
 - [Task Scheduling](/docs/concepts/task-scheduling) — Task queue and scheduling
 - [Event System](/docs/concepts/event-system) — Event bus architecture
+
+---
+
+## 26.7.x Addendum
+
+### Guardian Judge Payload Masks Secrets
+
+26.7.21+: the LLM judge used by heartbeat probes (`Guardian Judge`) must mask secrets — secrets are no longer serialized into logs or read by the auditor.
+
+### Heartbeat Refuses Dangerous Tools
+
+26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools. `Heartbeat` is now real (stubs → real) periodic daemon.
+
+### Provider Error Reads Bounded
+
+26.7.15+: provider error response body reads are now bounded — previously they could hang on a stalled proxy.
+
+### Shadow-Mode Event Bus
+
+26.7.x shadow mode: the system state bus with PII filtering; a robustness and privacy layer; an action dispatcher for automated responses to system events; a platform abstraction layer (PAL) with macOS-specific sensors.
+
+### Dreaming Daemon No Longer Burns Quota
+
+26.7.15 fix: the nightly dream run's retry storm is now bounded, so it no longer exhausts the provider quota.
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization is refused.
+
+### See Also
+
+- [Daemon](/docs/en/concepts/daemon) — Heartbeat driver
+- [Error Handling](/docs/en/concepts/error-handling) — fail-closed
+- [Security Overview](/docs/en/security/overview) — the fail-closed principle

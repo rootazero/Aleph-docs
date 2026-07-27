@@ -568,3 +568,54 @@ impl ToolService for CoreDispatch {
 - [代理工具链](./harness) — 思考器如何决定调用工具
 - [网关架构](./gateway) — MCP 和工具 RPC 方法
 - [记忆系统](./memory) — 记忆工具和检索架构
+
+---
+
+## 26.7.x 补充
+
+### 工具集重组
+
+26.7.x 内置工具集重组（约 19+ 工具），`src/builtin_tools/` 重新分目录：
+
+- 浏览器（CDP）
+- 桌面（通过 Bridge）
+- 文件操作（路径安全加固）
+- 搜索 / 网络抓取
+- 媒体处理
+- 视觉 / OCR
+- 知识记忆
+
+### 并行执行
+
+`src/tools/concurrency.rs` 资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）—— Act 阶段按声明分桶并行。
+
+### `tools.defer_mcp_tools` / `enable_tool_search`
+
+26.7.7+ 渐进式工具披露——非核心工具 schema 折叠为 name + description；`tool_search` 元工具按需加载。
+
+### Action-aware Approval Gate
+
+26.7.15+ 单一强点 `src/tools/scoped/`——斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
+
+### 三级执行权限
+
+| 等级 | 行为 |
+|------|------|
+| `ask` | 每次审批；未知工具失败关闭 |
+| `auto` | 幂等自动；破坏性仍审批 |
+| `full` | 全部自动（独立安全过滤除外） |
+
+### 失败关闭
+
+`permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
+
+### 跨批次去重 / 备忘
+
+`Memo / Cross-batch Dedup`：相同 `(name, args)` 复用首次结果。
+
+### 详见
+
+- [工具基础设施](/docs/zh/concepts/tool-infrastructure)
+- [内置工具](/docs/zh/concepts/builtin-tools)
+- [能力系统](/docs/zh/concepts/capability-system)
+- [执行引擎](/docs/zh/concepts/execution-engine)

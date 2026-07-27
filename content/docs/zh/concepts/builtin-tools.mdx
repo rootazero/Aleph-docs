@@ -233,3 +233,57 @@ pub enum ToolError {
 - [生成](/docs/zh/concepts/generation) — 媒体生成提供商
 - [媒体处理](/docs/zh/concepts/media-processing) — 附件处理管道
 - [搜索](/docs/zh/concepts/search) — 搜索提供商实现
+
+---
+
+## 26.7.x 补充
+
+### 工具集重组
+
+26.7.x 内置工具集重组（约 19+ 工具），`src/builtin_tools/` 重新分目录：
+
+- 浏览器工具（CDP 传输）
+- 桌面工具（通过 Bridge）
+- 文件操作工具（路径安全加固）
+- 搜索 / 网络抓取工具
+- 媒体处理工具
+- 视觉 / OCR 工具
+- 知识记忆工具
+
+### 并行执行
+
+`src/tools/concurrency.rs` 引入**资源声明**三态：
+
+- `Shared` —— 不冲突
+- `Exclusive{Global}` —— 独占整个执行
+- `Exclusive{Paths}` —— 独占特定路径
+
+Act 阶段按声明分桶并行，**桶内**并发、**桶间**串行。详见 [工具基础设施](/docs/zh/concepts/tool-infrastructure)。
+
+### 跨批次去重 / 备忘
+
+`Memo / Cross-batch Dedup`：相同 `(name, args)` 在一个批次或跨批次的二次调用复用首次结果。`McpResourceIndexLayer` 与 `tools.defer_mcp_tools` 协调。
+
+### `file_read` 支持图片
+
+26.6.29+：`file_read` 现在支持图片（`image_read`）；未变更的文件读取通过读缓存在轮次间去重。
+
+### 计算机使用语义交互
+
+26.7.7+ 语义交互：
+
+- `set_value` / `ax_action` 可访问性动作
+- 写入验证（无状态定位器评分）
+- `observe` 参数融合 act→observe（返回 post-state / 截图）
+- 恢复提示附加到工具失败后让模型自纠正
+- 密码管理器内 computer-use 被硬阻断
+
+### 失败关闭
+
+26.7.21+：未声明 / 未知工具在 `ask` tier 下**失败关闭**——之前是 default-allow 行为。
+
+### 见另请参阅
+
+- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 资源声明
+- [能力系统](/docs/zh/concepts/capability-system) — 权限
+- [执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与硬底

@@ -167,3 +167,19 @@ End a group-chat session.
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
 - [teams.*](/docs/en/gateway/methods/teams) -- Durable per-team chat threads (`teams.chat.*`) and coordination
 - [Architecture: Group Chat](/docs/en/architecture/groupchat) -- Group chat architecture
+
+---
+
+## 26.7.x Addendum
+
+### `group_chat.*` Full RPC
+
+- `group_chat.start` / `group_chat.end` / `group_chat.history` / `group_chat.list` / `group_chat.mention` / `group_chat.continue`
+
+### Team Chat Thread
+
+26.6.29+: the durable per-team chat thread (`teams.chat.*`) drives the three-panel group-chat window. `teams.chat.send` / `history` / `thread` / `cancel` supersede the older `group_chat.*`.
+
+### `teams.usage`
+
+26.7.x: team usage stats.

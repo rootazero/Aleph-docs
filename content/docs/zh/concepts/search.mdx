@@ -172,3 +172,44 @@ for result in results {
 
 - [内置工具](/docs/zh/concepts/builtin-tools) — 暴露给代理的搜索工具
 - [配置](/docs/zh/concepts/configuration) — 搜索提供商配置
+
+---
+
+## 26.7.x 补充
+
+### 记忆 `memory.retrieve_with_trace`
+
+26.7.21+：新增 `memory.retrieve_with_trace`——真实 scoring-pipeline trace 给 debug 面板。
+
+### 知识图谱
+
+26.7.15+ `note_graph_query`：
+
+- 双向 BFS 路径查找
+- 类型化关系边
+- `[[wikilink]]` supersession 强制浮现纠正笔记
+- CJK 三元组全文搜索
+- 抗崩溃索引
+
+### 28.7.27 Vault 面板
+
+- 卡片视图（替代旧表格）
+- 批量操作栏
+- 深链锚点
+- 证据链（引用本笔记的其他笔记序列）
+- 跨代理选择（原子一致性）
+- 来源（writer / timestamp / source event）
+- 批量导出为交付物
+
+### 真实打分与混合检索
+
+26.7.15+: `ScoringPipeline` 接入 `HybridRetrieval` 搜索流；`NoiseFilter` 集成到摄取管道；`MemoryConfig` 中加自适应检索和备份设置。
+
+### 网页抓取
+
+26.6.29+ 一类 `crawl4ai` / `firecrawl` provider（URL → markdown），vault 存储密钥；自动在失败时回退到内置 fetch。
+
+### 见另请参阅
+
+- [记忆系统](/docs/zh/concepts/memory) — 完整检索架构
+- [网关 RPC `memory.*`](/docs/zh/gateway/methods/memory) — 协议

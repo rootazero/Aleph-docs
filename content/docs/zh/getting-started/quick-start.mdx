@@ -16,7 +16,7 @@ description: "让 Aleph 运行起来"
 | **Windows** | `.msi` 从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
 
 1. 安装并启动应用
-2. 完成设置向导（API 密钥、模型选择）
+2. 完成设置向导（API 密钥、模型选择、**会话模式**、**执行等级**、**TLS**）
 3. 开始聊天
 
 桌面应用将核心服务器作为后台守护进程捆绑。壳停留在你的系统托盘中；关闭窗口**不会**停止服务器。
@@ -25,14 +25,17 @@ description: "让 Aleph 运行起来"
 
 ### 连接到远程核心
 
-桌面壳可以通过 Tailnet 或 VPN 连接到远程 `aleph-server`：
+桌面壳可以通过 Tailnet 或 VPN 连接到远程 `aleph-server`，**仅在**远程核心使用自签名 TLS 时（SAN 自动覆盖本机非环回接口 IP；Panel 端首次连接会弹出 TOFU 指纹 + SAN 审批面板）。
 
 ```bash
-# 在远程机器上，确保网关可访问
-aleph gateway run --bind 0.0.0.0 --port 18790
+# 在远程机器上，启用自签名 TLS
+aleph-server start \
+  --gateway-bind 0.0.0.0 \
+  --gateway-port 18790 \
+  --gateway-tls-auto-cert
 ```
 
-然后将本地壳指向远程来源（高级——参见 [配置](./configuration)）。
+然后在本地壳中输入 `wss://remote-host:18790` 并审批 TOFU 提示。
 
 ---
 
@@ -56,13 +59,16 @@ cargo run --bin aleph-server
 
 ### 2. 配置
 
-在 `~/.aleph/config.toml` 创建配置文件：
+在 `~/.aleph/aleph.toml` 创建配置文件：
 
 ```bash
 mkdir -p ~/.aleph
-cat > ~/.aleph/config.toml << 'EOF'
-[agent]
+cat > ~/.aleph/aleph.toml << 'EOF'
+[agents.defaults]
 model = "anthropic/claude-sonnet-4"
+thinking = "medium"
+session_mode = "work"
+exec_tier = "ask"
 
 [provider.claude]
 protocol = "anthropic"
@@ -90,10 +96,10 @@ WebChat 是一个基于 WASM 的 UI，连接到 Gateway WebSocket。
 
 #### Telegram
 
-添加到 `~/.aleph/config.toml`：
+添加到 `~/.aleph/aleph.toml`：
 
 ```toml
-[channel.telegram]
+[channels.telegram]
 enabled = true
 token = "YOUR_BOT_TOKEN"
 ```
@@ -103,9 +109,18 @@ token = "YOUR_BOT_TOKEN"
 #### Discord
 
 ```toml
-[channel.discord]
+[channels.discord]
 enabled = true
 token = "YOUR_BOT_TOKEN"
+```
+
+#### iMessage（BlueBubbles）
+
+```toml
+[channels.imessage]
+enabled = true
+server_url = "http://127.0.0.1:1234"
+password = "${BLUEBUBBLES_PASSWORD}"
 ```
 
 ### 5. 验证
@@ -115,28 +130,30 @@ token = "YOUR_BOT_TOKEN"
 ```bash
 # 服务器日志显示 "Gateway listening on ws://127.0.0.1:18790"
 tail -f ~/.aleph/logs/aleph.log
-```
 
-测试 WebSocket 连接：
-
-```bash
+# 或通过 RPC 查询
 curl http://localhost:18790/health
 ```
+
+### 6. 会话模式与执行等级
+
+打开 WebChat 后可在右上角切换 **session mode**（chat / work / code）与 **exec tier**（Ask / Auto / Full）。也可在 Settings → Policies 中设置全局默认。
 
 ---
 
 ## 架构一览
 
-> **一核多端，壳核分离；网关互通，权限控制。**
+> **一核多端，壳核分离；网关互通，权限控制；三对维度：exec_tier × thinking × session_mode。**
 
 - **一个核心**（`aleph-server`）驱动所有界面
 - **壳**（桌面应用）= 纯 OS 集成；**核心** = 所有业务逻辑
 - 所有终端使用相同的认证 WebSocket 协议
-- 桌面壳可以连接本地或远程核心
+- 桌面壳可以连接本地或远程核心（远程必须使用 `wss://` + TOFU）
+- 用户可调三对维度：`exec_tier`（权限）/ `thinking`（推理）/ `session_mode`（工具呈现）
 
 ## 下一步
 
-- [配置](./configuration) - 完整配置参考
-- [Gateway 协议](../gateway/protocol) - WebSocket JSON-RPC API
-- [接口](../interfaces/overview) - 连接更多平台
-- [架构](../architecture/overview) - 深入了解壳核分离
+- [配置](./configuration) —— 完整配置参考
+- [Gateway 协议](../gateway/protocol) —— WebSocket JSON-RPC API
+- [接口](../interfaces/overview) —— 连接更多平台
+- [架构](../architecture/overview) —— 深入了解壳核分离

@@ -236,3 +236,39 @@ watcher.watch(config_path, RecursiveMode::NonRecursive)?;
 - [Getting Started: Configuration](../getting-started/configuration) — User-facing configuration guide
 - [Gateway](../architecture/gateway) — Admin API for runtime config updates
 - [Error Handling](./error-handling) — How config errors are propagated
+
+---
+
+## 26.7.x Addendum
+
+### New Config Sections
+
+- **`[gateway.tls]`** (26.7.17+) — self-signed TLS. When `cert` / `key` are empty, the core auto-generates a cert; the SAN auto-discovers the host's non-loopback interface IPs; the optional `san` field overrides manually.
+- **`[gateway] trusted_proxy`** (26.7.17+) — reverse-proxy trust list; decides whether the gateway reads the real client IP.
+- **`[gateway] allow_insecure_remote`** (26.7.17+) — defaults to false; on false, non-loopback binds fail closed.
+- **`[agents.defaults] session_mode`** (26.7.21+) — `chat` / `work` / `code` three values.
+- **`[agents.defaults] exec_tier`** (26.7.15+) — `ask` / `auto` / `full` three tiers.
+- **`[sandbox.command_policy]`** — the hard floor; no `exec_tier` can lower it.
+- **`[tools] defer_mcp_tools`** (26.7.7+) — push MCP tools into the deferred tier (on-demand `tool_search`).
+- **`[tools] enable_tool_search`** (26.7.7+) — enable the `tool_search` meta-tool.
+- **`[[hook]]` blocks** (26.7.x) — Hooks; `context_injection_limit_bytes` bound, `require_consent` consent gate.
+- **`[[mcp.servers]]` blocks** (26.7.x) — MCP server config.
+- **`[[plugin.marketplace]]` blocks** (26.7.x) — plugin marketplace source.
+- **`[projects]` / `[[project]]`** (26.7.x) — project store; `projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` underpin.
+- **`[runtimes]`** (26.7.x) — runtime management; `runtimes.install` / `list` / `refresh`.
+- **`[voice]`** (26.7.x) — voice subsystem (WhisperLiveKit, multi-provider TTS).
+
+### Fail-Closed and Single-Source
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization is refused. `aleph.toml` is the **single** config file — `aleph-core` no longer carries a duplicate pricing table (neither does the shell).
+
+### Hot Reload
+
+- **Hot-reloadable**: model catalog + failover chain; provider config; channel on/off; `[execution]` run caps (`max_runs_global` / `max_runs_per_agent`)
+- **Requires restart**: core port, bind address, TLS certificate
+
+### Full Reference
+
+- [Configuration Getting-Started](/docs/en/getting-started/configuration) — full `aleph.toml` field reference
+- [Gateway Protocol TLS section](/docs/en/gateway/protocol#tls--tofu) — self-signed + TOFU
+- [Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and the hard floor

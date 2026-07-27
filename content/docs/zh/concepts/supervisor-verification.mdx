@@ -157,3 +157,35 @@ Aleph 的验证逻辑存在于提示词中（参见 `src/thinker/layers/agent_ro
 
 - [代理运行时](/docs/zh/concepts/agent-runtime) — 代理生命周期和停止条件
 - [任务调度](/docs/zh/concepts/task-scheduling) — 基于车道的执行
+
+---
+
+## 26.7.x 补充
+
+### `DiminishingReturnsDetector` 已删除
+
+26.7.20+：**`DiminishingReturnsDetector` 硬停被删除**——这是 R10「5 个不」之 3（不做完成度判断）的具体落实。
+
+历史位置在 `src/context/budget/`（`StopDiminishing` / `TurnMetrics`）；硬停机制是循环内的确定性完成判断，违反 R10。Ratchet 当前 5055 行（**代码是权威**——任何文档数字都只是 `CEILING` 的副本）。
+
+### 工具循环验证器
+
+26.7.15+：`src/verification/` 提供 Turn-level 工具循环验证器：
+
+- `hash_tool_args` —— 工具参数哈希
+- `ToolCallSummary` —— 工具调用摘要
+- `TurnVerifyContext` —— Turn 验证上下文
+- `VerifierVerdict` —— 验证裁决
+- `TOOL_HISTORY_WINDOW` —— 历史窗口
+
+只有**模型显式 stop**才会结束一个 Turn。`max_iterations` 仍是安全上限。
+
+### 上下文"永不破"保证
+
+26.7.1+：之前可能通过 `FinalReply` 提前结束的轮次现在总是路由过 `compact_to_fit` 然后继续。加一个确定性的 `truncate_to_fit` 底作为最后手段。
+
+### see also
+
+- [Harness 架构](/docs/zh/architecture/harness) — 验证器集成
+- [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop) — 5 个「不」
+- [架构概览](/docs/zh/architecture/overview) — 验证器位置

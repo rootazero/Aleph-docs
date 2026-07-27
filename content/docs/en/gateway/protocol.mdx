@@ -172,3 +172,83 @@ Unsubscribe:
   }
 }
 ```
+
+---
+
+## 26.7.x Addendum
+
+### TLS
+
+26.7.17+ introduces `[gateway] tls`:
+
+```toml
+[gateway]
+bind = "0.0.0.0"
+allow_insecure_remote = false  # default false; non-loopback binds fail closed
+
+[gateway.tls]
+# cert and key left empty → auto-generate a self-signed cert
+# SAN auto-discovers the host's non-loopback interface IPs
+# cert = "/path/to/cert.pem"
+# key  = "/path/to/key.pem"
+```
+
+When TLS is enabled, the connection URL becomes `wss://...`; the port stays the same.
+
+### Real Client IP
+
+26.7.17+:
+
+```toml
+[gateway]
+trusted_proxy = ["127.0.0.1", "::1"]
+```
+
+When listed in `trusted_proxy`, the gateway parses the real client IP from `X-Forwarded-For` / `X-Real-IP` (capacity limits, rate limits, audit, and connect-auth all depend on this).
+
+### Atomic Regen Marker
+
+26.7.18+: when the self-signed cert's SAN drifts, the gateway writes an **atomic regen marker** first, then regenerates the cert; if regeneration fails, the old cert is still used.
+
+### Single-Source Error Receipt
+
+26.7.21+: the gateway returns a **single-source** user-readable error. The raw error chain never leaks to the Panel.
+
+```json
+// Error-receipt example
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Tool 'shell_exec' failed: exit code 1",
+    "data": {
+      "receipt_id": "err-...",
+      "category": "tool_execution",
+      "user_message": "Command failed (exit 1)"
+    }
+  }
+}
+```
+
+### WS Task-Leak Fixes
+
+26.7.21+:
+
+- Per-connection event-forward tasks no longer leak
+- `broadcast::RecvError::Lagged` recovers rather than dies permanently
+- Webhook receivers return 503 under congestion rather than silently dropping
+
+### Request IDs Switched to Atomic Counter
+
+26.7.21+: wire request IDs no longer use UUIDs (the `uuid` dependency is dropped from `aleph-protocol`); switched to an **atomic counter**. IDs are now monotonically increasing, not random.
+
+### Full RPC ~265
+
+26.7.x the gateway exposes **~265 RPC methods** — see [Methods Reference](/docs/en/gateway/methods).
+
+### See Also
+
+- [Gateway Methods Reference](/docs/en/gateway/methods) — full RPC
+- [Gateway Auth](/docs/en/gateway/auth) — auth / pairing / TOFU
+- [Architecture / Gateway](/docs/en/architecture/gateway) — architecture

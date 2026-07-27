@@ -306,3 +306,60 @@ The following concepts were removed in the **Memory Sovereignty Cleanup** (2026-
 - [Thinker](./thinker) — How memories are injected into prompts
 - [Architecture: Memory](../architecture/memory) — Deep dive into storage implementation
 - [Memory Evolution](../architecture/memory-evolution) — Spec 1-4 and Spec A-C details
+
+---
+
+## 26.7.x Addendum
+
+### Note Layer Rounds 2–4
+
+26.7.15+ the knowledge-memory note layer matured:
+
+- Category names canonicalized (singular/plural split-brain fixed)
+- Relation vocabulary cleaned of entity-name pollution
+- Connected communities via Leiden refinement
+- Contradiction→supersession closure
+- Stale notes archived
+- Default-off governance gate
+
+### Vault Panel Refactor (26.7.27+)
+
+- Card view (replaces the old table)
+- Batch-action bar
+- Deep-link anchors
+- **Evidence chain** (sequence of other notes that cite this note)
+- Cross-agent selection (atomic consistency)
+- **Provenance** (writer / timestamp / source event)
+- Batch export as a **deliverable**
+
+### SkillOpt Self-Evolution
+
+26.7.x: skill evolution is constrained by the SkillOpt discipline — a bounded, validation-gated edit loop layered over LLM-proposed edits.
+
+### `note_graph_query` + `memory.retrieve_with_trace`
+
+26.7.15/21+:
+
+- `note_graph_query` read-only tool — bidirectional BFS path, typed relation edges, `[[wikilink]]` supersession
+- `memory.retrieve_with_trace` — real scoring-pipeline trace for the debug panel
+- CJK trigram full-text search
+- Crash-safe index
+
+### `memory.list_corrections`
+
+26.7.x: list the correction→distillation lifecycle.
+
+### `memory.appList`
+
+Lists memory entries associated with an app (filtered by `app_key`).
+
+### Real Cost and Token Accounting
+
+26.7.15+: Memory Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort, several retrieval bug fixes.
+
+### See Also
+
+- [Memory System (Architecture)](/docs/en/architecture/memory) — full retrieval architecture
+- [Memory Evolution](/docs/en/concepts/memory-evolution) — Dreaming + SkillOpt
+- [Note-Layer Wikilink](/docs/en/concepts/markdown-utils) — `[[wikilinks]]`
+- [Gateway RPC `memory.*`](/docs/en/gateway/methods/memory) — protocol

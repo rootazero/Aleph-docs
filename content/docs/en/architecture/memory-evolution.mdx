@@ -197,3 +197,29 @@ Specs currently in design (not yet shipped):
 - [Memory System](../concepts/memory) — Current system overview
 - [Memory Architecture](memory) — Implementation details
 - [Gateway: Memory Methods](../gateway/methods/memory) — API reference
+
+---
+
+## 26.7.x Addendum
+
+### SkillOpt Self-Evolution Discipline
+
+26.7.x ports from SkillOpt (arXiv 2605.23904): a bounded, validation-gated edit loop layered over the LLM-proposed edits (R7: the *content* is the model's; this layer only enforces discipline).
+
+### Note Layer Rounds 2–4
+
+26.7.15+ the knowledge-memory note layer matured — see [Memory (Architecture)](/docs/en/architecture/memory).
+
+### No Longer Burns Quota
+
+26.7.15+ fix: the nightly dream run's retry storm is now bounded, so it no longer exhausts the provider quota.
+
+### Real Cost and Token Accounting
+
+26.7.15+: prompt-cache discipline restored; thinking depth wired end-to-end; every assistant message carries its real per-message token cost.
+
+### See Also
+
+- [Memory (Architecture)](/docs/en/architecture/memory) — note layer
+- [Note-Layer Wikilink](/docs/en/concepts/markdown-utils) — `[[wikilinks]]`
+- [SkillOpt source](https://arxiv.org/abs/2605.23904) — self-evolution discipline

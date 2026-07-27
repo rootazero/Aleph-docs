@@ -115,3 +115,23 @@ pub struct SessionConfig {
 - [Wizard](/docs/concepts/wizard) — Step-by-step interaction builder
 - [Intent Detection](/docs/concepts/intent-detection) — Intent classification
 - [Messages](/docs/concepts/messages) — Message types and content blocks
+
+---
+
+## 26.7.x Addendum
+
+### `clarification.resolve` / `clarification.pending`
+
+26.7.x full clarification RPC:
+
+- `clarification.resolve` — resolve a pending question
+- `clarification.pending` — list current pending
+
+### Integration with `ask_user`
+
+26.7.15+ approval: Ask-tier tool execution surfaces in the Panel as `ask_user` clarification cards. Clarification is the underlying support.
+
+### See Also
+
+- [Approval](/docs/en/concepts/approval) — Ask-tier approval
+- [Security: Execution Approval](/docs/en/security/exec-approval) — user view

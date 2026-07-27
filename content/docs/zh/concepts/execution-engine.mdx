@@ -204,3 +204,41 @@ pub struct ExecutionAudit {
 - [安全原语](./security-primitives) —— 安全层
 - [内置工具](./builtin-tools) —— 代码执行工具
 - [审批](./approval) —— 桌面/浏览器审批系统
+
+---
+
+## 26.7.x 补充
+
+### Action-aware Approval Gate
+
+26.7.15+：执行审批门是**动作感知的**——人看到真实命令且授权指纹键**绑定在命令上**。授权粒度从「工具级」升到「命令级」。
+
+### `sandbox.command_policy` 硬底
+
+26.7.15+：硬底不能被任何 `exec_tier` 拉低。缺失或不一致**拒绝授权**。
+
+### 进程隔离内核
+
+26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起（[R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
+
+### Slash 快路径旁路关闭
+
+26.7.15+：斜杠快路径、`tools.invoke`、后台延续旁路全部被强制走审批门——之前可以绕过审批。
+
+### 三级执行权限
+
+| 等级 | 行为 |
+|------|------|
+| `ask` | 每次工具执行前请求审批；未知工具失败关闭 |
+| `auto` | 幂等工具自动放行，破坏性工具仍需审批 |
+| `full` | 全部自动放行（独立的安全硬过滤除外） |
+
+### 沙箱硬化
+
+26.7.15+：不可见字符 SSOT、对称熔断器清除、死代码扫描。
+
+### 见另请参阅
+
+- [能力系统](/docs/zh/concepts/capability-system) — 权限声明
+- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 详细
+- [架构红线 R7 / R10](/docs/zh/philosophy/redlines) — LLM 主权 + 笨循环

@@ -138,3 +138,25 @@ sub_agent_timeout = 300  # 秒
 - [编排器](./orchestrator) —— 父代理编排
 - [团队](./teams) —— 多代理团队管理
 - [ACP](./acp) —— 用于外部工具的代理客户端协议
+
+---
+
+## 26.7.x 补充
+
+### Interrupt 真实取消
+
+`Interrupt` 现在**真实取消 fan-out**，不再退化为入队。长跑 detach 成员不再泄漏。
+
+### 子代理授权恢复
+
+委托链内闭包——A2A 子代理可重新授权。
+
+### `subagent.tree` RPC
+
+返回代理的子代理树（节点身份 + 实时事件 + 树 RPC）。
+
+### 见另请参阅
+
+- [A2A 概念](/docs/zh/concepts/a2a-protocol) — 完整概念
+- [团队](/docs/zh/architecture/teams) — 团队协调
+- [网关 RPC `subagent.tree`](/docs/zh/gateway/methods/agents)

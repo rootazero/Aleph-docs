@@ -8,46 +8,64 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 > *"这是人类历史上第一次，机器的灵魂被赋予了身体。"*
 > — 《攻壳机动队》
 
-**Aleph** 是一个用 Rust 构建的强大个人 AI 助手，旨在让 AI 具备与世界交互的能力。它结合了高性能的 Gateway 控制平面和多通道消息支持，使 AI Agent 能够跨各种平台无缝工作。
+**Aleph** 是用 Rust 构建的个人 AI 助手。它把高性能的 Gateway 控制平面与多通道消息、记忆治理、工具执行、本地与远程执行体（节点集群）整合到同一个核心，让 AI Agent 能在你的硬件上跨平台工作，并保持端到端的可见性。
 
 > **一核多端，壳核分离；网关互通，权限控制。**
 >
-> 一个 `aleph-server` 核心驱动所有界面——桌面应用、CLI、TUI、Telegram、Discord 等。原生桌面壳是零业务逻辑的薄容器；所有推理、工具和状态都在核心中。每个终端通过同一个经过认证的 WebSocket 网关连接，无论是本地还是远程。
+> 一个 `aleph-server` 核心驱动所有界面——桌面应用、CLI、Telegram、Discord、iMessage 等。原生桌面壳是零业务逻辑的薄容器；所有推理、工具和状态都在核心中。每个终端通过同一个经过认证的 WebSocket 网关连接，无论是本地还是远程。
 
 ## 主要特性
 
-- **多提供商 AI** - Claude、GPT、Gemini、Ollama，支持自动故障转移
-- **多通道** - Telegram、Discord、iMessage、Slack、WebChat、桌面应用
-- **原生性能** - 100% Rust 核心，无解释型语言
-- **壳核分离** - 桌面壳纯 OS 集成；核心可独立运行
-- **远程核心** - 桌面壳可通过 Tailnet/VPN 连接远程 `aleph-server`
-- **集群联邦** - 一个中心核编排多台机器（节点）作为执行臂
-- **安全执行** - 三级安全模型用于命令执行
-- **可扩展** - MCP 集成、插件系统、自定义工具
-- **自托管** - 在你自己的硬件上运行，完全控制
+- **多提供商 AI** — Claude、GPT、Gemini、Ollama，带原子计数器与原子 regen marker 的故障转移；`session.usage` 走核心定价
+- **多通道** — Telegram、Discord、iMessage、WebChat、桌面应用；Telegram/Discord 已对齐路由器单源
+- **会话模式（chat / work / code）** — 与 `exec_tier`、`think_level` 并列的第三维，对工具**呈现**面做静态分区；可被 `session_set_mode` 工具动态切换
+- **原生性能** — 100% Rust 核心，无解释型语言
+- **壳核分离** — 桌面壳纯 OS 集成；核心可独立运行
+- **远程核心 + 自签名 TLS** — 桌面壳可通过 Tailnet/VPN 连接远程 `aleph-server`；SAN 自动覆盖本机非环回接口 IP
+- **TOFU 证书信任** — 桌面面板内完成指纹 + SAN 审批与本地固定
+- **集群联邦** — 一个中心核编排多台机器（节点）作为执行臂；节点键按 Unicode 归一化（CJK 节点名正确）
+- **三层安全模型** — 失败关闭的审批 / 沙箱 / 配对，加上 `exec_tier`、会话模式、能力账本
+- **治理拓扑层（loop_graph）** — 团队节点 / 独立证据审计员（`loop-auditor`） / 胜利声明 watcher / 客观 ACL
+- **可扩展** — MCP 集成（按需发现）、插件（plugin/install 统一入口）、Markdown 技能、自定义工具
+- **自托管** — 在你自己的硬件上运行，完全控制
 
 ## 架构
 
 ```
-                               终端
-    ┌─────────────────────────────────────────────────────────────┐
-    │ 桌面应用  │  Telegram  │  Discord  │  iMessage  │  CLI   │
-    │ (Tauri 壳)│            │           │            │        │
-    └───────┬───────┴────────────┴───────────┴────────────┴───┬───┘
-            │                                                │
-            │  WebSocket (JSON-RPC 2.0)                      │
-            │  ws://127.0.0.1:18790/ws                       │
-            │                                                │
-    ┌───────▼────────────────────────────────────────────────▼───┐
-    │                    Aleph 核心 (aleph-server)                │
-    │  ┌─────────┐  ┌───────────┐  ┌─────────┐  ┌─────────────┐ │
-    │  │  Agent  │  │  Session  │  │  Tools  │  │   Gateway   │ │
-    │  │  Loop   │  │  Manager  │  │ Registry│  │  (Auth)     │ │
-    │  └─────────┘  └───────────┘  └─────────┘  └─────────────┘ │
-    └────────────────────────────────────────────────────────────┘
+                          终端
+    ┌────────────────────────────────────────────────────────────┐
+    │ 桌面壳  │   CLI    │ Telegram │ Discord  │ iMessage │ TUI  │
+    │(Tauri v2)│         │          │          │          │      │
+    └────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┴──┬───┘
+         │          │          │          │          │         │
+         │       WebSocket (JSON-RPC 2.0, wss:// 可选)         │
+         │          │          │          │          │         │
+    ┌────▼──────────▼──────────▼──────────▼──────────▼─────────▼───┐
+    │                  Aleph 核心 (aleph-server)                    │
+    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+    │  │  Gateway    │  │  Harness     │  │   Tool Registry      │  │
+    │  │  (TLS/TOFU) │  │ (Think→Act)  │  │ (builtin/MCP/plugin) │  │
+    │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
+    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+    │  │  Thinker    │  │  Session     │  │   Memory + Loop      │  │
+    │  │ (PromptBuilder)│ │ Service      │  │   Graph (governance) │  │
+    │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
+    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+    │  │  Approval / │  │  Extension   │  │   Heartbeat / Cron   │  │
+    │  │  Guardrails │  │  / Skill     │  │   (stub→real)        │  │
+    │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
+    └───────────────────────────────────────────────────────────────┘
+                                  │
+                                  │ RPC over UDS / cluster lane
+                                  ▼
+                        集群节点（远程执行体）
 ```
 
-**壳核分离。** 桌面应用是一个薄 Tauri v2 壳——窗口、托盘、通知、自动更新、全局热键。它包含**零业务逻辑和零业务 UI**。所有产品 UI 在由核心提供的 Leptos Panel 中（`http://127.0.0.1:18790`）。所有推理、工具和状态在 `aleph-server` 中。壳可以连接本地核心或远程核心。
+**壳核分离。** 桌面应用是一个薄 Tauri v2 壳——窗口、托盘、通知、自动更新、全局热键。它包含**零业务逻辑和零业务 UI**。所有产品 UI 在由核心提供的 Leptos Panel 中（`http://127.0.0.1:18790`）。所有推理、工具和状态在 `aleph-server` 中。壳可以连接本地核心或远程核心（自签名 TLS + 客户端 TOFU 信任）。
+
+**第三双生子：会话模式。** `chat` / `work` / `code` 是与 `exec_tier`（执行审批等级）、`think_level`（思考预算）并列的第三个用户可调维度。它**只对工具呈现面**做静态分区（progressive-disclosure + deferred-tool tier），不影响权限——权限仍由 `exec_tier` 与审批门控制。可在面板 composer pill、Settings → Policies 或 `session_set_mode` 工具里切换。
+
+**治理拓扑层。** `loop_graph` 在 harness 之上叠加一层治理拓扑：团队节点 / 审计环 / 客观 ACL / 胜利声明 watcher / 内置 `loop-auditor` 智能体。它给单循环的四种失败模式（Goodhart、参考盲、环冲突、测量衰减）一个拓扑答案。
 
 ## 快速开始
 
@@ -55,8 +73,11 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 # 通过 cargo 安装
 cargo install aleph-cli
 
-# 运行设置向导
+# 运行设置向导（新增 chat/work/code 会话模式与 TLS 选择）
 aleph wizard
+
+# 启动核心
+aleph-server start
 
 # 开始聊天
 aleph chat "你好, Aleph!"
@@ -68,67 +89,67 @@ aleph chat "你好, Aleph!"
   <Card
     icon="🚀"
     title="快速上手"
-    description="安装、设置向导和初始配置"
+    description="安装、设置向导、初始配置和部署"
     href="./getting-started/installation"
   />
   <Card
     icon="🧭"
     title="设计理念"
-    description="设计哲学、五层涌现架构和 Agent 思维模型"
+    description="设计哲学、五层涌现架构、Agent 思维模型与硬约束 R1-R10"
     href="./philosophy/overview"
   />
   <Card
     icon="💡"
     title="概念"
-    description="Agent 运行时、消息、模型提供商、技能、工作空间、扩展"
+    description="Agent 运行时、消息、模型提供商、技能、工作空间、扩展、记忆"
     href="./concepts/agent-runtime"
   />
   <Card
     icon="🏗️"
     title="架构"
-    description="系统设计、网关、Agent 循环、会话管理"
+    description="系统设计、网关、Agent 循环、会话、记忆与治理拓扑"
     href="./architecture/overview"
   />
   <Card
     icon="🔌"
     title="Gateway RPC"
-    description="WebSocket 协议、认证、JSON-RPC 方法"
+    description="WebSocket 协议、TLS + TOFU、认证、JSON-RPC 方法全集"
     href="./gateway/protocol"
   />
   <Card
     icon="💬"
     title="接口"
-    description="Telegram、Discord、iMessage、WebChat 集成"
+    description="Telegram、Discord、iMessage、WebChat、桌面集成"
     href="./interfaces/overview"
   />
   <Card
     icon="🔧"
     title="工具与扩展"
-    description="内置工具、MCP 集成、创建自定义工具"
+    description="内置工具、MCP（按需发现）、插件、自定义工具与 Markdown 技能"
     href="./tools/overview"
   />
   <Card
     icon="🔒"
     title="安全"
-    description="执行审批、IPC 协议、设备配对"
+    description="执行审批、失败关闭的策略、TLS / TOFU、配对、签名操作账本"
     href="./security/exec-approval"
   />
   <Card
     icon="⚡"
     title="自动化"
-    description="Cron 作业、钩子和事件驱动工作流"
+    description="Cron 作业（已实化）、Hooks（注入限额 + 同意 + 库存）和事件"
     href="./automation/cron-jobs"
   />
   <Card
     icon="⌨️"
     title="CLI 参考"
-    description="命令、网关管理、Agent 交互"
+    description="命令、网关管理、Agent 交互、会话模式切换"
     href="./cli/commands"
   />
   <Card
     icon="🛠️"
     title="开发"
-    description="从源代码构建、测试和贡献"
+    description="从源代码构建（Rust 1.95+）、测试、贡献与设计模式"
     href="./development/building"
   />
   <Card
@@ -140,8 +161,14 @@ aleph chat "你好, Aleph!"
   <Card
     icon="📋"
     title="更新日志"
-    description="发布历史、里程碑和重要变更"
+    description="26.7.x 发布历史与近三个月重要变更"
     href="./changelog"
+  />
+  <Card
+    icon="📖"
+    title="术语表"
+    description="Aleph 概念的标准化术语（中英对照）"
+    href="./terminology"
   />
 </Cards>
 
@@ -149,11 +176,11 @@ aleph chat "你好, Aleph!"
 
 Aleph 构建于五层涌现架构之上：
 
-1. **知识之海** - AI 的预训练基础
-2. **领域分类** - 组织化的专业知识
-3. **原子技能** - 从知-什么到知-如何
-4. **功能模块** - 可组合的能力
-5. **多态 Agent** - 灵魂获得身体
+1. **知识之海** — AI 的预训练基础
+2. **领域分类** — 组织化的专业知识
+3. **原子技能** — 从知-什么到知-如何
+4. **功能模块** — 可组合的能力
+5. **多态 Agent** — 灵魂获得身体
 
 目标不仅仅是构建一个工具，而是探索通往 AGI 的路径——当智能获得行动能力时。
 

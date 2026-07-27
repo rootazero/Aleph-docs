@@ -159,3 +159,31 @@ I am Aleph, a polymorphic AI assistant.
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `identity.*` RPC
+
+- `identity.get` / `identity.list` / `identity.set` / `identity.clear`
+
+### `gateway.identity.get` / `gateway.credentials`
+
+Gateway-side identity and credentials.
+
+### `agents.bindings` / `channels.set_agent`
+
+agent ↔ channel binding.
+
+### Delegated Role Chain
+
+26.7.26+: the identity chain is closed within the chain's lifecycle; `SignerKey` is held by the corresponding Agent; `OperationLedger` is replayable against the chain the signer belongs to.
+
+### Real Client IP
+
+26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
+
+### Fail-Closed
+
+26.7.21+: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.

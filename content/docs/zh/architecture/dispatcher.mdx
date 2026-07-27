@@ -100,3 +100,31 @@ pub enum HydrationLevel {
 - [执行器](./executor) — 工具执行引擎
 - [工具链](./harness) — Think→Act 循环
 - [工具架构](./tools) — 工具开发
+
+---
+
+## 26.7.x 补充
+
+### 资源声明并发
+
+26.7.x Act 阶段按**资源声明**分桶并行：
+
+- 工具声明 `Shared` / `Exclusive{Global}` / `Exclusive{Paths}` 三态
+- **桶内**并发、**桶间**串行
+- 串行模式仅在单调用 / 并发禁用 / 重复调用 / 无并行组时回退
+
+### 跨批次去重
+
+相同 `(name, args)` 在一个批次或跨批次的二次调用复用首次结果。
+
+### 资源声明三态
+
+- `Shared` —— 不冲突
+- `Exclusive{Global}` —— 独占整个执行
+- `Exclusive{Paths}` —— 独占特定路径
+
+### 详见
+
+- [工具架构](/docs/zh/architecture/tools) — 工具生命周期
+- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 资源声明
+- [内置工具](/docs/zh/concepts/builtin-tools) — 工具集

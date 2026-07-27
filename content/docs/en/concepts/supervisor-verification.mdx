@@ -157,3 +157,35 @@ Agents are instructed to emit a `VERDICT: PASS|FAIL|PARTIAL` block summarizing t
 
 - [Agent Runtime](./agent-runtime) — Agent lifecycle and stop conditions
 - [Task Scheduling](./task-scheduling) — Lane-based execution
+
+---
+
+## 26.7.x Addendum
+
+### `DiminishingReturnsDetector` Removed
+
+26.7.20+: **`DiminishingReturnsDetector` hard stop is removed** — concrete form of R10 "Don't #3" (no completion judgment).
+
+Historically in `src/context/budget/` (`StopDiminishing` / `TurnMetrics`); the hard stop was a deterministic completion judgment inside the loop, violating R10. The ratchet is currently 5,055 lines (**code is the authority** — every doc number is just a copy of `CEILING`).
+
+### Tool-Loop Verifier
+
+26.7.15+: `src/verification/` provides the Turn-level tool-loop verifier:
+
+- `hash_tool_args` — tool-arg hash
+- `ToolCallSummary` — tool-call summary
+- `TurnVerifyContext` — turn verification context
+- `VerifierVerdict` — verdict
+- `TOOL_HISTORY_WINDOW` — history window
+
+Only the **model's explicit stop** ends a turn. `max_iterations` remains a safety cap.
+
+### Context "Never-Break" Guarantee
+
+26.7.1+: turns that previously could end early via `FinalReply` now always route through `compact_to_fit` and continue. A deterministic `truncate_to_fit` floor is added as a last resort.
+
+### See Also
+
+- [Harness Architecture](/docs/en/architecture/harness) — verifier integration
+- [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop) — the five "Don'ts"
+- [Architecture Overview](/docs/en/architecture/overview) — where the verifier sits

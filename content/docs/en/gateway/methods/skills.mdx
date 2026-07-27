@@ -224,3 +224,28 @@ Skills are loaded from the following directories (in order):
 - [Concepts: Extensions Store](/docs/en/concepts/extensions-store) -- The unified Extension concept (Skill / Plugin / MCP)
 - [extensions.*](/docs/en/gateway/methods/extensions) -- Unified façade routing to the per-kind backends
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### `skills.*` Full RPC
+
+- `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install`
+- `markdown_skills.handle_install`
+
+### `bundled.sync`
+
+26.7.x: sync bundled content with disk — avoid stale bundled content.
+
+### Markdown Skill Authoring Guide
+
+26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM.
+
+### Trigger-Word Enhancement
+
+26.7.x: BM25 ranker + edit-distance backstop.
+
+### Plugin-Bundled Skills
+
+26.7.17+: installed-plugin skills are folded into the skill index and `skill_read`.

@@ -480,3 +480,38 @@ Rationale: **LLM sovereignty** (R8) — deterministic heuristics for "importance
 - [Memory Evolution](memory-evolution) — Spec history (Spec 1-4, A-C)
 - [Gateway: Memory Methods](../gateway/methods/memory) — API reference
 - [Thinker](../concepts/thinker) — How memory is injected into prompts
+
+---
+
+## 26.7.x Addendum
+
+### Vault Panel Refactor (26.7.27+)
+
+- Card view (replaces the old table)
+- Batch-action bar + deep links + **evidence chain** + cross-agent selection
+- Provenance field
+- Batch export as a **deliverable**
+
+### `note_graph_query` Tool
+
+26.7.15+ read-only tool:
+
+- Bidirectional BFS path finding
+- Typed relation edges
+- `[[wikilink]]` supersession that force-surfaces a correcting note
+- Crash-safe index
+- CJK trigram full-text search
+
+### `memory.retrieve_with_trace`
+
+26.7.21+ real scoring-pipeline trace for the debug panel.
+
+### Real Cost and Token Accounting
+
+26.7.15+ Tier-3 hardening: agent-scoped recall signals, severity-gated archival, maturity cohort.
+
+### See Also
+
+- [Memory (Concept)](/docs/en/concepts/memory) — concept view
+- [Memory Evolution](/docs/en/architecture/memory-evolution) — SkillOpt
+- [Gateway RPC `memory.*`](/docs/en/gateway/methods/memory)

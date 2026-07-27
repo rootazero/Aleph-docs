@@ -158,3 +158,23 @@ args = []
 
 - [A2A](./a2a) — Agent-to-Agent protocol for internal agents
 - [Tools](../tools/overview) — Built-in tool system
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC
+
+- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
+- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
+- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
+
+### Process-Isolation Kernel
+
+26.7.x: ACP sessions are backed by the process-isolation kernel — sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn ([R1 carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
+
+### See Also
+
+- [ACP Concept](/docs/en/concepts/acp-protocol) — full concept
+- [Sandbox](/docs/en/architecture/sandbox) — isolation mechanisms
+- [Gateway RPC `acp.*`](/docs/en/gateway/methods)

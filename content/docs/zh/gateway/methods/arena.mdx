@@ -152,3 +152,27 @@ description: "评估和基准测试 RPC 方法"
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### `dreaming.run_now` / `dreaming.list_insights`
+
+梦境守护进程相关——手工触发每日综合笔记 / 列出最近 dream-run 历史。
+
+### `insights.tools`
+
+26.7.x：列出工具洞察（按活跃度 / 成功率排序）。
+
+### `activity.stats`
+
+活动统计——按代理 / 会话 / 工具聚合。
+
+### 集群舰队 feed
+
+26.7.15+：Panel 集群视图接入实时 feed，节点身份在 connect verdict 上持久化。
+
+### 实时多会话
+
+26.7.7+：运行闸门从 per-agent 移到 per-session `SessionRunRegistry`。`gateway.metrics.run_concurrency` / `gateway.metrics.lanes` 给出运行槽。

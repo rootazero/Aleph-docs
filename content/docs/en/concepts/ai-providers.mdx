@@ -170,3 +170,47 @@ pub struct AuthProfileRegistry {
 - [Thinker](./thinker) — Prompt construction
 - [Gateway](./gateway) — Execution engine
 - [Secret Management](./secret-management) — Credential storage
+
+---
+
+## 26.7.x Addendum
+
+### Provider Failover Refactor
+
+26.7.21+ major refactor: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
+
+### Real Cost Accounting
+
+26.7.15+: `session.usage` now carries a real spend ledger (both cost and token counts were partly fabricated before). The core holds a **single-source** price table; the shell no longer carries a duplicate.
+
+### VESR Dynamic Model Routing
+
+26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (**k-NN over sqlite-vec**), so the model sees which models have actually performed for this kind of work.
+
+### Protocol Adapters
+
+The `[provider.<name>]` block configures:
+
+- `protocol` — `anthropic` / `openai` / `gemini` / `ollama` / `openai_compat` / ...
+- `model` — default model
+- `api_key` — API key (supports `${ENV_VAR}` interpolation)
+- `base_url` — OpenAI-compatible custom base (Ollama, vLLM, etc.)
+- `max_failures` — failover threshold
+
+### `runtimes.install` / `list` / `refresh`
+
+26.7.x runtime management: auto-discover and install language runtimes (Node / Python / Bun / uv / ...). The capability ledger is rebuilt from disk.
+
+### `embedding_providers.*` / `generation_providers.*` / `rerank_config.*`
+
+26.7.x split categories — embedding, generation, rerank each have their own provider config RPCs.
+
+### `route_config.*` / `routing_rules.*`
+
+26.7.x routing rules (`routing_rules.create` / `list` / `get` / `update` / `delete` / `move`) — fine-grained routing control.
+
+### See Also
+
+- [Generation](/docs/en/concepts/generation) — detail
+- [Architecture / Providers](/docs/en/architecture/providers) — architecture
+- [Gateway RPC `providers.*`](/docs/en/gateway/methods/providers) — protocol

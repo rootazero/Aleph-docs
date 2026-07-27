@@ -157,3 +157,27 @@ aleph-server status   # 检查状态
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [入门：快速入门](/docs/zh/getting-started/quick-start)——守护进程设置
+
+---
+
+## 26.7.x 补充
+
+### `daemon.logs` / `daemon.shutdown` / `daemon.status`
+
+26.7.x：守护进程管理 RPC。
+
+### `aleph-server service` 子命令
+
+26.7.1+：安装/启动/启用自启/卸载系统服务（launchd / systemd-user / Task Scheduler）。
+
+### Day-boundary 日志轮转
+
+26.7.24+：守护进程支持 day-boundary 日志轮转；启动时写 `ALEPH-BOOT` marker。睡眠抑制剂在 stderr 静默。
+
+### Heartbeat 拒绝危险工具
+
+26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。
+
+### Guardian Judge payload 隐藏密钥
+
+26.7.21+：Heartbeat 探针使用的 LLM 判官（`Guardian Judge`）其 payload 必须隐藏密钥。

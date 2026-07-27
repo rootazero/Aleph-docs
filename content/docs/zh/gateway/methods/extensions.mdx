@@ -459,3 +459,41 @@ description: "统一扩展门面 RPC 方法（扩展商店）"
 - [plugins.*](/docs/zh/gateway/methods/plugins) —— 插件宿主后端（类型 `Plugin`）
 - [mcp.*](/docs/zh/gateway/methods/mcp) —— MCP 服务器后端（类型 `Mcp`）
 - [方法参考](/docs/zh/gateway/methods) —— 所有方法命名空间
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC 集
+
+- `extensions.catalog` —— 扩展目录
+- `extensions.configure` —— 配置
+- `extensions.disclosure` —— 安装前披露
+- `extensions.install` / `extensions.installed` / `extensions.uninstall` / `extensions.toggle`
+
+### `plugin.*` 规范名空间
+
+- `plugin.list` / `plugin.install` / `plugin.installFromZip` / `plugin.uninstall` / `plugin.update`
+- `plugin.enable` / `plugin.disable` / `plugin.load` / `plugin.unload` / `plugin.reload`
+- `plugin.callTool` / `plugin.executeCommand`
+- `plugin.marketplace.list` / `plugin.marketplace.add`
+
+### `plugins.*` 旧名空间（向后兼容）
+
+`plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall` / `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload` / `plugins.callTool` / `plugins.executeCommand`
+
+### `plugin.install` 统一入口
+
+26.7.21+：按源（市场 / 压缩包 / 路径）分类统一处理。
+
+### 生命周期竞态修复
+
+26.7.21+：
+
+- 并发 `reload` 在 load guard 下串行
+- 格式错误的插件结果不再掩盖为 `ServiceResult::ok`
+- `AuthorInfo` 解析使用最左分隔符
+
+### Capability Ledger
+
+26.7.x：每次安装时从磁盘**重建**的可见能力清单——安装前披露。

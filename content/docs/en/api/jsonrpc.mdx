@@ -191,18 +191,9 @@ When `require_auth` is enabled in the Gateway config, the **first message** on a
 | `markdown_skills.list` | List loaded skills | -- | `{ skills[] }` |
 | `markdown_skills.unload` | Unload a skill | `name` | `{ unloaded }` |
 
-### poe.* -- Principle-Operation-Evaluation
+### poe.* -- Principle-Operation-Evaluation (Retired)
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `poe.run` | Run a POE task | `spec`, `agent_id?` | `{ run_id }` |
-| `poe.status` | Get POE run status | `run_id` | `{ status, progress }` |
-| `poe.cancel` | Cancel a POE run | `run_id` | `{ cancelled }` |
-| `poe.list` | List POE runs | -- | `{ runs[] }` |
-| `poe.prepare` | Prepare a POE contract | `spec` | `{ contract_id, terms }` |
-| `poe.sign` | Sign a POE contract | `contract_id` | `{ signed }` |
-| `poe.reject` | Reject a POE contract | `contract_id` | `{ rejected }` |
-| `poe.pending` | List pending contracts | -- | `{ contracts[] }` |
+> **The POE (Principle-Operation-Evaluation) architecture was retired in 26.5+**. Its "intelligence" migrated to system prompt templates (R9), naturally covered by a single LLM call. The Harness does not judge completion (**R10 "Don't #3**). All `poe.*` methods are gone — `chat.send` / `chat.abort` / `chat.history` etc. now cover their use cases.
 
 ### identity.* -- Identity/Soul Management
 
@@ -307,3 +298,70 @@ Events are delivered as JSON-RPC notifications (no `id` field) to subscribed cli
 - [Rust API](/docs/en/api/rust) -- Core crate reference for library usage
 - [Gateway Overview](/docs/en/gateway/overview) -- Architecture and connection details
 - [Protocol](/docs/en/gateway/protocol) -- Transport format and authentication flow
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC ~265
+
+26.7.x the gateway exposes **~265 JSON-RPC methods** — distributed by topic in the [Gateway Methods Reference](/docs/en/gateway/methods) subpages.
+
+### Request IDs Switched to Atomic Counter
+
+26.7.21+: wire request IDs no longer use UUIDs (the `uuid` dependency is dropped from `aleph-protocol`); switched to an **atomic counter**.
+
+### Single-Source Error Receipt
+
+26.7.21+: the gateway returns a **single-source** user-readable error. The raw error chain never leaks to the Panel.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Tool 'shell_exec' failed",
+    "data": {
+      "receipt_id": "err-...",
+      "category": "tool_execution",
+      "user_message": "Command failed (exit 1)"
+    }
+  }
+}
+```
+
+### Protocol Version
+
+`connect.minProtocol` / `connect.maxProtocol` — currently 1 on both sides.
+
+### Cross-Channel Reachability
+
+26.7.x: configured channels are now truly reachable and addressable.
+
+### Full Method Table
+
+| Topic | Count | Topic | Count |
+|------|-------|-------|-------|
+| Core (health/echo/version/system.info/request.state) | 5 | Streaming events | ~12 |
+| Config (config.*) | ~12 | providers / embedding / generation / rerank / search | ~25 |
+| Logs (logs.*) | 3 | Service start/stop (services.*) | 4 |
+| Daemon (daemon.*) | 3 | Hooks (hooks.*) | 6 |
+| Gateway credentials (gateway.ticket/token/devices/credentials/identity/metrics) | ~10 | Wizard flow (wizard.*) | 3 |
+| Memory (memory.*) | ~15 | Skills (skills.*) | 5 |
+| MCP (mcp.* + mcp_config.*) | ~12 | Plugins/Extensions (plugin.* + plugins.* + extensions.*) | ~30 |
+| Heartbeat / Cron | ~18 | Channels (channel.* + channels.* + channel.pairing.*) | ~15 |
+| Workspace / Projects | ~10 | Tools (tools.*) | 5 |
+| Teams (teams.* + teams.chat.*) | ~25 | Subagent (subagent.tree) | 1 |
+| Chat / Session (chat.* + session.* + sessions.*) | ~20 | Graph (graph.*) | 6 |
+| Group chat | 6 | Activities (activity.stats / insights.tools) | 2 |
+| Agents (agents.* + agent.*) | ~20 | Clusters / Runtimes | 8 |
+| Dreams / Dreaming | 2 | Acp (acp.*) | 12 |
+| Clawhub | 4 | Trace (trace.*) | 3 |
+| Events | 1 | Total | ~265 |
+
+### See Also
+
+- [Gateway Methods Reference](/docs/en/gateway/methods) — full RPC
+- [Gateway Protocol](/docs/en/gateway/protocol) — protocol layer
+- [Gateway Auth](/docs/en/gateway/auth) — auth / pairing / TOFU

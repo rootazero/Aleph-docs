@@ -225,3 +225,26 @@ Get the status of a wizard session.
 8. **Review** - Configuration summary
 9. **Finalize** - Apply configuration
 10. **Complete** - Success message
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Set
+
+- `wizard.start` / `wizard.status` / `wizard.cancel`
+
+### 11 Stages
+
+26.7.21+ onboarding is 11 stages: welcome, provider, credentials, primary model, secondary model, thinking level, **session mode (chat / work / code)**, **exec tier (ask / auto / full)**, messaging apps, **gateway TLS**, done.
+
+### Subcommands
+
+- `aleph wizard` — full 11 stages
+- `aleph wizard --quick` — quick setup
+- `aleph wizard --provider` — add / reconfigure a single provider
+- `aleph wizard --mode` — switch the default session mode only
+
+### Panel UI Trigger
+
+The `wizard.*` RPC can be triggered from the Panel UI without a terminal.

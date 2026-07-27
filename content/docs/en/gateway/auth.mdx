@@ -404,3 +404,71 @@ When using the HTTP fallback endpoint, include authentication in headers:
 
 - [Protocol](/docs/en/gateway/protocol) -- WebSocket JSON-RPC 2.0 protocol details
 - [Methods Reference](/docs/en/gateway/methods) -- Complete RPC method catalog
+
+---
+
+## 26.7.x Addendum
+
+### TOFU Certificate Trust
+
+26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use
+
+- Shared decision core + pinned TOFU trust store
+- SHA-256 fingerprint + SAN/Subject parsing
+- Approval splash page (fingerprint + SAN + TOFU/change warning)
+- Pending-cert state with approve/reject paths
+- macOS WKWebView + iOS Keychain adapters
+
+### `connect` Handshake Hardened
+
+26.7.15+: the `connect` handshake now **precedes** the method in `gateway call` (previously the order was inverted, causing deadlocks / races).
+
+### Device Ticket / Token Rotation
+
+26.7.x full RPC:
+
+- `gateway.ticket.create` — issue device tickets
+- `gateway.token.current` / `gateway.token.rotate` — token management
+- `gateway.devices.list` / `gateway.devices.revoke` — device management
+
+Remote sessions are closed on token rotation; **loopback sessions are preserved**.
+
+### Remote-Auth Fixes
+
+26.7.17+ fixes:
+
+- Gateway remote-auth rotation kick
+- Device resurrection
+- Audit trail wired
+- Dead auth code pruned
+
+### Pairing Single-Sourced on the Router
+
+26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+
+### Signed Operation Ledger
+
+26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
+
+### Delegated Role Chain
+
+26.7.26+:
+
+- The identity chain is closed within the chain's lifecycle
+- `SignerKey` is held by the corresponding Agent
+- `OperationLedger` is replayable against the chain the signer belongs to
+
+### Real Client IP
+
+26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
+
+### See Also
+
+- [Gateway Protocol](/docs/en/gateway/protocol) — protocol
+- [Security: Pairing](/docs/en/security/pairing) — pairing flow
+- [Identity & Signing](/docs/en/concepts/identity-context) — delegation chain
+- [Architecture / Gateway](/docs/en/architecture/gateway) — architecture

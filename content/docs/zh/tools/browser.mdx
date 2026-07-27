@@ -402,3 +402,39 @@ Agent: I'll search for the latest Rust release notes.
 ```
 
 agent 使用快照来理解页面结构，通过 `ref_id` 点击链接，并通过 JavaScript 评估提取内容。
+
+---
+
+## 26.7.x 补充
+
+### 工具集重组
+
+26.7.x 内置工具集重组（约 19+ 工具），`src/builtin_tools/` 重新分目录。
+
+### 并行执行
+
+`src/tools/concurrency.rs` 资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）—— Act 阶段按声明分桶并行。
+
+### `tools.defer_mcp_tools` / `enable_tool_search`
+
+26.7.7+ 渐进式工具披露——非核心工具 schema 折叠为 name + description；`tool_search` 元工具按需加载。
+
+### MCP 按需发现
+
+26.7.17+：`McpResourceIndexLayer` 已回退。`mcp_list_*` 工具按需发现；`cat`-guard read-steer 路由到原生 MCP / 技能 / 插件读取。
+
+### `file_read` 支持图片
+
+26.6.29+：`file_read` 现在支持图片（`image_read`）；未变更的文件读取通过读缓存在轮次间去重。
+
+### 失败关闭
+
+未知工具在 `ask` tier 下**失败关闭**。
+
+### `plugin.install` 统一入口
+
+26.7.21+：按源（市场 / 压缩包 / 路径）分类统一处理。
+
+### 完整 `tools.*` / `mcp.*` / `extensions.*` RPC
+
+详见 [网关方法参考](/docs/zh/gateway/methods)。

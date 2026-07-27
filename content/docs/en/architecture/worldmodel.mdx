@@ -144,3 +144,29 @@ confidence_threshold = 0.7
 
 - [Dispatcher](./dispatcher) — Proactive action dispatching
 - [Daemon](../concepts/daemon) — Background service management
+
+---
+
+## 26.7.x Addendum
+
+### Sibling of the Loop-Graph Governance Layer
+
+26.7.21+: `worldmodel` sits next to `loop_graph` — the former tracks environmental state (for proactive behavior), the latter tracks graph nodes / governance events. Neither participates in completion judgment.
+
+### System State Bus
+
+`SystemStateBus` integration:
+
+- PII filtering
+- Robustness and privacy layer
+- Action dispatcher
+- Platform abstraction layer (PAL) with macOS-specific sensors
+
+### Heartbeat Proactive Wake
+
+Proactive tasks driven by world state + `Guardian Judge` decisions.
+
+### See Also
+
+- [Proactive Dispatcher](/docs/en/architecture/proactive-dispatcher)
+- [Daemon](/docs/en/concepts/daemon)

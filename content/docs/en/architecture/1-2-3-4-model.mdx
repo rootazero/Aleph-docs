@@ -271,3 +271,22 @@ The 1-2-3-4 model reflects a core belief: **an AI assistant should be a brain wi
 - Run the Core on a headless server while the Faces and Limbs run elsewhere
 
 This is not microservices for the sake of it. It is a pragmatic separation that keeps a complex system maintainable by a small team. The architecture is now stable -- future work fills in capabilities, not restructures the skeleton.
+
+---
+
+## 26.7.x Addendum
+
+### 1-2-3-4 Still Stable
+
+1 core (`alephcore`), 2 faces (CLI / TUI / WebChat Panel + desktop shell), 3 limbs (gateway, harness, toolchain), 4 nerves (event bus, memory, profile, state machine).
+
+### `loop_graph` Layered on Top of 1
+
+26.7.21+: `loop_graph` doesn't change the 1-2-3-4 model — it layers on top of the core, adding governance topology (team nodes / audit ring / objective ACL / victory-claim watchers) to the multi-agent system.
+
+### 12 Modules in Their Place
+
+The Harness is locked at 12 files (see [R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop)):
+
+- Top-level (8): `mod.rs` / `agent.rs` / `deps.rs` / `trait_def.rs` / `callback.rs` / `chain_context.rs` / `trace.rs` / `trace_sink.rs`
+- `agent/` (4): `think.rs` / `act.rs` / `guardrails.rs` / `prompt.rs`

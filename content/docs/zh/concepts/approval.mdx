@@ -173,3 +173,49 @@ shell_command = "deny"
 
 - [配置](./configuration) —— 如何配置审批策略
 - [安全：概览](../security/overview) —— 安全架构
+
+---
+
+## 26.7.x 补充
+
+### Action-aware 三级执行权限
+
+26.7.15+ 重大变更：三级执行权限（Ask / Auto / Full）替换二元 ask/auto：
+
+| 等级 | 行为 | 默认 |
+|------|------|------|
+| `ask` | 每次工具执行前请求审批；未知工具失败关闭 | ✅ |
+| `auto` | 幂等工具自动放行，破坏性工具仍需审批 | |
+| `full` | 全部自动放行（独立的安全硬过滤除外） | |
+
+### 工具元数据驱动
+
+读取每个工具声明的元数据（idempotent / destructive），**不读名字**。未知工具在 `ask` tier 下**失败关闭**。
+
+### Action-aware Grant 指纹键
+
+人看到真实命令且授权指纹键**绑定在命令上**。授权粒度从「工具级」升到「命令级」。
+
+### 单一强点
+
+26.7.15+：审批门强制在 `src/tools/scoped/` 单一强点。斜杠快路径、`tools.invoke`、后台延续旁路**全部关闭**。
+
+### `[sandbox.command_policy]` 硬底
+
+不能被任何 `exec_tier` 拉低。缺失或不一致**拒绝授权**（`fail-closed`）。
+
+### Discord 交互式审批按钮
+
+26.7.21+：双向 `ApprovalCallbackSink` 流；`mcp.respond_approval` / `mcp.cancel_approval` 支撑。
+
+### Panel / TUI 表面
+
+- Panel: composer tier pill + 内联审批 / `ask_user` 卡片
+- TUI: 轮询的 Ask-tier 工具审批覆盖（HITL overlay）
+
+### 见另请参阅
+
+- [执行引擎](/docs/zh/concepts/execution-engine) — 完整执行流
+- [安全：执行审批](/docs/zh/security/exec-approval) — 用户视角
+- [能力系统](/docs/zh/concepts/capability-system) — 权限声明
+- [架构红线 R7 / R10](/docs/zh/philosophy/redlines) — LLM 主权 + 笨循环

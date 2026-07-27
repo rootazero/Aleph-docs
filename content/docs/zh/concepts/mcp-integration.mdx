@@ -102,3 +102,41 @@ env = { HOME = "/Users/alice" }
 - [内置工具](/docs/zh/concepts/builtin-tools) — 原生 Aleph 工具
 - [能力系统](/docs/zh/concepts/capability-system) — 工具权限框架
 - [扩展系统](/docs/zh/concepts/extension-system) — 插件架构
+
+---
+
+## 26.7.x 补充
+
+### `McpResourceIndexLayer` 已回退
+
+26.7.17+ 收敛：eager 资源/提示索引层**被回退**。之前该层用 single-prefix ids（不能 round-trip）；现在改用**按需发现工具**。
+
+### 按需发现工具
+
+`mcp_list_*` 工具（位于 `src/gateway/handlers/mcp.rs`）让模型按需发现 MCP 资源/提示，而不是盲读文件。`cat`-guard read-steer 路由到原生 MCP / 技能 / 插件读取。
+
+### 协议版本协商 + 能力广播
+
+26.6.29+：
+
+- 广播 sampling 能力
+- 协商协议版本
+- `max_failures` 接线
+- `post_install` 字段
+
+### `mcp.respond_approval` / `cancel_approval`
+
+26.7.21+：Discord 交互式审批按钮的双向流；`ApprovalCallbackSink` 流程。
+
+### `mcp_config.*`
+
+26.7.x 完整 RPC：
+
+- `mcp_config.create` / `mcp_config.delete` / `mcp_config.get` / `mcp_config.list` / `mcp_config.update`
+
+### 见另请参阅
+
+- [内置工具](/docs/zh/concepts/builtin-tools) — 原生对比
+- [能力系统](/docs/zh/concepts/capability-system) — 权限
+- [扩展系统](/docs/zh/concepts/extension-system) — 与插件平行
+- [网关 RPC `mcp.*`](/docs/zh/gateway/methods/mcp) — 协议

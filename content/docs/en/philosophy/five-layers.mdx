@@ -166,7 +166,7 @@ L5 Polymorphic Agent = Gateway + Agent Loop + Memory + Dispatcher + Security
                        (I/O)     (Cognition)  (State)  (Action)    (Control)
 ```
 
-This is where the POE (Principle-Operation-Evaluation) architecture operates at its highest level. The agent does not just respond to prompts — it pursues goals with purpose, evaluates its own performance, and learns from the results.
+This is where the Think→Act loop, with its prompt-level first-principles anchoring and dual-process cognition, operates at its highest level. The agent does not just respond to prompts — it pursues goals with purpose, evaluates its own performance, and learns from the results. (The historical POE (Principle-Operation-Evaluation) architecture was retired in 26.5+; its "intelligence" migrated to system prompt templates (R9).)
 
 ## Emergence in Practice
 
@@ -178,7 +178,7 @@ The five-layer model is not just theoretical. It describes concrete mechanisms i
 | L2 | Intent System + Context Anchors | Domain classification + routing |
 | L3 | Experience Crystallizer + Skills | Pattern extraction + skill promotion |
 | L4 | Dispatcher + TaskGraph + MCP | Task composition + workflow orchestration |
-| L5 | Agent Loop + Gateway + POE | Autonomous behavior + multi-channel presence |
+| L5 | Harness (Think→Act) + Gateway | Autonomous behavior + multi-channel presence |
 
 ### The Feedback Loop
 
@@ -196,7 +196,7 @@ This feedback loop is what makes Aleph genuinely adaptive. The system does not j
 
 Beyond L5, the model acknowledges an asymptotic limit: **ℵ_omega**, the AGI horizon. This represents the theoretical endpoint where an AI system achieves fully general intelligence — infinite adaptation across all domains and contexts.
 
-Aleph does not claim to reach this horizon. But by building the infrastructure for emergence — the crystallization pipeline, the skill evolution system, the polymorphic architecture — it creates a foundation that can climb the ladder of aleph numbers as AI capabilities advance.
+Aleph does not claim to reach this horizon. But by building the infrastructure for emergence — the crystallization pipeline, the skill evolution system, the polymorphic architecture, and the loop-graph governance layer — it creates a foundation that can climb the ladder of aleph numbers as AI capabilities advance.
 
 ```
 ℵ₀  -->  Raw knowledge (L1-L2)
@@ -205,6 +205,10 @@ Aleph does not claim to reach this horizon. But by building the infrastructure f
 ℵ₃  -->  Polymorphic agents (L5)
 ℵ_omega  -->  AGI horizon (the limit)
 ```
+
+## Governance and Emergence
+
+> 26.7.x addition: on top of L5, Aleph now adds a **loop-graph governance layer** (`loop_graph`), described in the [Architecture Overview](/docs/en/architecture/overview) "Loop-Graph Governance" section. It supplements the multi-agent system that emerges at L5 with objective ACLs, an audit ring, victory-claim watchers, and a built-in `loop-auditor` agent.
 
 Each level transcends the previous, yet all are contained within the same point — the Aleph.
 

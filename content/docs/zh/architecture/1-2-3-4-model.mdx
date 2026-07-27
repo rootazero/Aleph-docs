@@ -271,3 +271,22 @@ aleph/
 - 在 headless 服务器上运行核心，而面孔和肢体运行在其他地方
 
 这不是为了微服务而微服务。这是一种务实的分离，让小团队也能维护复杂系统。架构现在已经稳定 —— 未来的工作是填充能力，而非重构骨架。
+
+---
+
+## 26.7.x 补充
+
+### 1-2-3-4 仍然稳定
+
+1 核心（`alephcore`）、2 面孔（CLI / TUI / WebChat Panel + 桌面壳）、3 肢体（gateway、harness、工具链）、4 神经（事件总线、记忆、profile、状态机）。
+
+### `loop_graph` 叠加在 1 之上
+
+26.7.21+：`loop_graph` 不改变 1-2-3-4 模型——它叠加在核心之上，给多代理系统补上治理拓扑（团队节点 / 审计环 / 客观 ACL / 胜利声明 watcher）。
+
+### 12 模块各归其所
+
+Harness 锁 12 文件（详见 [R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop)）：
+
+- 顶层 (8)：`mod.rs` / `agent.rs` / `deps.rs` / `trait_def.rs` / `callback.rs` / `chain_context.rs` / `trace.rs` / `trace_sink.rs`
+- `agent/` (4)：`think.rs` / `act.rs` / `guardrails.rs` / `prompt.rs`

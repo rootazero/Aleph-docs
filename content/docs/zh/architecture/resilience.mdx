@@ -400,3 +400,44 @@ src/resilience/
     ├── recovery_tests.rs      # 恢复集成测试
     └── governance_tests.rs    # 治理策略测试
 ```
+
+---
+
+## 26.7.x 补充
+
+### 网关错误链 single-source
+
+26.7.21+：原始错误链不外泄到 Panel；`ErrorReceipt` 单一来源用户可读。
+
+### WS 任务泄漏修复
+
+26.7.21+：每连接事件转发任务不再泄漏；`broadcast::RecvError::Lagged` 恢复而非永久死亡；webhook 反压返回 503。
+
+### Cluster 修复
+
+- 死的冷启动注册已修复
+- 注销能粘住
+- 反向 RPC 加固
+- `connect` 握手先于 `gateway call`
+
+### Cluster `file.write` 无 TOCTOU
+
+26.7.21+：存在检查与写入之间无 TOCTOU 窗口。
+
+### 失败关闭
+
+26.7.21 强化：策略文件缺失或不一致**拒绝授权**。
+
+### Guardian Judge
+
+26.7.21+：Heartbeat 探针的 LLM 判官——**payload 隐藏密钥**。
+
+### Heartbeat 拒绝危险工具
+
+26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。
+
+### 详见
+
+- [安全概览](/docs/zh/security/overview)
+- [失败关闭原则](/docs/zh/security/overview#失败关闭)
+- [守护进程](/docs/zh/concepts/daemon)

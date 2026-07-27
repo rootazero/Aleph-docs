@@ -173,3 +173,39 @@ pub enum OneOrMany<T> {
 
 - [内置工具](/docs/zh/concepts/builtin-tools) — 使用 Markdown 解析的工具
 - [PII 保护](/docs/zh/concepts/pii-protection) — 网关级 PII 过滤
+
+---
+
+## 26.7.x 补充
+
+### `[[wikilink]]` 生命周期
+
+26.7.7+ 笔记层 wikilink：
+
+- 解析 `[[wikilinks]]`（带别名）
+- 通过策略链解析并记录来源（`resolved_by` / `status` / `label`）
+- 重命名级联（包括类型化关系）
+- tombstone 删除语义与定向的入站回填
+- 梦境守护进程物化未链接-提及的软边
+
+### CJK trigram 全文搜索
+
+26.7.15+ 抗崩溃索引 + CJK 三元组全文搜索。
+
+### wikilink supersession
+
+26.7.15+：`[[wikilink]]` supersession 强制浮现纠正笔记——召回过时笔记时模型会看到正确的笔记。
+
+### 笔记层 Leiden 精炼
+
+26.7.15+：通过 Leiden 精炼的连通社区——聚类、关系边染色、矛盾→supersession 闭环。
+
+### `MARKDOWN_SKILL_AUTHORING.md`
+
+26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md`——技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写。
+
+### 见另请参阅
+
+- [记忆系统](/docs/zh/concepts/memory) — 笔记层
+- [技能系统](/docs/zh/concepts/skill-system) — SKILL.md 形式
+- [记忆演化](/docs/zh/concepts/memory-evolution) — 笔记层 + 梦境

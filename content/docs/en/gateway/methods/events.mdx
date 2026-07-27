@@ -289,3 +289,30 @@ A typical client subscribes to events before starting agent interactions:
 - [Protocol](/docs/en/gateway/protocol) -- Event delivery format and WebSocket transport
 - [agent.*](/docs/en/gateway/methods/agent) -- Agent methods that emit events
 - [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
+
+---
+
+## 26.7.x Addendum
+
+### Event Topics
+
+26.7.x event-bus topics:
+
+- `stream.*` — streaming (start/token/tool_call/done/end)
+- `agent.*` — agent state
+- `memory.*` — memory changes
+- `session.*` — session events
+- `team.*` — team events
+- `governance.*` — governance events (loop_graph)
+- `tool.*` — tool calls
+- `heartbeat.*` — heartbeat triggers
+- `cron.*` — cron triggers
+- `system.*` — system events
+
+### `events.subscribe` / `events.unsubscribe`
+
+Subscribe / unsubscribe patterns (an array of `patterns`).
+
+### WS Task-Leak Fixes
+
+26.7.21+: per-connection event-forward tasks no longer leak; `broadcast::RecvError::Lagged` recovers rather than dies permanently.

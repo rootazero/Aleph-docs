@@ -193,3 +193,51 @@ Per-session and per-user rate limits prevent abuse.
 - [Session Management](./session-service) — Session lifecycle
 - [Event System](./event-system) — Event distribution
 - [Thinker](./thinker) — Prompt construction
+
+---
+
+## 26.7.x Addendum
+
+### Single-Source Error Chain
+
+26.7.21+: the gateway returns a **single-source** user-readable error to the client. The raw error chain never leaks out to the Panel — the previous implementation would surface raw `serde_json` / sqlx / io errors directly to the user.
+
+### WS Task-Leak Fixes
+
+26.7.21+: per-connection event-forward tasks no longer leak on WebSocket disconnect; the channel forwarder **recovers** on `broadcast::RecvError::Lagged` rather than dying permanently.
+
+### Webhook Backpressure
+
+26.7.21+: webhook receivers return 503 under congestion rather than silently dropping inbound messages.
+
+### Dead-Letter and Re-Drive
+
+26.7.17+: `channel.dead_letters` collects undelivered messages; `channel.redrive_dead_letters` re-drives them.
+
+### Self-Signed TLS + TOFU
+
+26.7.17/18+:
+
+- In-process gateway TLS (`[gateway] tls` / `trusted_proxy` / `allow_insecure_remote`)
+- Self-signed cert SAN auto-discovers host's non-loopback interface IPs
+- Drift sidecar + atomic regen marker
+- Client-side TOFU (fingerprint + SAN approval + pinned trust store)
+- macOS WKWebView + iOS Keychain adapters
+
+### Real Client IP
+
+26.7.17+: `[gateway] trusted_proxy` reverse-proxy trust list — decides whether the gateway reads the real client IP (capacity limits, rate limits, audit, connect-auth).
+
+### `gateway.ticket.create` / `token.rotate` / `devices.*`
+
+26.7.x full device-ticket / token-rotation / device-management RPC. Remote sessions are closed on token rotation; **loopback sessions are preserved**.
+
+### Full RPC
+
+26.7.x the gateway exposes **~265 RPC methods** — see [Gateway Methods Reference](/docs/en/gateway/methods).
+
+### See Also
+
+- [Gateway Protocol](/docs/en/gateway/protocol) — WebSocket protocol
+- [Gateway Auth](/docs/en/gateway/auth) — auth / pairing / TOFU
+- [Gateway Methods](/docs/en/gateway/methods) — full RPC

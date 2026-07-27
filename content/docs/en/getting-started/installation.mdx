@@ -7,37 +7,37 @@ This guide covers installing Aleph on your system.
 
 ## Prerequisites
 
-- **Rust 1.92+** - Required for building from source (see `rust-version` in `Cargo.toml`)
-- **just** - Command runner (`cargo install just`)
-- **npm** - For building the WASM panel UI
-- **wasm-bindgen** - WASM JS bindings (`cargo install wasm-bindgen-cli`)
-- **macOS 14+**, **Linux**, or **Windows** - Primary supported platforms
-- **SQLite** - Bundled via `rusqlite` (no separate install needed)
+- **Rust 1.95+** — needed to build from source (see `rust-version` in `Cargo.toml`)
+- **just** — command runner (`cargo install just`)
+- **npm** — needed to build the WASM panel UI
+- **wasm-bindgen** — WASM JS bindings (`cargo install wasm-bindgen-cli`)
+- **macOS 14+**, **Linux**, or **Windows** — primary supported platforms
+- **SQLite** — bundled via `rusqlite` (no separate install needed)
 
 ### Platform-Specific Requirements
 
 **macOS:**
-- Xcode Command Line Tools
-- Swift toolchain (for desktop bridge)
+- Xcode command-line tools
+- Swift toolchain (for the desktop bridge)
 
 **Linux:**
 - `build-essential` or equivalent
 - `pkg-config`
-- `libssl-dev`
+- `libssl-dev` (TLS uses `ring`; R3 keeps heavyweight deps out of core)
 
 **Windows:**
-- Visual Studio Build Tools
+- Visual Studio build tools
 - `windows-sys` features handled automatically by Cargo
 
 ## Installation Methods
 
 ### Desktop App (Recommended)
 
-The easiest way to run Aleph is the native desktop app. It bundles both the core server and a Tauri shell — no terminal required.
+The easiest way to run Aleph is the native desktop app. It bundles both the core server and the Tauri shell — no terminal required.
 
 | Platform | Download | Notes |
-|----------|----------|-------|
-| **macOS** | `.dmg` from [Releases](https://github.com/rootazero/Aleph/releases) | Universal binary (Intel & Apple Silicon) |
+|------|------|------|
+| **macOS** | `.dmg` from [Releases](https://github.com/rootazero/Aleph/releases) | Universal binary (Intel + Apple Silicon) |
 | **Linux** | `.deb` / `.AppImage` from [Releases](https://github.com/rootazero/Aleph/releases) | Debian, Ubuntu, Fedora |
 | **Windows** | `.msi` from [Releases](https://github.com/rootazero/Aleph/releases) | Windows 10/11 |
 
@@ -45,8 +45,9 @@ The desktop app:
 - Embeds `aleph-server` as a background daemon
 - Hosts the Leptos Panel in a native webview
 - Provides system tray, OS notifications, global hotkey (`CmdOrCtrl+Shift+A`)
-- Auto-updates silently via GitHub Releases
-- Supports launch-at-login
+- Silent auto-update through GitHub Releases
+- Supports launch-at-login (Settings → General / tray menu; Windows via Task Scheduler)
+- Auto-generates a self-signed cert when `[gateway.tls] cert/key` are left empty; SAN auto-discovers the host's non-loopback interface IPs; the Panel approves via TOFU and pins the fingerprint
 
 ### Using Just (Development)
 
@@ -56,10 +57,10 @@ For development or headless server deployment:
 # Verify all build dependencies are installed
 just deps
 
-# Run server in development mode (rebuilds WASM)
+# Run the server in dev mode (rebuilds WASM)
 just dev
 
-# Build release binary
+# Build a release binary
 just build
 
 # Run tests
@@ -69,17 +70,17 @@ just test
 ### From Source
 
 ```bash
-# Clone the repository
+# Clone the repo
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
 
 # Verify dependencies
 just deps
 
-# Run in development mode
+# Run in dev mode
 just dev
 
-# Or build release binary
+# Or build a release binary
 just build
 ```
 
@@ -91,36 +92,44 @@ The release binary will be at `target/release/aleph-server`.
 # Run the desktop shell in dev mode (rebuilds daemon + shell)
 just shell-dev
 
-# Build platform installer (.app/.dmg, .msi, .deb)
+# Build platform installers (.app/.dmg, .msi, .deb)
 just shell-build
 ```
 
-### Verify Build
+### Verifying the Build
 
 ```bash
-# Quick compilation check
+# Quick compile check
 just check
 
 # Run core tests
 just test
 
-# Check all crates including desktop
+# Check all crates, including desktop
 just check-desktop
+
+# Prompt scaffolding size (gated by R9's two rulers)
+aleph-server prompt-size
 ```
 
-## Directory Structure
+## Directory Layout
 
-Aleph creates the following directories at `~/.aleph/`:
+Aleph creates the following under `~/.aleph/`:
 
 | Path | Purpose |
 |------|---------|
-| `~/.aleph/` | Main configuration directory |
-| `~/.aleph/aleph.toml` | Primary configuration file |
-| `~/.aleph/logs/` | Server logs |
-| `~/.aleph/skills/` | User-installed skills |
-| `~/.aleph/plugins/` | Extensions |
+| `~/.aleph/` | Main config directory |
+| `~/.aleph/aleph.toml` | Main config file |
+| `~/.aleph/logs/` | Server logs (day-boundary auto-rotation + `ALEPH-BOOT` marker) |
+| `~/.aleph/skills/` | User-installed Markdown skills |
+| `~/.aleph/plugins/` | Extension plugins |
+| `~/.aleph/mcp/` | MCP server configs and credentials |
+| `~/.aleph/memory/` | Memory store (SQLite + sqlite-vec + notes) |
+| `~/.aleph/cron/` | Cron job persistence (now real, not stubs) |
+| `~/.aleph/artifacts/` | Artifact store (deliverables) |
+| `~/.aleph/ops.log` | Signed operation ledger |
 
 ## Next Steps
 
-- [Quick Start](./quick-start) - Get up and running
-- [Configuration](./configuration) - Configure your setup
+- [Quick Start](./quick-start) — get running in 5 minutes
+- [Configuration](./configuration) — configure your setup

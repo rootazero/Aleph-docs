@@ -245,12 +245,13 @@ All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebS
 ```json
 {
   "jsonrpc": "2.0",
-  "id": "msg-001",
-  "method": "agent.run",
+  "id": 1,
+  "method": "chat.send",
   "params": {
     "message": "Explain the Rust borrow checker",
     "session_key": "agent:main:main",
-    "thinking": "medium"
+    "thinking": "medium",
+    "session_mode": "work"
   }
 }
 ```
@@ -272,6 +273,55 @@ All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebS
 
 ## Related Pages
 
-- [Gateway Overview](/docs/en/gateway/overview) -- WebSocket protocol and event bus
+- [Gateway Protocol](/docs/en/gateway/protocol) -- WebSocket protocol and event bus
 - [Agent Runtime](/docs/en/concepts/agent-runtime) -- How the agent processes messages
 - [Workspaces](/docs/en/concepts/workspaces) -- Session storage and state directories
+
+---
+
+## 26.7.x Addendum
+
+### Session-Event Single-Source-of-Truth
+
+26.7.7 introduces `session_events` as the **canonical** event log:
+
+- `MessageProjector` materializes `SessionEvent` records into the `messages` table
+- A boot-time `ProjectionReconciler` back-fills transcripts
+- Messages carry `tool_call_id` / `tool_name` + an `AssistantRunMeta` stamp
+- Legacy sessions are back-filled and read behind a locked invariant
+
+### UnifiedMessage and ProviderDelta
+
+26.7.7+ in `src/providers/` introduces `UnifiedMessage` and `ProviderDelta`:
+
+- `UnifiedMessage` is an LLM-agnostic intermediate message representation (OpenAI / Anthropic / Gemini / Ollama all adapt to it)
+- `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallDelta` / ...)
+- A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live
+- Streaming and final text both route through one shared sanitize atom
+
+### Chat Stream
+
+26.7.7 introduced the **narration-led** chat stream:
+
+- Compact single-line tool rows (status glyphs, live elapsed)
+- `✓N steps` summary line once done
+- The workspace pane becomes a tool-detail viewer that live-follows the foreground conversation (with pin)
+- Tool events are emitted in completion order (not input order)
+
+### Mid-Stream Steering
+
+26.6.29+ supports typing into a chat while it's still running:
+
+- Queued messages render as in-stream "ghost" bubbles
+- Flushed at the next turn boundary via steering, or force-inserted immediately (Esc + ⚡)
+- Injecting a message no longer produces an illegal message sequence; tool results stay contiguous, so OpenAI-compatible proxies no longer silently return empty responses
+
+### iMessage Tapback
+
+26.7.21+: inbound iMessage add-tapbacks (add-reactions) are surfaced to the model as context rather than dropped.
+
+### See Also
+
+- [Gateway Protocol](/docs/en/gateway/protocol) — JSON-RPC and the event bus
+- [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode) — the `session_mode` field
+- [Thinker](/docs/en/concepts/thinker) — where `UnifiedMessage` → `ProviderDelta` actually lives

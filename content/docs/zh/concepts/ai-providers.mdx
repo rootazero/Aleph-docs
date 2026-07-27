@@ -170,3 +170,47 @@ pub struct AuthProfileRegistry {
 - [思考器](./thinker) —— 提示词构造
 - [网关](./gateway) —— 执行引擎
 - [密钥管理](./secret-management) —— 凭证存储
+
+---
+
+## 26.7.x 补充
+
+### Provider Failover 重构
+
+26.7.21+ 重大重构：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
+
+### 真实成本核算
+
+26.7.15+：`session.usage` 现在携带真实花费账本（之前成本与 token 数都是部分伪造的）。核心**单源**价格表，shell 不再持有重复价格表。
+
+### VESR 动态模型路由
+
+26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（**k-NN over sqlite-vec**），所以模型能看到哪些模型在此类工作上**实际**表现过。
+
+### 协议适配器
+
+`[provider.<name>]` 段配置：
+
+- `protocol` —— `anthropic` / `openai` / `gemini` / `ollama` / `openai_compat` / ...
+- `model` —— 默认模型
+- `api_key` —— API 密钥（支持 `${ENV_VAR}` 插值）
+- `base_url` —— 兼容 OpenAI 的自定义 base（Ollama、vLLM 等）
+- `max_failures` —— 失败转移阈值
+
+### `runtimes.install` / `list` / `refresh`
+
+26.7.x 运行时管理：自动发现与安装语言运行时（Node / Python / Bun / uv / ...）。能力账本从磁盘重建。
+
+### `embedding_providers.*` / `generation_providers.*` / `rerank_config.*`
+
+26.7.x 拆分类别——embedding、generation、rerank 各自独立的 provider 配置 RPC。
+
+### `route_config.*` / `routing_rules.*`
+
+26.7.x 路由规则（`routing_rules.create` / `list` / `get` / `update` / `delete` / `move`）——细粒度路由控制。
+
+### 见另请参阅
+
+- [生成](/docs/zh/concepts/generation) — 详细
+- [架构 / 提供商](/docs/zh/architecture/providers) — 架构
+- [网关 RPC `providers.*`](/docs/zh/gateway/methods/providers) — 协议

@@ -7,263 +7,267 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 # Changelog
 
-Aleph follows a milestone-driven development process. Since the project is pre-1.0, changes are organized by month and milestone rather than semantic version tags.
+Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0.
 
 <Callout type="info">
-Aleph is under active development. Breaking changes may occur between milestones. The API and architecture are stabilizing but not yet frozen.
+  This page is a **documentation-focused** summary derived from Aleph's main repository `CHANGELOG.md` — it surfaces **user-visible** changes (features, CLI/RPC, config, security) and omits pure-internal refactor details. For the full record, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
 </Callout>
 
 ---
 
-## February 2026
+## 26.7.21 — chat / work / code Session Mode + Loop-Graph Governance Layer
 
-### Desktop Bridge Overhaul
+The largest feature drop in a while — 282 commits across three days. Three threads run through it.
 
-A complete redesign of the desktop integration layer, migrating from a native Swift macOS app to a cross-platform Tauri-based bridge architecture.
+1. **`chat` / `work` / `code` session mode** — the **third twin** of `exec_tier` and `think_level`. It statically partitions the tool **presentation** surface (progressive-disclosure core set + deferred-tool tier), never permissions. Picked from a Panel composer pill, from Settings → Policies as a global default, or conversationally via the new `session_set_mode` tool. Each mode also drives a distinct right-panel behavior (chat = badge, work = plan surface, code = tool detail) and adds one cache-stable prompt line.
+2. **Loop-graph governance layer** — a governance topology store, a nine-action tool, an audit ring, objective ACLs, a prompt layer, and a root gate. The closed-set governance edges give the four single-loop failure modes (Goodhart, reference blindness, ring conflict, measurement decay) a topological answer.
+3. **Entropy-reduction and hardening sweep** — the Telegram and Discord channels were gap-analyzed against reference implementations and shed several thousand lines of dead parallel layers while their access control was unified onto the real router; macOS desktop rails were corrected against real hardware; a multi-module adversarial review pass fixed dozens of correctness, concurrency, and security defects across the gateway, providers, extensions, tasks, teams, sessions, and skills.
 
-**Server-Centric Build Architecture**
+### Added
 
-- Introduced `BridgeSupervisor` — the Rust server now spawns and manages the Tauri bridge as a subprocess
-- Implemented `DesktopBridgeManager` for server-side bridge lifecycle management
-- Added JSON-RPC protocol over Unix Domain Sockets (UDS) for server-to-bridge communication
-- Bridge handshake with capability negotiation (`aleph.handshake`, `system.ping`)
+- **`chat` / `work` / `code` session mode.** A user-selected static partition of the tool presentation surface, orthogonal to permissions. Single source in `config/types/policies/session_mode.rs`; request > session > global resolution with stamp-on-carry; the partition lands on the two existing presentation mechanisms (progressive-disclosure core set + deferred-tool tier) so `src/harness/` gains zero lines.
+- **Mode v2 semantics.** Family tables match on `_` word boundaries; MCP-qualified `{server}__{tool}` names are exempt from the builtin tables; `media_understand` stays listed in chat and code; chat's core subtraction can no longer drain to empty; subagents inherit the parent mode with a short prompt line.
+- **Loop-graph governance layer.** A governance topology store, a nine-action tool, an audit ring, objective ACLs, a prompt layer, and a root gate. Documented in `docs/reference/GRAPH_LAYER.md`.
+- **Graph × multi-agent fusion.** A `team` node kind, live-joined teams in graph status, team pair targets, victory-claim triggers that poke watchers on team disband, and a built-in **`loop-auditor`** agent.
+- **`governance_metrics` in-core probe.** Replaces the sandbox-walled `sqlite` shell probes the audit sensor could not legally reach, plus notes-era activity counters on `dream_reports`.
+- **Discord interactive approval buttons.** A two-way `ApprovalCallbackSink` flow, plus edit-based reply streaming.
+- **iMessage inbound reactions as context.** Add-tapbacks arriving from the user are surfaced to the model as context rather than dropped.
+- **macOS window targeting via Accessibility.** A public AX window resolver (CGWindowID → AX by geometry) so focus raises the *specific* target window and bounds are set on the exact window, with an osascript fallback.
+- **Grounding evidence gate on team task review.** `task_review` approvals can now require grounding, with acceptance metadata helpers.
+- **Daemon-computed session cost.** `session.usage` computes cost via core pricing and the duplicate price table in the shell was deleted; `plugin.install` gained a unified handler that classifies the source (the CLI stops guessing).
 
-**Browser Automation**
+### Fixed
 
-- New `BrowserTool` with Chrome DevTools Protocol (CDP) transport via `chromiumoxide`
-- Cross-platform Chromium discovery (macOS, Linux, Windows)
-- ARIA snapshot extraction with `ref_id` resolution for semantic element targeting
-- Full action set: click, type, fill, scroll, hover with ARIA ref targeting
-- Integration tests for complete browser workflows
-
-**Vision & Approval System**
-
-- `VisionTool` with pluggable providers: Claude vision and platform-native OCR
-- `ApprovalPolicy` trait and configuration for gating sensitive tool actions
-- Approval checks integrated into `BrowserTool` and `DesktopTool`
-
-**Desktop Capabilities (Phase 3)**
-
-- 12 bridge methods implemented: `click`, `type_text`, `key_combo`, `launch_app`, `window_list`, `focus_window`, `canvas_overlay`, `tray.update_status`, `ocr`, `ax_tree`, `scroll`, `drag`
-- Windows support: input simulation via WinRT, OCR, UI Automation accessibility tree
-- macOS: Vision framework OCR, Accessibility API inspection
-
-**Breaking Changes**
-
-- UniFFI Swift bindings removed — replaced by UDS IPC protocol
-- macOS Swift app deprecated and removed — Tauri bridge is the sole desktop frontend
-- macOS-specific CI workflows and build scripts removed
-
-### Cron System Redesign
-
-- Replaced window-based scheduling with a state-machine scheduling engine
-- Added delivery pipeline with `DeliveryTarget` trait (webhook support)
-- Template system, resource management, and job chaining
-- Schema migration with state-machine, resilience, delivery, and chain fields
-
-### Memory System Enhancements
-
-- Storage-time deduplication via vector similarity
-- JSONL backup service with rolling retention
-- `ScoringPipeline` wired into `HybridRetrieval` search flow
-- `NoiseFilter` integrated into the ingestion pipeline
-- Adaptive retrieval and backup settings added to `MemoryConfig`
+- **Every Panel send re-carried the composer's cached mode** — all four send paths now carry mode on the first message only, and `session_updated` syncs mode and exec tier back into Panel state so the pill and right rail read store truth.
+- **`tool_search` could be collapsed by progressive disclosure**, pointing the model at a guaranteed-miss lookup — it is now pushed into the request core set at registration.
+- **Telegram ignored the operator's configured access policy.** The inbound router fell back to defaults for Telegram, and the channel-local pairing store was never written to. ~2.8k lines of dead parallel layers were removed; parallel nested-config / account-pool / resolver layers in Discord too.
+- **Gateway leaks and drops.** Per-connection event-forward task leak on every WS disconnect; channel forwarder died permanently on `broadcast::RecvError::Lagged`; webhook backpressure silently dropped inbound messages instead of returning 503; raw error chain leaked to the Panel — all fixed.
+- **Command injection on desktop `open` / `launch`** — now dispatched through `ShellExecuteW` instead of a shell; symlink planting during bundled-content extraction refused via `symlink_metadata`; skill download path traversal closed and the scanner file size capped; cluster `file.write` no longer has a TOCTOU window.
+- **Certificate approval could be authorized without a fingerprint match**; the webview microphone grant was not origin-restricted on Linux or Windows — both fixed.
+- **Approval failed open on a missing policy file**, and `permissive_default` disagreed with `Default::default()` — both now fail closed.
+- **Prompt-boundary injection.** Transcript, focus, and prior-summary content now escape boundary markers before entering the prompt; `ToolAwareChunker` asserts a non-zero token ratio.
+- **Provider failover cloned the entire conversation on every request** and published route state non-atomically — ~2,000 lines of unreachable provider code were deleted.
+- **Extension lifecycle races** — concurrent `reload` is now serialized under the load guard; malformed plugin results are no longer masked as `ServiceResult::ok`; `AuthorInfo` parsing uses the leftmost separator.
+- **Cluster node keys were byte-sliced**, breaking CJK node names — normalization is now Unicode-aware.
+- **macOS capture and recording rails.** Screen recording is cropped to the requested region via `setSourceRect`; completion is verified before reporting success; typed bridge errors are preserved on OCR, window-capture, media, input, and screenshot rails.
+- **Harness ratchet lowered to 5008** by removing the `DiminishingReturnsDetector` hard stop — a deterministic completion judgment inside the loop, which R10 forbids.
+- **Session and team integrity.** `retire_from` is atomic and shutdown timeouts surface; active team names are unique via a partial index; team protocol text and artifact content are size-capped.
+- **Wire request ids no longer use UUIDs** (atomic counter; the dependency is dropped from `aleph-protocol`); a custom regex that fails to compile no longer discards the valid ones alongside it.
 
 ---
 
-## Early February 2026
+## 26.7.18 — Self-Signed TLS + Client TOFU
 
-### Swarm Intelligence Architecture
+A remote-access release that closes the loop on **self-signed TLS**. Two halves meet in the middle.
 
-- Event bus foundation with `AgentLoopEvent` enum and publishing (shadow mode)
-- Semantic aggregator for cross-agent context
-- Context injector with `ContextProvider` trait integrated into `MessageBuilder`
-- `SwarmContextProvider` implementation
-- Collective memory for multi-agent shared state
-- Phase 1 Shadow Monitor Mode completed
+On the server: the self-signed certificate's SAN now **auto-discovers the host's non-loopback interface IPs** — a `wss://` connection to a LAN or public address no longer fails hostname verification — with a drift-tracking sidecar that reuses the cert when the interface set is a subset and regenerates it (never bricks) when it drifts or the sidecar is corrupt. On the client: the Panel gains **in-app trust-on-first-use (TOFU) certificate trust** — a self-signed gateway cert is reviewed and pinned from inside the app via a fingerprint + SAN approval splash with a TOFU/change warning, backed by a shared decision core and a pinned trust store. The macOS WKWebView cert-challenge adapter is the reference platform; iOS Keychain trust store and decision mirror wired alongside.
 
-### System State Bus (SSB)
+### Added
 
-- Core infrastructure: event routing, subscriptions, and state tracking
-- Robustness and privacy layer with PII filtering
-- Action dispatcher for automated responses to system events
-- Platform Abstraction Layer (PAL) with macOS-specific sensors
-- Integration with `SystemStateBus` for perception data
+- **Self-signed cert SAN auto-discovery.** A new `[gateway.tls] san` field plus automatic discovery of the host's non-loopback interface IPs are assembled into the self-signed certificate's SAN.
+- **SAN-drift sidecar.** An unchanged or subset SAN reuses the existing cert; a drifted one regenerates it; guarded by an atomic regen marker and a shrink-reuse test.
+- **Panel in-app certificate trust (TOFU).** Shared decision core, pinned TOFU trust store, SHA-256 fingerprint + SAN/subject parsing, an approval splash page, and pending-cert state with approve/reject Tauri commands.
+- **macOS WKWebView cert-challenge adapter + install dispatch.** The reference platform for in-app trust.
+- **iOS Keychain trust store + decision mirror.** Unit-tested Keychain-backed trust for the iOS Panel.
 
-### Control Plane UI
+### Fixed
 
-- Sidebar narrow/wide mode switching
-- Tooltip and StatusBadge components for alert indicators
-- Real-time alert system via WebSocket subscriptions
-- Settings with nested routing and `SettingsLayout`
-- Real Gateway RPC integration (replaced mock data)
-
-### Collaborative Skill Evolution
-
-- `SuccessManifest` data structure for tracking successful tool patterns
-- `ConstraintValidator` for skill safety checks
-- `CollaborativeSolidificationPipeline` for multi-agent skill sharing
-- Integration with tool execution for automatic manifest creation
+- **Panel token wall buried by the boot gate** on a remote unauthorized connect — the token wall now surfaces.
+- **macOS WKWebView `respondsToSelector` cache** was stale — the cache is now busted on install.
+- **macOS trust approval navigated by a relative path** — now navigates by absolute URL.
+- **`credentialForTrust` returning nil** could panic at the FFI boundary — now fails closed.
+- **Corrupt `sans.txt` sidecar** is best-effort and regenerates the cert rather than bricking boot.
+- **Lite supervisor relocation** is suppressed while a trust prompt is pending.
+- **Malformed-DER fingerprint parsing** never panics (regression-tested).
 
 ---
 
-## Late January 2026
+## 26.7.17 — Native Gateway TLS + MCP On-Demand Discovery + Plugin Skills Folded In
 
-### POE (Principle-Operation-Evaluation) Architecture
+A security and hardening release. The headline is **native gateway TLS for remote connections** — the gateway terminates TLS in-process, fails closed on plaintext to any non-loopback bind, refuses insecure transport to a remote client by default, and resolves the real client IP behind a trusted reverse proxy; the Panel forces `wss://` to remote hosts. Alongside it: **MCP discovery convergence** that retracts the eager resource/prompt index layer in favor of on-demand discovery tools, **plugin-bundled skills folded into the skill mechanism** with the agent catalog revived, deep **file-op path safety**, and a broad hardening sweep across the harness, tools, context, cache, loop, teams, and memory subsystems.
 
-A new execution framework for structured, validated agent task execution.
+### Added
 
-- Core types: principles, operations, evaluation criteria
-- Entropy-based budget manager for resource allocation
-- Hard validation rules and semantic validation via LLM judge
-- Composite validator combining rule-based and semantic checks
-- `POEManager` for orchestrating POE lifecycles
-- Worker abstraction with `AgentLoopWorker` integration
-- Gateway RPC handlers: `poe.run`, `poe.status`, `poe.cancel`, `poe.list`
-- Experience crystallization feeding into the skill evolution system
+- **Native in-process gateway TLS.** New off-by-default config (`[gateway] tls` / `trusted_proxy` / `allow_insecure_remote`).
+- **Trusted-proxy real-client-IP resolver.** A spoof-safe resolver reads the true client address behind a trusted proxy.
+- **MCP resource/prompt discovery tools.** `mcp_list_*` let the model find MCP resources and prompts on demand.
+- **Plugin-bundled skills are visible to the model.** Installed-plugin skills are folded into the skill index and `skill_read`.
+- **`call_id`-exact approval correlation + completion-order live tool events.**
+- **Workflow interop for `.mjs` / dynamic workflows.**
+- **Gateway dead-letter forensic trail.**
 
-### Agent-Action Interaction
+### Changed
 
-- `QuestionKind` types for structured user interaction (confirm, select, input)
-- `UserAnswer` type for structured responses
-- `AskUserRich` decision variant in the agent loop
-- `on_user_question` callback in `LoopCallback` trait
-- CLI implementation via `inquire` crate
+- **Fail-closed remote transport.** The gateway refuses plaintext on a non-loopback bind at boot.
+- **Dropped `aws-lc-rs` for a `ring`-only TLS provider** to keep the Windows build clean.
+- **MCP discovery converged to one on-demand channel.**
+- **Harness R10 line-budget paydown.** Dead prompt-layer surfaces pruned (net ≈ −3.4k LOC); ceiling 5035 → 4988.
+- **Deep context-layer hardening.** Sixteen items from a gap analysis plus a context-cache hardening round.
+- **Loop layer, rounds 5–7.** Wake/resume deny layer, tree budget for teams/swarm, Guardian cache/breaker, goal wait-barrier.
+- **Teams coordinated-tasks, rounds 4–5.** Snapshot protocol restore, pause/resume gate, live escalation leader.
+- **Memory management D1–D4.** Ack-inversion fix, session-end wiring, compression fixes, batch `remember`.
+- **File-op path safety.** Symlink-safe delete/move, glob/deny re-checks, collision de-dup, per-path locks.
 
-### Skill Evolution System
+### Fixed
 
-- `EvolutionTracker` for logging tool execution patterns
-- `SolidificationDetector` for detecting repeated successful patterns
-- `SkillGenerator` for automatic `SKILL.md` creation
-- `GitCommitter` for auto-committing evolved skills
-- `SkillCompiler` (Phase 10) for compiling skills into executable form
-
-### Spec-Driven Development
-
-- `SpecWriter` for automated requirement analysis
-- `TestWriter` for test generation from specifications
-- `LlmJudge` for evaluation of generated code against specs
-- `SpecDrivenWorkflow` orchestrator tying it all together
-
-### Resilient Task Execution
-
-- `ResilientTask` trait for defining fault-tolerant tasks
-- `ResilientExecutor` with retry logic, exponential backoff, and fallback strategies
-- Cron integration with `PodcastTask` example
+- **`skill_read` refused symlinked/duplicate skills** — now resolves by precedence.
+- **Gateway remote-auth rotation kick + device resurrection.**
+- **`serde_json` map-insert key type** in `message_history`.
+- Two pre-existing `alephcore` lib-suite test failures unblocked.
+- Workspace-wide clippy / rust-doctor cleanups to keep `-D warnings` green.
 
 ---
 
-## Mid-January 2026
+## 26.7.15 — Three-Tier Execution Permissions + Note Layer + True Cost & Token Accounting
 
-### rig-core Migration
+A hardening and safety release. The headline is a **three-tier execution permission model** (Ask / Auto / Full) with an action-aware approval gate — the human sees the exact command and the grant keys on it — surfaced as inline approval and `ask_user` cards in Panel and a polled HITL overlay in the TUI. Alongside it: a matured **knowledge-memory note layer** (graph path-finding, `[[wikilink]]` supersession, CJK full-text search, contradiction→supersession closure), **truthful cost & token accounting** (both were partly fabricated), a repaired **cluster enrollment / reverse-RPC** path, and a large **harness R10 paydown** that deletes zero-consumer abstractions and an unreachable ~3,800-line tool-hydration stack.
 
-A major internal migration from the custom AI provider layer to the `rig-core` framework.
+### Added
 
-- Upgraded `rig-core` from 0.6 to 0.28
-- Complete V1-to-V2 core migration (`AetherCore` removed, `AetherV2Core` is now the sole implementation)
-- New UniFFI v2 bindings with async callback pattern
-- `RigAgentManager` with process methods for tool-calling agents
-- `MemoryStore` with SQLite and `fastembed` for vector search
-- `SearchTool` (Tavily API) and `WebFetchTool` (HTML extraction) as built-in tools
-- Legacy routing, semantic, and tools modules removed
+- **Three-tier execution permissions (Ask / Auto / Full).** A single operator-facing knob reads each tool's declared metadata (idempotent / destructive); unknown tools fail closed in `Ask`; the `[sandbox.command_policy]` hard-floor can't be lowered by any tier.
+- **`note_graph_query` read-only tool + note-graph path-finding.** Bidirectional-BFS path finding, typed relation edges, `[[wikilink]]` supersession, crash-safe index, CJK trigram full-text search.
+- **In-window restart-to-update banner.** The desktop shell injects an update banner on stage with its own sentinel control channel.
+- **TUI §5.12 maturity.** A `/sessions` picker, a live context-window gauge, a polled Ask-tier tool-approval overlay (HITL).
+- **Live cluster fleet feed.**
 
-### Aether Cowork Mode
+### Changed
 
-- Task orchestration core (Phase 1)
-- Swift UI progress panel for task tracking
-- UniFFI bindings for task orchestration
-- Configuration system and settings UI
+- **Truthful cost & token accounting.** Real spend ledger; prompt-cache discipline restored; thinking depth wired end-to-end.
+- **Non-intrusive computer-use.** Desktop apps driven through pid-targeted input rail with window-scoped capture; six P0 defects fixed.
+- **Knowledge-memory note layer, rounds 2–4.** Category names canonicalized; relation vocabulary cleaned; Leiden community refinement; contradiction→supersession closure.
+- **Memory Tier-3 hardening.** Agent-scoped recall signals, severity-gated archival, maturity cohort.
+- **Cluster enrollment repaired.** Dead cold-start enrollment fixed; deregistration made to stick.
+- **Deferred tools are callable.** Progressive tool disclosure no longer strands deferred tools.
+- **Sandbox hardening.** Invisible-character SSOT, symmetric breaker purge.
+- **Goal subsystem.** Fail-closed continuation gate and an atomic continuation claim.
 
-### macOS UI Polish
+### Removed
 
-- Liquid Glass implementation for macOS 26+ with consistent appearance
-- Multi-modal attachment architecture with encoding field
-- Memory storage integration into conversation processing
-- Clipboard image attachments passed to AI via rig-core
+- **Four zero-consumer harness abstractions (R10 paydown):** `TraceSink::on_init_seam`, `HarnessCallback::on_tool_call`, `HarnessCallback::on_complete`, and the `Harness` trait itself.
+- **Unreachable tool-hydration stack (~3,800 lines)** plus a cache framework and a configuration knob that never honored its reported value.
+- **The phantom 4,900-line harness target** — replaced by the `budget.rs` ratchet as the actual R10 redline (currently 5,043 lines).
 
----
+### Fixed
 
-## Late December 2025
-
-### Internationalization
-
-- Full English and Simplified Chinese localization support
-- Localized UI strings throughout the macOS app
-
-### Permission System
-
-- Mandatory permission gating at startup (Accessibility, Input Monitoring)
-- Auto-restart after permission grant
-- Debounced permission status monitoring
-- In-app permission prompts (replaced system dialogs)
-
-### Provider Management
-
-- Provider activation/deactivation toggle
-- Inline connection test results
-- Custom provider authentication fixes
-- Settings window layout improvements
-
-### macOS 26 Window Design
-
-- Phase 1 & 2 implementation of new window chrome
-- Minimum window size constraints
-- Window reopening via URL scheme
+- **Dreaming daemon burned provider quota nightly.**
+- **Panel auto-update 404.**
+- **`channels.set_agent` accepted non-existent agents** — gateway now validates.
+- **Provider error reads could hang on a stalled proxy.**
+- **Instance-lock holder was unreadable cross-platform.**
+- **Spawned subagents inherit the operator's `[execution] max_iterations`.**
+- **A subagent can find its own offloaded tool output again.**
+- **Multi-provider router deep-cloned whole session + non-atomic publish** — atomic regen marker + single clone.
+- And more — see CHANGELOG 26.7.15.
 
 ---
 
-## Mid-December 2025
+## 26.7.7 — MoA Continuous Advisory + Progressive Tool Disclosure + True Multi-Session Parallelism
 
-### Memory Module (Phase 4)
+A large capability release. The headline is **Mixture-of-Agents (MoA) continuous advisory** — any agent turn can now be shadowed by a panel of advisor models whose views are aggregated into the reply — landing alongside **progressive tool disclosure**, **true multi-session parallelism**, a **`[[wikilink]]` note lifecycle** with rename cascades and provenance, a deepened **memory-galaxy canvas**, a **narration-led chat stream** with a live-follow workspace, and a rebuilt **session single-source-of-truth** event log.
 
-- RAG-based contextual memory with vector search
-- Memory retention policies
-- macOS context capture (Swift)
-- Performance benchmarks and comprehensive test suite
-- Core integration with conversation pipeline
+### Added
 
-### AI Provider Integration
+- **MoA continuous advisory.** New virtual `MoaProvider` fans a turn out to a configurable advisor panel (with per-advisor timeout, prompt-cache breakpoints, signature cache); presets authored and switched via the new `moa` tool, a `/moa` one-shot, and a Panel visual-config page.
+- **Progressive tool disclosure + `tool_search`.** Non-core tool schemas collapse to name + description; `get_tool_schema` pulls a full schema on demand; `[tools] defer_mcp_tools` pushes MCP tools into the deferred tier.
+- **True multi-session parallelism.** Run gate moved from per-agent to per-session `SessionRunRegistry`; a run-lifetime `ConcurrencyLimiter` enforces global + per-agent caps; server-authoritative running-set broadcast drives unified "running" dots.
+- **`[[wikilink]]` note lifecycle.** Parse, strategy-chain resolve with provenance, rename cascades (incl. typed relations), tombstone delete with targeted back-fill.
+- **Deepened memory-galaxy canvas.** Community-centroid gravity clustering, recency/confidence brightness, relation-kind edge tinting.
+- **Narration-led chat stream + live-follow workspace.** Compact single-line tool rows; workspace pane becomes tool-detail viewer with pin.
+- **Session single-source-of-truth event log.** `session_events` is canonical; `MessageProjector` materializes events; `ProjectionReconciler` back-fills.
+- **Computer-use semantic interaction.** `set_value` / `ax_action` accessibility actions; `observe` parameter fuses act→observe.
+- **Message-stream assembler.** Single `MessageAssembler` reducer strips inline `<think>` blocks live.
+- **Live-hot-reloadable execution caps.** `[execution]` run-cap is now Live via arc-swap global semaphore.
 
-- Foundation AI provider interface
-- Multi-provider router implementation
-- AetherCore and memory integration
-- Config management backend with hot-reload
-- Routing rules editor
-- Behavior settings and hotkey customization
-- PII scrubbing for privacy
-- Typewriter effect output mode
+### Fixed
 
-### Halo Overlay
-
-- Enhanced Halo overlay UI
-- Three input modes: cut, copy, and halo
-- Input mode selection UI before AI processing
-- Clipboard context mechanism (10-second window)
-- Double-shift default hotkey (avoiding input method conflicts)
-
----
-
-## Pre-December 2025
-
-### Foundation
-
-The initial development period established the core Rust server, Gateway WebSocket protocol, agent loop, session management, and the original macOS Swift app. Key milestones included:
-
-- Rust core with async runtime (Tokio)
-- Gateway JSON-RPC 2.0 protocol over WebSocket
-- Multi-provider AI routing (Claude, GPT, Gemini, Ollama)
-- Telegram and Discord channel adapters
-- Three-tier command execution security model
-- MCP (Model Context Protocol) tool integration
-- SQLite-backed conversation persistence
-- Configuration via TOML with environment variable overrides
+- **Session sidebar showed a raw `<system-reminder>`** — per-turn reminders delivered as transient recall context.
+- **MoA presets on the default provider never activated** — primary provider key mapped into `named_providers`; tool args schema hand-written flat.
+- **`file_ops` glob path-escape** — absolute and `..` patterns rejected; Windows drive-relative / UNC-prefixed globs rejected.
+- **Session epoch parsing on Windows.**
+- **Sandbox stdin / timeout hardening.**
+- **Windows standalone-server self-update.**
+- **Panel "running" dot correctness** — purely server-authoritative with sequence guard.
+- And more — see CHANGELOG 26.7.7.
 
 ---
 
-## Tags
+## 26.7.1 — Context "Never-Break" Guarantee + Real Context-Usage Gauge
+
+A harness-reliability and polish release. The headline is a **context "never-break" guarantee** — the agent loop now always compacts and continues instead of ever cutting a turn short — alongside a **real, reload-proof context-usage gauge**, **launch-at-login landing on all three product forms**, and a flattened, collapsible redesign of tool calls in the chat stream.
+
+### Added
+
+- **Context "never-break" guarantee.** Pressure situations previously ending a turn via `FinalReply` now always route through `compact_to_fit`. A deterministic `truncate_to_fit` floor added as a last resort.
+- **Real per-model context-usage gauge that survives reloads.** Computed core-side, persisted on the assistant message. New sessions show an `≈N%` estimate from a local budget dry-run (zero LLM calls).
+- **Launch-at-login lands on all three product forms.** Full desktop App, Lite Panel shell, and standalone `aleph-server` (new `service` subcommand).
+- **Flattened, collapsible chat tool-call display.** Compact single-changing-line step strip; full-detail side panel for overflow.
+- **`system.open_path` desktop capability.** Cross-platform primitive using OS default handler.
+- **Broader runtime-detection coverage.** Homebrew `rustup` keg, MacPorts, asdf shims, Nix profile paths; extended Windows search for `node` / `playwright-cli`.
+
+### Fixed
+
+- **Standalone server self-update on Linux.** Atomic temp-file rename instead of in-place overwrite (`ETXTBSY`).
+- **Launch-at-login toggle never appeared in the full desktop App.** Switched to `tauri-plugin-autostart` plugin commands.
+- **Updater signing key rotated.** New keypair wired through CI; both product forms updated.
+- Cross-platform session-directory naming healed on read; chat-sidebar async reads guard disposed signal.
+
+---
+
+## 26.6.29 — iMessage Channel + iOS Panel + VESR Dynamic Model Routing
+
+A big multi-day release. Headlines: a brand-new **iMessage channel via BlueBubbles**; the **iOS Panel growing into a real iPhone + iPad app**; **VESR dynamic model routing**; first-class **web-fetch providers**; richer **multi-agent teams / kanban**; and the ability to **type into a chat while it's still running**.
+
+### Added
+
+- **iMessage channel via BlueBubbles.** Outbound text and attachments; inbound webhook + catch-up polling with offset reconciliation and GUID dedup; group/chat sends; reactions / typing / read-receipts (gated on the BlueBubbles private API).
+- **iOS Panel is now a real iPhone + iPad app.** Native pairing screen, full iPad support (Split View / Stage Manager), TestFlight distribution, phone UI with Chat-first tabs.
+- **VESR dynamic model routing.** Aleph records every completed run's outcome and recalls a per-model track record at run start (k-NN over sqlite-vec).
+- **Web-fetch provider category.** `crawl4ai` and `firecrawl` are first-class, UI-configurable fetch providers with vault-stored keys.
+- **Richer multi-agent teams / kanban.** Full task lifecycle (approve / reject, waiting-review / paused / skipped columns); live subagent-tree; broadcast storm-prevention guards.
+- **Type into a chat while it's still running.** Queued messages render as in-stream "ghost" bubbles; flushed at the next turn boundary or force-inserted (Esc + ⚡).
+- **Sticky single-chat Todo / plan panel.** Always-visible plan widget above the input box.
+- **Real per-model context-usage gauge.** Core-authoritative occupancy, persisted across tab switches.
+- **MCP enhancements.** Sampling capability advertised; protocol version negotiation; `max_failures` wired; `post_install` field; `zhipu-vision` and `unreal-engine` presets.
+- **Tool improvements.** `file_read` supports images (`image_read`); unchanged reads de-duplicated across turns.
+- **Soul archetype selector** in Panel agent creation; 3D memory-galaxy visual/perf pass.
+
+### Fixed
+
+- **"Model returned empty response" when steering mid-run** — tool results kept contiguous.
+- **macOS Local Network privacy** — daemon embeds a stable `CFBundleIdentifier` and is re-signed on build.
+- **Routing failover attribution** — frozen model + provider attributed from model directive, not wrapper name.
+- `firecrawl` never persisted as a `[fetch]` backend; gateway closes remote sessions on token rotation.
+
+---
+
+## Historical Milestones
+
+For all major changes before 26.6, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
+
+Selected milestones:
+
+- **26.6.x** — Multi-provider failover refactor; Telegram/Discord adapter overhaul; Panel Memory Vault refactor; iMessage channel; iOS Panel; VESR dynamic routing; MoA advisory; progressive tool disclosure; context never-break
+- **26.5.x** — Cluster federation; ACES integration; Panel Memory Galaxy
+- **26.4.x** — Knowledge-memory note layer (graph path, wikilinks, CJK search)
+- **26.3.x** — Self-evolution discipline; Telegram/Discord major cleanup
+- **26.2.x** — Harness migration; R10 redline landed; Desktop Bridge overhaul
+- **26.1.x** — TOML config; RAG-ified memory system; POE architecture
+- **2025.12** — Internationalization; permission system; macOS 26 window design
+- **2025.11** — Halo overlay; Memory Module (Phase 4); AI provider integration
+- **2025.10** — Rust core; Gateway WebSocket; Agent loop; macOS Swift app v1
+
+---
+
+## Tags & Snapshots
 
 | Tag | Description |
 |-----|-------------|
+| `26.7.21` | Current stable — chat/work/code session mode + loop-graph governance + entropy-reduction sweep |
+| `26.7.18` | Self-signed TLS + client TOFU |
+| `26.7.17` | Native gateway TLS + MCP on-demand discovery |
+| `26.7.15` | Three-tier execution permissions + note layer + true cost accounting |
+| `26.7.7` | MoA advisory + progressive tool disclosure + true multi-session parallelism |
+| `26.7.1` | Context never-break + real context gauge |
+| `26.6.29` | iMessage channel + iOS Panel + VESR routing |
 | `pre-aleph-rename` | Snapshot before the project was renamed to Aleph |
 | `pre-cleanup-20260131` | Snapshot before the January 2026 code cleanup |
-| `phase4-foundation` | Phase 4 foundation milestone |

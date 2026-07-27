@@ -179,3 +179,35 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
 - [网关架构](./gateway) —— 反向 RPC 通道所扩展的 WebSocket 控制平面
 - [执行审批](../security/exec-approval) —— 节点审批请求路由进入的审批设施
 - [设备配对](../security/pairing) —— 节点复用的入伙流程
+
+---
+
+## 26.7.x 补充
+
+### 生命周期 SSOT
+
+26.7.25+ 集群注册 / 注销 / deregister 引入**单一事实来源**：
+
+- 死的冷启动注册已修复
+- 注销能粘住
+- 反向 RPC 加固
+- `connect` 握手先于 `gateway call` 中的方法
+- R8 写入完成（之前是半完成）
+
+### Unicode 节点键
+
+26.7.20+：`normalize_node_key` 按 Unicode 归一化，CJK 节点名正确工作。
+
+### `cluster.deregister` / `enroll` / `environments_list`
+
+26.7.x 完整 RPC。
+
+### 节点配置
+
+`agents.bindings` 与 channel 配置正确同步；R8 写入：集群节点配置修改后正确持久化并广播给所有面板。
+
+### 见另请参阅
+
+- [集群概念（概念）](/docs/zh/concepts/arena) — 集群视角
+- [A2A](/docs/zh/architecture/a2a) — 子代理协议
+- [网关 RPC `cluster.*`](/docs/zh/gateway/methods/cluster)

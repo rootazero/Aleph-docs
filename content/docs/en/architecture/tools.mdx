@@ -568,3 +568,53 @@ Extension tools are qualified as `ext__{plugin_id}__{tool_name}` in the registry
 - [Agent Harness](./harness) -- How the Thinker decides to call tools
 - [Gateway Architecture](./gateway) -- MCP and tool RPC methods
 - [Memory System](./memory) -- Memory tools and retrieval architecture
+---
+
+## 26.7.x Addendum
+
+### Toolset Reorganized
+
+26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`:
+
+- Browser (CDP)
+- Desktop (via the Bridge)
+- File operations (with path-safety hardening)
+- Search / web fetch
+- Media processing
+- Vision / OCR
+- Knowledge / memory
+
+### Parallel Execution
+
+`src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
+
+### `tools.defer_mcp_tools` / `enable_tool_search`
+
+26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
+
+### Action-Aware Approval Gate
+
+26.7.15+ single choke point at `src/tools/scoped/` — the slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the approval gate.
+
+### Three-Tier Execution Permissions
+
+| Tier | Behavior |
+|------|----------|
+| `ask` | Prompt for approval before every execution; unknown tools fail closed |
+| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
+| `full` | All auto-allow (besides the hard security filter) |
+
+### Fail-Closed
+
+When `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+
+### Cross-Batch Dedup / Memo
+
+`Memo / Cross-batch Dedup`: a duplicate `(name, args)` reuses the first result.
+
+### See Also
+
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure)
+- [Built-in Tools](/docs/en/concepts/builtin-tools)
+- [Capability System](/docs/en/concepts/capability-system)
+- [Execution Engine](/docs/en/concepts/execution-engine)

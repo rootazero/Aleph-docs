@@ -366,3 +366,39 @@ Aleph 网关通过命名空间的 JSON-RPC 2.0 方法公开其功能。每个命
 
 - [协议](/docs/zh/gateway/protocol)——JSON-RPC 2.0 传输详情
 - [认证](/docs/zh/gateway/auth)——令牌管理和设备配对
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC 计数
+
+26.7.x 网关暴露 **~265 个 JSON-RPC 方法**，按主题分组（详见各子页）：
+
+| 主题 | 方法数 | 主题 |
+|------|--------|------|
+| 核心（health/echo/version/system.info/request.state） | 5 | 流式事件 |
+| 配置（config.*） | ~12 | providers / embedding / generation / rerank / search |
+| 日志（logs.*） | 3 | 服务启停（services.*） |
+| 守护进程（daemon.*） | 3 | Hooks（hooks.*） |
+| Gateway 凭据（gateway.ticket/token/devices/credentials/identity/metrics） | ~10 | Wizard 流程（wizard.*） |
+| Memory（memory.*） | ~15 | Skills（skills.*） |
+| MCP（mcp.* + mcp_config.*） | ~12 | Plugins/Extensions（plugin.* + plugins.* + extensions.*） |
+| Heartbeat / Cron | ~18 | Channels（channel.* + channels.* + channel.pairing.*） |
+| Workspace / Projects | ~10 | Tools（tools.*） |
+| Teams（teams.* + teams.chat.*） | ~25 | Subagent（subagent.tree） |
+| Chat / Session（chat.* + session.* + sessions.*） | ~20 | Graph（graph.*） |
+| Group chat | 5 | Activities（activity.stats / insights.tools） |
+| Agents（agents.* + agent.*） | ~20 | Clusters / Runtimes |
+| Dreams / Dreaming | 2 | Acp（acp.*） |
+| Clawhub | 4 | Trace（trace.*） |
+| Events | 1 | Index / Health / Echo / Version / System.Info / Request.State |
+| Service / Daemon | ~6 | 总计 ~265 |
+
+### 详见
+
+各子页面对照 Aleph 源码 `src/gateway/handlers/mod.rs` 的 `register_handler!` 与 `src/bin/aleph-server/commands/start/builder/handlers/*.rs` 的真实方法列表。
+
+### 注
+
+由于 RPC 表非常大，且仍在持续增加，**没有**逐方法的 wiki 页；本索引 + 各主题文件 + 自动生成的 Rust doc 是当前最权威的来源。

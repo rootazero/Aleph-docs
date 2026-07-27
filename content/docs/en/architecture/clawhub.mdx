@@ -118,3 +118,25 @@ api_token = "${CLAWHUB_TOKEN}"
 - [Extensions Store](/docs/en/concepts/extensions-store) — The current umbrella for discovering and installing Skills, Plugins, and MCP servers (supersedes ClawHub)
 - [Skills](/docs/en/concepts/skills) — Skill system overview
 - [Skill Installer](/docs/en/concepts/skills#installation) — Installing skills
+
+---
+
+## 26.7.x Addendum
+
+### Demoted to Long-Tail
+
+ClawHub is **no longer a first-class extension source**:
+
+- The settings tab has been **removed** (folded into Settings → Advanced)
+- Demoted to long-tail
+- No longer maintained as a separate panel mode
+
+### Full RPC
+
+- `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install`
+- Read by the `store-agent` when browsing `/extensions`
+
+### See Also
+
+- [ClawHub Concept](/docs/en/concepts/clawhub) — full concept
+- [Extensions Store](/docs/en/concepts/extensions-store) — the replacement

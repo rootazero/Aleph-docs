@@ -603,3 +603,54 @@ The `PolicyEngine` performs stateless permission checks at the Executor level, e
 ## Reference Documentation
 
 For the authoritative system architecture, see the canonical [Architecture Reference](https://github.com/rootazero/Aleph/blob/main/docs/reference/ARCHITECTURE.md) in the source repository.
+---
+
+## 26.7.x Addendum
+
+### The Third Twin: Session Mode
+
+`chat` / `work` / `code` is the **third** user-adjustable axis alongside `exec_tier` and `think_level`. It statically partitions the tool **presentation** surface only (progressive-disclosure core set + deferred-tool tier), never permissions. Switchable from the Panel composer pill, from Settings → Policies (global default), or via the `session_set_mode` tool. Each mode also drives a distinct right-panel behavior (chat = badge, work = plan surface, code = tool detail) and adds one cache-stable prompt line.
+
+### Loop-Graph Governance Layer (`loop_graph`)
+
+`loop_graph` adds a governance topology on top of the Harness:
+
+- **Team nodes** — fuse the multi-agent system into the graph
+- **Audit ring** — closed-set audit action log
+- **Objective ACLs** — authorized by graph node identity
+- **Victory-claim watchers** — triggered on team/loop completion
+- **Built-in `loop-auditor` agent** — audit/supervision default to independent-context evidence
+
+It gives the four single-loop failure modes (Goodhart, reference blindness, ring conflict, measurement decay) a topological answer.
+
+### Self-Signed TLS + TOFU
+
+26.7.17/18+:
+
+- The gateway terminates TLS in-process (self-signed or user-supplied)
+- Self-signed cert SAN auto-discovers the host's non-loopback interface IPs
+- Drift sidecar + atomic regen marker
+- Client-side TOFU (fingerprint + SAN approval + pinned trust store)
+- macOS WKWebView + iOS Keychain adapters
+
+### Real Cost and Token Accounting
+
+26.7.15+: `session.usage` now carries a real spend ledger (previously partly fabricated); prompt-cache discipline restored; thinking depth wired end-to-end.
+
+### Daemon-Computed Session Cost
+
+`session.usage` computes cost via core pricing and the duplicate price table in the shell was deleted.
+
+### Full RPC Count
+
+26.7.x the gateway exposes **~265 RPC methods** — see [Gateway Methods Reference](/docs/en/gateway/methods).
+
+### Full Module Inventory
+
+The `aleph-server` process holds ~76 `src/<module>` directories plus a few top-level `.rs` files. See the `src/` directory tree.
+
+### See Also
+
+- [Architecture 1-2-3-4 Model](/docs/en/architecture/1-2-3-4-model) — stable skeleton
+- [Architectural Redlines R1–R10](/docs/en/philosophy/redlines) — hard constraints
+- [Gateway Protocol](/docs/en/gateway/protocol) — protocol

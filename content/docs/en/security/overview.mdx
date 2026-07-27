@@ -156,3 +156,58 @@ These logs provide a complete trail of who executed what, when, and with what pe
 - [Device Pairing](/docs/en/security/pairing) -- Trust establishment for new devices
 - [IPC Protocol](/docs/en/security/ipc) -- Secure local communication protocol
 - [Execution Approval](/docs/en/security/exec-approval) -- Human-in-the-loop command approval
+
+---
+
+## 26.7.x Addendum
+
+### Fail-Closed
+
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+
+### Three-Tier Execution Permissions
+
+| Tier | Behavior |
+|------|----------|
+| `ask` | Prompt for approval before every execution; unknown tools fail closed (default) |
+| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
+| `full` | All auto-allow (besides the hard security filter) |
+
+### Action-Aware Approval Gate
+
+26.7.15+ the approval gate is action-aware — the human sees the actual command and the grant fingerprint **keys on it**. Single choke point at `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
+
+### TOFU Certificate Trust
+
+26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use. Shared decision core + pinned trust store + SHA-256 fingerprint + SAN/Subject parsing + approval splash + macOS WKWebView / iOS Keychain adapters.
+
+### Pairing Single-Sourced on the Router
+
+26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
+
+### Real Client IP
+
+26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
+
+### Signed Operation Ledger
+
+26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
+
+### Desktop `open` / `launch` Command Injection
+
+26.7.21+ fix: dispatched through `ShellExecuteW` instead of a shell.
+
+### Bundled-Extraction Symlink Planting
+
+26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata`.
+
+### Process-Isolation Kernel
+
+26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. A legitimate carve-out from R1.
+
+### See Also
+
+- [Architectural Redlines R1 / R3 / R10](/docs/en/philosophy/redlines) — hard constraints
+- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and approval
+- [Security: Pairing](/docs/en/security/pairing) — device pairing
+- [Security: Sandbox](/docs/en/security/sandboxing) — OS-level sandbox

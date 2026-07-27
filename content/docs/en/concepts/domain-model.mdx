@@ -176,3 +176,24 @@ impl Email {
 - [Architecture Overview](../architecture/overview) — Where domain fits in the 5-layer model
 - [Design Patterns](../development/design-patterns) — Context, Newtype, Builder patterns
 - [Session Management](../architecture/session-service) — Identity and session domain concepts
+
+---
+
+## 26.7.x Addendum
+
+### POE Context Retired
+
+The POE (Principle-Operation-Evaluation) architecture was retired in 26.5+. Its "intelligence" migrated to system prompt templates (R9); success definition, validation, and evaluation are now naturally covered by a single LLM call. The Harness does not judge completion (**R10 "Don't #3**), nor does it participate in evaluation.
+
+Historical POE types — `SuccessManifest` aggregate root, `ValidationRule` and `Verdict` value objects (in `src/poe/types.rs`) — remain as read-only archaeological reference but are **not part of the runtime evaluation**.
+
+### New Bounded Contexts
+
+- **Loop-Graph Governance context** (`src/loop_graph/`) — team nodes / audit ring / objective ACLs / victory-claim watchers / built-in `loop-auditor`
+- **Goal context** (`src/goal/`) — persistent goals managed by GoalStore
+- **Artifact context** (`src/artifacts/`) — deliverables (the product of `tools.publish`)
+- **Signing context** (`src/identity/signer.rs`) — per-agent signing key + signed operation ledger
+
+### Harness 12 Files
+
+26.7.x: `src/harness/` is locked at **12 files**; the line count is gated by the ratchet in `src/harness/tests/budget.rs` (**code is the authority** — every doc number is just a copy of `CEILING`). See [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop).

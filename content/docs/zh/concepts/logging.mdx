@@ -196,3 +196,24 @@ impl<S> Layer<S> for PiiScrubbingLayer {
 - [错误处理](/docs/zh/concepts/error-handling) — 错误如何记录和传播
 - [安全: 概览](/docs/zh/security/overview) — PII 和数据保护策略
 - [入门: 配置](/docs/zh/getting-started/configuration) — 日志配置选项
+
+---
+
+## 26.7.x 补充
+
+### Day-boundary 日志轮转
+
+26.7.24+：守护进程支持 day-boundary 日志轮转（`day-boundary log rotation`），与 `ALEPH-BOOT` marker 配合标记每次启动的日志起点。睡眠抑制剂在 stderr 上静默，不再刷噪音。
+
+### 真实成本与 token 核算
+
+26.7.15+：`session.usage` 现在携带真实花费账本（之前成本 *与* token 数都是**部分伪造的**）；提示缓存纪律恢复；思考深度端到端接线；每条助手消息携带真实的、每消息 token 成本，不重复计算。
+
+### 守护者判官 payload 隐藏密钥
+
+26.7.21：Heartbeat 探针使用的 LLM 判官（`Guardian Judge`）其 payload 必须隐藏密钥——密钥不会再被序列化到日志或被审计员读取。
+
+### 见另请参阅
+
+- [守护进程](/docs/zh/concepts/daemon) — 启动 marker + 睡眠抑制剂
+- [会话成本](/docs/zh/architecture/overview#守护进程端计算的会话成本) — 单源价格表

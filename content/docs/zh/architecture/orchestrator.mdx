@@ -120,3 +120,25 @@ HarnessRunner::run(flow, deps) → FlowOutcome
 - [工具链](./harness) — Think→Act 循环运行时
 - [会话服务](./session-service) — 仅追加事件日志
 - [思考器](./thinker) — LLM 交互层
+
+---
+
+## 26.7.x 补充
+
+### 真实最大迭代
+
+26.7.15+：派生的子代理**继承**操作者的 `[execution] max_iterations`（之前是 fallback 到 200）。`HarnessRunner::default_max_iterations` hook 被正确覆写。
+
+### 子代理可中断
+
+26.7.x：A2A 子代理 mid-turn interruptible——`Interrupt` 真实取消 fan-out。
+
+### 子代理 scoped tool output
+
+26.7.15+：子 harness 拿到一个**被父会话 scope 的 `ToolResultStore`**——之前 process-wide 导致 silent zero-hit recall。
+
+### 详见
+
+- [代理运行时](/docs/zh/concepts/agent-runtime)
+- [Harness 架构](/docs/zh/architecture/harness)
+- [会话服务](/docs/zh/architecture/session-service)

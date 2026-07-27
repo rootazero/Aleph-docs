@@ -233,3 +233,57 @@ pub enum ToolError {
 - [Generation](./generation) — Media generation providers
 - [Media Processing](./media-processing) — Attachment processing pipeline
 - [Search](./search) — Search provider implementations
+
+---
+
+## 26.7.x Addendum
+
+### Toolset Reorganized
+
+26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`:
+
+- Browser tools (CDP transport)
+- Desktop tools (via the Bridge)
+- File-operation tools (with path-safety hardening)
+- Search / web-fetch tools
+- Media processing tools
+- Vision / OCR tools
+- Knowledge / memory tools
+
+### Parallel Execution
+
+`src/tools/concurrency.rs` introduces the **resource-claim** three-state:
+
+- `Shared` — no conflict
+- `Exclusive{Global}` — exclusive over the whole execution
+- `Exclusive{Paths}` — exclusive over specific paths
+
+The Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially. See [Tool Infrastructure](/docs/en/concepts/tool-infrastructure).
+
+### Cross-Batch Dedup / Memo
+
+`Memo / Cross-batch Dedup`: a duplicate `(name, args)` within or across batches reuses the first result. `McpResourceIndexLayer` coordinates with `tools.defer_mcp_tools`.
+
+### `file_read` Supports Images
+
+26.6.29+: `file_read` now supports images (`image_read`); unchanged file reads are de-duplicated across turns via a read cache.
+
+### Computer-Use Semantic Interaction
+
+26.7.7+ semantic interaction:
+
+- `set_value` / `ax_action` accessibility actions
+- Write verification (stateless locator scoring)
+- `observe` parameter fuses act→observe (returns post-state / screenshot)
+- Recovery hints appended to tool failures so the model can self-correct
+- Computer-use is hard-blocked inside password managers
+
+### Fail-Closed
+
+26.7.21+: undeclared / unknown tools **fail closed** under the `ask` tier — previously default-allow.
+
+### See Also
+
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — resource claims
+- [Capability System](/docs/en/concepts/capability-system) — permissions
+- [Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and the hard floor

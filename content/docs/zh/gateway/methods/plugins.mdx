@@ -231,3 +231,21 @@ listens = ["session.start"]
 
 - [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
 - [架构：插件](/docs/zh/architecture/plugins)——插件系统架构
+
+---
+
+## 26.7.x 补充
+
+### 完整 RPC 集
+
+- `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall`
+- `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload`
+- `plugins.callTool` / `plugins.executeCommand`
+
+### `plugin.*` 规范名空间
+
+26.7.21+ 引入 `plugin.*` 规范名空间——`plugins.*` 保留向后兼容。详见 [扩展](/docs/zh/gateway/methods/extensions)。
+
+### 失败开放 → 失败关闭
+
+26.7.21+ 强化：插件失败默认行为改为**失败关闭**。

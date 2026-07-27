@@ -189,3 +189,30 @@ Dual-path memory injection:
 - [Thinker](./thinker) — LLM interaction and streaming
 - [Harness](./harness) — Think→Act loop execution
 - [Memory](./memory) — RAG, facts, and retrieval
+
+---
+
+## 26.7.x Addendum
+
+### Layers Refactored (prompt leanness)
+
+The 26.7.17/20 **prune-the-prompt** rounds: dead prompt-layer surfaces pruned (net ≈ −3.4k LOC); `scaffold_bytes_ratchet` (measured scaffolding ceiling, only decreases); `no_sentence_is_stated_twice` — three constraints. **R9 "Intelligence in the Prompt"** has its two rulers baked into architecture:
+
+- **First ruler**: runtime facts the model **can't know** vs teaching a strong model how to think — the latter doesn't belong in the prompt.
+- **Second ruler (Pi's mirror)**: if a tool owns a sentence, write it into that tool's `DESCRIPTION` (sent with its schema, only to requests that can actually call it), not the system prompt.
+
+`src/thinker/prompt_contract.rs` exposes `reachable_layers` (a layer must be able to speak, otherwise whitelist with reason) as the enforced gate. `aleph-server prompt-size` reports the current actual scaffolding byte count.
+
+### Layer Count
+
+The legacy 6-layer mental model (identity / skills / memory / tools / rules / conversation) has been replaced by ~28 finer layers (in `src/thinker/layers/`): `agent_role`, `chain_context`, `citation_standards`, `curated_memory`, `doctor_repair_hint`, `environment`, `execution_plan`, `extra_files`, `graph_topology`, `guidelines`, `identity_files`, `language`, `mcp_instructions`, `memory_protocol`, `multi_step_conduct`, `operational_guidelines`, `profile`, `protocol_tokens`, `provider_guidance`, `role`, `runtime_capabilities`, `runtime_context`, `security`, `session_budget`, `session_context_guide`, `skill_instructions`, `soul`, `special_actions`, `standing_goal`, `strategy`, `strategy_pointer`, `timer_loop`, `tool_runtime_state`, `voice_mode`, etc.
+
+### `session_mode` in the Prompt
+
+Each session mode adds one cache-stable prompt line (chat / work / code, each different).
+
+### See Also
+
+- [Thinker](/docs/en/concepts/thinker) — the actual layer host
+- [Architectural Redlines R9](/docs/en/philosophy/redlines#r9-intelligence-lives-in-the-prompt) — the two rulers
+- [Architecture Overview](/docs/en/architecture/thinker) — layer details

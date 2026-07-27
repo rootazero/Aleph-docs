@@ -149,3 +149,20 @@ A2A 适配器与以下组件集成：
 - [代理运行时](./agent-runtime) —— 代理如何生成和管理任务
 - [编排器](./orchestrator) —— 任务路由和委托决策
 - [安全：概览](../security/overview) —— 信任等级和审批
+
+---
+
+## 26.7.x 补充
+
+### A2A 中断 + 取消
+
+26.7.24+：A2A 流的中断与取消——`Interrupt` 真实取消 fan-out，**不再退化为入队**。长跑 detach 成员不再泄漏——detach 成员泄漏被修。
+
+### 子代理授权恢复
+
+A2A 子代理现在**可重新授权**——之前一旦授权失败就永久切断，现在由链路内闭包生命周期管理（与 `Identity` 委托链一致）。
+
+### 见另请参阅
+
+- [代理运行时](/docs/zh/concepts/agent-runtime) — 26.7.x 子代理可中断
+- [身份与签名](/docs/zh/concepts/identity-context) — 委托链

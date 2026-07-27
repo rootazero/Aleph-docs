@@ -207,3 +207,33 @@ Event: StreamChunk { content, block_type }
 - [Harness](./harness) — Think→Act loop
 - [Dispatcher](./dispatcher) — Task orchestration
 - [Memory System](./memory) — Context augmentation
+
+---
+
+## 26.7.x Addendum
+
+### Layers Reorganized
+
+26.7.x: ~28 finer layers replace the legacy 6-layer mental model (in `src/thinker/layers/`). See [Prompt System](/docs/en/concepts/prompt-system) and [Thinker (Concept)](/docs/en/concepts/thinker).
+
+### R9's Two Rulers
+
+`reachable_layers` / `scaffold_bytes_ratchet` / `no_sentence_is_stated_twice` — `aleph-server prompt-size` reports the actual byte count.
+
+### `session_mode` Lines
+
+Each session mode adds one cache-stable prompt line.
+
+### UnifiedMessage and ProviderDelta
+
+`UnifiedMessage` is the LLM-agnostic intermediate message representation; `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallDelta`). A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live.
+
+### `tool_search` Meta-Tool
+
+26.7.7+ progressive tool disclosure — static core tool set + full tool catalog + `tool_search` meta-tool for on-demand schema loading.
+
+### See Also
+
+- [Thinker (Concept)](/docs/en/concepts/thinker)
+- [Prompt System](/docs/en/concepts/prompt-system)
+- [Architectural Redlines R9](/docs/en/philosophy/redlines#r9-intelligence-lives-in-the-prompt)

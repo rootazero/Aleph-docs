@@ -159,3 +159,47 @@ The following environment variables affect CLI behavior:
 - [Gateway Management](/docs/cli/gateway) — Start, stop, and monitor the server
 - [Agent Interaction](/docs/cli/agent) — Chat, ask, and manage sessions
 - [Configuration Management](/docs/cli/config) — Read and write configuration from the CLI
+
+---
+
+## 26.7.x Addendum
+
+### `aleph wizard` 11 Stages
+
+26.7.21+ full flow: welcome, provider, credentials, primary model, secondary model, thinking level, **session mode (chat / work / code)**, **exec tier (ask / auto / full)**, messaging apps, **gateway TLS**, done.
+
+### `aleph wizard --mode`
+
+New subcommand: switch the default session mode only.
+
+### `aleph-server service` Subcommand
+
+26.7.1+: install / start / enable auto-start / uninstall system service (launchd / systemd-user / Task Scheduler).
+
+### `aleph chat` Enhancements
+
+- Send message with `session_mode` field
+- `chat.abort` abort a run
+- `chat.history` / `chat.clear` / `chat.context_estimate` / `chat.rewind`
+
+### `aleph config` Enhancements
+
+New config sections: `[gateway.tls]` / `trusted_proxy` / `session_mode` / `exec_tier` / `[sandbox.command_policy]` / `[tools] defer_mcp_tools` / `enable_tool_search` / `[[hook]]` / `[[mcp.servers]]` / `[[plugin.marketplace]]` / `[projects]` / `[runtimes]` / `[voice]`.
+
+### `aleph channels` Enhancements
+
+`aleph channels start telegram` / `discord` / `imessage`. `channels.set_agent` now **must** specify an existing agent.
+
+### `aleph-server prompt-size`
+
+R9 prompt-scaffolding size check — `src/thinker/prompt_contract.rs` `scaffold_bytes_ratchet` measured.
+
+### Full RPC ~265
+
+26.7.x the gateway exposes **~265 RPC methods** — see [Gateway Methods Reference](/docs/en/gateway/methods).
+
+### See Also
+
+- [Setup Wizard](/docs/en/getting-started/wizard) — full 11 stages
+- [CLI Commands Reference](/docs/en/cli/commands) — full command
+- [Configuration](/docs/en/getting-started/configuration) — full `aleph.toml` field

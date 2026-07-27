@@ -196,3 +196,24 @@ This split design allows:
 - [Error Handling](./error-handling) — How errors are logged and propagated
 - [Security: Overview](../security/overview) — PII and data protection policies
 - [Getting Started: Configuration](../getting-started/configuration) — Logging configuration options
+
+---
+
+## 26.7.x Addendum
+
+### Day-Boundary Log Rotation
+
+26.7.24+: the daemon supports day-boundary log rotation; on startup it writes an `ALEPH-BOOT` marker at the top of the log, so operators can locate each startup's boundary. The sleep inhibitor is silent on stderr, no more noise.
+
+### Real Cost and Token Accounting
+
+26.7.15+: `session.usage` now carries a real spend ledger (both cost *and* token counts were **partly fabricated** before); prompt-cache discipline is restored; thinking depth is wired end-to-end; every assistant message carries its real per-message token cost without double-counting.
+
+### Guardian Judge Payload Masks Secrets
+
+26.7.21: the LLM judge used by heartbeat probes (`Guardian Judge`) must mask secrets — secrets are no longer serialized into logs or read by the auditor.
+
+### See Also
+
+- [Daemon](./daemon) — startup marker + sleep inhibitor
+- [Session Cost](/docs/en/architecture/overview#daemon-computed-session-cost) — the single pricing table

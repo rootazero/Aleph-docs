@@ -203,3 +203,37 @@ pub struct Dispatcher {
 
 - [事件系统](./event-system) —— 事件分发模式
 - [配置](./configuration) —— 守护进程配置选项
+
+---
+
+## 26.7.x 补充
+
+### `aleph-server service` 子命令
+
+26.7.1+：独立的 `aleph-server` 二进制获得 `service` 子命令，安装器默认即「登录时启动」：
+
+```bash
+aleph-server service install     # 安装（launchd / systemd-user / Task Scheduler）
+aleph-server service start       # 立即启动
+aleph-server service status      # 查看状态
+aleph-server service enable      # 启用自启
+aleph-server service uninstall   # 卸载
+```
+
+### Day-boundary 日志轮转
+
+26.7.24+：守护进程支持 day-boundary 日志轮转；启动时写 `ALEPH-BOOT` marker 到日志开头，便于运维定位每次启动的边界。睡眠抑制剂在 stderr 上静默，不再刷噪音。
+
+### 守护者判官（Guardian Judge）
+
+26.7.21+：Heartbeat 探针使用 LLM 判官 `Guardian Judge` 决定是否需要主动唤醒。**Payload 必须隐藏密钥**——密钥不会再被序列化到日志或被审计员读取。
+
+### Heartbeat 拒绝危险工具
+
+26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。`Heartbeat` 现在是实化（stubs → real）的周期守护。
+
+### 见另请参阅
+
+- [自动化 / Heartbeat](/docs/zh/automation/heartbeat) — `heartbeat.*` RPC
+- [部署 service 子命令](/docs/zh/getting-started/deployment#作为系统服务service-子命令) — 安装与启动
+- [架构概览](/docs/zh/architecture/overview) — Heartbeat 在哪里驱动

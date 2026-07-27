@@ -211,3 +211,29 @@ pub struct AgentRules {
 - [会话管理](./session-service) —— 会话生命周期和持久化
 - [工具](./tools) —— 代理可用的工具
 - [编排器](./orchestrator) —— 代理如何被分派和协调
+
+---
+
+## 26.7.x 补充
+
+### 跨子代理的中途可中断
+
+26.7.x：**子代理现在是 mid-turn 可中断的**——delegated 子代理的 `Interrupt` 真实取消 fan-out，**不再退化为入队**。长跑 detach 成员不再泄漏——detach 成员泄漏被修。
+
+### Subagent Tree
+
+`subagent.tree` RPC（26.7.x）返回代理的子代理树（节点身份 + 实时事件 + 树 RPC）。
+
+### 真实最大迭代
+
+26.7.15+：派生的子代理**继承**操作者的 `[execution] max_iterations`。`HarnessRunner::default_max_iterations` hook 被正确覆写。之前 fallback 到 `FALLBACK_MAX_ITERATIONS=200`，循环并非无限，数字只是没跟配置。
+
+### 子代理作用域工具输出
+
+26.7.15+：子代理拿到一个**被父会话 scope 的 `ToolResultStore` 句柄**——之前是 process-wide，Layer-3 溢出落到父会话目录之外，**silent zero-hit recall**。修复是 recall 修复，不是隔离修复（之前已 failsafe：子代理看不到任何东西，更不是别人的数据）。
+
+### 见另请参阅
+
+- [代理组件](/docs/zh/concepts/agent-components) — 子代理构建
+- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 资源声明
+- [网关 RPC `subagent.tree`](/docs/zh/gateway/methods/agents) — 子代理树查询

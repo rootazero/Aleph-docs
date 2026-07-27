@@ -232,3 +232,30 @@ impl HeartbeatService {
 
 - [代理运行时](/docs/zh/concepts/agent-runtime) — 如何生成和管理子代理
 - [竞技场](/docs/zh/concepts/arena) — 多代理协作工作区
+
+---
+
+## 26.7.x 补充
+
+### Cron 已实化（stubs → real）
+
+26.7.x：历史的 cron `*_stub` 占位 RPC（`cron.list_stub` / `cron.get_stub` / ...）已被**实化**。`cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status` / `cron.run` / `cron.runs` / `cron.toggle` 现在有真实实现（之前是 error-stubs）。
+
+### Heartbeat 已实化
+
+同样：`heartbeat.list` / `heartbeat.get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` 现在有真实实现。
+
+### 守护进程端完整链路
+
+Cron / Heartbeat 的真实实现由 [守护进程](/docs/zh/concepts/daemon) 驱动，包括：
+
+- Day-boundary 日志轮转
+- `ALEPH-BOOT` marker
+- 睡眠抑制剂静默
+- `Guardian Judge` 主动唤醒决策
+
+### 见另请参阅
+
+- [守护进程](/docs/zh/concepts/daemon) — Cron/Heartbeat 驱动
+- [自动化 / Cron 作业](/docs/zh/automation/cron-jobs) — 完整 RPC
+- [Heartbeat](/docs/zh/automation/heartbeat) — 完整 RPC

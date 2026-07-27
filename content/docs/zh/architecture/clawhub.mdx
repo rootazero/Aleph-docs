@@ -118,3 +118,25 @@ api_token = "${CLAWHUB_TOKEN}"
 - [扩展商店](/docs/zh/concepts/extensions-store) —— 当前用于发现和安装技能、插件及 MCP 服务器的统一入口（取代 ClawHub）
 - [技能](/docs/zh/concepts/skills) —— 技能系统概览
 - [技能安装器](/docs/zh/concepts/skills#installation) —— 安装技能
+
+---
+
+## 26.7.x 补充
+
+### 降级为长尾
+
+ClawHub **不再是一级扩展源**：
+
+- 设置标签页**已移除**（并入 Settings → Advanced）
+- 降级为长尾
+- 不再维护为独立面板模式
+
+### 完整 RPC
+
+- `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install`
+- 由 `store-agent` 在 `/extensions` 浏览时读取
+
+### 见另请参阅
+
+- [ClawHub 概念](/docs/zh/concepts/clawhub) — 完整概念
+- [扩展商店](/docs/zh/concepts/extensions-store) — 替代品

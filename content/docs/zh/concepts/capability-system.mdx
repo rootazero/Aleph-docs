@@ -138,3 +138,37 @@ file_ops = "allow"
 
 - [扩展](./extensions) —— 插件架构
 - [审批](./approval) —— 桌面/浏览器审批系统
+
+---
+
+## 26.7.x 补充
+
+### `CapabilityLedger`
+
+26.7.x 引入——每次安装时从磁盘**重建**的可见能力清单（用于 `plugin.install` / `runtimes.install` 的安装前披露）：
+
+- 重建逻辑在 `make_runtime_ledger()`
+- 与运行时的 `claim` 校验**分离**（不混为一谈）
+- 重建失败的插件在 install 之前就被拒
+
+### Action-aware Approval
+
+26.7.15+ `ApprovalPolicy` 是**动作感知的**——人看到真实命令且授权指纹键**绑定在命令上**。授权粒度从「工具级」升到「命令级」。
+
+### 三级执行权限
+
+| 等级 | 行为 |
+|------|------|
+| `ask` | 每次工具执行前请求审批；未知工具失败关闭 |
+| `auto` | 幂等工具自动放行，破坏性工具仍需审批 |
+| `full` | 全部自动放行（独立的安全硬过滤除外） |
+
+### `[sandbox.command_policy]` 硬底
+
+不能被任何 `exec_tier` 拉低。`fail-closed`（缺失/不一致拒绝授权）。
+
+### 详情
+
+- [安全概览](/docs/zh/security/overview) — 失败关闭原则
+- [执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与 action-aware
+- [扩展](/docs/zh/concepts/extensions) — 插件能力

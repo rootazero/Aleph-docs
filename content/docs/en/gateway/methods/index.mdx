@@ -366,3 +366,39 @@ Methods like `agent.run` trigger streaming events. Subscribe to `stream.*` topic
 
 - [Protocol](/docs/en/gateway/protocol) -- JSON-RPC 2.0 transport details
 - [Authentication](/docs/en/gateway/auth) -- Token management and device pairing
+
+---
+
+## 26.7.x Addendum
+
+### Full RPC Count
+
+26.7.x the gateway exposes **~265 JSON-RPC methods**, grouped by topic (see individual pages):
+
+| Topic | Count | Topic |
+|------|-------|------|
+| Core (health/echo/version/system.info/request.state) | 5 | Streaming events |
+| Config (config.*) | ~12 | providers / embedding / generation / rerank / search |
+| Logs (logs.*) | 3 | Service start/stop (services.*) |
+| Daemon (daemon.*) | 3 | Hooks (hooks.*) |
+| Gateway credentials (gateway.ticket/token/devices/credentials/identity/metrics) | ~10 | Wizard flow (wizard.*) |
+| Memory (memory.*) | ~15 | Skills (skills.*) |
+| MCP (mcp.* + mcp_config.*) | ~12 | Plugins/Extensions (plugin.* + plugins.* + extensions.*) |
+| Heartbeat / Cron | ~18 | Channels (channel.* + channels.* + channel.pairing.*) |
+| Workspace / Projects | ~10 | Tools (tools.*) |
+| Teams (teams.* + teams.chat.*) | ~25 | Subagent (subagent.tree) |
+| Chat / Session (chat.* + session.* + sessions.*) | ~20 | Graph (graph.*) |
+| Group chat | 5 | Activities (activity.stats / insights.tools) |
+| Agents (agents.* + agent.*) | ~20 | Clusters / Runtimes |
+| Dreams / Dreaming | 2 | Acp (acp.*) |
+| Clawhub | 4 | Trace (trace.*) |
+| Events | 1 | Index / Health / Echo / Version / System.Info / Request.State |
+| Service / Daemon | ~6 | Total ~265 |
+
+### See Also
+
+Each subpage is mapped against the real method list in `src/gateway/handlers/mod.rs` `register_handler!` and `src/bin/aleph-server/commands/start/builder/handlers/*.rs`.
+
+### Note
+
+Given the RPC table's size and ongoing growth, **there is no per-method wiki page**; this index + topic files + auto-generated Rust doc is currently the most authoritative source.
