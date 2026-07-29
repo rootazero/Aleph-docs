@@ -1,474 +1,250 @@
 ---
 title: "Authentication"
-description: "Gateway authentication flow, token management, and device pairing"
+description: "Gateway connection authentication, token lifecycle, and remote transport encryption"
 ---
 
-The Gateway supports device-based authentication with HMAC-SHA256 signed tokens. When `require_auth` is enabled, every client must authenticate before issuing RPC calls.
+Aleph's trust boundary is the **network boundary**: loopback is the implicit operator (zero config); a remote connection must pass the `connect` login wall with one of three Gateway credentials. Once authorized the connection is single-tier `operator`, identical to local.
 
-## Authentication Flow
+Code anchors: `src/gateway/handlers/connect.rs` (handshake + authorization verdict), `src/gateway/server/handler.rs::ws_upgrade_handler` (upgrade gate + login wall), `src/gateway/origin_policy.rs` (browser cross-origin / DNS-rebinding defence), `src/gateway/tls.rs` (TLS material), `src/gateway/security/{shared_token.rs, device_token_manager.rs, store/}` (credentials + storage).
+
+## Trust model at a glance
 
 ```
-Client connects via WebSocket
-    |
-    v
-+-----------------------------+
-| require_auth enabled?       |
-|   Yes -> First frame must   |
-|          be "connect"       |
-|   No  -> Direct access      |
-+-----------------------------+
-    |
-    v (if auth required)
-+-----------------------------+
-| Validate credentials        |
-|   - Bearer token + HMAC sig |
-|   - Device fingerprint      |
-|   - Public key verification |
-+-----------------------------+
-    |
-    v
-+-----------------------------+
-| Issue session token          |
-| Assign client role           |
-| (operator or node)           |
-+-----------------------------+
++---------------------+        +--------------------+        +-------------------+
+|  Same host / browser |  ──>  |  /ws upgrade (426) |  ──>  |  resolve_connect_ |
+|  (loopback / tauri:) |        |  first frame must be connect |       auth             |
++---------------------+        +--------------------+        +-------------------+
+                                                                       |
+                                              +------------------------+------------------------+
+                                              |                        |                        |
+                                              v                        v                        v
+                                     loopback (params optional)   device_token (*)    bootstrap_ticket (*) / token
+                                              |                        |                        |
+                                       operator (implicit)   bound to a device_id   one-shot → fresh device_token
 ```
 
-When authentication is not required (local-only deployments), clients connect and begin issuing RPC calls immediately. When enabled, the very first WebSocket frame must be a `connect` request.
+- **Loopback** — same-host desktop / CLI / bridge process, zero config, `operator` immediately, never audited.
+- **Remote** — present one of the credentials below in `connect`, then call other methods; `trusted_proxy` resolves the real client from `X-Forwarded-For` (last entry) when the connection's peer is in `trusted_ips`.
+- **Single-tier `operator`** — there is no Chat / Config sub-tier; an authorized Panel has the same authority as a local user. Connection trust is orthogonal to *what an agent may do*, which is governed by `tools/scoped/`'s three-tier permission merge.
 
-## Connect Request
+## The three credentials
 
-The `connect` method negotiates protocol version, identifies the client, and presents credentials.
+`resolve_connect_auth` evaluates them in this order:
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "connect",
-  "params": {
-    "minProtocol": 1,
-    "maxProtocol": 1,
-    "client": {
-      "id": "macos-app",
-      "version": "1.0.0",
-      "platform": "macos"
-    },
-    "role": "operator",
-    "auth": {
-      "token": "bearer_token",
-      "signature": "hmac_sha256_signature"
+| # | Credential | Source | Storage | Revocation |
+|---|------------|--------|---------|------------|
+| 1 | **Loopback** (implicit) | Same-host process | — | — |
+| 2 | **Device token** `aleph-dt-<uuid>` | Exchanged for a bootstrap ticket at first `connect`; replayed thereafter | SHA-256 hash in `~/.aleph/data/security.db` | `gateway.devices.revoke` (precise socket close + drops every token for that device) |
+| 3 | **Bootstrap ticket** `aleph-bt-<uuid>` | `gateway.ticket.create` or `aleph-server pair` | Single INSERT, consumed on exchange | Single-use, default TTL 5 min (clamped 60s – 86 400s by `gateway_ticket.rs`) |
+| 4 | **Shared Gateway token** `aleph-<uuid>` | `SharedTokenManager::generate_token` (first boot) | HMAC hash in `~/.aleph/data/security.db`; plaintext only in memory | `gateway.token.rotate` — regenerates + revokes every paired Panel + force-closes every remote socket |
+
+### Bootstrap-ticket → device-token flow
+
+```
+[Operator, authorised on machine A]
+    |  `gateway.ticket.create`  (or  `aleph-server pair`)
+    |  -> server mints `aleph-bt-<uuid>`  TTL=300s
+    |  -> response also carries LAN-friendly pairing URLs
+    |     (same-host bind ⇒ empty list; the Panel falls back to its own origin)
+    v
+[New device]  browser opens ?bt=<ticket>
+    |  /ws first frame: connect { bootstrap_ticket, device_id }
+    v
+[Server]  consumes the ticket atomically
+    |  creates a device row + `aleph-dt-<uuid>` (TTL 10y)
+    |  response carries device_token
+    v
+[Panel]  persists device_token; replays it on every reconnect
+```
+
+Code facts:
+
+- Bootstrap-ticket format: `device_token_manager.rs:88` — `format!("aleph-bt-{}", Uuid::new_v4())`.
+- Device-token format: `device_token_manager.rs:148` — `format!("aleph-dt-{}", Uuid::new_v4())`, default TTL `DEFAULT_DEVICE_TOKEN_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000` (10 years).
+- Device tokens are stored as **SHA-256 hashes**: `device_token_manager.rs:240` — `hex::encode(sha2::Sha256::digest(...))`.
+- Shared-token hash: `shared_token.rs:99-103` — `HMAC-SHA256(secret, token)` written via `set_shared_token_with_secret`.
+- `exchange_bootstrap_ticket` refuses a `device_id` that already names a non-Panel row (`DeviceTokenError::DeviceIdConflict`) — closes the namespace-collision vector where a one-shot ticket would mint an operator credential that the Panel roster cannot see and `revoke_all_panel_devices` cannot reach (`device_token_manager.rs:113-126`).
+
+### Audited events
+
+Only **remote** `connect`s that are **rejected** are audited; loopback is operator and never logs.
+
+| Source | Event | Bound |
+|--------|-------|-------|
+| `connect` rejected | `AuditEventType::AuthFailure` (in `src/security/audit.rs`) | `Auth`-scope rate limiter, ≤ 10/60s/IP |
+| `UnauthorizedFloodGuard` closes a socket | `AuditEventType::RateLimited` | One row per abusive connection, not per rejected request |
+
+## Remote transport encryption (TLS)
+
+A remote connection is accepted only when **one of these holds** (`insecure_exposure_refused` in `src/gateway/server/mod.rs`):
+
+```toml
+# Remote plaintext is refused by default. Pick one:
+[gateway]
+allow_insecure_remote = true          # only on a trusted LAN — you have been warned
+
+[gateway]
+tls.enabled = true                    # native TLS
+tls.cert_path = "/etc/letsencrypt/.../fullchain.pem"
+tls.key_path  = "/etc/letsencrypt/.../privkey.pem"
+
+[gateway]
+tls.enabled = true                    # empty paths ⇒ self-signed
+                                       # (SAN auto-covers host's non-loopback IPs)
+
+[gateway.trusted_proxy]
+enabled = true
+trusted_ips = ["127.0.0.1", "::1"]    # upstream TLS-terminating reverse proxy
+# + gateway.host still bound to 127.0.0.1
+```
+
+### A. Trusted reverse proxy (recommended; needs a domain)
+
+Bind Aleph to loopback; Caddy / nginx terminates TLS in front:
+
+```toml
+[gateway]
+host = "127.0.0.1"
+allowed_origins = ["https://your.domain.com"]
+
+[gateway.trusted_proxy]
+enabled = true
+```
+
+```
+your.domain.com { reverse_proxy 127.0.0.1:18790 }
+```
+
+**`trusted_proxy` must be enabled in lock-step** — without it every remote client looks like `127.0.0.1` to Aleph and so auto-passes the loopback-operator test, a full auth bypass.
+
+### B. Native self-signed (no domain)
+
+```toml
+[gateway]
+host = "0.0.0.0"
+
+[gateway.tls]
+enabled = true
+# cert_path / key_path left empty ⇒ auto-generate and persist under ~/.aleph/data/tls/
+# san = []   # optional; default already covers all non-loopback interface IPs
+```
+
+`src/gateway/tls.rs::load_or_generate`:
+
+1. If the persisted `cert.pem` / `key.pem` / `sans.txt` exist and the desired SAN set is a **subset** of what's recorded → reuse.
+2. Drift or missing sidecar → delete `sans.txt` first, then write `cert.pem`, then `key.pem`, then `sans.txt` — atomic-regen marker commits the new pair only after every byte is on disk.
+3. Startup logs the SHA-256 fingerprint, so a Panel can pin it.
+
+Client verification: macOS / iOS run a [TOFU flow](#tofu--pairing-store-single-source) inside the App — shared decision core + pinned trust store + SHA-256 fingerprint + SAN parsing + approval splash (TOFU/change warning + approve/reject). Other clients follow the macOS reference.
+
+### C. Operator-provided certificate (domain, no proxy)
+
+```toml
+[gateway]
+host = "0.0.0.0"
+
+[gateway.tls]
+enabled = true
+cert_path = "/etc/letsencrypt/live/your.domain.com/fullchain.pem"
+key_path  = "/etc/letsencrypt/live/your.domain.com/privkey.pem"
+```
+
+```rust
+pub struct GatewayTlsConfig {
+    pub enabled: bool,
+    pub cert_path: String,
+    pub key_path: String,
+    pub san: Vec<String>,
+}
+```
+
+`load_or_generate` reads `cert_path` / `key_path` verbatim in the `TlsMode::Provided` branch; the self-signed branch ignores them (`src/gateway/tls.rs:48-91`).
+
+## Trusted-proxy / real client IP
+
+`src/gateway/trusted_proxy.rs::resolve_client` is the spoof-safe single source:
+
+```rust
+ResolvedClient { ip: IpAddr, secure: bool } =
+    if enabled && trusted_ips.contains(&peer) {
+        last_forwarded_for(headers).unwrap_or(peer),
+        forwarded_proto_https(headers)
+    } else {
+        (peer, false)    // untrusted peer → XFF ignored entirely
     }
-  }
-}
 ```
 
-**Response (success):**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "session_token": "session-uuid",
-    "role": "operator",
-    "scopes": ["*"],
-    "expires_at": 1706400000000
-  }
-}
+Used by:
+
+- `is_loopback` from the resolved IP — **XFF can never flip loopback** (forge `X-Forwarded-For: 127.0.0.1` and the real peer is still remote, so `is_loopback()` is `false`).
+- Per-IP concurrent-connection cap (`gateway.max_connections_per_ip`, default 64), `Auth`-scope rate-limit key, and the `AuthFailure` / `RateLimited` audit log all key on `resolved.ip`.
+- WS upgrade's `secure` field is `tls_enabled || resolved.secure` — a non-loopback client on an unencrypted leg is refused with `426 Upgrade Required`.
+
+## Origin policy / DNS-rebinding defence
+
+The browser-side gate (`src/gateway/origin_policy.rs`; browsers can't forge `Origin`):
+
+| Origin | Verdict | Why |
+|--------|---------|-----|
+| Missing / empty | **allow** | Native callers (CLI, bots, `tokio-tungstenite`) send none; only browsers do. |
+| Loopback / `tauri:` scheme | **allow** | Same-machine UI, desktop webview. |
+| `[gateway] allowed_origins` exact match | **allow** | Operator-configured extra origins. |
+| Same-origin + `Host` is an IP literal or loopback | **allow** | LAN-by-IP zero-config. A domain `Host` is **not** auto-allowed — DNS-rebinding defence. |
+| Anything else (public web domain) | **deny** | `403 origin not allowed`. |
+
+The escape hatch is `[gateway] allow_any_origin = true` — only for deployments fronting Aleph with their own reverse-proxy / auth layer (otherwise any web page the user visits can drive the agent).
+
+## TOFU / pairing-store single source
+
+Self-signed TLS is trusted from inside the App, end-to-end:
+
+- **Server** — `load_or_generate` keeps the SAN set in a sidecar; a newly-appearing interface IP triggers one atomic regen (new fingerprint, re-trust once). Drift detection lives in `gateway/tls.rs`.
+- **Client** — the macOS WKWebView cert-challenge adapter is the reference platform (proven end-to-end against a real self-signed remote): shared decision core + pinned TOFU trust store + SHA-256 fingerprint + SAN/subject parsing + approval splash (fingerprint + SAN + TOFU/change warning) + `pending-cert` state with approve/reject Tauri commands. iOS Keychain is the second wired adapter.
+- **Channel pairing** (`src/gateway/pairing_store.rs`, methods `pairing.list` / `pairing.approve` / `pairing.reject`) is a separate concept — it authorises **unknown channel senders** (iMessage / Telegram / Discord), **not** Panel device pairing. Channel access / pairing / allowlists are single-sourced on the inbound router.
+
+## Credential and vault components
+
+| Component | Path | Role |
+|-----------|------|------|
+| `SharedTokenManager` | `src/gateway/security/shared_token.rs` | Creates / rotates / validates the shared Gateway token; owns `SecretVault`. |
+| `DeviceTokenManager` | `src/gateway/security/device_token_manager.rs` | Bootstrap-ticket mint / consume, device-token issuance, per-device revocation. |
+| `SecurityStore` | `src/gateway/security/store/` | SQLite backend with `bootstrap_tickets` / `devices` / `tokens` / `identity` / `senders`. |
+| `SecretVault` | `src/secrets/vault.rs` | Encrypted at-rest; the **master key is the live shared token** (the `vault: RwLock<SecretVault>` field in `shared_token.rs:32`). |
+| `SecretMasker` | `src/exec/masker.rs` | Redacts secrets in any human-visible or audit-string (approval cards, logs, receipts). Built-in patterns cover OpenAI / Anthropic / AWS / GitHub classic + fine-grained / generic passwords / PKCS#8 `-----BEGIN PRIVATE KEY-----` (regression-tested at `masker.rs:99-123`). |
+
+### Headless credential tools
+
+All bypass the running daemon; they open `~/.aleph/data/security.db` (mode 0600, WAL) directly under the Spec-C singleton-lock protocol:
+
+```bash
+# Mint a bootstrap ticket + LAN-friendly pairing URLs (headless counterpart of
+# Settings → Security → "Pair new device")
+aleph-server pair [--ttl SECONDS]
+
+# Print the live shared Gateway token — one-shot, plaintext to stdout
+aleph-server bootstrap-token
+
+# Offline verify per-agent signing identities — independent of the daemon
+aleph-server identity verify
 ```
 
-**Response (failure):**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32001,
-    "message": "Authentication failed: invalid token"
-  }
-}
-```
+## Revocation
 
-### Connect Parameters
+Revocation takes effect **immediately**, not at the next handshake:
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `minProtocol` | number | Yes | Minimum protocol version the client supports |
-| `maxProtocol` | number | Yes | Maximum protocol version the client supports |
-| `client.id` | string | Yes | Client identifier (e.g. `"cli"`, `"macos-app"`, `"web"`) |
-| `client.version` | string | Yes | Client version string |
-| `client.platform` | string | Yes | Platform (`"macos"`, `"ios"`, `"android"`, `"cli"`, `"web"`) |
-| `role` | string | Yes | Requested role: `"operator"` or `"node"` |
-| `auth.token` | string | Yes | Bearer token issued during device pairing |
-| `auth.signature` | string | Yes | HMAC-SHA256 signature of the token |
+- `gateway.token.rotate` regenerates the shared token, revokes every paired Panel device, and closes every remote socket (`handlers/gateway_token.rs::handle_token_rotate`). The response carries the fresh token and `revoked_devices`.
+- `gateway.devices.revoke {device_id}` revokes one Panel device; its live sessions are dropped to the login wall synchronously, then the socket is closed with WS 4001 `device_revoked` (`handlers/gateway_devices.rs`).
+- **Loopback survives** — token rotation never tears down same-host sessions (`rotated_should_close_remote` in `server/handler.rs` keys the close on `is_loopback`).
+- Failure-closed at the seam — `exchange_bootstrap_ticket` refuses a `device_id` that already exists with `device_type != "panel"`; otherwise a one-shot ticket could mint an operator credential that the Panel roster cannot see.
 
-## Token Types
+## Rate-limit and audit
 
-Aleph uses two categories of tokens, each serving a different phase of the authentication lifecycle.
+- `src/gateway/rate_limiter.rs` — keyed on `(resolved_client_ip, method_scope)`; loopback exempt.
+- `src/gateway/server/flood_guard.rs::UnauthorizedFloodGuard` — counts unauthorized requests per connection, trips on threshold, writes `AuditEventType::RateLimited`.
+- `src/security/audit.rs` — `AuthFailure` / `RateLimited` rows, written from `ws_upgrade_handler` + the login-wall path.
 
-### Device Token
+## See also
 
-A long-lived token issued during device pairing. Stored securely on the client device (Keychain on macOS/iOS, encrypted storage on other platforms). Used to obtain session tokens via the `connect` method.
-
-| Property | Value |
-|----------|-------|
-| Lifetime | Until revoked |
-| Storage | Client-side secure storage |
-| Scope | Device-level identity |
-| Rotation | Manual via `auth.rotate` |
-
-### Session Token
-
-A short-lived token issued by the Gateway after a successful `connect` handshake. Automatically included in subsequent requests during the WebSocket session. Expires after 24 hours by default.
-
-| Property | Value |
-|----------|-------|
-| Lifetime | 24 hours (default) |
-| Storage | In-memory (Gateway) |
-| Scope | Per-session |
-| Rotation | Automatic on reconnect |
-
-## HMAC-SHA256 Signing
-
-All tokens are signed with HMAC-SHA256. The Gateway never stores raw token values -- only their HMAC hashes are persisted in SQLite.
-
-```
-Token Issuance:
-  token        = UUID v4
-  signature    = HMAC-SHA256(secret, token)
-  stored_hash  = HMAC-SHA256(secret, token)
-
-Token Validation:
-  1. Verify HMAC signature matches token
-  2. Compute hash = HMAC-SHA256(secret, token)
-  3. Look up hash in database
-  4. Check expiry and revocation status
-  5. Update last_used_at timestamp
-```
-
-The HMAC secret is generated at server startup (32 bytes of cryptographically secure random data). It can be persisted across restarts for token continuity.
-
-## Token Validation Result
-
-When a token passes validation, the Gateway returns an internal `TokenValidation` containing the identity context for the session.
-
-```json
-{
-  "token_id": "tok-uuid",
-  "device_id": "dev-uuid",
-  "role": "operator",
-  "scopes": ["*"],
-  "remaining_ms": 86400000
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `token_id` | string | Unique token identifier |
-| `device_id` | string | Device that owns this token |
-| `role` | string | `"operator"` (full control) or `"node"` (limited) |
-| `scopes` | string[] | Permission scopes (`["*"]` = all) |
-| `remaining_ms` | number | Milliseconds until token expires |
-
-## Device Roles
-
-| Role | Description | Permissions |
-|------|-------------|-------------|
-| `operator` | Full control (CLI, macOS App, Web UI) | All RPC methods, tool execution, config changes |
-| `node` | Limited execution (iOS/Android nodes) | Agent interaction, read-only config, no exec approval |
-
-## Device Pairing
-
-New devices must be paired before they can authenticate. The pairing flow uses a challenge-response protocol.
-
-### Pairing Flow
-
-```
-New Device                          Gateway
-    |                                  |
-    |--- auth.pairing.request -------->|
-    |    { device_name, platform,      |
-    |      public_key }                |
-    |                                  |
-    |<-- pairing_id, challenge --------|
-    |                                  |
-    |                    Owner approves via CLI/UI
-    |                                  |
-    |--- auth.pairing.complete ------->|
-    |    { pairing_id, signed_challenge}|
-    |                                  |
-    |<-- device_token, signature ------|
-```
-
-### Approve/Reject Pairing
-
-The owner approves or rejects pending pairing requests via `auth.pairing.approve` or `auth.pairing.reject`.
-
-**Approve:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.pairing.approve",
-  "params": {
-    "pairing_id": "pair-uuid",
-    "role": "operator",
-    "scopes": ["*"]
-  }
-}
-```
-
-**Reject:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "auth.pairing.reject",
-  "params": {
-    "pairing_id": "pair-uuid",
-    "reason": "Unknown device"
-  }
-}
-```
-
-### List Devices
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "auth.devices.list"
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "devices": [
-      {
-        "device_id": "dev-uuid-1",
-        "device_name": "MacBook Pro",
-        "device_type": "macos",
-        "role": "operator",
-        "scopes": ["*"],
-        "last_seen_at": 1706400000000,
-        "created_at": 1706313600000
-      }
-    ]
-  }
-}
-```
-
-## Token Rotation
-
-Tokens can be rotated without re-pairing. The old token is revoked and a new one is issued with the same permissions.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.rotate",
-  "params": {
-    "token": "old-token",
-    "signature": "old-signature"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "token": "new-token",
-    "signature": "new-signature",
-    "token_id": "new-tok-uuid",
-    "expires_at": 1706486400000
-  }
-}
-```
-
-## Token Revocation
-
-Revoke a specific token or all tokens for a device.
-
-**Revoke single token:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.revoke",
-  "params": {
-    "token_id": "tok-uuid"
-  }
-}
-```
-
-**Revoke all device tokens:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "auth.revoke_device",
-  "params": {
-    "device_id": "dev-uuid"
-  }
-}
-```
-
-## Guest Access
-
-Aleph supports invitation-based guest access with scoped permissions. Guests receive limited access to specific tools.
-
-### Guest Invitation Flow
-
-1. **Owner creates invitation** with scoped permissions and optional expiry
-2. **Guest activates invitation** using the one-time token
-3. **Gateway creates identity context** with frozen permissions
-4. **Guest operates within scope** -- PolicyEngine enforces boundaries
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.invite",
-  "params": {
-    "guest_name": "Mom",
-    "allowed_tools": ["translate"],
-    "expires_in_seconds": 86400,
-    "display_name": "Mom"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "invitation_token": "inv-token-uuid",
-    "url": "https://aleph.local/join?t=inv-token-uuid",
-    "expires_at": 1706486400000
-  }
-}
-```
-
-### Permission Matching
-
-Guest permissions use a hierarchical matching system:
-
-| Pattern | Matches |
-|---------|---------|
-| `"translate"` | Exact tool name `translate` |
-| `"shell"` | Category match: `shell:exec`, `shell:read`, etc. |
-| `"*"` | Wildcard: all tools |
-
-## Security Headers
-
-When using the HTTP fallback endpoint, include authentication in headers:
-
-| Header | Value | Description |
-|--------|-------|-------------|
-| `Authorization` | `Bearer <token>` | Device or session token |
-| `X-Aleph-Signature` | `<hmac_signature>` | HMAC-SHA256 of the token |
-| `X-Aleph-Device-Id` | `<device_id>` | Device identifier |
-
-## Error Codes
-
-| Code | Constant | Description |
-|------|----------|-------------|
-| -32000 | `AUTH_REQUIRED` | No credentials provided |
-| -32001 | `AUTH_FAILED` | Invalid token or signature |
-| -32002 | `PERMISSION_DENIED` | Valid auth but insufficient permissions |
-
-## Configuration
-
-```json5
-{
-  "gateway": {
-    "require_auth": true,
-    "token_expiry_ms": 86400000,  // 24 hours
-    "max_devices": 10,
-    "auto_cleanup_expired": true
-  }
-}
-```
-
-## See Also
-
-- [Protocol](/docs/en/gateway/protocol) -- WebSocket JSON-RPC 2.0 protocol details
-- [Methods Reference](/docs/en/gateway/methods) -- Complete RPC method catalog
-
----
-
-## 26.7.x Addendum
-
-### TOFU Certificate Trust
-
-26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use
-
-- Shared decision core + pinned TOFU trust store
-- SHA-256 fingerprint + SAN/Subject parsing
-- Approval splash page (fingerprint + SAN + TOFU/change warning)
-- Pending-cert state with approve/reject paths
-- macOS WKWebView + iOS Keychain adapters
-
-### `connect` Handshake Hardened
-
-26.7.15+: the `connect` handshake now **precedes** the method in `gateway call` (previously the order was inverted, causing deadlocks / races).
-
-### Device Ticket / Token Rotation
-
-26.7.x full RPC:
-
-- `gateway.ticket.create` — issue device tickets
-- `gateway.token.current` / `gateway.token.rotate` — token management
-- `gateway.devices.list` / `gateway.devices.revoke` — device management
-
-Remote sessions are closed on token rotation; **loopback sessions are preserved**.
-
-### Remote-Auth Fixes
-
-26.7.17+ fixes:
-
-- Gateway remote-auth rotation kick
-- Device resurrection
-- Audit trail wired
-- Dead auth code pruned
-
-### Pairing Single-Sourced on the Router
-
-26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
-
-### Fail-Closed
-
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
-
-### Signed Operation Ledger
-
-26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
-
-### Delegated Role Chain
-
-26.7.26+:
-
-- The identity chain is closed within the chain's lifecycle
-- `SignerKey` is held by the corresponding Agent
-- `OperationLedger` is replayable against the chain the signer belongs to
-
-### Real Client IP
-
-26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
-
-### See Also
-
-- [Gateway Protocol](/docs/en/gateway/protocol) — protocol
-- [Security: Pairing](/docs/en/security/pairing) — pairing flow
-- [Identity & Signing](/docs/en/concepts/identity-context) — delegation chain
-- [Architecture / Gateway](/docs/en/architecture/gateway) — architecture
+- [Protocol](/docs/en/gateway/protocol) — WebSocket JSON-RPC 2.0
+- [Security / Pairing](/docs/en/security/pairing) — channel-side pairing flow
+- [Architecture / Gateway](/docs/en/architecture/gateway) — internal structure

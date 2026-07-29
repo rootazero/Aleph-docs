@@ -1,474 +1,255 @@
 ---
 title: "身份认证"
-description: "网关认证流程、令牌管理和设备配对"
+description: "网关连接认证、令牌生命周期和远程加密"
 ---
 
-网关支持基于设备的 HMAC-SHA256 签名令牌认证。当启用 `require_auth` 时，每个客户端在发起 RPC 调用前必须先进行认证。
+Aleph 的信任边界是**网络边界**——loopback 永远授权（零配置），远程连接必须凭 `connect` 握手里的一种 Gateway 凭据通过登录墙。授权之后是单层 `operator`，权限与本地一致。
 
-## 认证流程
+完整代码：`src/gateway/handlers/connect.rs`（握手与授权判定）、`src/gateway/server/handler.rs::ws_upgrade_handler`（升级门 + 登录墙）、`src/gateway/origin_policy.rs`（浏览器跨源 / DNS-rebinding 防御）、`src/gateway/tls.rs`（TLS 物材）、`src/gateway/security/{shared_token.rs, device_token_manager.rs, store/}`（凭据与存储）。
+
+## 信任模型概览
 
 ```
-客户端通过 WebSocket 连接
-    |
-    v
-+-----------------------------+
-| require_auth 是否启用？      |
-|   是 -> 第一帧必须是           |
-|          "connect"           |
-|   否 -> 直接访问              |
-+-----------------------------+
-    |
-    v（如果需要认证）
-+-----------------------------+
-| 验证凭据                     |
-|   - Bearer token + HMAC 签名 |
-|   - 设备指纹                 |
-|   - 公钥验证                 |
-+-----------------------------+
-    |
-    v
-+-----------------------------+
-| 颁发会话令牌                  |
-| 分配客户端角色                |
-|（operator 或 node）          |
-+-----------------------------+
++---------------------+        +--------------------+        +-------------------+
+|  同台机器 / 浏览器   |  ──>  |  /ws 升级 (426 等) |  ──>  |  resolve_connect_ |
+|  (loopback / tauri:) |        |  WS 握手首帧 connect |      |       auth          |
++---------------------+        +--------------------+        +-------------------+
+                                                                       |
+                                                +----------------------+----------------------+
+                                                |                      |                      |
+                                                v                      v                      v
+                                       loopback (省略 params)     device_token (*)    bootstrap_ticket (*) / token
+                                                |                      |                      |
+                                       operator（隐式）         device_id 绑定      一次性换新 device_token
 ```
 
-当不需要认证时（仅限本地部署），客户端连接后可立即开始发起 RPC 调用。启用认证时，第一个 WebSocket 帧必须是 `connect` 请求。
+- **loopback**：本机 desktop / CLI / 同进程桥接，零配置，直接 `operator`，从不写审计日志。
+- **远程**：用下列任一种凭据过 `connect`，再调用其它方法；若连接 peer 已在 `trusted_proxy.trusted_ips` 内，`trusted_proxy` 决议器会从 `X-Forwarded-For` 末尾恢复真实客户端 IP（`src/gateway/trusted_proxy.rs`）。
+- **单层 `operator`**：通过授权后无 Chat/Config 子层之分；连接信任与"工具允许什么"完全正交（后者由 [`tools/scoped/`](/docs/zh/security/pairing) 三层合并处理）。
 
-## Connect 请求
+## 三种凭据
 
-`connect` 方法用于协商协议版本、识别客户端并提交凭据。
+`resolve_connect_auth` 按下列顺序决定授权：
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "connect",
-  "params": {
-    "minProtocol": 1,
-    "maxProtocol": 1,
-    "client": {
-      "id": "macos-app",
-      "version": "1.0.0",
-      "platform": "macos"
-    },
-    "role": "operator",
-    "auth": {
-      "token": "bearer_token",
-      "signature": "hmac_sha256_signature"
+| # | 凭据 | 来源 | 存储 | 撤销 |
+|---|------|------|------|------|
+| 1 | **loopback**（隐式） | 同台进程 | — | — |
+| 2 | **设备令牌** `aleph-dt-<uuid>` | `gateway.ticket.create` 引导交换；或重复重连 | `~/.aleph/data/security.db` SHA-256 哈希 | `gateway.devices.revoke`（精准关 socket + 吊销该设备的全部 token） |
+| 3 | **引导票** `aleph-bt-<uuid>` | `gateway.ticket.create` 或 `aleph-server pair` | 单条 INSERT 后立即 consume | 单次有效，TTL 默认 5 分钟（`gateway_ticket.rs` 里 60s 一下限 / 86_400s 上限） |
+| 4 | **共享网关令牌** `aleph-<uuid>` | `SharedTokenManager::generate_token`（首次启动） | `~/.aleph/data/security.db` HMAC 哈希；明文只在内存 | `gateway.token.rotate`：重新生成、吊销所有 Panel 设备、强关远端 socket |
+
+### 引导票 → 设备令牌
+
+```
+[操作员] 操作机 A 已授权
+    |  `gateway.ticket.create` (or `aleph-server pair`)
+    |  -> 服务端生成 `aleph-bt-<uuid>` TTL=300s
+    |  -> 响应附 LAN 友好的 pairing URLs（同一主机零返回）
+    v
+[终端] 通过 ?bt=<ticket> 打开
+    |  /ws 首帧 connect { bootstrap_ticket, device_id }
+    v
+[服务端] 原子 consume 票
+    |  创建设备行 + `aleph-dt-<uuid>` (TTL=10年)
+    |  响应回带 device_token
+    v
+[Panel] 持久化 device_token，后续 reconnect 都用它
+```
+
+代码事实：
+
+- 引导票格式：`device_token_manager.rs:88` `format!("aleph-bt-{}", Uuid::new_v4())`。
+- 设备令牌格式：`device_token_manager.rs:148` `format!("aleph-dt-{}", Uuid::new_v4())`，TTL `DEFAULT_DEVICE_TOKEN_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000`（10 年）。
+- 设备令牌以 **SHA-256 哈希** 存：`device_token_manager.rs:240` `hex::encode(sha2::Sha256::digest(...))`。
+- 共享令牌哈希：`shared_token.rs:99-103` HMAC-SHA256(secret, token) + `set_shared_token_with_secret`。
+- 设备表中的 `device_id` 在交换前要做 namespace 检查：非 Panel 的 `device_id` 直接拒（`DeviceTokenError::DeviceIdConflict`），避免一次性票换出 Panel 看不到的 operator 令牌。
+
+### 计入选审计的事件
+
+只有**远程**且**失败**的 `connect` 才会被审计；loopback 是操作员、从来不写：
+
+| 来源 | 事件 | 上界 |
+|------|------|------|
+| `connect` 拒绝 | `AuditEventType::AuthFailure` (`src/security/audit.rs`) | `Auth`-scope rate-limiter ≤10/60s/IP |
+| `UnauthorizedFloodGuard` 关闭 | `AuditEventType::RateLimited` | 每次风暴连接一行（不是每个被拒的请求一行） |
+
+## 远程连接加密（TLS）
+
+要使远程连接被接受，**必须满足下列条件之一**（`insecure_exposure_refused`，`src/gateway/server/mod.rs`）：
+
+```toml
+# 远程明文默认拒绝。任选其一：
+[gateway]
+allow_insecure_remote = true          # 仅限受信任的内网 / 明知接受风险
+
+[gateway]
+tls.enabled = true                    # 原生 TLS
+tls.cert_path = "/etc/letsencrypt/.../fullchain.pem"
+tls.key_path  = "/etc/letsencrypt/.../privkey.pem"
+
+[gateway]
+tls.enabled = true                    # 空路径 ⇒ 自签 (SAN 自动覆盖接口 IP)
+
+[gateway.trusted_proxy]
+enabled = true
+trusted_ips = ["127.0.0.1", "::1"]    # 受信反向代理终止 TLS
+# + 对应 host 仍绑定到 loopback
+```
+
+详细三档推荐组合（带示例）：
+
+### A. 受信反向代理（推荐）
+
+适合有域名 + 公开证书的场景。`aleph` 留在 loopback；Caddy / nginx 终止 TLS：
+
+```toml
+[gateway]
+host = "127.0.0.1"
+allowed_origins = ["https://your.domain.com"]
+
+[gateway.trusted_proxy]
+enabled = true
+```
+
+```
+your.domain.com { reverse_proxy 127.0.0.1:18790 }
+```
+
+**`trusted_proxy` 必须同步开启**——不开启的话所有远端客户端被算成 `127.0.0.1`，直接绕过 `connect` 登录墙。
+
+### B. 原生自签 TLS（无域名）
+
+```toml
+[gateway]
+host = "0.0.0.0"
+
+[gateway.tls]
+enabled = true
+# cert_path / key_path 留空 ⇒ 自动生成并持久化到 ~/.aleph/data/tls/
+# san = []   # 可选；缺省自动覆盖所有非 loopback 接口 IP
+```
+
+`gateway.tls.rs::load_or_generate` 流程：
+
+1. 持久化的 `cert.pem` / `key.pem` / `sans.txt` 存在 → 子集覆盖即复用（避免无效 churn）。
+2. 漂移 / 缺失 → 删除 `sans.txt` 后**先写 cert，再写 key，最后写 sans.txt**——崩溃任何阶段都不留撕裂。
+3. 启动日志打印 SHA-256 指纹，方便客户端一次性信任。
+
+客户端验证：macOS / iOS 通过 [TOFU 流程](#tofu--pairing-store-单源) 在 App 内 pin（共享决策核心 + 固定 trust store + SHA-256 fingerprint + SAN 解析 + 审批面板，含 TOFU/change 警告）。
+
+### C. 自带证书
+
+```toml
+[gateway]
+host = "0.0.0.0"
+
+[gateway.tls]
+enabled = true
+cert_path = "/etc/letsencrypt/live/your.domain.com/fullchain.pem"
+key_path  = "/etc/letsencrypt/live/your.domain.com/privkey.pem"
+```
+
+```rust
+pub struct GatewayTlsConfig {
+    pub enabled: bool,
+    pub cert_path: String,
+    pub key_path: String,
+    pub san: Vec<String>,
+}
+```
+
+`gateway.tls::load_or_generate` 在 Provided 分支读 `cert_path` / `key_path`，自签分支忽略这两个 key（`gateway/tls.rs:48-91`）。
+
+## Trusted-proxy / 真实客户端 IP
+
+`src/gateway/trusted_proxy.rs::resolve_client` 是单源 spoof-safe 解析：
+
+```rust
+ResolvedClient { ip: IpAddr, secure: bool } =
+    if enabled && trusted_ips.contains(&peer) {
+        last_forwarded_for(headers).unwrap_or(peer),
+        forwarded_proto_https(headers)
+    } else {
+        (peer, false)    // 不在白名单的 peer → 一律忽略 XFF
     }
-  }
-}
 ```
 
-**响应（成功）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "session_token": "session-uuid",
-    "role": "operator",
-    "scopes": ["*"],
-    "expires_at": 1706400000000
-  }
-}
+使用：
+
+- `is_loopback` 的判定根据 `resolved.ip`——**XFF 不能让 loopback 翻转**（即使伪造 `127.0.0.1`，只要真实 peer 不是 loopback，`is_loopback()` 就是 `false`）。
+- 单 IP 并发连接上限（`gateway.max_connections_per_ip` 默认 64）、`Auth`-scope 速率限流、`AuthFailure`/`RateLimited` 审计都 key 在 `resolved.ip` 上。
+- `ws_upgrade_handler` 返回的 `secure = tls_enabled || resolved.secure`。不安全的远端升级一律 426 `Upgrade Required`。
+
+## Origin 策略 / DNS-rebinding 防御
+
+浏览器 WS 升级强制 `Origin: ...` 头（不可伪造），源策略 `src/gateway/origin_policy.rs`：
+
+| Origin | 处置 | 理由 |
+|--------|------|------|
+| 缺失 / 空 | **放行** | 原生客户端（CLI / bot / `tokio-tungstenite`）不发此头；只有浏览器发。 |
+| 同源 / loopback / `*.localhost` / `tauri:` scheme | **放行** | 同机或桌面 webview 的稳定来源。 |
+| `[gateway] allowed_origins` 精确匹配 | **放行** | 运营者显式允许（多前端 / 拆部署）。 |
+| 同源 + `Host` 是 IP 字面量或 loopback | **放行** | LAN 用 IP 访问零配置；域名 `Host` **不会**自动放（防 DNS-rebinding）。 |
+| 其它（公网域名） | **拒绝** | 403 `origin not allowed`。 |
+
+完整规则、`<gateway> allow_any_origin = true` 的逃逸口与 DNS-rebinding 防御逻辑见 `src/gateway/origin_policy.rs`。
+
+## TOFU / pairing store 单源
+
+远程 TLS 的客户端信任由两层交付：
+
+- **服务端**：自签证书 SAN 自动覆盖 loopback + 自动发现的非 loopback 接口 IP（`gateway.tls.rs::discover_interface_ips`）。每个新出现的 IP 触发一次原子 regen（`sans.txt` sidecar 控制）；客户端会重新信任一次。
+- **客户端**：macOS WKWebView / iOS Keychain 适配器跑一份共享决策核心 + 固定 TOFU trust store（SHA-256 fingerprint + SAN / Subject 解析 + pending-cert 状态 + approve / reject 路径）。其它客户端以该 macOS 实现为参考平台。
+
+> 渠道侧"pairing code"（`src/gateway/pairing_store.rs`，`pairing.list` / `pairing.approve` / `pairing.reject`）是**未知道渠道发送者**（iMessage / Telegram 等）的审批，**与设备配对无关**。两个 pairing 共享同一个 inbound 路由器作为单源；Telegram / Discord / iMessage 用了同一份 pairing store。
+
+## 凭据与工具
+
+| 组件 | 路径 | 职责 |
+|------|------|------|
+| `SharedTokenManager` | `src/gateway/security/shared_token.rs` | 创建 / 轮换 / 验证共享令牌；同时持有 `SecretVault`。 |
+| `DeviceTokenManager` | `src/gateway/security/device_token_manager.rs` | 引导票生成 / 消费 / 设备令牌颁发 / 设备撤销。 |
+| `SecurityStore` | `src/gateway/security/store/` | SQLite 后端，模式包括 `bootstrap_tickets` / `devices` / `tokens` / `identity` / `senders`。 |
+| `SecretVault` | `src/secrets/vault.rs` | 加密存储；**主密钥 = 当前共享令牌**（`shared_token.rs:32` 的 `vault: RwLock<SecretVault>`）。 |
+| `SecretMasker` | `src/exec/masker.rs` | 渲染字符串时遮蔽密钥（审批卡 / 日志 / 用户可见回执）。SHA-256 之外还有 AWS / GitHub / 私钥 / password URL 等模式；`masker.rs:99-123` 覆盖 PKCS#8 `-----BEGIN PRIVATE KEY-----`。 |
+| `SharedTokenManager::generate_token` | `shared_token.rs:98` | `format!("aleph-{}", Uuid::new_v4())`，HMAC 哈希落库。 |
+| `SharedTokenManager::validate` | `shared_token.rs:111` | 重算 HMAC，常时比较。 |
+
+### 反向读取凭据 / 配对 CLI
+
+无需运行 daemon：
+
+```bash
+# 打印引导票 + 推荐 pairing URLs（headless 配对）
+aleph-server pair [--ttl SECONDS]
+
+# 打印当前共享令牌（明文，仅一次性输出供扫 QR / 启动 LAN URL）
+aleph-server bootstrap-token
+
+# 离线验证 agent 签名身份（无锁打开 security.db）
+aleph-server identity verify
 ```
 
-**响应（失败）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32001,
-    "message": "Authentication failed: invalid token"
-  }
-}
-```
+两个命令都通过 `alephcore::utils::paths::get_security_db_path()` 直接打开 `~/.aleph/data/security.db`（mode 0600，WAL），绕开 daemon；与运行时实例遵循 [Spec C](/docs/zh/security/pairing) 锁协议。
 
-### Connect 参数
+## 撤销路径
 
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `minProtocol` | number | 是 | 客户端支持的最低协议版本 |
-| `maxProtocol` | number | 是 | 客户端支持的最高协议版本 |
-| `client.id` | string | 是 | 客户端标识符（如 `"cli"`、`"macos-app"`、`"web"`） |
-| `client.version` | string | 是 | 客户端版本字符串 |
-| `client.platform` | string | 是 | 平台（`"macos"`、`"ios"`、`"android"`、`"cli"`、`"web"`） |
-| `role` | string | 是 | 请求的角色：`"operator"` 或 `"node"` |
-| `auth.token` | string | 是 | 设备配对期间颁发的 Bearer 令牌 |
-| `auth.signature` | string | 是 | 令牌的 HMAC-SHA256 签名 |
+撤销**立即**生效，不等下一次握手：
 
-## 令牌类型
+- **`gateway.token.rotate`** 重新生成共享令牌 → 撤销每个 Panel 设备 → 关闭每个远端 socket（`handlers/gateway_token.rs::handle_token_rotate`）。`revoked_devices` 计数回响应里。
+- **`gateway.devices.revoke {device_id}`** 撤销单台设备 → 它的活跃连接立刻降级到登录墙 → websocket 关闭 4001 `device_revoked`（`handlers/gateway_devices.rs` + `server::handler::invalidate_device_sessions`）。
+- **同台机不被关闭**：token 轮换时环回 session 保留不变（`server/handler.rs::rotated_should_close_remote` 显式按 `is_loopback` 区分）。
 
-Aleph 使用两类令牌，分别用于认证生命周期的不同阶段。
+错误前置（拒绝提交，闭环）：配对时若 `device_id` 已存在但 `device_type != "panel"`，拒绝消费该引导票——避免一次性票换出 Panel roster 看不到 / `revoke_all_panel_devices` 摸不到的 operator 凭据（`device_token_manager.rs:113-126`）。
 
-### 设备令牌
+## 速率限流 / 审计
 
-设备配对期间颁发的长期令牌。安全存储在客户端设备上（macOS/iOS 使用钥匙串，其他平台使用加密存储）。用于通过 `connect` 方法获取会话令牌。
+- **限流器** (`src/gateway/rate_limiter.rs`)：按 `resolved_client_ip × method_scope`。`Auth`-scope 防 `connect` 暴力，`Connect`-scope 防通常握手。
+- **登录墙风暴**：`src/gateway/server/flood_guard.rs::UnauthorizedFloodGuard` 计数未授权请求；达到阈值断连并写 `AuditEventType::RateLimited`。
+- **审计日志**：`src/security/audit.rs::SecurityAuditLog` 持久化 `AuthFailure` 与 `RateLimited`；由 `gateway/server/handler.rs::ws_upgrade_handler` + 登录墙分支写入。
 
-| 属性 | 值 |
-|----------|-------|
-| 有效期 | 直到被撤销 |
-| 存储位置 | 客户端安全存储 |
-| 范围 | 设备级身份 |
-| 轮换 | 通过 `auth.rotate` 手动轮换 |
+## 详见
 
-### 会话令牌
-
-网关成功完成 `connect` 握手后颁发的短期令牌。在 WebSocket 会话期间自动包含在后续请求中。默认 24 小时后过期。
-
-| 属性 | 值 |
-|----------|-------|
-| 有效期 | 24 小时（默认） |
-| 存储位置 | 内存（网关） |
-| 范围 | 每会话 |
-| 轮换 | 重新连接时自动轮换 |
-
-## HMAC-SHA256 签名
-
-所有令牌均使用 HMAC-SHA256 签名。网关从不存储原始令牌值——仅在 SQLite 中持久化其 HMAC 哈希值。
-
-```
-令牌颁发：
-  token        = UUID v4
-  signature    = HMAC-SHA256(secret, token)
-  stored_hash  = HMAC-SHA256(secret, token)
-
-令牌验证：
-  1. 验证 HMAC 签名与令牌匹配
-  2. 计算 hash = HMAC-SHA256(secret, token)
-  3. 在数据库中查找 hash
-  4. 检查过期和撤销状态
-  5. 更新 last_used_at 时间戳
-```
-
-HMAC 密钥在服务器启动时生成（32 字节加密安全随机数据）。可持久化以在重启后保持令牌连续性。
-
-## 令牌验证结果
-
-令牌通过验证后，网关返回内部 `TokenValidation`，包含会话的身份上下文。
-
-```json
-{
-  "token_id": "tok-uuid",
-  "device_id": "dev-uuid",
-  "role": "operator",
-  "scopes": ["*"],
-  "remaining_ms": 86400000
-}
-```
-
-| 字段 | 类型 | 说明 |
-|-------|------|-------------|
-| `token_id` | string | 唯一令牌标识符 |
-| `device_id` | string | 拥有此令牌的设备 |
-| `role` | string | `"operator"`（完全控制）或 `"node"`（受限） |
-| `scopes` | string[] | 权限范围（`["*"]` = 全部） |
-| `remaining_ms` | number | 令牌过期前的毫秒数 |
-
-## 设备角色
-
-| 角色 | 说明 | 权限 |
-|------|-------------|-------------|
-| `operator` | 完全控制（CLI、macOS App、Web UI） | 所有 RPC 方法、工具执行、配置更改 |
-| `node` | 受限执行（iOS/Android 节点） | 代理交互、只读配置、无执行审批 |
-
-## 设备配对
-
-新设备在认证前必须先进行配对。配对流程使用质询-响应协议。
-
-### 配对流程
-
-```
-新设备                          网关
-    |                              |
-    |--- auth.pairing.request ---->|
-    |    { device_name, platform,  |
-    |      public_key }            |
-    |                              |
-    |<-- pairing_id, challenge ----|
-    |                              |
-    |                  所有者通过 CLI/UI 审批
-    |                              |
-    |--- auth.pairing.complete --->|
-    |    { pairing_id, signed_challenge}|
-    |                              |
-    |<-- device_token, signature --|
-```
-
-### 审批/拒绝配对
-
-所有者通过 `auth.pairing.approve` 或 `auth.pairing.reject` 审批或拒绝待处理的配对请求。
-
-**审批：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.pairing.approve",
-  "params": {
-    "pairing_id": "pair-uuid",
-    "role": "operator",
-    "scopes": ["*"]
-  }
-}
-```
-
-**拒绝：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "auth.pairing.reject",
-  "params": {
-    "pairing_id": "pair-uuid",
-    "reason": "Unknown device"
-  }
-}
-```
-
-### 设备列表
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "auth.devices.list"
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "devices": [
-      {
-        "device_id": "dev-uuid-1",
-        "device_name": "MacBook Pro",
-        "device_type": "macos",
-        "role": "operator",
-        "scopes": ["*"],
-        "last_seen_at": 1706400000000,
-        "created_at": 1706313600000
-      }
-    ]
-  }
-}
-```
-
-## 令牌轮换
-
-令牌可在不重新配对的情况下进行轮换。旧令牌被撤销，同时颁发一个具有相同权限的新令牌。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.rotate",
-  "params": {
-    "token": "old-token",
-    "signature": "old-signature"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "token": "new-token",
-    "signature": "new-signature",
-    "token_id": "new-tok-uuid",
-    "expires_at": 1706486400000
-  }
-}
-```
-
-## 令牌撤销
-
-撤销特定令牌或设备的所有令牌。
-
-**撤销单个令牌：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.revoke",
-  "params": {
-    "token_id": "tok-uuid"
-  }
-}
-```
-
-**撤销设备的所有令牌：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "auth.revoke_device",
-  "params": {
-    "device_id": "dev-uuid"
-  }
-}
-```
-
-## 访客访问
-
-Aleph 支持基于邀请的访客访问，具有限定权限。访客获得对特定工具的有限访问权限。
-
-### 访客邀请流程
-
-1. **所有者创建邀请**，附带限定权限和可选的过期时间
-2. **访客使用一次性令牌激活邀请**
-3. **网关创建身份上下文**，权限被冻结
-4. **访客在范围内操作**——策略引擎强制执行边界
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "auth.invite",
-  "params": {
-    "guest_name": "Mom",
-    "allowed_tools": ["translate"],
-    "expires_in_seconds": 86400,
-    "display_name": "Mom"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "invitation_token": "inv-token-uuid",
-    "url": "https://aleph.local/join?t=inv-token-uuid",
-    "expires_at": 1706486400000
-  }
-}
-```
-
-### 权限匹配
-
-访客权限使用分层匹配系统：
-
-| 模式 | 匹配项 |
-|---------|---------|
-| `"translate"` | 精确工具名 `translate` |
-| `"shell"` | 类别匹配：`shell:exec`、`shell:read` 等 |
-| `"*"` | 通配符：所有工具 |
-
-## 安全请求头
-
-使用 HTTP 回退端点时，在请求头中包含认证信息：
-
-| 请求头 | 值 | 说明 |
-|--------|-------|-------------|
-| `Authorization` | `Bearer <token>` | 设备或会话令牌 |
-| `X-Aleph-Signature` | `<hmac_signature>` | 令牌的 HMAC-SHA256 |
-| `X-Aleph-Device-Id` | `<device_id>` | 设备标识符 |
-
-## 错误代码
-
-| 代码 | 常量 | 说明 |
-|------|----------|-------------|
-| -32000 | `AUTH_REQUIRED` | 未提供凭据 |
-| -32001 | `AUTH_FAILED` | 令牌或签名无效 |
-| -32002 | `PERMISSION_DENIED` | 认证有效但权限不足 |
-
-## 配置
-
-```json5
-{
-  "gateway": {
-    "require_auth": true,
-    "token_expiry_ms": 86400000,  // 24 小时
-    "max_devices": 10,
-    "auto_cleanup_expired": true
-  }
-}
-```
-
-## 另请参阅
-
-- [协议](/docs/zh/gateway/protocol)——WebSocket JSON-RPC 2.0 协议详情
-- [方法参考](/docs/zh/gateway/methods)——完整的 RPC 方法目录
-
----
-
-## 26.7.x 补充
-
-### TOFU 证书信任
-
-26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use
-
-- 共享决策核心 + 已固定 TOFU 信任存储
-- SHA-256 指纹 + SAN/Subject 解析
-- 审批面板页面（指纹 + SAN + TOFU/change 警告）
-- pending-cert 状态与 approve/reject 路径
-- macOS WKWebView + iOS Keychain 适配器
-
-### `connect` 握手加固
-
-26.7.15+：`connect` 握手**先于**`gateway call` 中的方法（之前是反过来，导致死锁/竞争）。
-
-### 设备票 / 令牌轮换
-
-26.7.x 完整 RPC：
-
-- `gateway.ticket.create` —— 颁发设备票
-- `gateway.token.current` / `gateway.token.rotate` —— 令牌管理
-- `gateway.devices.list` / `gateway.devices.revoke` —— 设备管理
-
-远程会话在 token 轮换时被关闭，**环回会话保留**。
-
-### 远程认证修复
-
-26.7.17+ 修复：
-
-- 网关远程认证 rotation kick
-- 设备复活
-- 审计轨道已接入
-- 死的认证代码被剪除
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已被回退——access / pairing / allowlist **单一源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### 失败关闭
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### `signed_operation_ledger`
-
-26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
-
-### 委托角色链
-
-26.7.26+：
-
-- 身份链路生命周期内闭包
-- `SignerKey` 由对应 Agent 持有
-- `OperationLedger` 由签名者所属链路回放
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### 详见
-
-- [网关协议](/docs/zh/gateway/protocol) — 协议
-- [安全：配对](/docs/zh/security/pairing) — pairing 流程
-- [身份与签名](/docs/zh/concepts/identity-context) — 委托链
-- [架构 / 网关](/docs/zh/architecture/gateway) — 架构
+- [协议](/docs/zh/gateway/protocol) — WebSocket JSON-RPC 2.0
+- [安全 / 配对](/docs/zh/security/pairing) — pairing 流程（渠道发送者）
+- [架构 / 网关](/docs/zh/architecture/gateway) — 内部结构
