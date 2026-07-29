@@ -1,36 +1,57 @@
 ---
 title: "iMessage"
-description: "通过 Messages.app 和 SQLite 轮询实现原生 macOS iMessage 集成"
+description: "通过 Messages.app SQLite 轮询实现的原生 macOS iMessage 集成，以及跨平台的 BlueBubbles 传输"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-iMessage 接口通过读取 Messages.app SQLite 数据库中的消息并通过 AppleScript 发送回复来提供原生 macOS 集成。这是一个平台特定的接口，仅在 macOS 上运行。
+iMessage 接口通过读取 Messages.app SQLite 数据库中的消息并通过 AppleScript 发送回复来提供原生 macOS 集成，**并且**提供一个跨平台的 **BlueBubbles** 传输，通过 REST + webhook 与正在运行的 BlueBubbles 服务器对话。两条传输都实现同一个 `Channel` trait，并走同一条入站流水线；你可以在同一份配置中启用其中一条或两条。
 
-## 架构
+## 两条传输
 
-与基于云的接口（Telegram、Discord）不同，iMessage 集成完全是本地的：
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│                         macOS System                              │
+│  ┌──────────────────┐     ┌──────────────────────────────────┐   │
+│  │   Messages.app   │     │           Aleph Server            │   │
+│  │                  │     │                                   │   │
+│  │  chat.db ────────┼─────┼──> SQLite 轮询（只读）            │   │
+│  │  (SQLite)        │     │  [IMessageChannel，仅 macOS]      │   │
+│  │                  │ <───┼─── AppleScript（发送消息）        │   │
+│  └──────────────────┘     └──────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
 
+┌──────────────────────────────────────────────────────────────────┐
+│                  BlueBubbles 服务器（任意宿主）                  │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │  REST API + webhook  ◀──▶  [BlueBubblesChannel, 任意 OS]  │   │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     macOS 系统                           │
-│                                                          │
-│  ┌──────────────┐     ┌──────────────────────────────┐  │
-│  │ Messages.app │     │        Aleph Server           │  │
-│  │              │     │                               │  │
-│  │  chat.db ────┼─────┼──> SQLite 轮询 (只读)          │  │
-│  │  (SQLite)    │     │                               │  │
-│  │              │ <───┼─── AppleScript (发送消息)      │  │
-│  └──────────────┘     └──────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
 
-**接收消息：** Aleph 以只读模式轮询 `~/Library/Messages/chat.db` SQLite 数据库，检测自上次轮询以来的新行。
+- **`IMessageChannel`**（local）—— SQLite 数据库轮询接收，AppleScript 发送。需要 macOS、完全磁盘访问和自动化权限。仅在 macOS 上注册（模块上的 `#[cfg(target_os = "macos")]`）。
+- **`BlueBubblesChannel`**（`imessage/bluebubbles/`）—— 与 BlueBubbles 服务器的 REST + webhook。纯 HTTP——可在任何 OS 上编译运行。
 
-**发送消息：** Aleph 使用 `osascript` 执行控制 Messages.app 的 AppleScript 命令，通过 iMessage 服务发送文本和文件附件。
+## 适配器结构
+
+iMessage 适配器位于 `src/gateway/interfaces/imessage/`：
+
+| 模块 | 职责 |
+|--------|----------------|
+| `mod.rs` | `IMessageChannel`、能力默认值、factory 接线 |
+| `config.rs` | `IMessageConfig`、`DmPolicy`、`GroupPolicy` |
+| `db.rs` | `MessagesDb`——围绕 `chat.db` 的只读 SQLite 包装 |
+| `sender.rs` | AppleScript 驱动的出站发送 |
+| `target.rs` | 目标标准化（`normalize_phone`、`parse_target`、`IMessageTarget`、`Service`） |
+| `reaction.rs` | Tapback code ↔ emoji 映射（两条传输的单一来源） |
+| `bluebubbles/` | `BlueBubblesChannel` + REST/webhook staging |
+
+两条传输共享 Gateway 的 **`OffsetTracker`**（当前位于 telegram 模块下）以持久化 catch-up 水位，使得 daemon 离线时抵达的消息在重启后会被补齐。
 
 ## 能力
+
+### `IMessageChannel`（Local）
 
 | 功能 | 状态 |
 |---------|--------|
@@ -39,7 +60,7 @@ iMessage 接口通过读取 Messages.app SQLite 数据库中的消息并通过 A
 | 照片 | 支持（发送和接收） |
 | 文档 | 支持（发送和接收） |
 | 音频/视频 | 支持（发送和接收） |
-| 轻点反馈反应 | 有限（通过 AppleScript 发送不完全支持） |
+| Tapback 反应 | 入站 add-tapback 作为上下文上抛给模型；出站跨 macOS 版本不可靠 |
 | 回复线程 | 不支持 |
 | 消息编辑 | 不支持 |
 | 消息删除 | 不支持 |
@@ -47,20 +68,42 @@ iMessage 接口通过读取 Messages.app SQLite 数据库中的消息并通过 A
 | 已读回执 | 不支持 |
 | 最大消息长度 | ~20,000 字符 |
 | 最大附件大小 | 100 MB |
+| 流式协议 | `None` |
+
+### `BlueBubblesChannel`
+
+| 功能 | 状态 |
+|---------|--------|
+| 文本消息 | 支持 |
+| 富文本 (Markdown) | 不支持 |
+| 照片 | 支持（发送和接收） |
+| 文档 | 支持（发送和接收） |
+| 音频/视频 | 支持（发送和接收） |
+| Tapback 反应 | 支持（通过 BlueBubbles API 入站 + 出站） |
+| 回复线程 | 支持 |
+| 消息编辑 | 不支持 |
+| 消息删除 | 不支持 |
+| 输入中指示器 | 支持 |
+| 已读回执 | 支持 |
+| 最大消息长度 | 4,000 字符 |
+| 最大附件大小 | 100 MB |
+| 流式协议 | `None` |
 
 ## 前置条件
+
+### Local 传输
 
 <Steps>
 <Step>
 
-### macOS 要求
+#### macOS 要求
 
-iMessage 接口仅在 macOS 上工作。它使用 `#[cfg(target_os = "macos")]` 进行条件编译，在 Linux 或 Windows 构建中不可用。
+Local 传输仅在 macOS 上注册（`#[cfg(target_os = "macos")]`）。在 Linux/Windows 构建上，仅 `BlueBubblesChannel` 可用。
 
 </Step>
 <Step>
 
-### 完全磁盘访问
+#### 完全磁盘访问
 
 Aleph 需要**完全磁盘访问**权限来读取 `~/Library/Messages/chat.db`：
 
@@ -74,7 +117,7 @@ Aleph 需要**完全磁盘访问**权限来读取 `~/Library/Messages/chat.db`�
 </Step>
 <Step>
 
-### 自动化权限
+#### 自动化权限
 
 Aleph 需要**自动化**权限通过 AppleScript 控制 Messages.app：
 
@@ -85,44 +128,46 @@ Aleph 需要**自动化**权限通过 AppleScript 控制 Messages.app：
 </Step>
 </Steps>
 
+### BlueBubbles 传输
+
+<Steps>
+<Step>
+
+#### 运行 BlueBubbles 服务器
+
+你需要一台正在运行的 BlueBubbles 服务器（通常在同一台拥有 iMessage 账户的 Mac 上）。按 BlueBubbles 文档安装并启动；记录服务器 URL 与账户密码。
+
+</Step>
+<Step>
+
+#### 开放 REST + Webhook 端口
+
+确保 Aleph 能访问 BlueBubbles 服务器（HTTPS），并且 BlueBubbles 的 webhook 能访问 Aleph（Gateway 的 HTTP 服务器）。
+
+</Step>
+</Steps>
+
 ## 配置
 
-### 最小配置
+### Local 传输
 
 ```toml
 [[channels]]
-id = "imessage"
+id = "imessage-local"
 channel_type = "imessage"
 enabled = true
 
 [channels.config]
-enabled = true
-```
-
-### 完整配置参考
-
-```toml
-[[channels]]
-id = "imessage"
-channel_type = "imessage"
-enabled = true
-
-[channels.config]
-# 启用 iMessage 频道（默认：false）
-enabled = true
-
 # Messages 数据库路径（默认：~/Library/Messages/chat.db）
 db_path = "~/Library/Messages/chat.db"
 
 # 轮询间隔（毫秒）（默认：1000）
 poll_interval_ms = 1000
 
-# 入站消息的 DM 策略
-# 选项："pairing"、"allowlist"、"open"、"disabled"
+# DM 策略：pairing | allowlist | open | disabled
 dm_policy = "pairing"
 
-# 群组消息策略
-# 选项："open"、"allowlist"、"disabled"
+# 群组消息策略：open | allowlist | disabled
 group_policy = "open"
 
 # DM 的电话号码/电子邮件白名单
@@ -134,7 +179,7 @@ group_allow_from = []
 # 在群组聊天中需要 @mention（默认：true）
 require_mention = true
 
-# 用于群组中提及检测的机器人名称
+# 群组中提及检测的机器人名称
 bot_name = "Aleph"
 
 # 在入站消息中包含附件（默认：true）
@@ -144,34 +189,62 @@ include_attachments = true
 max_attachment_size = 0
 
 # 入站消息去抖（毫秒）（默认：500）
-# 防止处理快速爆发的消息
 inbound_debounce_ms = 500
 ```
 
-## DM 策略
+### BlueBubbles 传输
+
+```toml
+[[channels]]
+id = "imessage-bb"
+channel_type = "imessage.bluebubbles"
+enabled = true
+
+[channels.config]
+# BlueBubbles 服务器 URL（HTTPS）
+server_url = "https://bluebubbles.local:1234"
+
+# BlueBubbles 账户密码
+password = "${BLUEBUBBLES_PASSWORD}"
+
+# 可选 webhook URL（在 BlueBubbles 服务器侧设置）
+webhook_url = "https://aleph.example.com/webhooks/imessage"
+
+# 回退轮询循环的间隔（毫秒）
+poll_interval_ms = 1000
+
+# 与 local 传输相同的 DM / 群组 / 白名单策略
+dm_policy = "pairing"
+group_policy = "open"
+allow_from = ["+15551234567"]
+```
+
+## DM 与群组策略
 
 `dm_policy` 设置控制 Aleph 如何处理来自未知发送者的直接消息：
 
 | 策略 | 行为 |
 |--------|----------|
-| **`pairing`** (默认) | 未知发送者在 Aleph 响应之前被提示输入配对码 |
+| **`pairing`**（默认） | 未知发送者在 Aleph 响应之前被提示输入配对码 |
 | **`allowlist`** | 仅处理 `allow_from` 中的发送者；忽略所有其他发送者 |
 | **`open`** | 无限制地接受所有发送者 |
 | **`disabled`** | 完全禁用 DM |
 
 <Callout type="info">
-**pairing** 策略与 Aleph 的邀请系统集成。所有者可以生成配对码，当未知发送者通过 iMessage 发送该码时，他们的电话号码或电子邮件会自动添加到白名单。
+**pairing** 策略使用 Gateway 的单一 `PairingStore`。操作员签发配对码，未知发送者通过 iMessage 发送该码，操作员从 Panel 通过 `channel.pairing.approve` 批准——批准后该号码或邮箱被加入白名单。不存在每频道的配对数据库。
 </Callout>
 
 ### 群组策略
 
 | 策略 | 行为 |
 |--------|----------|
-| **`open`** (默认) | 接受所有群聊（带有可选的提及要求） |
+| **`open`**（默认） | 接受所有群聊（带有可选的提及要求） |
 | **`allowlist`** | 仅处理 `group_allow_from` 中的群组 |
 | **`disabled`** | 完全禁用群组消息 |
 
 ## 消息轮询如何工作
+
+### Local 传输（`IMessageChannel`）
 
 轮询循环在后台 Tokio 任务中运行：
 
@@ -181,8 +254,12 @@ inbound_debounce_ms = 500
    - 查询 `ROWID > last_seen` 且 `is_from_me = 0` 的消息
    - 对于每条新消息，解析发送者句柄和聊天信息
    - 如果设置了 `cache_has_attachments`，提取附件
-   - 转换为 `InboundMessage` 并通过 mpsc 频道发送
+   - 转换为 `InboundMessage` 并通过频道状态 broadcast
 4. **更新标记** — 每批处理后更新最后看到的 ROWID
+
+### BlueBubbles 传输（`BlueBubblesChannel`）
+
+`BlueBubblesChannel` 在 BlueBubbles 服务器上注册 webhook 接收推送，并以 `poll_interval_ms` 的轮询循环作为 catch-up 回退。共享的 `OffsetTracker` 让两条传输都能在重启后从最后持久化的 GUID/ROWID 恢复，而不是直接跳到最新消息。
 
 ### Apple 时间戳
 
@@ -194,9 +271,7 @@ unix_timestamp = apple_timestamp / 1,000,000,000 + 978,307,200
 
 ## 发送消息
 
-消息通过控制 Messages.app 的 AppleScript 发送：
-
-### 文本消息
+### Local 传输 — AppleScript
 
 ```applescript
 tell application "Messages"
@@ -206,20 +281,7 @@ tell application "Messages"
 end tell
 ```
 
-### 文件附件
-
-```applescript
-tell application "Messages"
-    set targetService to 1st account whose service type = iMessage
-    set targetBuddy to participant "+15551234567" of targetService
-    set theFile to POSIX file "/path/to/file.png"
-    send theFile to targetBuddy
-end tell
-```
-
-### 群组聊天消息
-
-群组聊天通过聊天 ID 而不是参与者来寻址：
+群聊通过聊天 ID 寻址：
 
 ```applescript
 tell application "Messages"
@@ -228,35 +290,52 @@ tell application "Messages"
 end tell
 ```
 
+### BlueBubbles 传输 — REST
+
+BlueBubbles 传输通过 BlueBubbles REST API 发送，不需要 AppleScript，因此 BlueBubbles 可在任意宿主、非 Mac 账户上工作。Reaction、reply、typing indicator、read receipt 都走同一套 REST 接口。
+
+## Tapback 反应
+
+Tapback code 的单一来源（`src/gateway/interfaces/imessage/reaction.rs`）将 Apple/BlueBubbles 的数字 `associatedMessageType` 映射到规范名称与 emoji：
+
+| Code | 名称 | Emoji |
+|------|------|-------|
+| 2000 | love | ❤️ |
+| 2001 | like | 👍 |
+| 2002 | dislike | 👎 |
+| 2003 | laugh | 😂 |
+| 2004 | emphasize | ‼️ |
+| 2005 | question | ❓ |
+
+"remove" 变体（3000–3005）和未知 code 故意缺席，因此针对它们的 emoji 查询返回 `None`，并在映射层丢弃——这就是"只上抛 add-tapback"如何在没有第二道过滤器的情况下强制。入站 *add* tapback 作为上下文上抛给模型（用户对先前助手消息的反应）；*remove* tapback 被丢弃。
+
 ## 媒体处理
 
 ### 接收附件
 
-附件通过消息表中的 `cache_has_attachments` 标志检测，并通过 `message_attachment_join` 表解析：
+附件通过消息表中的 `cache_has_attachments` 标志检测，并通过 `message_attachment_join`（local 传输）或 BlueBubbles 附件元数据（BlueBubbles 传输）解析：
 
 | 字段 | 来源 |
 |-------|--------|
 | `id` | 附件 GUID |
-| `mime_type` | 来自 `attachment.mime_type` 列 |
+| `mime_type` | 来自 `attachment.mime_type`（local）或 BlueBubbles `TransferName` |
 | `filename` | 来自 `attachment.filename` 或 `transfer_name` |
 | `size` | 来自 `attachment.total_bytes` |
 
 ### 发送附件
 
-出站文件附件必须提供为本地文件路径。文件通过 AppleScript `send POSIX file` 命令发送。
+Local 传输要求本地文件路径（通过 AppleScript `send POSIX file`）。BlueBubbles 传输通过 BlueBubbles REST API 上传。
 
 ## 会话路由
 
-iMessage 对话根据聊天上下文映射到会话密钥：
-
 | 上下文 | 会话密钥 |
 |---------|------------|
-| 与 +15551234567 的 DM | `agent:main:dm:+15551234567` 或 `agent:main:imessage:dm:+15551234567` |
+| 与 `+15551234567` 的 DM | `agent:main:dm:+15551234567` 或 `agent:main:imessage:dm:+15551234567` |
 | 群组聊天（聊天 ID） | `agent:main:imessage:group:{chat_identifier}` |
 
 `chat_identifier` 通常是 DM 的电话号码或群组聊天的内部 ID。
 
-## 数据库架构
+## 数据库架构（Local 传输）
 
 Aleph 从 `chat.db` 中的三个主要表读取：
 
@@ -292,48 +371,31 @@ Aleph 从 `chat.db` 中的三个主要表读取：
 
 ## 限制
 
+### Local 传输
+
 - **仅限 macOS** — 无法在 Linux 或 Windows 上运行
 - **需要完全磁盘访问** — 数据库受 macOS TCC（透明度、同意和控制）保护
 - **非实时交付** — 基于轮询，可配置间隔（最小实际值：~500ms）
-- **无富文本** — iMessage 内部支持富文本，但 AppleScript 仅发送纯文本
+- **无富文本** — AppleScript 仅发送纯文本
 - **无输入中指示器** — 需要更深入的系统集成
-- **轻点反馈反应** — 跨 macOS 版本通过 AppleScript 发送轻点反馈不可靠支持；接收轻点反馈尚未实现
+- **出站 tapback 不可靠** — 通过 AppleScript 发送 tapback 在跨 macOS 版本上不稳定
 - **无消息编辑/删除** — AppleScript 不公开这些操作
+
+### BlueBubbles 传输
+
+- **需要 BlueBubbles 服务器** — 在一台拥有 iMessage 账户的 Mac 上运行；Aleph 通过 HTTPS 与之通信
+- **无富文本** — 仅纯文本
+- **无消息编辑/删除** — BlueBubbles REST API 不公开这些操作
 
 ## 故障排除
 
 | 问题 | 解决方案 |
 |---------|----------|
-| "Failed to open Messages database" | 在系统设置中授予 Aleph 二进制文件完全磁盘访问权限 |
+| "Failed to open Messages database" | 在系统设置中授予 Aleph 二进制文件完全磁盘访问权限（local 传输） |
 | "AppleScript execution failed" | 授予自动化权限；确保 Messages.app 已安装并登录 |
 | 机器人看不到新消息 | 验证 `db_path` 指向正确的数据库；检查 `is_from_me = 0` 过滤器是否工作 |
 | Messages.app 意外打开 | 这是正常的 — AppleScript 在发送时可能会激活应用 |
 | 响应时间慢 | 减少 `poll_interval_ms`（例如到 500）；注意这会增加 SQLite 读取频率 |
 | "Invalid target" 错误 | 确保收件人是有效的电话号码（带国家代码）或电子邮件地址 |
 | 群组消息被忽略 | 检查 `group_policy` 和 `group_allow_from`；验证 `require_mention` 设置 |
-
----
-
-## 26.7.x 补充
-
-> 注：本节以用户视角补充 26.7.x 的新内容；具体 RPC 与实现细节见 [协议适配器（概念）](/docs/zh/concepts/protocol-adapters) 与 [网关 RPC](/docs/zh/gateway/methods)。
-
-### 跨通道可达性
-
-26.7.x：所有配置的 channel 现在真的可达且可寻址——之前有些配置从未生效。
-
-### Telegram 平行层清理
-
-26.7.21 砍掉 ~2.6k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）。access / pairing / allowlist **单源到路由器**。
-
-### Discord 平行层清理
-
-26.7.21 移除重复的嵌套配置 / account-pool / 解析器层。
-
-### iMessage
-
-26.7.21+ 增强：入站 add-tapback（add-reaction）会上抛为模型上下文。
-
-### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。
+| BlueBubbles：收不到 webhook | 验证 `webhook_url` 从 BlueBubbles 宿主可达；检查 Aleph Gateway HTTP 端口 |

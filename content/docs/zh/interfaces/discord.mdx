@@ -6,7 +6,7 @@ description: "Discord Bot 接口——机器人创建、权限和公会配置"
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架将 Aleph 连接到 Discord。它支持公会（服务器）频道、直接消息、文件附件、嵌入、反应、Markdown 格式和斜杠命令。
+Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架将 Aleph 连接到 Discord。它支持公会（服务器）频道、直接消息、文件附件、嵌入、反应、Markdown 格式、斜杠命令以及交互式审批按钮。
 
 ## 能力
 
@@ -19,11 +19,13 @@ Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架�
 | 音频/视频 | 支持（发送和接收） |
 | 消息反应 | 支持 |
 | 回复线程 | 支持 |
-| 消息编辑 | 支持（带频道上下文） |
-| 消息删除 | 支持（带频道上下文） |
+| 消息编辑 | 支持 |
+| 消息删除 | 支持 |
 | 输入中指示器 | 支持 |
 | 嵌入 | 支持（出站） |
 | 斜杠命令 | 可配置 |
+| 交互式审批按钮 | 支持（通过 `DiscordPanel` / `TelegramChannelApprovalCapability` 流程） |
+| 流式协议 | `EditBased` |
 | 最大消息长度 | 2,000 字符 |
 | 最大附件大小 | 25 MB（Nitro 为 100 MB） |
 
@@ -76,19 +78,6 @@ Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架�
 3. 复制生成的 URL 并在浏览器中打开以邀请机器人到你的服务器
 
 </Step>
-<Step>
-
-### 启用 Discord 功能
-
-使用 `discord` 功能标志构建 Aleph：
-
-```bash
-cargo build --release --features discord
-# 或用于所有接口：
-cargo build --release --features all-interfaces
-```
-
-</Step>
 </Steps>
 
 ## 配置
@@ -114,12 +103,14 @@ channel_type = "discord"
 enabled = true
 
 [channels.config]
-# 来自 Discord Developer Portal 的机器人令牌（必需）
-# 支持 ${ENV_VAR} 扩展
+# 来自 Discord Developer Portal 的机器人令牌（必需）；支持 ${ENV_VAR} 扩展
 bot_token = "${DISCORD_BOT_TOKEN}"
 
 # 用于斜杠命令注册的应用 ID（可选）
 application_id = 123456789012345678
+
+# 入站消息的 DM 策略：open | allowlist | pairing | disabled
+dm_policy = "open"
 
 # 公会（服务器）白名单——空表示允许所有公会
 allowed_guilds = [123456789012345678]
@@ -127,8 +118,11 @@ allowed_guilds = [123456789012345678]
 # 公会内频道白名单——空表示允许所有频道
 allowed_channels = [987654321098765432]
 
-# 允许直接消息（默认：true）
-dm_allowed = true
+# 群组消息策略：open | allowlist | disabled
+group_policy = "open"
+
+# DM 用户 id 白名单
+allow_from = [123456789012345678]
 
 # 文本命令前缀（默认："!"）
 command_prefix = "!"
@@ -161,9 +155,24 @@ export DISCORD_BOT_TOKEN="MTIzNDU2..."
 export DISCORD_APPLICATION_ID="123456789012345678"  # 可选
 ```
 
+## 适配器结构
+
+Discord 接口被拆分为 `src/gateway/interfaces/discord/` 下一组职责单一的模块：
+
+| 模块 | 职责 |
+|--------|----------------|
+| `mod.rs` | `DiscordChannel`、事件 handler、thread 绑定、embed 助手 |
+| `config.rs` | `DiscordConfig`、`IntentsConfig` |
+| `resolver/` | `DiscordResolver`——为上下文挑选正确的 guild/channel 绑定（guild-id 解析、channel-id 解析、候选选择、错误类型） |
+| `permissions.rs` | 权限审计（交通灯 `TrafficLight` × `HealthStatus`，对 u64 标志位做的纯逻辑） |
+| `security/mod.rs` | 安全审计 / 策略钩子 |
+| `api.rs` | Discord REST 助手 |
+
+适配器把每条入站消息交给**入站路由**——路由负责 DM 策略、白名单强制、配对与会话密钥解析。Discord 侧不再有每频道配对存储。
+
 ## 权限审计
 
-Aleph 包含内置的权限审计系统，检查机器人在每个公会中的权限。权限分为三个级别：
+Aleph 包含内置的权限审计系统（`permissions.rs`），检查机器人在每个公会中的权限。权限分为三个级别：
 
 ### 必需权限
 
@@ -198,7 +207,7 @@ Aleph 包含内置的权限审计系统，检查机器人在每个公会中的�
 - **黄色（降级）** — 必需权限存在，缺少一些推荐权限
 - **红色（严重）** — 缺少必需权限；机器人无法运行
 
-你可以通过 `interface.status` RPC 方法检查权限状态。
+可以从 Panel 查看权限状态，或通过 JSON-RPC 调用 `discord.audit_permissions`。
 
 ## 消息路由
 
@@ -217,7 +226,7 @@ Aleph 包含内置的权限审计系统，检查机器人在每个公会中的�
 
 ### 直接消息
 
-当 `dm_allowed` 为 `true` 时处理 DM。不需要前缀或提及——所有 DM 文本直接转发给 Agent。
+当 `dm_policy` 允许时处理 DM。不需要前缀或提及——DM 文本在路由的访问检查通过后转发给 Agent。
 
 ### 对话 ID
 
@@ -234,6 +243,7 @@ Aleph 包含内置的权限审计系统，检查机器人在每个公会中的�
 |---------|------------|
 | 与用户 DM | `agent:main:dm:{user_id}` 或 `agent:main:discord:dm:{user_id}` |
 | 公会频道 | `agent:main:discord:group:{channel_id}` |
+| Thread | `agent:main:discord:thread:{thread_id}` |
 
 ## 附件
 
@@ -271,7 +281,7 @@ let msg = OutboundMessage::text("channel_id", "Here is the file")
 - 入站消息如果用户回复了先前消息，则包含 `reply_to`
 - 出站消息可以设置 `reply_to` 以创建回复链
 
-这在 Discord 的 UI 中创建视觉回复指示器。
+这在 Discord 的 UI 中创建视觉回复指示符。Thread（`thread_id`）被映射为独立的会话密钥，因此 thread 中的对话与父频道相互隔离。
 
 ## 斜杠命令
 
@@ -285,6 +295,16 @@ let msg = OutboundMessage::text("channel_id", "Here is the file")
 斜杠命令注册需要 `applications.commands` OAuth2 范围。全局命令可能需要长达一个小时才能传播；公会特定命令是即时的。
 </Callout>
 
+## 交互式审批按钮
+
+审批门控的工具调用以 Discord 组件呈现（`/docs/concepts/approval`）：
+
+- Agent 发送一条带 **Allow Once / Allow Always / Deny** 按钮的消息。
+- 用户点击；交互通过 `ApprovalCallbackSink`（Telegram/Discord 共享同一个双向流）回流。
+- 通过后，原消息被**就地编辑**（`edit`），线程上显示已解决的状态——不再在原提示上叠加"approved!"回复。
+
+这与 Telegram 共享同一个审批流程；唯一的区别是线缆格式。
+
 ## 错误处理
 
 | 错误 | 行为 |
@@ -294,7 +314,7 @@ let msg = OutboundMessage::text("channel_id", "Here is the file")
 | **公会不在白名单中** | 来自该公会的消息被静默忽略 |
 | **频道不在白名单中** | 来自该频道的消息被静默忽略 |
 | **机器人未被提及** | 当 `respond_to_mentions` 为 `true` 时跳过消息 |
-| **速率限制** | Serenity 自动处理 Discord 速率限制 |
+| **速率限制** | Serenity 自动处理 Discord 速率限制；ChannelRegistry 在 `RateLimited` 上重试 |
 
 ## Gateway Intents
 
@@ -323,29 +343,3 @@ guild_members = false      # GUILD_MEMBERS intent (privileged)
 | 斜杠命令不出现 | 确保 `application_id` 已设置且机器人被邀请时带有 `applications.commands` 范围 |
 | 权限审计显示红色 | 使用审计的 `fix_suggestions` 在服务器设置中授予缺少的权限 |
 | 附件发送失败 | 检查机器人在目标频道中是否具有 **Attach Files** 权限 |
-
----
-
-## 26.7.x 补充
-
-> 注：本节以用户视角补充 26.7.x 的新内容；具体 RPC 与实现细节见 [协议适配器（概念）](/docs/zh/concepts/protocol-adapters) 与 [网关 RPC](/docs/zh/gateway/methods)。
-
-### 跨通道可达性
-
-26.7.x：所有配置的 channel 现在真的可达且可寻址——之前有些配置从未生效。
-
-### Telegram 平行层清理
-
-26.7.21 砍掉 ~2.6k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）。access / pairing / allowlist **单源到路由器**。
-
-### Discord 平行层清理
-
-26.7.21 移除重复的嵌套配置 / account-pool / 解析器层。
-
-### iMessage
-
-26.7.21+ 增强：入站 add-tapback（add-reaction）会上抛为模型上下文。
-
-### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。

@@ -7,7 +7,7 @@ This page is a compact quick-reference for every JSON-RPC method exposed by the 
 
 ## Transport
 
-All methods are invoked over a **WebSocket** connection to the Gateway server (default `ws://127.0.0.1:18790`). The protocol is JSON-RPC 2.0 -- every request requires `jsonrpc`, `method`, and `id` fields. Notifications (no `id`) are used for server-to-client events.
+All methods are invoked over a **WebSocket** connection to the Gateway server (default `ws://127.0.0.1:18790`). The protocol is JSON-RPC 2.0 — every request requires `jsonrpc`, `method`, and `id` fields. Notifications (no `id`) are used for server-to-client events.
 
 ```json
 {
@@ -28,203 +28,336 @@ When `require_auth` is enabled in the Gateway config, the **first message** on a
 
 ## Method Index
 
-### agent.* -- Agent Execution
+### Core
+
+| Method | Description |
+|--------|-------------|
+| `health` | Health check, returns `{ status: "ok" }` |
+| `echo` | Echo back params |
+| `version` | Server version and build |
+| `system.info` | System metrics (CPU, memory, disk, uptime) |
+| `request.state` | Per-request runtime state snapshot |
+
+### `agent.*` / `agents.*` — Agent Execution
 
 [Full documentation](/docs/en/gateway/methods/agent)
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `agent.run` | Start an agent run with streaming | `message`, `session_key?`, `thinking?`, `model?` | `{ run_id, status, session_key }` |
-| `agent.cancel` | Cancel a running agent | `run_id` | `{ cancelled, run_id }` |
-| `agent.status` | Get run status (polling) | `run_id` | `{ run_id, status, iterations, tokens_used }` |
-| `agent.list` | List available agent configurations | -- | `{ agents[] }` |
-| `agent.respondToInput` | Send follow-up input to a waiting run | `run_id`, `message` | `{ queued }` |
+| Method | Description |
+|--------|-------------|
+| `agent.run` | Start an agent run (streaming) |
+| `agent.status` | Run status (polling) |
+| `agent.cancel` | Cancel a running agent |
+| `agent.list` / `agents.list` | List agent configurations |
+| `agents.get` | Get one agent |
+| `agents.create` / `agents.update` / `agents.delete` | CRUD |
+| `agents.set_default` | Default agent |
+| `agents.teams` | List teams an agent belongs to |
+| `agents.tools_schema` | Tool schema for an agent |
+| `agents.files.list` / `.get` / `.set` / `.delete` | Agent file CRUD |
+| `agents.bindings` | Channel-to-agent bindings |
 
-### session.* -- Session Management
+### `session.*` / `sessions.*` — Session Management
 
-[Full documentation](/docs/en/gateway/methods/session)
+| Method | Description |
+|--------|-------------|
+| `session.usage` | Session cost (daemon-computed, core pricing) |
+| `session.compact` | Trigger manual compaction |
+| `session.truncate` | Truncate session |
+| `sessions.list` | List sessions with filters |
+| `sessions.delete` | Delete a session |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `session.list` | List sessions with filters | `filter?`, `limit?`, `offset?` | `{ sessions[], total }` |
-| `session.history` | Get raw message history | `session_key`, `limit?` | `{ messages[], token_count }` |
-| `session.compact` | Trigger manual compaction | `session_key` | `{ tokens_before, tokens_after, facts_extracted }` |
-| `session.delete` | Permanently delete a session | `session_key` | `{ deleted, messages_removed }` |
+### `chat.*` — Chat Control
 
-### config.* -- Configuration
+| Method | Description |
+|--------|-------------|
+| `chat.send` | Send a chat message (wired at boot via `agent_init`) |
+| `chat.abort` | Abort current chat generation |
+| `chat.history` | Get chat history |
+| `chat.clear` | Clear chat history |
+| `chat.rewind` | Rewind to an earlier turn |
+| `chat.context_estimate` | Estimate context window usage |
 
-[Full documentation](/docs/en/gateway/methods/config)
+### `config.*` — Configuration
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `config.get` | Get active configuration | -- | `{ config, source, loaded_at }` |
-| `config.reload` | Reload from disk | -- | `{ reloaded, changed_keys }` |
-| `config.validate` | Validate without applying | `config` | `{ valid, errors[], warnings[] }` |
-| `config.schema` | Get configuration JSON Schema | -- | JSON Schema object |
+| Method | Description |
+|--------|-------------|
+| `config.schema` | Configuration JSON Schema |
+| `config.get` / `config.path` | Read active config / a sub-key |
+| `config.reload` | Reload from disk |
+| `config.validate` | Validate without applying |
+| `config.patch` | Patch active config |
 
-### exec.* -- Command Execution Security
+### `exec.*` — Command Execution Security
 
-[Full documentation](/docs/en/gateway/methods/exec)
+| Method | Description |
+|--------|-------------|
+| `exec.approval.request` | Request command approval |
+| `exec.approval.resolve` | Resolve a pending approval |
+| `exec.approvals.get` / `exec.approvals.set` | Approval configuration CRUD |
+| `exec.approvals.pending` | List pending approvals |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `exec.approval.request` | Request command approval | `command`, `cwd`, `agent_id`, `timeout_ms?` | `{ id, approved, decision }` |
-| `exec.approval.resolve` | Resolve a pending approval | `id`, `decision`, `resolved_by?` | `{ resolved }` |
-| `exec.approvals.get` | Get approval configuration | -- | `{ config, hash }` |
-| `exec.approvals.set` | Update approval config | `config`, `base_hash` | `{ applied }` |
-| `exec.approvals.pending` | List pending approvals | -- | `{ pending[] }` |
+### `events.*` — Event Subscriptions
 
-### events.* -- Event Subscriptions
+| Method | Description |
+|--------|-------------|
+| `events.subscribe` | Subscribe to event topics |
+| `events.unsubscribe` | Remove subscriptions |
+| `events.list` | List active subscriptions |
 
-[Full documentation](/docs/en/gateway/methods/events)
+### `logs.*` — Logging
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `events.subscribe` | Subscribe to event topics | `patterns[]` | `{ subscribed[], active_patterns[] }` |
-| `events.unsubscribe` | Remove subscriptions | `patterns[]` | `{ unsubscribed[], active_patterns[] }` |
-| `events.list` | List active subscriptions | -- | `{ patterns[], total }` |
+| Method | Description |
+|--------|-------------|
+| `logs.getLevel` / `logs.setLevel` | Component log level |
+| `logs.getDirectory` | Log directory |
+| `logs.tail` | Stream recent log entries |
 
-### wizard.* -- Setup Wizards (Panel-driven; not a CLI subcommand)
+### `commands.*` / `tools.*` — Commands & Tools
 
-The `wizard.*` methods are defined in the source handler (`src/gateway/handlers/wizard.rs`) but are **not currently wired** in the runtime handler registration — they reflect the design target, and are not yet exposed via JSON-RPC. The Panel invokes them from the handshake window; the CLI does **not** expose an `aleph wizard` subcommand. See [Methods Reference](/docs/en/gateway/methods) for the accurate list of currently exposed methods.
+| Method | Description |
+|--------|-------------|
+| `commands.list` | List registered commands |
+| `command.execute` | Execute a command |
+| `tools.catalog` | Full tool catalog |
+| `tools.effective` | Effective tools (after progressive disclosure / mode) |
+| `tools.invoke` | Invoke a tool |
+| `tools.cancel_call` | Cancel an in-flight call |
+| `tools.in_flight` | List in-flight calls |
 
-### cron.* -- Scheduled Jobs
+### `wizard.*` — Setup Wizards (Panel-driven)
 
-[Full documentation](/docs/en/gateway/methods/cron)
+`wizard.*` is wired at boot via `install_wizard_handlers` (`src/gateway/handlers/wizard.rs`) once `WizardSessionManager` is constructed. There is no CLI subcommand — the Panel invokes these from the handshake window.
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `cron.create` | Create a scheduled job | `name`, `schedule`, `agent_id`, `prompt` | `{ job_id, next_run_at }` |
-| `cron.list` | List all jobs | `filter?` | `{ jobs[], total }` |
-| `cron.get` | Get job details + run history | `job_id` | Job object with `recent_runs[]` |
-| `cron.delete` | Delete a job | `job_id` | `{ deleted }` |
-| `cron.trigger` | Manually trigger a job | `job_id` | `{ triggered, run_id }` |
-| `cron.pause` | Pause a job | `job_id` | `{ paused }` |
-| `cron.resume` | Resume a paused job | `job_id` | `{ resumed, next_run_at }` |
-| `cron.status` | Get scheduler status | -- | Scheduler state |
+| Method | Description |
+|--------|-------------|
+| `wizard.start` | Start a wizard session |
+| `wizard.next` | Advance (no answer) |
+| `wizard.answer` | Answer and advance |
+| `wizard.cancel` | Cancel the session |
+| `wizard.status` | Session status |
 
-### browser.* -- Browser Automation
+### `cron.*` / `heartbeat.*` — Scheduled Jobs
 
-[Full documentation](/docs/en/gateway/methods/browser)
+`cron.*` and `heartbeat.*` are registered as phase-1 placeholders; the boot path replaces them with live handlers when the corresponding service is up.
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `browser.navigate` | Navigate to a URL | `url`, `wait_until?`, `timeout_ms?` | `{ url, title, status }` |
-| `browser.click` | Click an element | `target` (ActionTarget) | `{ clicked }` |
-| `browser.type` | Type text into an element | `target`, `text`, `clear?` | `{ typed }` |
-| `browser.screenshot` | Capture a screenshot | `target?`, `full_page?`, `format?` | `{ data_base64, width, height }` |
-| `browser.evaluate` | Execute JavaScript | `script`, `timeout_ms?` | `{ value, type }` |
-| `browser.snapshot` | Take ARIA accessibility snapshot | -- | `{ elements[], page_title }` |
+| Method | Description |
+|--------|-------------|
+| `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` | Job CRUD |
+| `cron.run` / `cron.runs` | Trigger + history |
+| `cron.status` / `cron.toggle` | Scheduler control |
+| `heartbeat.list` / `.get` / `.create` / `.update` / `.delete` | Heartbeat CRUD |
+| `heartbeat.toggle` / `.wake` / `.runs` | Heartbeat control |
 
-### chat.* -- Chat Control
+### `channel.*` / `channels.*` / `channel.pairing.*` — Channels
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `chat.send` | Send a chat message | `message`, `session_key?` | Run info |
-| `chat.abort` | Abort current chat generation | `run_id?` | `{ aborted }` |
-| `chat.history` | Get chat history | `session_key?`, `limit?` | `{ messages[] }` |
-| `chat.clear` | Clear chat history | `session_key?` | `{ cleared }` |
+[Full documentation](/docs/en/gateway/methods/channels)
 
-### models.* -- Model Discovery
+| Method | Description |
+|--------|-------------|
+| `channels.list` | List channels (registered + configured) |
+| `channels.status` | Channel status |
+| `channels.set_agent` | Bind channel to agent |
+| `channels.dead_letters` | Inspect dead-letter queue |
+| `channels.redrive_dead_letters` | Re-send dead-letter messages |
+| `channel.start` / `channel.stop` | Lifecycle |
+| `channel.create` / `channel.delete` | CRUD |
+| `channel.send` | Send a message |
+| `channel.pairing_data` | Pairing payload (QR / code) |
+| `channel.pairing.list` / `.approve` / `.reject` / `.approved` / `.revoke` | Pairing flow |
+| `discord.validate_token` / `discord.list_guilds` / `discord.list_channels` / `discord.audit_permissions` | Discord Panel helpers |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `models.list` | List available models | -- | `{ models[] }` |
-| `models.get` | Get model details | `model_id` | Model metadata |
-| `models.capabilities` | Get model capabilities | `model_id` | Capability flags |
+### `browser.*` — Browser Automation
 
-### memory.* -- Memory Operations
+| Method | Description |
+|--------|-------------|
+| `browser.navigate` / `browser.click` / `browser.type` / `browser.screenshot` / `browser.evaluate` / `browser.snapshot` | Headless browser control |
+| `browser_config.*` | Browser configuration (proxy, allowed domains, headless flag) |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `memory.search` | Search stored memories | `query`, `limit?` | `{ results[] }` |
+### `memory.*` — Memory Operations
 
-### skills.* -- Skills Management
+| Method | Description |
+|--------|-------------|
+| `memory.search` / `memory.compress` / `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace` | Memory subsystem |
+| `memory_config.*` | Memory configuration |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `skills.list` | List installed skills | -- | `{ skills[] }` |
-| `skills.install` | Install a skill | `name`, `source` | Install result |
+### `mcp.*` / `mcp_config.*` — MCP
 
-### plugins.* -- Plugin Lifecycle
+| Method | Description |
+|--------|-------------|
+| `mcp.list` / `mcp.add` / `mcp.update` / `mcp.delete` / `mcp.status` / `mcp.logs` | MCP server CRUD |
+| `mcp.start` / `mcp.stop` / `mcp.restart` | MCP lifecycle |
+| `mcp.tools` / `mcp.resources` / `mcp.prompts` | Capability aggregation |
+| `mcp_config.list` / `.get` / `.create` / `.update` / `.delete` | Settings-page CRUD |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `plugins.list` | List installed plugins | -- | `{ plugins[] }` |
-| `plugins.load` | Load a plugin into runtime | `path` | `{ loaded }` |
-| `plugins.unload` | Unload a plugin | `plugin_id` | `{ unloaded }` |
-| `plugins.enable` | Enable a plugin | `plugin_id` | `{ enabled }` |
-| `plugins.disable` | Disable a plugin | `plugin_id` | `{ disabled }` |
-| `plugins.status` | Get plugin status | `plugin_id` | Plugin status |
+### `plugin.*` / `plugins.*` / `extensions.*` — Extensions
 
-### services.* -- Background Services
+| Method | Description |
+|--------|-------------|
+| `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall` | Legacy namespace |
+| `plugin.list` / `plugin.install` / `plugin.installFromZip` / `plugin.uninstall` / `plugin.update` | Canonical CC-compatible namespace |
+| `plugin.enable` / `plugin.disable` / `plugin.load` / `plugin.unload` / `plugin.reload` | Plugin lifecycle |
+| `plugin.callTool` / `plugin.executeCommand` | Invocation |
+| `plugin.marketplace.list` / `.add` / `.update` / `.remove` / `.install` | Marketplace |
+| `extensions.catalog` / `extensions.installed` / `extensions.toggle` / `extensions.uninstall` / `extensions.disclosure` / `extensions.configure` / `extensions.install` | Extensions Store |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `services.list` | List background services | -- | `{ services[] }` |
-| `services.start` | Start a service | `name` | `{ started }` |
-| `services.stop` | Stop a service | `name` | `{ stopped }` |
-| `services.status` | Get service status | `name` | `{ status }` |
+### `skills.*` / `markdown_skills.*` — Skills
 
-### mcp.* -- MCP Approval
+| Method | Description |
+|--------|-------------|
+| `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install` | Skill lifecycle |
+| `markdown_skills.load` / `.reload` / `.list` / `.unload` | Markdown skill runtime |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `mcp.list_pending_approvals` | List pending MCP approvals | -- | `{ approvals[] }` |
-| `mcp.respond_approval` | Respond to an MCP approval | `id`, `approved` | `{ responded }` |
-| `mcp.cancel_approval` | Cancel an MCP approval | `id` | `{ cancelled }` |
+### `bundled.sync` — Bundled Content
 
-### markdown_skills.* -- Markdown Skill Runtime
+| Method | Description |
+|--------|-------------|
+| `bundled.sync` | Sync bundled content to user dir |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `markdown_skills.load` | Load a markdown skill | `path` | `{ loaded }` |
-| `markdown_skills.reload` | Reload a skill | `name` | `{ reloaded }` |
-| `markdown_skills.list` | List loaded skills | -- | `{ skills[] }` |
-| `markdown_skills.unload` | Unload a skill | `name` | `{ unloaded }` |
+### `services.*` — Background Services
 
-### poe.* -- Principle-Operation-Evaluation (Retired)
+| Method | Description |
+|--------|-------------|
+| `services.start` / `services.stop` / `services.list` / `services.status` | Service lifecycle |
 
-> **The POE (Principle-Operation-Evaluation) architecture was retired in 26.5+**. Its "intelligence" migrated to system prompt templates (R9), naturally covered by a single LLM call. The Harness does not judge completion (**R10 "Don't #3**). All `poe.*` methods are gone — `chat.send` / `chat.abort` / `chat.history` etc. now cover their use cases.
+### `pty.*` — Embedded Terminal
 
-### identity.* -- Identity/Soul Management
+| Method | Description |
+|--------|-------------|
+| `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list` | PTY session CRUD |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `identity.get` | Get current identity | -- | Identity object |
-| `identity.set` | Set identity fields | `fields` | `{ updated }` |
-| `identity.clear` | Reset to default identity | -- | `{ cleared }` |
-| `identity.list` | List available identities | -- | `{ identities[] }` |
+### `hooks.*` — User-Level Hooks
 
-### workspace.* -- Workspace Isolation
+| Method | Description |
+|--------|-------------|
+| `hooks.list` / `hooks.registry` / `hooks.add` / `hooks.remove` / `hooks.reload` / `hooks.events` | `~/.aleph/hooks.json` admin |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `workspace.create` | Create a workspace | `name`, `config?` | `{ workspace_id }` |
-| `workspace.list` | List workspaces | -- | `{ workspaces[] }` |
-| `workspace.get` | Get workspace details | `workspace_id` | Workspace object |
-| `workspace.update` | Update workspace config | `workspace_id`, `config` | `{ updated }` |
-| `workspace.archive` | Archive a workspace | `workspace_id` | `{ archived }` |
+### `providers.*` / `embedding_providers.*` / `generation_providers.*` / `rerank_config.*` / `search_config.*`
 
-### guests.* -- Guest Invitations
+Provider configuration (read / write / test) plus embedding, generation, rerank, and search provider surfaces.
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `guests.createInvitation` | Create a guest invitation | `permissions`, `expires?` | `{ invitation_id, token }` |
-| `guests.listPending` | List pending invitations | -- | `{ invitations[] }` |
-| `guests.revokeInvitation` | Revoke an invitation | `invitation_id` | `{ revoked }` |
+### `runtimes.*` — Capability Probe / Ledger
 
-### Utility Methods
+| Method | Description |
+|--------|-------------|
+| `runtimes.list` / `runtimes.refresh` / `runtimes.install` | External-tool ledger |
 
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `health` | Health check | -- | `{ status: "ok" }` |
-| `echo` | Echo back params | any | Echoed params |
-| `version` | Get server version | -- | `{ version, build }` |
-| `logs.levels` | Get current log levels for all components | -- | `{ levels }` |
-| `logs.set_level` | Set log level for a component | `component`, `level` | `{ set }` |
-| `logs.tail` | Stream recent log entries | `lines?`, `follow?` | `{ entries[] }` |
-| `commands.list` | List all registered commands | -- | `{ commands[] }` |
+### `models.*` — Model Discovery
+
+| Method | Description |
+|--------|-------------|
+| `models.list` / `models.get` / `models.capabilities` | Model metadata |
+
+### `identity.*` — Identity
+
+| Method | Description |
+|--------|-------------|
+| `identity.get` / `identity.set` / `identity.clear` / `identity.list` | Identity ("soul") management |
+
+### `workspace.*` / `projects.*` — Workspaces & Projects
+
+| Method | Description |
+|--------|-------------|
+| `workspace.create` / `.list` / `.get` / `.update` / `.archive` | Workspace CRUD |
+| `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get` | Project CRUD |
+
+### `teams.*` / `teams.chat.*` — Teams & Group Chat
+
+| Method | Description |
+|--------|-------------|
+| `teams.list` / `teams.get` / `teams.disband` / `teams.delete` | Team lifecycle |
+| `teams.list_tasks` / `teams.create_task` / `teams.update_task` | Task CRUD |
+| `teams.task.trace` / `teams.usage` | Task introspection |
+| `teams.chat.send` / `teams.chat.cancel` / `teams.chat.thread` / `teams.chat.history` | Group-chat run control |
+
+### `group_chat.*`
+
+| Method | Description |
+|--------|-------------|
+| `group_chat.start` / `group_chat.mention` / `group_chat.end` / `group_chat.list` / `group_chat.history` | Group chat orchestration |
+
+### `subagent.tree`
+
+| Method | Description |
+|--------|-------------|
+| `subagent.tree` | Sub-agent hierarchy snapshot |
+
+### `graph.*` — Governance Topology
+
+| Method | Description |
+|--------|-------------|
+| `graph.query` / `graph.node_detail` / `graph.search` | Graph read |
+| `graph.update_note` / `graph.rename_note` / `graph.delete_note` | Graph write |
+
+### `dreaming.*`
+
+| Method | Description |
+|--------|-------------|
+| `dreaming.run_now` | Trigger a dream run |
+
+### `trace.*`
+
+| Method | Description |
+|--------|-------------|
+| `trace.list` / `trace.get` / `trace.by_runs` | Trace replay |
+
+### `daemon.*` / `gateway.*` — Daemon & Gateway Credentials
+
+| Method | Description |
+|--------|-------------|
+| `daemon.status` / `daemon.shutdown` / `daemon.logs` | Daemon lifecycle |
+| `gateway.token.current` / `gateway.token.rotate` | Gateway token |
+| `gateway.ticket.create` | Pairing ticket |
+| `gateway.devices.list` / `gateway.devices.revoke` | Trusted devices |
+| `gateway.credentials` | Credentials bundle |
+| `gateway.identity.get` | Identity snapshot |
+| `gateway.metrics.lanes` / `gateway.metrics.run_concurrency` | Metrics |
+| `gateway.flow.reload` | Reload gateway flow config |
+| `oauth.*` / `gateway.ticket.*` | OAuth + ticket surface |
+
+### `cluster.*` / `flow_admin.*`
+
+| Method | Description |
+|--------|-------------|
+| `cluster.*` | Cluster enrollment / node control |
+| `flow_admin.*` | Flow admin |
+
+### `activity.*` / `insights.*` / `debug.*`
+
+| Method | Description |
+|--------|-------------|
+| `activity.stats` | Activity counter |
+| `insights.tools` | Tool usage insights |
+| `debug.*` | Debug surfaces |
+
+### `secret_approvals.*` / `secret_migration.*` / `secrets.*` / `security_config.*` / `fetch_config.*` / `general_config.*` / `generation_config.*` / `behavior_config.*` / `execution_config.*` / `acp_config.*` / `mcp_config.*`
+
+Configuration CRUD per area.
+
+### `pairing.*`
+
+| Method | Description |
+|--------|-------------|
+| `pairing.*` | Gateway-level pairing admin |
+
+### `flow_admin.*` / `fs.*`
+
+| Method | Description |
+|--------|-------------|
+| `flow_admin.*` | Flow admin |
+| `fs.*` | Filesystem helpers |
+
+### `voice.*`
+
+| Method | Description |
+|--------|-------------|
+| `voice.*` | Voice streaming controls |
+
+### `route_config.*` / `routing_rules.*` / `pairing.*`
+
+| Method | Description |
+|--------|-------------|
+| `route_config.*` | Route binding CRUD |
+| `routing_rules.*` | Routing rules CRUD |
 
 ## Error Codes
 
@@ -287,73 +420,6 @@ Events are delivered as JSON-RPC notifications (no `id` field) to subscribed cli
 
 ## See Also
 
-- [Rust API](/docs/en/api/rust) -- Core crate reference for library usage
-- [Gateway Overview](/docs/en/gateway/overview) -- Architecture and connection details
-- [Protocol](/docs/en/gateway/protocol) -- Transport format and authentication flow
-
----
-
-## 26.7.x Addendum
-
-### Full RPC ~265
-
-26.7.x the gateway exposes **~265 JSON-RPC methods** — distributed by topic in the [Gateway Methods Reference](/docs/en/gateway/methods) subpages.
-
-### Request IDs Switched to Atomic Counter
-
-26.7.21+: wire request IDs no longer use UUIDs (the `uuid` dependency is dropped from `aleph-protocol`); switched to an **atomic counter**.
-
-### Single-Source Error Receipt
-
-26.7.21+: the gateway returns a **single-source** user-readable error. The raw error chain never leaks to the Panel.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32603,
-    "message": "Tool 'shell_exec' failed",
-    "data": {
-      "receipt_id": "err-...",
-      "category": "tool_execution",
-      "user_message": "Command failed (exit 1)"
-    }
-  }
-}
-```
-
-### Protocol Version
-
-`connect.minProtocol` / `connect.maxProtocol` — currently 1 on both sides.
-
-### Cross-Channel Reachability
-
-26.7.x: configured channels are now truly reachable and addressable.
-
-### Full Method Table
-
-| Topic | Count | Topic | Count |
-|------|-------|-------|-------|
-| Core (health/echo/version/system.info/request.state) | 5 | Streaming events | ~12 |
-| Config (config.*) | ~12 | providers / embedding / generation / rerank / search | ~25 |
-| Logs (logs.*) | 3 | Service start/stop (services.*) | 4 |
-| Daemon (daemon.*) | 3 | Hooks (hooks.*) | 6 |
-| Gateway credentials (gateway.ticket/token/devices/credentials/identity/metrics) | ~10 | Wizard flow (wizard.*) | 3 |
-| Memory (memory.*) | ~15 | Skills (skills.*) | 5 |
-| MCP (mcp.* + mcp_config.*) | ~12 | Plugins/Extensions (plugin.* + plugins.* + extensions.*) | ~30 |
-| Heartbeat / Cron | ~18 | Channels (channel.* + channels.* + channel.pairing.*) | ~15 |
-| Workspace / Projects | ~10 | Tools (tools.*) | 5 |
-| Teams (teams.* + teams.chat.*) | ~25 | Subagent (subagent.tree) | 1 |
-| Chat / Session (chat.* + session.* + sessions.*) | ~20 | Graph (graph.*) | 6 |
-| Group chat | 6 | Activities (activity.stats / insights.tools) | 2 |
-| Agents (agents.* + agent.*) | ~20 | Clusters / Runtimes | 8 |
-| Dreams / Dreaming | 2 | Acp (acp.*) | 12 |
-| Clawhub | 4 | Trace (trace.*) | 3 |
-| Events | 1 | Total | ~265 |
-
-### See Also
-
-- [Gateway Methods Reference](/docs/en/gateway/methods) — full RPC
-- [Gateway Protocol](/docs/en/gateway/protocol) — protocol layer
-- [Gateway Auth](/docs/en/gateway/auth) — auth / pairing / TOFU
+- [Rust API](/docs/en/api/rust) — Core crate reference for library usage
+- [Gateway Overview](/docs/en/gateway/overview) — Architecture and connection details
+- [Protocol](/docs/en/gateway/protocol) — Transport format and authentication flow

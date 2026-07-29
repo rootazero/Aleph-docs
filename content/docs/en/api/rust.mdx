@@ -3,7 +3,7 @@ title: "Rust API"
 description: "Core crate reference for embedding Aleph as a library"
 ---
 
-The `alephcore` crate is the Rust library that powers every Aleph component -- the Gateway daemon, CLI, desktop app, and messaging interfaces. You can also use it directly as a library to embed Aleph's AI agent capabilities in your own Rust applications.
+The `alephcore` crate is the Rust library that powers every Aleph component — the Gateway daemon, CLI, desktop app, and messaging interfaces. You can also use it directly as a library to embed Aleph's AI agent capabilities in your own Rust applications.
 
 ```toml
 # Cargo.toml
@@ -28,64 +28,76 @@ The crate is organized into domain-specific modules. All public modules are re-e
 
 ```text
 alephcore
-  ├── harness         # Think→Act execution engine (`AgentHarness`)
-  ├── agents          # Agent definitions, sub-agents, swarm
-  ├── approval        # User approval workflows
-  ├── browser         # CDP browser automation
-  ├── builtin_tools   # Built-in tool implementations
-  ├── capability      # Capability detection
-  ├── cli             # CLI helpers (inquire prompts)
-  ├── command         # Command definitions
-  ├── components      # Shared domain types (only `types/`; the legacy EventHandler chain was removed during the Harness migration)
-  ├── compressor      # Context compression
-  ├── conversation    # Multi-turn conversation management
-  ├── daemon          # Proactive AI daemon (worldmodel, perception)
-  ├── desktop         # Desktop integration
-  ├── discovery       # Service discovery
-  ├── dispatcher      # Unified tool registry & dispatch
-  ├── domain          # Domain modeling types
-  ├── engine          # Engine coordination
-  ├── event           # Event types
-  ├── exec            # Command execution & security kernel
-  ├── executor        # Task executors
-  ├── extension       # Plugin/extension system
-  ├── gateway*        # WebSocket JSON-RPC server (feature-gated)
-  ├── generation      # Content generation providers
-  ├── intent          # Intent routing
-  ├── logging         # Structured logging with PII scrubbing
-  ├── markdown        # Markdown processing
-  ├── mcp             # Model Context Protocol integration
-  ├── memory          # Memory storage & retrieval
-  ├── metrics         # Performance telemetry
-  ├── payload         # Request/response payloads
-  ├── permission      # Permission management
-  ├── pii             # PII detection & scrubbing
-  ├── loop_graph       # governance topology layer (team / audit ring / victory-claim watchers)
-  ├── looping          # loop pause / resume
-  ├── goal             # goal subsystem
-  ├── artifacts        # artifact store
-  ├── verification     # tool-loop verifier
-  ├── prompt          # Prompt construction
-  ├── providers       # AI provider abstraction
-  ├── resilient       # Resilient task execution
-  ├── routing         # Session key routing
-  ├── runtimes        # Capability probe/ledger (detect & bootstrap external tools)
-  ├── scheduler       # Task scheduling
-  ├── search          # Search providers
-  ├── secrets         # Secret management
-  ├── skill           # Individual skill types
-  ├── skills          # Skills registry & management
-  ├── skill_evolution # Skill solidification & evolution
-  ├── spec_driven     # Spec-driven development workflow
-  ├── supervisor      # PTY process supervision
-  ├── thinker         # LLM decision-making layer
-  ├── tools           # Tool trait system
-  ├── video           # Video transcript extraction
-  ├── vision          # Vision/image processing
-  └── wizard          # Session-based configuration wizard (`wizard.*` RPC, Panel-driven; no CLI subcommand)
+  ├── a2a              # Agent-to-agent protocol (adapter / domain / port / service / sub_agent)
+  ├── acp              # Agent Communication Protocol (manager / adapters / transport / session / protocol)
+  ├── agents           # Agent definitions, sub-agents, swarm
+  ├── approval         # User approval workflows + callback sink
+  ├── artifacts        # Artifact store
+  ├── browser          # CDP / Playwright / Chrome MCP browser automation
+  ├── builtin_tools    # Built-in tool implementations
+  ├── bundled          # Bundled-content sync
+  ├── canvas_io        # Canvas I/O surface
+  ├── clarification    # `ask_user` HITL clarification
+  ├── cli              # CLI helpers (inquire prompts, command parser)
+  ├── clipboard        # Clipboard integration
+  ├── cluster          # Multi-node cluster
+  ├── command          # Command definitions + parser
+  ├── components       # Shared domain types (`types/`)
+  ├── context          # Context budget / reactive compaction / rescue
+  ├── diagnostics      # Diagnostics surface
+  ├── discovery        # Service discovery
+  ├── domain           # Domain modeling types
+  ├── error            # Unified `AlephError` enum (always public)
+  ├── event            # Event types + bus
+  ├── event_handler    # Event-handler chain (kept for backward use)
+  ├── exec             # Command execution & security kernel
+  ├── executor         # Task executors
+  ├── export           # Session / artifact export
+  ├── extension        # Plugin / extension system
+  ├── fetch            # HTTP fetch + extract
+  ├── generation       # Content generation
+  ├── goal             # Goal subsystem (pursuit, store, types)
+  ├── group_chat       # Multi-agent group-chat orchestration
+  ├── guardrails       # Input / output guardrails
+  ├── harness          # Think→Act execution engine (`AgentHarness`)
+  ├── hub              # Aleph Hub catalog / install / verify / trust
+  ├── identity         # Identity / soul / signer
+  ├── logging          # Structured logging + PII scrubbing
+  ├── loop_graph       # Governance topology (team / audit ring / victory-claim watchers)
+  ├── looping          # Loop pause / resume
+  ├── markdown         # Markdown processing
+  ├── mcp              # Model Context Protocol integration
+  ├── media            # Media handling
+  ├── memory           # Memory storage & retrieval
+  ├── metrics          # Performance telemetry
+  ├── orchestrator     # Orchestrator layer
+  ├── pii              # PII detection & scrubbing
+  ├── pricing          # Core pricing table
+  ├── projects         # Project store
+  ├── providers        # AI provider abstraction
+  ├── resilience       # Resilient task execution + state DB
+  ├── routing          # Session key routing + route bindings
+  ├── runtimes         # Capability probe / ledger (detect & bootstrap external tools)
+  ├── sandbox          # Sandbox abstraction
+  ├── search           # Search providers
+  ├── secrets          # Secret management
+  ├── security         # Security primitives + vault
+  ├── session          # Session management + events
+  ├── skill            # Skill system (individual skill types + registry)
+  ├── strategy         # Strategy planner + store
+  ├── sync_primitives  # Shared `Arc` / `Mutex` aliases
+  ├── tasks            # Task graph subsystem
+  ├── teams            # Multi-agent teams
+  ├── thinker          # LLM decision-making layer
+  ├── tool_metadata    # Tool catalog + unified tool surface
+  ├── tool_output      # Tool output formatting
+  ├── tools            # Tool trait system + dispatcher
+  ├── utils            # Shared utilities
+  ├── verification     # Tool-loop verifier
+  ├── vision           # Vision / image processing
+  ├── wizard           # Session-based configuration wizard (`wizard.*` RPC, Panel-driven; no CLI subcommand)
+  └── workflow         # Workflow templates
 ```
-
-Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) below.
 
 ## Key Public Types
 
@@ -103,17 +115,29 @@ Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) b
 
 ### Harness (Think→Act)
 
+The harness is the Think→Act driver that owns the agent loop. It is governed by R10 ("the harness is scaffolding, not cognition") and is ratcheted by `src/harness/tests/budget.rs`: exactly **12 files**, with line totals held below `CEILING = 5,055` (`src/harness/tests/budget.rs:335`).
+
 | Type | Module | Description |
 |------|--------|-------------|
-| `AgentHarness` | `harness::AgentHarness` | Core Think→Act execution engine (ratchet: 12 files, `CEILING = 5,055` at `src/harness/tests/budget.rs:335`) |
+| `AgentHarness` | `harness::AgentHarness` | Core Think→Act execution engine |
 | `AgentHarness::new` | `harness::AgentHarness` | Construct with `HarnessDeps` |
-| `HarnessDeps` | `harness::deps` | Injected dependencies (session, tool, provider, callback) |
-| `HarnessRunner` | `harness::HarnessRunner` | Polymorphic seam (replaces the legacy `Harness` trait) |
-| `HarnessCallback` | `harness::callback` | Live event callback (delta, reasoning, tool_call_start/done, complete_with_outcome) |
-| `TurnState` / `TurnStep` | `harness::trait_def` | Turn / step state |
-| `ChainContext` | `harness::chain_context` | Per-turn execution context |
+| `AgentHarness::run` | `harness::AgentHarness` | Drive a full agent run |
+| `AgentHarness::terminate_reason` | `harness::AgentHarness` | Why the run stopped |
+| `AgentHarness::token_breakdown` | `harness::AgentHarness` | Token accounting across categories |
+| `AgentHarness::last_turn_context_tokens` | `harness::AgentHarness` | Last-turn context tokens |
+| `AgentHarness::tool_timeline` | `harness::AgentHarness` | Tool invocation timeline |
+| `AgentHarness::duration_ms` | `harness::AgentHarness` | Wall-clock duration |
+| `HarnessDeps` | `harness::deps` | Injected dependencies (session, tool, provider, callback, sink) |
+| `HarnessRunner` | `harness::agent` | Polymorphic seam (replaces the legacy `Harness` trait) |
+| `HarnessCallback` | `harness::callback` | Live event callback (`on_delta` / `on_reasoning` / `on_tool_call_start` / `on_tool_call_done` / `on_complete_with_outcome`) |
 | `HarnessError` | `harness::trait_def` | Harness error |
-| `TurnPhase` | `harness::trait_def` | Turn phase |
+| `TurnState` | `harness::trait_def` | Turn state |
+| `TurnStep` | `harness::trait_def` | Step state |
+| `ChainContext` | `harness::chain_context` | Per-turn execution context |
+| `TraceSink` / `NoopTraceSink` | `harness::trace_sink` | Trace sink trait + default impl |
+| `StallConfig` / `StallTracker` | `harness::deps` | Consecutive-failure watchdog |
+
+> The `TurnPhase` enum was deleted in batch 5 (2026-07-15) when the Act-period wall clock moved to the tool layer; the harness no longer makes a completion judgment of its own (R10).
 
 ### Thinker (LLM Layer)
 
@@ -130,20 +154,20 @@ Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) b
 
 | Type | Module | Description |
 |------|--------|-------------|
-| `AlephTool` | `tools` | Static dispatch trait -- compile-time typed tools |
-| `AlephToolDyn` | `tools` | Dynamic dispatch trait -- runtime-loaded tools (MCP, plugins) |
+| `AlephTool` | `tools` | Static dispatch trait — compile-time typed tools |
+| `AlephToolDyn` | `tools` | Dynamic dispatch trait — runtime-loaded tools (MCP, plugins) |
 | `AlephToolServer` | `tools` | Hot-reload enabled tool server |
 | `AlephToolServerHandle` | `tools` | Thread-safe handle to a running tool server |
-| `ToolRegistry` | `dispatcher` | Unified registry aggregating all tool sources |
-| `ToolDefinition` | `dispatcher` | Tool metadata (name, description, JSON Schema, category) |
-| `UnifiedTool` | `dispatcher` | Wrapper unifying native, MCP, skill, and plugin tools |
-| `ToolResult` | `dispatcher` | Execution result from any tool |
+| `ToolRegistry` | `tool_metadata` | Unified registry aggregating all tool sources |
+| `ToolDefinition` | `tool_metadata` | Tool metadata (name, description, JSON Schema, category) |
+| `UnifiedTool` / `UnifiedToolInfo` | `tool_metadata` | Wrapper unifying native, MCP, skill, and plugin tools |
+| `ToolResult` | `tool_metadata` | Execution result from any tool |
 
 ### Providers
 
 | Type | Module | Description |
 |------|--------|-------------|
-| `AiProvider` | `providers` | Core trait for AI backends (process, process_with_tools, stream) |
+| `AiProvider` | `providers` | Core trait for AI backends (`process` / `process_with_tools` / `stream`) |
 | `HttpProvider` | `providers::http_provider` | Protocol-agnostic HTTP provider |
 | `OllamaProvider` | `providers::ollama` | Native Ollama integration |
 | `FailoverProvider` | `providers::failover` | Automatic provider failover |
@@ -153,14 +177,14 @@ Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) b
 
 | Type | Module | Description |
 |------|--------|-------------|
-| `AlephError` | `error` | Unified error enum with 20+ variants |
+| `AlephError` | `error` | Unified error enum with many variants |
 | `Result<T>` | `error` | Type alias for `std::result::Result<T, AlephError>` |
 
 Every `AlephError` variant carries an optional `suggestion` field with user-friendly remediation advice. Call `.suggestion()` to retrieve it, or `.user_friendly_message()` for a formatted display string.
 
 ## Core Traits
 
-### `AlephTool` -- Static Tool Trait
+### `AlephTool` — Static Tool Trait
 
 ```rust
 #[async_trait]
@@ -190,7 +214,7 @@ let tools: Vec<Box<dyn AlephToolDyn>> = vec![
 ];
 ```
 
-### `AiProvider` -- LLM Backend Trait
+### `AiProvider` — LLM Backend Trait
 
 ```rust
 pub trait AiProvider: Send + Sync {
@@ -208,7 +232,7 @@ pub trait AiProvider: Send + Sync {
 
 Aleph ships adapters for OpenAI-compatible, Anthropic, Gemini, and Ollama protocols. Add new providers by implementing this trait or by registering a YAML-defined protocol adapter.
 
-### `LoopCallback` -- Agent Loop Events
+### `LoopCallback` — Agent Loop Events
 
 ```rust
 pub trait LoopCallback: Send + Sync {
@@ -325,8 +349,8 @@ struct WeatherArgs {
 #[derive(Serialize)]
 struct WeatherOutput {
     temperature: f64,
-    condition: String,
-    city: String,
+    pub condition: String,
+    pub city: String,
 }
 
 #[async_trait]
@@ -382,53 +406,17 @@ Key error variants: `NetworkError`, `AuthenticationError`, `RateLimitError`, `Pr
 
 Aleph uses Tokio with the `rt-multi-thread` feature. All public async APIs return `Send` futures compatible with Tokio's multi-threaded runtime. Key Tokio features used:
 
-- `rt-multi-thread` -- Work-stealing thread pool
-- `sync` -- Channels, mutexes, RwLocks, semaphores
-- `time` -- Timeouts, intervals, sleep
-- `process` -- Child process management
-- `fs` -- Async filesystem operations
-- `signal` -- Unix signal handling
-- `net` -- TCP/UDP networking
+- `rt-multi-thread` — Work-stealing thread pool
+- `sync` — Channels, mutexes, RwLocks, semaphores
+- `time` — Timeouts, intervals, sleep
+- `process` — Child process management
+- `fs` — Async filesystem operations
+- `signal` — Unix signal handling
+- `net` — TCP/UDP networking
 
 ## See Also
 
-- [JSON-RPC API](/docs/en/api/jsonrpc) -- WebSocket RPC method reference
-- [Architecture](/docs/en/architecture/overview) -- System architecture overview
-- [Tool System](/docs/en/tools/overview) -- Tool design and built-in tools
-- [Gateway](/docs/en/gateway/overview) -- Gateway server documentation
-
----
-
-## 26.7.x Addendum
-
-### Module Inventory
-
-The `alephcore` crate exposes ~76 `src/<module>` directories plus a few top-level `.rs` files (`alephcore::error` / `pricing` / `canvas_io` / `event_handler` / `sync_primitives`).
-
-### Key Exports
-
-```rust
-use alephcore::identity::IdentityContext;
-use alephcore::session::events::{SessionEvent, SessionEventRecord, TurnId};
-use alephcore::providers::{UnifiedMessage, ProviderDelta, TextDelta, ThinkingDelta};
-use alephcore::looping::{LoopState, PauseReason};
-use alephcore::goal::{Goal, GoalStore};
-use alephcore::artifacts::ArtifactRecord;
-use alephcore::identity::signer::{SignerKey, OperationLedger};
-use alephcore::memory::note_layer::NoteRelation;
-use alephcore::loop_graph::{AuditRing, VictoryClaim, Watcher};
-use alephcore::tools::concurrency::ResourceClaim;
-use alephcore::verification::{ToolCallSummary, TurnVerifyContext, VerifierVerdict};
-```
-
-### Harness API
-
-`alephcore::harness::AgentHarness` — ratchet: 12 files, `CEILING = 5,055` at `src/harness/tests/budget.rs:335` (2026-07-26). `run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`.
-
-### Thinker API
-
-`alephcore::thinker::PromptBuilder` / `PromptPipeline` / `PromptLayer` / `InteractionManifest` / `SoulManifest` / `IdentityResolver` / `MemoryContextProvider` / `TokenBudget`.
-
-### Full Module Reference
-
-See `cargo doc --open --package alephcore` and the `src/` directory tree.
+- [JSON-RPC API](/docs/en/api/jsonrpc) — WebSocket RPC method reference
+- [Architecture](/docs/en/architecture/overview) — System architecture overview
+- [Tool System](/docs/en/tools/overview) — Tool design and built-in tools
+- [Gateway](/docs/en/gateway/overview) — Gateway server documentation

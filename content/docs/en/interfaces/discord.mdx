@@ -1,12 +1,12 @@
 ---
 title: "Discord"
-description: "Discord Bot interface for Aleph -- bot creation, permissions, and guild configuration"
+description: "Discord Bot interface for Aleph — bot creation, permissions, and guild configuration"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-The Discord interface connects Aleph to Discord using the [serenity](https://github.com/serenity-rs/serenity) framework. It supports guild (server) channels, direct messages, file attachments, embeds, reactions, Markdown formatting, and slash commands.
+The Discord interface connects Aleph to Discord using the [serenity](https://github.com/serenity-rs/serenity) framework. It supports guild (server) channels, direct messages, file attachments, embeds, reactions, Markdown formatting, slash commands, and interactive approval buttons.
 
 ## Capabilities
 
@@ -19,11 +19,13 @@ The Discord interface connects Aleph to Discord using the [serenity](https://git
 | Audio/Video | Supported (send and receive) |
 | Message reactions | Supported |
 | Reply threading | Supported |
-| Message editing | Supported (with channel context) |
-| Message deletion | Supported (with channel context) |
+| Message editing | Supported |
+| Message deletion | Supported |
 | Typing indicator | Supported |
 | Embeds | Supported (outbound) |
 | Slash commands | Configurable |
+| Interactive approval buttons | Supported (via `DiscordPanel` / `TelegramChannelApprovalCapability` flow) |
+| Stream protocol | `EditBased` |
 | Max message length | 2,000 characters |
 | Max attachment size | 25 MB (100 MB with Nitro) |
 
@@ -76,19 +78,6 @@ Navigate to **OAuth2 > URL Generator**:
 3. Copy the generated URL and open it in your browser to invite the bot to your server
 
 </Step>
-<Step>
-
-### Enable the Discord Feature
-
-Build Aleph with the `discord` feature flag:
-
-```bash
-cargo build --release --features discord
-# or for all interfaces:
-cargo build --release --features all-interfaces
-```
-
-</Step>
 </Steps>
 
 ## Configuration
@@ -114,21 +103,26 @@ channel_type = "discord"
 enabled = true
 
 [channels.config]
-# Bot token from Discord Developer Portal (required)
-# Supports ${ENV_VAR} expansion
+# Bot token from Discord Developer Portal (required); supports ${ENV_VAR} expansion
 bot_token = "${DISCORD_BOT_TOKEN}"
 
 # Application ID for slash commands registration (optional)
 application_id = 123456789012345678
 
-# Guild (server) allowlist -- empty means allow all guilds
+# DM policy for incoming messages: open | allowlist | pairing | disabled
+dm_policy = "open"
+
+# Guild (server) allowlist — empty means allow all guilds
 allowed_guilds = [123456789012345678]
 
-# Channel allowlist within guilds -- empty means allow all channels
+# Channel allowlist within guilds — empty means allow all channels
 allowed_channels = [987654321098765432]
 
-# Allow direct messages (default: true)
-dm_allowed = true
+# Group message policy: open | allowlist | disabled
+group_policy = "open"
+
+# Allowlist of user ids for DMs
+allow_from = [123456789012345678]
 
 # Prefix for text commands (default: "!")
 command_prefix = "!"
@@ -161,9 +155,24 @@ export DISCORD_BOT_TOKEN="MTIzNDU2..."
 export DISCORD_APPLICATION_ID="123456789012345678"  # Optional
 ```
 
+## Adapter Structure
+
+The Discord interface is split across focused modules under `src/gateway/interfaces/discord/`:
+
+| Module | Responsibility |
+|--------|----------------|
+| `mod.rs` | `DiscordChannel`, event handlers, thread binding, embed helpers |
+| `config.rs` | `DiscordConfig`, `IntentsConfig` |
+| `resolver/` | `DiscordResolver` — picks the right guild/channel binding for a context (guild-id resolution, channel-id resolution, candidate selection, error type) |
+| `permissions.rs` | Permission audit (traffic-light `TrafficLight` × `HealthStatus`, pure logic on the u64 flag bitfield) |
+| `security/mod.rs` | Security audit / policy hooks |
+| `api.rs` | Discord REST helpers |
+
+The adapter hands every inbound message to the **inbound router**, which owns DM policy, allowlist enforcement, pairing, and session-key resolution. There is no per-channel pairing store on the Discord side.
+
 ## Permission Audit
 
-Aleph includes a built-in permission audit system that checks the bot's permissions in each guild. Permissions are categorized into three levels:
+Aleph includes a built-in permission audit system (`permissions.rs`) that checks the bot's permissions in each guild. Permissions are categorized into three levels:
 
 ### Required Permissions
 
@@ -194,11 +203,11 @@ These enable richer interaction:
 
 The audit produces a traffic-light assessment:
 
-- **Green (Healthy)** -- All required and recommended permissions granted
-- **Yellow (Degraded)** -- Required permissions present, some recommended missing
-- **Red (Critical)** -- Missing required permissions; bot cannot function
+- **Green (Healthy)** — All required and recommended permissions granted
+- **Yellow (Degraded)** — Required permissions present, some recommended missing
+- **Red (Critical)** — Missing required permissions; bot cannot function
 
-You can check permission status via the `interface.status` RPC method.
+You can check permission status from the Panel, or via `discord.audit_permissions` over JSON-RPC.
 
 ## Message Routing
 
@@ -217,7 +226,7 @@ The mention text is automatically stripped from the message before routing to th
 
 ### Direct Messages
 
-DMs are processed whenever `dm_allowed` is `true`. No prefix or mention is required -- all DM text is forwarded directly to the agent.
+DMs are processed whenever `dm_policy` permits. No prefix or mention is required — DM text is forwarded to the agent subject to the router's access check.
 
 ### Conversation IDs
 
@@ -234,6 +243,7 @@ Each Discord conversation maps to a session key:
 |---------|------------|
 | DM with user | `agent:main:dm:{user_id}` or `agent:main:discord:dm:{user_id}` |
 | Guild channel | `agent:main:discord:group:{channel_id}` |
+| Thread | `agent:main:discord:thread:{thread_id}` |
 
 ## Attachments
 
@@ -271,19 +281,29 @@ When the agent responds to a specific message, Discord's reply reference is used
 - Inbound messages include `reply_to` if the user replied to a previous message
 - Outbound messages can set `reply_to` to create a reply chain
 
-This creates the visual reply indicator in Discord's UI.
+This creates the visual reply indicator in Discord's UI. Threads (`thread_id`) are surfaced as their own session key so conversations inside a thread stay isolated from the parent channel.
 
 ## Slash Commands
 
 When `slash_commands_enabled` is `true` and `application_id` is set, Aleph can register slash commands with Discord. These appear in the command picker when users type `/`:
 
-- `/ask` -- Send a message to Aleph
-- `/status` -- Check Aleph's status
-- `/help` -- Show available commands
+- `/ask` — Send a message to Aleph
+- `/status` — Check Aleph's status
+- `/help` — Show available commands
 
 <Callout type="info">
 Slash command registration requires the `applications.commands` OAuth2 scope. Global commands may take up to an hour to propagate; guild-specific commands are instant.
 </Callout>
+
+## Interactive Approval Buttons
+
+Approval-gated tool calls are surfaced as Discord components (`/docs/concepts/approval`):
+
+- The agent posts a message with **Allow Once / Allow Always / Deny** buttons.
+- The user clicks; the interaction flows back through the `ApprovalCallbackSink` (Telegram/Discord share the two-way flow).
+- On accept, the original message is **edited in place** (`edit`) so the thread shows the resolved status — no second "approved!" reply on top of the prompt.
+
+This shares one approval flow with Telegram; the only difference is the wire format.
 
 ## Error Handling
 
@@ -294,7 +314,7 @@ Slash command registration requires the `applications.commands` OAuth2 scope. Gl
 | **Guild not in allowlist** | Messages from that guild are silently ignored |
 | **Channel not in allowlist** | Messages from that channel are silently ignored |
 | **Bot not mentioned** | Message is skipped when `respond_to_mentions` is `true` |
-| **Rate limiting** | Serenity handles Discord rate limits automatically |
+| **Rate limiting** | Serenity handles Discord rate limits automatically; the registry retries on `RateLimited` |
 
 ## Gateway Intents
 
@@ -323,29 +343,3 @@ guild_members = false      # GUILD_MEMBERS intent (privileged)
 | Slash commands do not appear | Ensure `application_id` is set and the bot was invited with `applications.commands` scope |
 | Permission audit shows Red | Use the audit's `fix_suggestions` to grant missing permissions in Server Settings |
 | Attachments fail to send | Check that the bot has the **Attach Files** permission in the target channel |
-
----
-
-## 26.7.x Addendum
-
-> Note: this section supplements 26.7.x from the user view; RPC and implementation details are in [Protocol Adapters (Concept)](/docs/en/concepts/protocol-adapters) and [Gateway RPC](/docs/en/gateway/methods).
-
-### Cross-Channel Reachability
-
-26.7.x: configured channels are now truly reachable and addressable — previously some configurations never took effect.
-
-### Telegram Parallel-Layer Cleanup
-
-26.7.21 shed ~2.6k lines of dead code (an uncompiled webhook server, an unconstructed session manager, a dead draft API, duplicated status reactions). Access / pairing / allowlist **single-sourced on the router**.
-
-### Discord Parallel-Layer Cleanup
-
-26.7.21 removed duplicated nested-config / account-pool / resolver layers.
-
-### iMessage
-
-26.7.21+ enhancement: inbound add-tapbacks (add-reactions) surface to the model as context.
-
-### Full `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-See [Gateway RPC channels](/docs/en/gateway/methods/channels).

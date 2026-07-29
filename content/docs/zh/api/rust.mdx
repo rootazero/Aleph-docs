@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | 字段 | 值 |
 |-------|-------|
 | Crate 名称 | `alephcore` |
-| 版本 | 2021 |
+| Edition | 2021 |
 | 最低 Rust 版本 | 1.92 |
 | Crate 类型 | `rlib`、`cdylib` |
 | 异步运行时 | Tokio（多线程） |
@@ -28,64 +28,76 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 ```text
 alephcore
-  ├── harness         # Think→Act 执行引擎（`AgentHarness`）
-  ├── agents          # Agent 定义、子 Agent、群体
-  ├── approval        # 用户审批工作流
-  ├── browser         # CDP 浏览器自动化
-  ├── builtin_tools   # 内置工具实现
-  ├── capability      # 能力检测
-  ├── cli             # CLI 助手（inquire 提示）
-  ├── command         # 命令定义
-  ├── components      # 共享域类型（仅 `types/`；原 EventHandler 链路已在 Harness 迁移时移除）
-  ├── compressor      # 上下文压缩
-  ├── conversation    # 多轮对话管理
-  ├── daemon          # 主动 AI 守护进程（worldmodel、perception）
-  ├── desktop         # 桌面集成
-  ├── discovery       # 服务发现
-  ├── dispatcher      # 统一工具注册表和调度
-  ├── domain          # 领域建模类型
-  ├── engine          # 引擎协调
-  ├── event           # 事件类型
-  ├── exec            # 命令执行和安全内核
-  ├── executor        # 任务执行器
-  ├── extension       # 插件/扩展系统
-  ├── gateway*        # WebSocket JSON-RPC 服务器（功能门控）
-  ├── generation      # 内容生成提供商
-  ├── intent          # 意图路由
-  ├── logging         # 带 PII 清理的结构化日志
-  ├── markdown        # Markdown 处理
-  ├── mcp             # Model Context Protocol 集成
-  ├── memory          # 记忆存储和检索
-  ├── metrics         # 性能遥测
-  ├── payload         # 请求/响应负载
-  ├── permission      # 权限管理
-  ├── pii             # PII 检测和清理
-  ├── loop_graph       # 治理拓扑层（团队 / 审计环 / 胜利声明 watcher）
-  ├── looping          # 循环暂停/恢复
-  ├── goal             # 目标子系统
+  ├── a2a              # Agent-to-agent 协议（adapter / domain / port / service / sub_agent）
+  ├── acp              # Agent Communication Protocol（manager / adapters / transport / session / protocol）
+  ├── agents           # Agent 定义、子 Agent、swarm
+  ├── approval         # 用户审批工作流 + callback sink
   ├── artifacts        # 工件存储
+  ├── browser          # CDP / Playwright / Chrome MCP 浏览器自动化
+  ├── builtin_tools    # 内置工具实现
+  ├── bundled          # bundled content 同步
+  ├── canvas_io        # Canvas I/O 面板
+  ├── clarification    # `ask_user` HITL 澄清
+  ├── cli              # CLI 助手（inquire 提示、command parser）
+  ├── clipboard        # 剪贴板集成
+  ├── cluster          # 多节点集群
+  ├── command          # 命令定义 + 解析器
+  ├── components       # 共享域类型（`types/`）
+  ├── context          # 上下文预算 / 反应式压缩 / rescue
+  ├── diagnostics      # 诊断面板
+  ├── discovery        # 服务发现
+  ├── domain           # 领域建模类型
+  ├── error            # 统一 `AlephError` 枚举（始终 public）
+  ├── event            # 事件类型 + bus
+  ├── event_handler    # event-handler 链路（保留以兼容）
+  ├── exec             # 命令执行和安全内核
+  ├── executor         # 任务执行器
+  ├── export           # 会话 / 工件导出
+  ├── extension        # 插件 / 扩展系统
+  ├── fetch            # HTTP fetch + extract
+  ├── generation       # 内容生成
+  ├── goal             # 目标子系统（pursuit、store、types）
+  ├── group_chat       # 多智能体群聊编排
+  ├── guardrails       # 输入 / 输出 guardrails
+  ├── harness          # Think→Act 执行引擎（`AgentHarness`）
+  ├── hub              # Aleph Hub 目录 / install / verify / trust
+  ├── identity         # 身份 / soul / signer
+  ├── logging          # 带 PII 清理的结构化日志
+  ├── loop_graph       # 治理拓扑（team / audit ring / victory-claim watchers）
+  ├── looping          # 循环暂停/恢复
+  ├── markdown         # Markdown 处理
+  ├── mcp              # Model Context Protocol 集成
+  ├── media            # 媒体处理
+  ├── memory           # 记忆存储和检索
+  ├── metrics          # 性能遥测
+  ├── orchestrator     # orchestrator 层
+  ├── pii              # PII 检测和清理
+  ├── pricing          # 核心价格表
+  ├── projects         # 项目存储
+  ├── providers        # AI 提供商抽象
+  ├── resilience       # 弹性任务执行 + state DB
+  ├── routing          # 会话密钥路由 + route bindings
+  ├── runtimes         # 能力探测 / 分类账（检测和引导外部工具）
+  ├── sandbox          # sandbox 抽象
+  ├── search           # 搜索提供商
+  ├── secrets          # 密钥管理
+  ├── security         # 安全原语 + vault
+  ├── session          # 会话管理 + events
+  ├── skill            # 技能系统（单个技能类型 + 注册表）
+  ├── strategy         # 策略 planner + store
+  ├── sync_primitives  # 共享 `Arc` / `Mutex` 别名
+  ├── tasks            # 任务图谱子系统
+  ├── teams            # 多智能体团队
+  ├── thinker          # LLM 决策层
+  ├── tool_metadata    # 工具目录 + 统一工具面板
+  ├── tool_output      # 工具输出格式化
+  ├── tools            # 工具 trait 系统 + dispatcher
+  ├── utils            # 共享工具
   ├── verification     # 工具循环验证器
-  ├── prompt          # 提示词构建
-  ├── providers       # AI 提供商抽象
-  ├── resilient       # 弹性任务执行
-  ├── routing         # 会话密钥路由
-  ├── runtimes        # 能力探测/分类账（检测和引导外部工具）
-  ├── scheduler       # 任务调度
-  ├── search          # 搜索提供商
-  ├── secrets         # 密钥管理
-  ├── skill           # 单个技能类型
-  ├── skills          # 技能注册表和管理
-  ├── skill_evolution # 技能固化和进化
-  ├── spec_driven     # 规范驱动开发工作流
-  ├── supervisor      # PTY 进程监督
-  ├── thinker         # LLM 决策层
-  ├── tools           # 工具 trait 系统
-  ├── video           # 视频转录提取
-  ├── vision          # 视觉/图像处理
-  └── wizard          # 会话制配置向导（`wizard.*` RPC，Panel 驱动；CLI 无对应子命令）
+  ├── vision           # 视觉 / 图像处理
+  ├── wizard           # 会话制配置向导（`wizard.*` RPC，Panel 驱动；CLI 无对应子命令）
+  └── workflow         # workflow 模板
 ```
-
-标记 `*` 的模块是功能门控的。参见下面的 [功能标志](#功能标志)。
 
 ## 关键公共类型
 
@@ -101,19 +113,31 @@ alephcore
 | `RoutingRuleConfig` | `config` | 意图路由规则 |
 | `GeneralConfig` | `config` | 一般应用程序设置 |
 
-### 工具链（Think→Act）
+### Harness（Think→Act）
+
+Harness 是拥有 Agent 循环的 Think→Act driver。它受 R10 约束（"harness 是 scaffolding，不是 cognition"），并由 `src/harness/tests/budget.rs` 通过棘轮强制：恰好 **12 文件**，行数总和压低于 `CEILING = 5,055`（`src/harness/tests/budget.rs:335`）。
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AgentHarness` | `harness::AgentHarness` | 核心 Think→Act 执行引擎（ratchet：12 文件，`CEILING = 5055`，`src/harness/tests/budget.rs:335`） |
+| `AgentHarness` | `harness::AgentHarness` | 核心 Think→Act 执行引擎 |
 | `AgentHarness::new` | `harness::AgentHarness` | 用 `HarnessDeps` 构造 |
-| `HarnessDeps` | `harness::deps` | 注入的依赖（session、tool、provider、callback） |
-| `HarnessRunner` | `harness::HarnessRunner` | 多态 seam（替代旧 `Harness` trait） |
-| `HarnessCallback` | `harness::callback` | 实时事件回调（delta、reasoning、tool_call_start/done、complete_with_outcome） |
-| `TurnState` / `TurnStep` | `harness::trait_def` | Turn / step 状态 |
+| `AgentHarness::run` | `harness::AgentHarness` | 驱动一次完整的 Agent 运行 |
+| `AgentHarness::terminate_reason` | `harness::AgentHarness` | 运行停止原因 |
+| `AgentHarness::token_breakdown` | `harness::AgentHarness` | 按类别统计 token |
+| `AgentHarness::last_turn_context_tokens` | `harness::AgentHarness` | 上一轮的上下文 token 数 |
+| `AgentHarness::tool_timeline` | `harness::AgentHarness` | 工具调用时间线 |
+| `AgentHarness::duration_ms` | `harness::AgentHarness` | 实际耗时 |
+| `HarnessDeps` | `harness::deps` | 注入的依赖（session、tool、provider、callback、sink） |
+| `HarnessRunner` | `harness::agent` | 多态 seam（替代旧 `Harness` trait） |
+| `HarnessCallback` | `harness::callback` | 实时事件回调（`on_delta` / `on_reasoning` / `on_tool_call_start` / `on_tool_call_done` / `on_complete_with_outcome`） |
+| `HarnessError` | `harness::trait_def` | Harness 错误 |
+| `TurnState` | `harness::trait_def` | Turn 状态 |
+| `TurnStep` | `harness::trait_def` | step 状态 |
 | `ChainContext` | `harness::chain_context` | 每轮执行上下文 |
-| `HarnessError` | `harness::trait_def` | 工具链错误 |
-| `TurnPhase` | `harness::trait_def` | Turn 阶段 |
+| `TraceSink` / `NoopTraceSink` | `harness::trace_sink` | Trace sink trait + 默认实现 |
+| `StallConfig` / `StallTracker` | `harness::deps` | 连续失败 watchdog |
+
+> `TurnPhase` 枚举在 batch 5（2026-07-15）中被删除——当时 Act 阶段的 wall clock 下沉到 tool 层；harness 不再自己做完成度判断（R10）。
 
 ### Thinker（LLM 层）
 
@@ -134,16 +158,16 @@ alephcore
 | `AlephToolDyn` | `tools` | 动态分发 trait——运行时加载的工具（MCP、插件） |
 | `AlephToolServer` | `tools` | 支持热重载的工具服务器 |
 | `AlephToolServerHandle` | `tools` | 运行中工具服务器的线程安全句柄 |
-| `ToolRegistry` | `dispatcher` | 聚合所有工具来源的统一注册表 |
-| `ToolDefinition` | `dispatcher` | 工具元数据（名称、描述、JSON Schema、类别） |
-| `UnifiedTool` | `dispatcher` | 统一原生、MCP、技能和插件工具的包装器 |
-| `ToolResult` | `dispatcher` | 任何工具的执行结果 |
+| `ToolRegistry` | `tool_metadata` | 聚合所有工具来源的统一注册表 |
+| `ToolDefinition` | `tool_metadata` | 工具元数据（名称、描述、JSON Schema、类别） |
+| `UnifiedTool` / `UnifiedToolInfo` | `tool_metadata` | 统一原生、MCP、技能和插件工具的包装器 |
+| `ToolResult` | `tool_metadata` | 任何工具的执行结果 |
 
 ### 提供商
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AiProvider` | `providers` | AI 后端的核心 trait（process、process_with_tools、stream） |
+| `AiProvider` | `providers` | AI 后端的核心 trait（`process` / `process_with_tools` / `stream`） |
 | `HttpProvider` | `providers::http_provider` | 协议无关的 HTTP 提供商 |
 | `OllamaProvider` | `providers::ollama` | 原生 Ollama 集成 |
 | `FailoverProvider` | `providers::failover` | 自动提供商故障转移 |
@@ -153,7 +177,7 @@ alephcore
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AlephError` | `error` | 具有 20+ 变体的统一错误枚举 |
+| `AlephError` | `error` | 统一错误枚举（含多 variant） |
 | `Result<T>` | `error` | `std::result::Result<T, AlephError>` 的类型别名 |
 
 每个 `AlephError` 变体都携带一个可选的 `suggestion` 字段，包含用户友好的修复建议。调用 `.suggestion()` 获取它，或 `.user_friendly_message()` 获取格式化的显示字符串。
@@ -382,13 +406,13 @@ match result {
 
 Aleph 使用带 `rt-multi-thread` 功能的 Tokio。所有公共异步 API 返回与 Tokio 多线程运行时兼容的 `Send` Future。使用的关键 Tokio 功能：
 
-- `rt-multi-thread` -- 工作窃取线程池
-- `sync` -- 通道、互斥锁、RwLocks、信号量
-- `time` -- 超时、间隔、睡眠
-- `process` -- 子进程管理
-- `fs` -- 异步文件系统操作
-- `signal` -- Unix 信号处理
-- `net` -- TCP/UDP 网络
+- `rt-multi-thread` — 工作窃取线程池
+- `sync` — 通道、互斥锁、RwLocks、信号量
+- `time` — 超时、间隔、睡眠
+- `process` — 子进程管理
+- `fs` — 异步文件系统操作
+- `signal` — Unix 信号处理
+- `net` — TCP/UDP 网络
 
 ## 另请参阅
 
@@ -396,51 +420,3 @@ Aleph 使用带 `rt-multi-thread` 功能的 Tokio。所有公共异步 API 返�
 - [架构](/docs/zh/architecture/overview) — 系统架构概览
 - [工具系统](/docs/zh/tools/overview) — 工具设计和内置工具
 - [Gateway](/docs/zh/gateway/overview) — Gateway 服务器文档
-
----
-
-## 26.7.x 补充
-
-### 模块清单
-
-`alephcore` crate 暴露 ~84 个 `src/<module>` 目录 + 几个顶层 `.rs` 文件（`alephcore::error` / `pricing` / `canvas_io` / `event_handler` / `sync_primitives`）。26.7.22+ 新增 / 重组的顶层模块：`artifacts/`、`export/`、`hub/`、`looping/`、`goal/`、`strategy/`、`clipboard/`、`projects/`、`vision/`。
-
-### 关键导出
-
-```rust
-use alephcore::identity::IdentityContext;
-use alephcore::session::events::{SessionEvent, SessionEventRecord, TurnId};
-use alephcore::providers::{UnifiedMessage, ProviderDelta, TextDelta, ThinkingDelta};
-
-// Loop / Goal / Strategy（26.7.22+）
-use alephcore::looping::{LoopState, Cadence, LoopStatus, PauseReason};
-use alephcore::goal::{Goal, GoalStore, GoalStatus, GateOutcome, GateConfig};
-use alephcore::strategy::{Strategy, StrategyKey, StrategyStore, PlannerNode};
-
-// Artifacts / Hub（26.7.22+）
-use alephcore::artifacts::{ArtifactStore, ArtifactRecord, ArtifactOrigin, encode_session_key, MAX_ARTIFACT_BYTES};
-use alephcore::hub::{ALEPH_HUB_ID, ALEPH_HUB_URL, HubCatalogClient, ExtensionEntry, ExtensionKind, TrustTier, InstallSpec};
-use alephcore::routing::{SessionKey, DmScope, PeerKind, RouteBinding, MatchRule};
-
-// Voice 流式（26.7.22+）
-use alephcore::gateway::voice::streaming::{TranscriptDelta, StreamRegistry, StreamingTranscriber, StreamHandles};
-
-// 既有导出
-use alephcore::identity::signer::{SignerKey, OperationLedger};
-use alephcore::memory::note_layer::NoteRelation;
-use alephcore::loop_graph::{AuditRing, VictoryClaim, Watcher};
-use alephcore::tools::concurrency::ResourceClaim;
-use alephcore::verification::{ToolCallSummary, TurnVerifyContext, VerifierVerdict};
-```
-
-### Harness API
-
-`alephcore::harness::AgentHarness` —— ratchet：12 文件，`CEILING = 5055`（`src/harness/tests/budget.rs:335`，2026-07-26 修订）。`run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`。
-
-### Thinker API
-
-`alephcore::thinker::PromptBuilder` / `PromptPipeline` / `PromptLayer` / `InteractionManifest` / `SoulManifest` / `IdentityResolver` / `MemoryContextProvider` / `TokenBudget`。
-
-### 完整模块参考
-
-详见 `cargo doc --open --package alephcore` 与 `src/` 目录树。

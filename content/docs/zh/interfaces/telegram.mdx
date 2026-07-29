@@ -6,7 +6,7 @@ description: "Telegram Bot 接口——设置、配置和媒体处理"
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-Telegram 接口使用 [teloxide](https://github.com/teloxide/teloxide) 框架将 Aleph 连接到 Telegram Bot API。它支持直接消息、群聊、文件附件、内联键盘和 Markdown 格式。
+Telegram 接口使用 [teloxide](https://github.com/teloxide/teloxide) 框架将 Aleph 连接到 Telegram Bot API。它支持直接消息、群聊、文件附件、内联键盘、Markdown 格式、forum topic 以及 tapback 风格的反应。
 
 ## 能力
 
@@ -21,12 +21,13 @@ Telegram 接口使用 [teloxide](https://github.com/teloxide/teloxide) 框架将
 | 语音消息 | 支持（接收） |
 | 内联键盘 | 支持 |
 | 回复线程 | 支持 |
-| 消息编辑 | 支持（带聊天上下文） |
-| 消息删除 | 支持（带聊天上下文） |
+| 消息编辑 | 支持 |
+| 消息删除 | 支持 |
 | 输入中指示器 | 支持 |
+| 反应 | 支持（`setMessageReaction`） |
+| 流式协议 | `EditBased` |
 | 最大消息长度 | 4,096 字符 |
 | 最大附件大小 | 50 MB |
-| 反应 | 有限（仅限 Telegram Premium） |
 
 ## 前置条件
 
@@ -54,19 +55,6 @@ Telegram 接口使用 [teloxide](https://github.com/teloxide/teloxide) 框架将
 - `/setprivacy` — 如果你想让机器人看到所有群组消息（不仅仅是命令和提及），禁用 "隐私模式"
 
 </Step>
-<Step>
-
-### 启用 Telegram 功能
-
-使用 `telegram` 功能标志构建 Aleph：
-
-```bash
-cargo build --release --features telegram
-# 或用于所有接口：
-cargo build --release --features all-interfaces
-```
-
-</Step>
 </Steps>
 
 ## 配置
@@ -92,27 +80,31 @@ channel_type = "telegram"
 enabled = true
 
 [channels.config]
-# 来自 @BotFather 的机器人令牌（必需）
-# 支持 ${ENV_VAR} 扩展
+# 来自 @BotFather 的机器人令牌（必需）；支持 ${ENV_VAR} 扩展
 bot_token = "${TELEGRAM_BOT_TOKEN}"
 
 # 不带 @ 的机器人用户名（连接时自动检测）
 bot_username = "my_aleph_bot"
 
-# 用户白名单——空表示允许所有用户
-# 使用 Telegram 用户 ID（不是用户名）
-allowed_users = [123456789, 987654321]
+# 入站消息的 DM 策略：open | allowlist | pairing | disabled
+dm_policy = "pairing"
 
-# 群组/聊天白名单——空表示允许所有群组
+# 群组消息策略：open | allowlist | disabled
+group_policy = "open"
+
+# DM 的电话号码 / 用户 id 白名单
+allow_from = [123456789, 987654321]
+
+# 群组白名单
 allowed_groups = [-1001234567890]
 
-# 允许直接消息（默认：true）
-dm_allowed = true
+# 群组聊天中需要 @mention（默认：true）
+require_mention = true
 
-# 允许群组消息（默认：true）
-groups_allowed = true
+# 群组中提及检测的机器人名称
+bot_name = "Aleph"
 
-# 长轮询模式的轮询间隔（秒）（默认：1）
+# 轮询间隔（默认：1）
 polling_interval_secs = 1
 
 # 处理时发送输入中指示器（默认：true）
@@ -120,14 +112,6 @@ send_typing = true
 
 # 失败消息的最大重试次数（默认：3）
 max_retries = 3
-
-# Webhook 配置（可选——默认为长轮询）
-# [channels.config.webhook]
-# url = "https://your-domain.com/telegram/webhook"
-# port = 8443
-# path = "/telegram/webhook"
-# certificate = "/path/to/cert.pem"    # 用于自签名证书
-# secret_token = "your-webhook-secret"  # 验证令牌
 ```
 
 <Callout type="warn">
@@ -142,7 +126,39 @@ max_retries = 3
 export TELEGRAM_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 ```
 
-Aleph 会通过 `TelegramConfig::from_env()` 自动获取它。
+## 适配器结构
+
+Telegram 接口被拆分为 `src/gateway/interfaces/telegram/` 下一组职责单一的模块：
+
+| 模块 | 职责 |
+|--------|----------------|
+| `bot_instance.rs` | 每个配置的账号对应一个 teloxide `Bot` |
+| `config.rs` / `config_v2.rs` | `TelegramConfig` 与多账号 `TelegramConfigV2` |
+| `config_resolver.rs` | 把多账号配置解析为单一有效视图 |
+| `access.rs` | 粗粒度 DM/群组预过滤（`AccessController`）——只丢弃明显应丢弃的流量 |
+| `approval.rs` | `TelegramChannelApprovalCapability`（交互式审批按钮） |
+| `chunking.rs` | 长消息分片 |
+| `delivery.rs` | 出站发送流水线 + 速率限制处理 |
+| `error_cooldown.rs` | 每会话错误冷却 + 输入中断路器 |
+| `handlers.rs` | bot 派发 handler（命令、回调、文本） |
+| `mention.rs` | `@mention` 解析 / 剥离 |
+| `offset.rs` | 持久化轮询 offset 跟踪器（与 iMessage BlueBubbles 共享） |
+| `polling.rs` | 长轮询循环 |
+| `reaction_handler.rs` | 处理状态反应（👀 / 👍 / 👎） |
+| `sticker.rs` | sticker 处理 |
+| `streaming/` | `EditBased` 流式（lane tracker、orchestrator、telegram event emitter） |
+
+适配器**不拥有**配对状态。它把未知发送者交给入站路由；路由才是 access / pairing / allowlist 决策的**单一来源**（参见[接口概览](/docs/interfaces/overview)）。
+
+## Access / Pairing / Allowlist——单源到路由器
+
+`AccessController::check_message()` 返回三种裁决之一（`src/gateway/interfaces/telegram/access.rs`）：
+
+- `Allowed`——已静态白名单，或 DM 策略是 `open` / 平凡禁用。
+- `NeedsPairing`——DM 策略是 `pairing` 且发送者尚不为人知。适配器把消息交给路由；路由负责配对码签发、过期与审批（`channel.pairing.list` / `approve` / `reject` / `revoke`）。
+- `Denied`——静默丢弃（群组不被允许、DM 策略 `disabled` 等）。
+
+不再有每频道的配对数据库：26.7.21 移除了频道本地配对存储。配对状态由 Gateway 的 `PairingStore`（SQLite）持久化，操作员在 Panel 中通过 `channel.pairing.approve` / `reject` 处理新配对请求。`TelegramConfigV2 → ChannelConfig` 桥接把所有 DM/群组/白名单规则送进路由，因此在 `config.toml` 中改一处就是路由强制的一处。
 
 ## 长轮询 vs Webhook
 
@@ -153,30 +169,27 @@ Aleph 支持两种从 Telegram 接收更新的模式：
 机器人定期向 Telegram 的服务器请求新更新。这是默认设置，开箱即用，无需额外基础设施。
 
 **优点：**
+
 - 无需公共 URL 或 SSL 证书
 - 在 NAT 和防火墙后工作
 - 设置简单
 
 **缺点：**
+
 - 稍高的延迟（可通过 `polling_interval_secs` 配置）
 - 保持与 Telegram 服务器的持久连接
 
 ### Webhook 模式
 
-Telegram 通过 HTTPS POST 请求将更新推送到你的服务器。通过添加 `webhook` 部分启用：
-
-```toml
-[channels.config.webhook]
-url = "https://aleph.example.com/telegram/webhook"
-port = 8443
-secret_token = "a-random-secret-string"
-```
+Telegram 通过 HTTPS POST 请求将更新推送到你的服务器。在频道配置中通过 `webhook` 段启用。
 
 **优点：**
+
 - 更低的延迟（即时交付）
 - 对高流量机器人更高效
 
 **缺点：**
+
 - 需要公共 HTTPS 端点
 - 需要有效的 SSL 证书（或带 `certificate` 字段的自签名证书）
 
@@ -192,21 +205,21 @@ Telegram 用户 ID 是数字。要查找用户的 ID：
 ### 白名单行为
 
 ```toml
-# 空列表 = 允许所有人
-allowed_users = []
+# 空列表 = 允许所有人（受 dm_policy 约束）
+allow_from = []
 
 # 仅允许特定用户
-allowed_users = [123456789, 987654321]
+allow_from = [123456789, 987654321]
 ```
 
-当 `allowed_users` 非空时，来自未列出用户的消息会被静默丢弃。同样的逻辑适用于 `allowed_groups` 的群聊。
+当 `dm_policy = "allowlist"` 且发送者不在 `allow_from` 中时，消息被静默丢弃。当 `dm_policy = "pairing"` 且发送者尚未被批准时，路由签发配对码。
 
 ### 群聊行为
 
 当 Aleph 在群组中收到消息时：
 
 1. 检查组 ID 是否在 `allowed_groups` 中（或列表为空）
-2. 检查发送者是否在 `allowed_users` 中（或列表为空）
+2. 检查发送者是否在 `allow_from` 中（或列表为空）
 3. 如果两者都通过，将消息路由到 Agent
 
 <Callout type="info">
@@ -239,13 +252,14 @@ Aleph 从所有支持的 Telegram 媒体类型中提取附件：
 - 其他所有 — 作为文档发送（`sendDocument`）
 
 附件可以提供为：
+
 - **内存字节**（`data` 字段）
 - **本地文件路径**（`path` 字段）
 - **远程 URL**（`url` 字段）
 
 ## 内联键盘
 
-Telegram 接口支持用于交互式提示的内联键盘按钮。这主要由工具审批系统使用，让用户直接从聊天中批准或拒绝工具执行：
+Telegram 接口支持用于交互式提示的内联键盘按钮。审批系统使用此机制让用户直接在聊天中批准或拒绝工具执行：
 
 ```
 Aleph wants to execute: shell_exec("ls -la")
@@ -253,9 +267,7 @@ Aleph wants to execute: shell_exec("ls -la")
 [Allow Once] [Allow Always] [Deny]
 ```
 
-当用户点击按钮时，回调查询通过 Gateway 路由回并由审批桥处理。按钮上的加载指示器通过 `answerCallbackQuery` 自动关闭。
-
-键盘也可以用于 Agent 自己构建的自定义多选响应。
+当用户点击按钮时，回调查询通过 Gateway 路由回并由审批桥（`TelegramChannelApprovalCapability`）处理。按钮上的加载指示器通过 `answerCallbackQuery` 自动关闭。该桥是双向的：Discord 上的回复在同一流程中原地编辑原消息。
 
 ## 会话路由
 
@@ -265,8 +277,9 @@ Aleph wants to execute: shell_exec("ls -la")
 |---------|------------|
 | 与用户 12345 的 DM | `agent:main:dm:12345` 或 `agent:main:telegram:dm:12345` |
 | 群组 -100123 | `agent:main:telegram:group:-100123` |
+| Forum topic | `agent:main:telegram:topic:{thread_id}` |
 
-确切的格式取决于你的 `dm_scope` 设置（参见 [接口概览](/docs/interfaces/overview)）。
+确切的格式取决于你的 `dm_scope` 设置（参见[接口概览](/docs/interfaces/overview)）。
 
 ## 消息格式
 
@@ -291,11 +304,12 @@ Telegram 接口处理常见的失败场景：
 | 错误 | 行为 |
 |-------|----------|
 | **无效的机器人令牌** | 启动时通过 `getMe` API 调用检测；频道进入 `Error` 状态 |
-| **速率限制** | 遵守 Telegram 速率限制；最多重试 `max_retries` 次 |
+| **速率限制** | 遵守 Telegram 速率限制；ChannelRegistry 在 `RateLimited` 上重试（`SendRetryPolicy`，默认 2 次重试，绑定 `retry_after` 上限） |
 | **网络故障** | 长轮询自动重新连接；Webhook 模式依赖 Telegram 的重试 |
-| **用户不在白名单中** | 消息被静默丢弃并记录调试级别日志 |
+| **用户不在白名单中** | 静默丢弃；若 `dm_policy = pairing`，路由签发配对码 |
 | **空消息** | 跳过（无文本且无附件） |
 | **服务消息** | 忽略（加入/离开通知、置顶消息等） |
+| **每会话卡死** | `ErrorCooldown` 在异常状态的会话上短路输入与重试 |
 
 ## 验证
 
@@ -310,35 +324,9 @@ Telegram 接口处理常见的失败场景：
 
 | 问题 | 解决方案 |
 |---------|----------|
-| 机器人不响应 | 检查构建中是否启用了 `telegram` 功能标志 |
+| 机器人不响应 | 检查 `config.toml` 中频道是否启用，并确认路由收到了消息（在配对存储里查看发送者 id） |
 | 机器人忽略群组消息 | 通过 BotFather 禁用隐私模式（`/setprivacy`）或确保机器人被提及 |
-| 日志中 "User not in allowlist" | 将用户的数字 Telegram ID 添加到 `allowed_users` |
+| 日志中 "User not in allowlist" | 将用户的数字 Telegram ID 添加到 `allow_from`，或在 Panel 中批准待处理的配对码 |
 | "Failed to verify bot token" | 使用 `curl https://api.telegram.org/bot<TOKEN>/getMe` 验证你的令牌 |
 | 消息延迟 | 减少 `polling_interval_secs` 或切换到 Webhook 模式 |
 | 格式显示损坏 | Aleph 使用 MarkdownV2；检查特殊字符是否被双转义 |
-
----
-
-## 26.7.x 补充
-
-> 注：本节以用户视角补充 26.7.x 的新内容；具体 RPC 与实现细节见 [协议适配器（概念）](/docs/zh/concepts/protocol-adapters) 与 [网关 RPC](/docs/zh/gateway/methods)。
-
-### 跨通道可达性
-
-26.7.x：所有配置的 channel 现在真的可达且可寻址——之前有些配置从未生效。
-
-### Telegram 平行层清理
-
-26.7.21 砍掉 ~2.6k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）。access / pairing / allowlist **单源到路由器**。
-
-### Discord 平行层清理
-
-26.7.21 移除重复的嵌套配置 / account-pool / 解析器层。
-
-### iMessage
-
-26.7.21+ 增强：入站 add-tapback（add-reaction）会上抛为模型上下文。
-
-### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。

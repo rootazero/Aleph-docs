@@ -1,33 +1,32 @@
 ---
 title: "WebChat"
-description: "内置 Web 聊天接口，支持 WebSocket 流式传输和静态文件服务"
+description: "内置 Web 聊天接口：WebAssembly Panel + 基于 JSON-RPC 2.0 的 Gateway WebSocket"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-WebChat 是 Aleph 的内置基于 Web 的聊天接口。它由 Gateway 的 HTTP 服务器直接提供，与 WebSocket 端点并存，无需外部依赖或第三方 API。WebChat 使用与所有其他 Gateway 客户端相同的 JSON-RPC 2.0 协议。
+WebChat 是 Aleph 的内置基于 Web 的聊天接口。它是一个 **WebAssembly Panel**（`interfaces/webchat/`），由 Gateway 的 HTTP 服务器直接提供，与 WebSocket 端点并存。无需外部依赖或第三方 API——Panel 是一个 Leptos 应用，挂载到浏览器 `<body>`，通过与其他 Aleph 客户端相同的 JSON-RPC 2.0 协议与 Gateway 对话。
 
 ## 架构
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │                     浏览器 / 嵌入式                           │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │                   WebChat UI                            │  │
+│  │                WebChat UI（Leptos）                     │  │
 │  │  ┌──────────┐  ┌───────────┐  ┌──────────────────┐    │  │
 │  │  │ 消息历史  │  │  输入区域  │  │  流式传输面板     │    │  │
 │  │  └──────────┘  └───────────┘  └──────────────────┘    │  │
 │  └──────────┬─────────────────────────────────────────────┘  │
-│             │ WebSocket (JSON-RPC 2.0)                        │
+│             │ WebSocket（JSON-RPC 2.0）                      │
 └─────────────┼────────────────────────────────────────────────┘
               │
 ┌─────────────┼────────────────────────────────────────────────┐
 │             ▼                                                  │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │              Gateway HTTP Server                        │  │
-│  │                                                         │  │
-│  │  /              → 静态文件 (WebChat UI)                 │  │
+│  │  /              → 静态文件（WebChat WASM 包）          │  │
 │  │  /ws            → WebSocket 端点                        │  │
 │  │  /health        → 健康检查                              │  │
 │  │  /metrics       → 指标端点                              │  │
@@ -36,28 +35,44 @@ WebChat 是 Aleph 的内置基于 Web 的聊天接口。它由 Gateway 的 HTTP 
 └──────────────────────────────────────────────────────────────┘
 ```
 
-WebChat 作为单页应用 (SPA) 从 Gateway 的静态文件目录提供。与 Gateway 的 WebSocket 连接使用与 macOS 应用、Tauri 桌面应用和 CLI 相同的 JSON-RPC 协议提供实时双向通信。
+`interfaces/webchat/src/lib.rs` 导出 WASM 入口：
 
-## 面板导航
+```rust
+#[wasm_bindgen(start)]
+pub fn main() {
+    panic_overlay::install();
+    appearance::init_appearance();
+    mount_to_body(app::App);
+}
+```
 
-桌面面板（以及完整的 WebChat SPA）公开了**七个顶层模式**，可从分区切换器进入。它们按以下导航顺序排列：
+Panel 是一个单页应用（SPA）。macOS 应用、Tauri 桌面应用与 CLI 使用的同一套 JSON-RPC 协议，由 Gateway 在 `/ws` 端点上对外暴露。
 
-| 模式 | 路由 | 用途 |
-|------|-------|---------|
+## Panel 拓扑
+
+Panel 暴露 **五个顶层内容区**（`PanelMode::Chat`、`Dashboard`、`Memory`、`Agents`、`Teams`），由分区切换器（`src/components/nav_menu.rs`）进入。**Settings**（`PanelMode::Settings`）是一个独立目的地，位于内容分区切换器之外。**Extensions** 与 **More** 可达但不参与主导航：
+
+| 分区 | 路由 | 用途 |
+|---------|-------|---------|
 | Chat | `/chat` | 主对话界面 |
-| Dashboard | `/dashboard` | 状态、活动和概览 |
-| Memory | `/memory` | 记忆中心 —— 图谱视图和表格视图统一在一个宿主中 |
+| Dashboard | `/dashboard` | 状态、活动与概览 |
+| Memory | `/memory` | 记忆中心——图谱视图和表格视图统一在一个宿主中 |
 | Agents | `/agents` | 浏览和配置智能体 |
 | Teams | `/teams` | 多智能体团队和群聊 |
-| Extensions | `/extensions` | 统一的扩展商店 |
-| Settings | `/settings` | 配置 |
+| Settings | `/settings` | 配置（独立目的地，非分区） |
 
-这个拓扑带来了几处变化：
+两个路由可达但不出现在分区切换器中：
 
-- **Extensions**（`/extensions`）是统一的**扩展商店** —— 一个按功能类别浏览技能（Skill）、插件（Plugin）和 MCP 服务器的统一场所。它**取代了旧的 ClawHub 标签页**，后者已被移除。完整概念参见[扩展商店](/docs/zh/concepts/extensions-store)。
-- 旧的 **MCP / Plugins / Skills** 设置面板现在位于 **Settings > Advanced** 之下，而非作为顶层标签页。
+- **Extensions**（`/extensions`）—— 扩展商店的启动入口位于 Chat 侧边栏的 advanced-features 区；该路由保留用于直接链接。详见[扩展商店](/docs/zh/concepts/extensions-store)。
+- **More**（`/more`）—— 仅手机端的折叠页（Teams / Agents / Extensions / Wizard / Help）。
 
-> 切换模式只改变面板界面；底层的 Gateway 会话和 WebSocket 连接保持不变，因此下文描述的同一 JSON-RPC 协议适用于全部七个模式。
+因此切换器是 `ALL_MODES = [Chat, Dashboard, Memory, Agents, Teams, Settings]`——共六项，其中内容区的五项构成主工作流。按设备族划分的 UI 位于 `interfaces/webchat/src/platform/{wide,phone,tablet}/`：
+
+- **wide**（桌面 / 宽屏浏览器）—— `platform/wide/views/`，侧栏 + 多列
+- **phone**（iPhone / Android）—— `platform/phone/`，底部 tab + 单列；子视图 `chat`、`memory`、`agents`、`teams`、`dashboard`、`extensions`、`settings`、`more`、`shell`
+- **tablet**（iPad）—— `platform/tablet/mod.rs` 骨架，规划中支持 Stage Manager
+
+> 切换分区只改变面板界面；底层的 Gateway 会话和 WebSocket 连接保持不变，因此下文描述的同一 JSON-RPC 协议适用于全部分区。
 
 ## 能力
 
@@ -67,12 +82,13 @@ WebChat 作为单页应用 (SPA) 从 Gateway 的静态文件目录提供。与 G
 | Markdown 渲染 | 支持（完整 CommonMark） |
 | 代码语法高亮 | 支持 |
 | Mermaid 图表 | 支持 |
-| 实时流式传输 | 支持 |
+| 实时流式传输 | 支持（Panel live stream） |
 | 图片显示 | 支持（内联） |
 | 文件上传 | 支持 |
 | Canvas 交互 | 支持 |
 | 输入中指示器 | 视觉（客户端） |
-| 多标签 UI | 支持 |
+| 多标签 UI | 支持（Wide + Phone + Tablet） |
+| 流式协议 | `EditBased` |
 | 最大消息长度 | 无限制 |
 
 WebChat 在 **WebRich** 交互范式下运行，这使 AI 能够访问包括 Mermaid 图表、canvas 绘图、可折叠部分和流式输出在内的完整能力集。
@@ -84,7 +100,7 @@ WebChat 在 **WebRich** 交互范式下运行，这使 AI 能够访问包括 Mer
 
 ### 无需额外设置
 
-WebChat 包含在基础 `gateway` 功能标志中。如果你可以启动 Aleph 服务器，WebChat 就可用。
+WebChat 内置在 `gateway` 特性中；只要你能够启动 Aleph 服务器，WebChat 就可用。
 
 ```bash
 cargo build --release --features gateway
@@ -99,7 +115,7 @@ cargo build --release --features gateway
 aleph server start
 ```
 
-服务器默认在 `ws://127.0.0.1:18790` 启动。HTTP 服务器同时提供 WebSocket 端点和 WebChat 静态文件。
+服务器默认在 `ws://127.0.0.1:18790` 启动。HTTP 服务器同时提供 WebSocket 端点和 WebChat WASM 包。
 
 </Step>
 </Steps>
@@ -146,7 +162,7 @@ HttpServerConfig {
 }
 ```
 
-`fallback_file` 启用 SPA 路由 —— 任何不匹配静态文件的路径都提供 `index.html`，让前端路由器处理 URL。
+`fallback_file` 启用 SPA 路由 —— 任何不匹配静态文件的路径都提供 `index.html`，让 Panel 的路由器处理 URL。
 
 ## WebSocket 协议
 
@@ -238,9 +254,9 @@ Gateway 的 HTTP 服务器基于文件扩展名和路径模式处理静态文件
 
 | 模式 | 行为 |
 |---------|----------|
-| `/` | 提供 `index.html` |
+| `/` | 提供 `index.html`（加载 WASM 包） |
 | `/assets/*`, `/static/*` | 提供静态资源 |
-| `*.html`, `*.css`, `*.js` | 提供匹配的文件 |
+| `*.html`, `*.css`, `*.js` | 提供匹配文件 |
 | `*.png`, `*.jpg`, `*.svg` | 提供图片文件 |
 | `/favicon.ico` | 提供 favicon |
 | 任何其他路径 | 回退到 `index.html`（SPA 路由） |
@@ -356,79 +372,10 @@ curl http://127.0.0.1:18790/health
 
 | 问题 | 解决方案 |
 |---------|----------|
-| WebChat 页面空白 | 验证 `static_dir` 路径包含构建的 WebChat UI 文件 |
+| WebChat 页面空白 | 验证 `static_dir` 路径包含构建的 WebChat WASM 包 |
 | WebSocket 连接被拒绝 | 确保 Gateway 正在运行且端口与你的 URL 匹配 |
 | 浏览器控制台中的 CORS 错误 | 将来源添加到 WebChat 配置中的 `cors_origins` |
 | "Authentication required" | 禁用 `require_auth` 或在 `connect` 请求中提供有效令牌 |
 | 流式传输不工作 | 在发送 `agent.run` 之前订阅 `stream.*` 事件 |
 | 静态资源返回 404 | 检查文件是否存在于静态目录中且具有正确的扩展名 |
 | SPA 路由损坏 | 确保 HTTP 服务器配置中的 `fallback_file` 设置为 `"index.html"` |
-
----
-
-## 26.7.x 补充
-
-> 注：本节以用户视角补充 26.7.x 的新内容；具体 RPC 与实现细节见 [协议适配器（概念）](/docs/zh/concepts/protocol-adapters) 与 [网关 RPC](/docs/zh/gateway/methods)。
-
-### 跨通道可达性
-
-26.7.x：所有配置的 channel 现在真的可达且可寻址——之前有些配置从未生效。
-
-### Telegram 平行层清理
-
-26.7.21 砍掉 ~2.6k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）。access / pairing / allowlist **单源到路由器**。
-
-### Discord 平行层清理
-
-26.7.21 移除重复的嵌套配置 / account-pool / 解析器层。
-
-### iMessage
-
-26.7.21+ 增强：入站 add-tapback（add-reaction）会上抛为模型上下文。
-
-### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。
-
-### 平台拓扑（26.7.22+）
-
-`interfaces/webchat/src/platform/` 提供了**三套并行的面板布局**，按设备族切换：
-
-| 平台 | 路径 | 子模块数 | 形态 |
-|------|------|---------|------|
-| **wide**（桌面 / 宽屏） | `interfaces/webchat/src/platform/wide/` | `views/`（10+ 子视图）+ `mod.rs` | 侧栏 + 多列 |
-| **phone**（iPhone / Android 手机） | `interfaces/webchat/src/platform/phone/` | 8 个子模块（agents / chat / dashboard / extensions / memory / settings / teams / shell / more / mod） | 底部 tab + 单列 |
-| **tablet**（iPad） | `interfaces/webchat/src/platform/tablet/` | `mod.rs`（当前主要为骨架） | Split View / Stage Manager |
-
-**Phone 平台子视图**（按 iOS 子目录命名）：
-
-- `phone/chat` —— 单列聊天流 + 浮动 composer
-- `phone/memory` —— 卡片视图（继承 `wide/views/memory/cards.rs`）+ 触摸人体工学
-- `phone/agents` / `phone/teams` —— 移动版团队 / agent 列表
-- `phone/dashboard` —— 简化的运行状态
-- `phone/extensions` —— 移动版 Hub 商店（搜索 + 类别 chip + featured）
-- `phone/settings` —— 简化的设置屏（参 [iOS Panel Phase 1/2 fixes](/docs/zh/changelog#a-aleph-hub-单一源)）
-- `phone/more` —— 折叠菜单（Teams / Agents / Extensions / Wizard / Help）
-- `phone/shell` —— 移动 webview 容器（Capacitor / WKWebView）
-
-**Tablet 平台**：
-
-- `tablet/mod.rs` —— 当前主要为骨架；计划在 iPad 多任务 + Stage Manager 上做完整布局
-
-**Wide vs Phone 共享的子视图**（如 memory 的卡片渲染器）通过**模块继承**实现——`platform/wide/views/memory/cards.rs` 在 `platform/phone/memory/` 中复用，仅调整 padding / font scale。
-
-### iOS Panel 完整化（26.6.25+ / 26.7.22+）
-
-- **原生配对屏**：shake-to-reconfigure、Keychain 连接存储、加载失败回退
-- **完整 iPad 支持**：设备族、全屏、方向、Split View / Stage Manager 多任务、平板专属布局、触摸人体工学
-- **TestFlight** 内部分发
-- **默认 pairing 切到 HTTPS + ATS**（26.7.22+）
-- **iOS Keychain trust store + 决策镜像**（与 macOS WKWebView 共享决策核心）
-
-### View 子模块（wide/views/，26.7.22+）
-
-- **`memory/`**（11 个）—— Vault 面板重构：[详见](/docs/zh/concepts/memory#vault-面板重构26.7.2713-个-panelmemory-提交)
-- **`voice/`**（10 个）—— 实时字幕与 VAD：[详见](/docs/zh/concepts/voice-streaming#panel-视图-platformwideviewsvoice)
-- **`artifacts/`**（5 个）—— Deliverables 面板：[详见](/docs/zh/concepts/artifacts-deliverables#panel-deliverables-面板)
-- **`settings/`** —— 统一保存条 + Phase3/4 + Provider Presets Swift UI
-- **`agents/` / `teams/` / `extensions/` / `dashboard/` / `chat/`** —— 各顶层模式

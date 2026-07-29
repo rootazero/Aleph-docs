@@ -1,20 +1,20 @@
 ---
 title: "WebChat"
-description: "Built-in web chat interface with WebSocket streaming and static file serving"
+description: "Built-in web chat interface: a WebAssembly Panel + Gateway WebSocket over JSON-RPC 2.0"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-WebChat is Aleph's built-in web-based chat interface. It is served directly by the Gateway's HTTP server alongside the WebSocket endpoint, requiring no external dependencies or third-party APIs. WebChat uses the same JSON-RPC 2.0 protocol as all other Gateway clients.
+WebChat is Aleph's built-in web-based chat interface. It is a **WebAssembly Panel** (`interfaces/webchat/`) served directly by the Gateway's HTTP server alongside the WebSocket endpoint. No external dependencies or third-party APIs are required — the Panel is a Leptos app that mounts to the browser `<body>` and talks to the Gateway over the same JSON-RPC 2.0 protocol used by every other Aleph client.
 
 ## Architecture
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │                     Browser / Embedded                        │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │                   WebChat UI                            │  │
+│  │                   WebChat UI (Leptos)                   │  │
 │  │  ┌──────────┐  ┌───────────┐  ┌──────────────────┐    │  │
 │  │  │ Message  │  │  Input    │  │  Streaming       │    │  │
 │  │  │ History  │  │  Area     │  │  Response Panel  │    │  │
@@ -27,8 +27,7 @@ WebChat is Aleph's built-in web-based chat interface. It is served directly by t
 │             ▼                                                  │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │              Gateway HTTP Server                        │  │
-│  │                                                         │  │
-│  │  /              → Static files (WebChat UI)            │  │
+│  │  /              → Static files (WebChat WASM bundle)   │  │
 │  │  /ws            → WebSocket endpoint                   │  │
 │  │  /health        → Health check                         │  │
 │  │  /metrics       → Metrics endpoint                     │  │
@@ -37,28 +36,44 @@ WebChat is Aleph's built-in web-based chat interface. It is served directly by t
 └──────────────────────────────────────────────────────────────┘
 ```
 
-WebChat is served as a single-page application (SPA) from the Gateway's static file directory. The WebSocket connection to the Gateway provides real-time bidirectional communication using the same JSON-RPC protocol used by the macOS app, Tauri desktop app, and CLI.
+`interfaces/webchat/src/lib.rs` exports the WASM entry point:
 
-## Panel navigation
+```rust
+#[wasm_bindgen(start)]
+pub fn main() {
+    panic_overlay::install();
+    appearance::init_appearance();
+    mount_to_body(app::App);
+}
+```
 
-The desktop panel (and the full WebChat SPA) exposes **seven top-level modes**, reached from the section switcher. They appear in this nav order:
+The Panel is a single-page application (SPA). The same JSON-RPC protocol used by the macOS app, Tauri desktop app, and CLI is exposed at `/ws` on the Gateway.
 
-| Mode | Route | Purpose |
-|------|-------|---------|
+## Panel Topology
+
+The Panel exposes **five top-level content sections** (`PanelMode::Chat`, `Dashboard`, `Memory`, `Agents`, `Teams`), reached from the section switcher (`src/components/nav_menu.rs`). **Settings** (`PanelMode::Settings`) is a separate destination that lives outside the content-section switcher. **Extensions** and **More** are reachable but not part of the primary navigation:
+
+| Section | Route | Purpose |
+|---------|-------|---------|
 | Chat | `/chat` | Primary conversation surface |
 | Dashboard | `/dashboard` | Status, activity, and overview |
-| Memory | `/memory` | Memory Hub — Graph view and Table view in one host |
+| Memory | `/memory` | Memory Hub — graph view and table view in one host |
 | Agents | `/agents` | Browse and configure agents |
 | Teams | `/teams` | Multi-agent teams and group chat |
-| Extensions | `/extensions` | The unified Extensions Store |
-| Settings | `/settings` | Configuration |
+| Settings | `/settings` | Configuration (separate destination, not a section) |
 
-A few things changed with this topology:
+Two routes are reachable but not in the section switcher:
 
-- **Extensions** (`/extensions`) is the unified **Extensions Store** — a single place to browse Skills, Plugins, and MCP servers by functional category. It **replaces the old ClawHub tab**, which has been removed. See [Extensions Store](/docs/en/concepts/extensions-store) for the full concept.
-- The legacy **MCP / Plugins / Skills** settings panels now live under **Settings > Advanced**, rather than as top-level tabs.
+- **Extensions** (`/extensions`) — the launch surface for the Extensions Store lives in the Chat sidebar's advanced-features zone; the route is kept for direct linking. See [Extensions Store](/docs/en/concepts/extensions-store).
+- **More** (`/more`) — phone-only tab that collapses Teams / Agents / Extensions / Wizard / Help.
 
-> Switching modes only changes the panel surface; the underlying Gateway session and WebSocket connection are unchanged, so the same JSON-RPC protocol described below applies across all seven modes.
+The switcher is therefore `ALL_MODES = [Chat, Dashboard, Memory, Agents, Teams, Settings]` — six entries, with the content-only five forming the primary workflow. Per-form-factor UI lives under `interfaces/webchat/src/platform/{wide,phone,tablet}/`:
+
+- **wide** (desktop / wide-screen browser) — `platform/wide/views/`, sidebar + multi-column
+- **phone** (iPhone / Android) — `platform/phone/`, bottom-tab + single column; sub-views `chat`, `memory`, `agents`, `teams`, `dashboard`, `extensions`, `settings`, `more`, `shell`
+- **tablet** (iPad) — `platform/tablet/mod.rs` skeleton, planned for Stage Manager
+
+> Switching sections only changes the panel surface; the underlying Gateway session and WebSocket connection are unchanged, so the same JSON-RPC protocol described below applies across every section.
 
 ## Capabilities
 
@@ -68,12 +83,13 @@ A few things changed with this topology:
 | Markdown rendering | Supported (full CommonMark) |
 | Code syntax highlighting | Supported |
 | Mermaid diagrams | Supported |
-| Real-time streaming | Supported |
+| Real-time streaming | Supported (Panel live stream) |
 | Image display | Supported (inline) |
 | File upload | Supported |
 | Canvas interaction | Supported |
 | Typing indicator | Visual (client-side) |
-| Multi-tab UI | Supported |
+| Multi-tab UI | Supported (Wide + Phone + Tablet) |
+| Stream protocol | `EditBased` |
 | Max message length | Unlimited |
 
 WebChat operates under the **WebRich** interaction paradigm, which gives the AI access to the full set of capabilities including Mermaid charts, canvas drawing, collapsible sections, and streaming output.
@@ -85,7 +101,7 @@ WebChat operates under the **WebRich** interaction paradigm, which gives the AI 
 
 ### No Additional Setup Required
 
-WebChat is included with the base `gateway` feature flag. If you can start the Aleph server, WebChat is available.
+WebChat is shipped inside the `gateway` feature; if you can start the Aleph server, WebChat is available.
 
 ```bash
 cargo build --release --features gateway
@@ -100,7 +116,7 @@ cargo build --release --features gateway
 aleph server start
 ```
 
-The server starts on `ws://127.0.0.1:18790` by default. The HTTP server serves both the WebSocket endpoint and the WebChat static files.
+The server starts on `ws://127.0.0.1:18790` by default. The HTTP server serves both the WebSocket endpoint and the WebChat WASM bundle.
 
 </Step>
 </Steps>
@@ -120,7 +136,7 @@ max_connections = 100
 
 ### Explicit WebChat Config
 
-For advanced scenarios, you can configure WebChat separately:
+For advanced scenarios you can configure WebChat separately:
 
 ```toml
 [channels.webchat]
@@ -147,7 +163,7 @@ HttpServerConfig {
 }
 ```
 
-The `fallback_file` enables SPA routing -- any path that does not match a static file serves `index.html`, letting the frontend router handle the URL.
+The `fallback_file` enables SPA routing — any path that does not match a static file serves `index.html`, letting the Panel's router handle the URL.
 
 ## WebSocket Protocol
 
@@ -239,7 +255,7 @@ The Gateway's HTTP server handles static file requests based on file extensions 
 
 | Pattern | Behavior |
 |---------|----------|
-| `/` | Serves `index.html` |
+| `/` | Serves `index.html` (which loads the WASM bundle) |
 | `/assets/*`, `/static/*` | Serves static assets |
 | `*.html`, `*.css`, `*.js` | Serves matching files |
 | `*.png`, `*.jpg`, `*.svg` | Serves image files |
@@ -282,9 +298,9 @@ Wildcard patterns are supported (e.g., `http://localhost:*` matches any port).
 
 When `require_auth` is enabled on the Gateway, WebChat users must authenticate:
 
-1. **Token-based** -- Pass a bearer token in the `connect` request
-2. **Device pairing** -- Use the pairing flow to register the browser as a trusted device
-3. **No auth** (default) -- When `require_auth` is `false`, all WebSocket connections are accepted
+1. **Token-based** — Pass a bearer token in the `connect` request
+2. **Device pairing** — Use the pairing flow to register the browser as a trusted device
+3. **No auth** (default) — When `require_auth` is `false`, all WebSocket connections are accepted
 
 ```toml
 [gateway]
@@ -315,7 +331,7 @@ The WebChat UI can specify custom session keys to support multiple conversations
 }
 ```
 
-Session history, compaction, and persistence work identically to all other interfaces -- backed by the SQLite session store.
+Session history, compaction, and persistence work identically to all other interfaces — backed by the SQLite session store.
 
 ## InteractionManifest
 
@@ -357,36 +373,10 @@ This can be used for monitoring and load balancer health checks.
 
 | Problem | Solution |
 |---------|----------|
-| WebChat page is blank | Verify the `static_dir` path contains the built WebChat UI files |
+| WebChat page is blank | Verify the `static_dir` path contains the built WebChat WASM bundle |
 | WebSocket connection refused | Ensure the Gateway is running and the port matches your URL |
 | CORS errors in browser console | Add your origin to `cors_origins` in the WebChat config |
 | "Authentication required" | Either disable `require_auth` or provide a valid token in the `connect` request |
 | Streaming not working | Subscribe to `stream.*` events before sending `agent.run` |
 | Static assets return 404 | Check that the file exists in the static directory and has the correct extension |
 | SPA routing broken | Ensure `fallback_file` is set to `"index.html"` in the HTTP server config |
-
----
-
-## 26.7.x Addendum
-
-> Note: this section supplements 26.7.x from the user view; RPC and implementation details are in [Protocol Adapters (Concept)](/docs/en/concepts/protocol-adapters) and [Gateway RPC](/docs/en/gateway/methods).
-
-### Cross-Channel Reachability
-
-26.7.x: configured channels are now truly reachable and addressable — previously some configurations never took effect.
-
-### Telegram Parallel-Layer Cleanup
-
-26.7.21 shed ~2.6k lines of dead code (an uncompiled webhook server, an unconstructed session manager, a dead draft API, duplicated status reactions). Access / pairing / allowlist **single-sourced on the router**.
-
-### Discord Parallel-Layer Cleanup
-
-26.7.21 removed duplicated nested-config / account-pool / resolver layers.
-
-### iMessage
-
-26.7.21+ enhancement: inbound add-tapbacks (add-reactions) surface to the model as context.
-
-### Full `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-See [Gateway RPC channels](/docs/en/gateway/methods/channels).

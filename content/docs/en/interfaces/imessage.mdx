@@ -1,36 +1,57 @@
 ---
 title: "iMessage"
-description: "Native macOS iMessage integration for Aleph via Messages.app and SQLite polling"
+description: "Native macOS iMessage integration for Aleph via Messages.app SQLite polling, plus a cross-platform BlueBubbles transport"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-The iMessage interface provides native macOS integration by reading messages from the Messages.app SQLite database and sending replies via AppleScript. This is a platform-specific interface that only runs on macOS.
+The iMessage interface provides native macOS integration by reading messages from the Messages.app SQLite database and sending replies via AppleScript, **plus** a cross-platform **BlueBubbles** transport that talks REST + webhook to a running BlueBubbles server. Both transports implement the same `Channel` trait and are routed through the same inbound pipeline; you can run either (or both) from a single config.
 
-## Architecture
+## Two Transports
 
-Unlike cloud-based interfaces (Telegram, Discord), the iMessage integration is entirely local:
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│                         macOS System                              │
+│  ┌──────────────────┐     ┌──────────────────────────────────┐   │
+│  │   Messages.app   │     │           Aleph Server            │   │
+│  │                  │     │                                   │   │
+│  │  chat.db ────────┼─────┼──> SQLite Polling (read-only)     │   │
+│  │  (SQLite)        │     │  [IMessageChannel, macOS-only]    │   │
+│  │                  │ <───┼─── AppleScript (send message)     │   │
+│  └──────────────────┘     └──────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
 
+┌──────────────────────────────────────────────────────────────────┐
+│                  BlueBubbles Server (any host)                    │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │  REST API + webhook  ◀──▶  [BlueBubblesChannel, any OS]  │   │
+│  └──────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     macOS System                         │
-│                                                          │
-│  ┌──────────────┐     ┌──────────────────────────────┐  │
-│  │ Messages.app │     │        Aleph Server           │  │
-│  │              │     │                               │  │
-│  │  chat.db ────┼─────┼──> SQLite Polling (read-only) │  │
-│  │  (SQLite)    │     │                               │  │
-│  │              │ <───┼─── AppleScript (send message) │  │
-│  └──────────────┘     └──────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
 
-**Receiving messages:** Aleph polls the `~/Library/Messages/chat.db` SQLite database in read-only mode, detecting new rows since the last poll.
+- **`IMessageChannel`** (local) — SQLite database polling for receiving, AppleScript for sending. Requires macOS, Full Disk Access, and Automation permission. Only registered on macOS (`#[cfg(target_os = "macos")]` on the module).
+- **`BlueBubblesChannel`** (`imessage/bluebubbles/`) — REST + webhook against a BlueBubbles server. Pure HTTP — compiles and runs on any OS.
 
-**Sending messages:** Aleph uses `osascript` to execute AppleScript commands that control Messages.app, sending text and file attachments through the iMessage service.
+## Adapter Structure
+
+The iMessage adapter lives under `src/gateway/interfaces/imessage/`:
+
+| Module | Responsibility |
+|--------|----------------|
+| `mod.rs` | `IMessageChannel`, capability defaults, factory wiring |
+| `config.rs` | `IMessageConfig`, `DmPolicy`, `GroupPolicy` |
+| `db.rs` | `MessagesDb` — read-only SQLite wrapper around `chat.db` |
+| `sender.rs` | AppleScript-driven outbound send |
+| `target.rs` | Target normalization (`normalize_phone`, `parse_target`, `IMessageTarget`, `Service`) |
+| `reaction.rs` | Tapback code ↔ emoji mapping (single source for both transports) |
+| `bluebubbles/` | `BlueBubblesChannel` + REST/webhook staging |
+
+Both transports share the gateway-shared **`OffsetTracker`** (currently homed in the Telegram module) for the catch-up watermark so that messages arriving while the daemon is offline are picked up on restart.
 
 ## Capabilities
+
+### `IMessageChannel` (Local)
 
 | Feature | Status |
 |---------|--------|
@@ -39,7 +60,7 @@ Unlike cloud-based interfaces (Telegram, Discord), the iMessage integration is e
 | Photos | Supported (send and receive) |
 | Documents | Supported (send and receive) |
 | Audio/Video | Supported (send and receive) |
-| Tapback reactions | Limited (send not fully supported via AppleScript) |
+| Tapback reactions | Inbound add-tapbacks are surfaced to the model as context; outbound is unreliable across macOS versions |
 | Reply threading | Not supported |
 | Message editing | Not supported |
 | Message deletion | Not supported |
@@ -47,20 +68,42 @@ Unlike cloud-based interfaces (Telegram, Discord), the iMessage integration is e
 | Read receipts | Not supported |
 | Max message length | ~20,000 characters |
 | Max attachment size | 100 MB |
+| Stream protocol | `None` |
+
+### `BlueBubblesChannel`
+
+| Feature | Status |
+|---------|--------|
+| Text messages | Supported |
+| Rich text (Markdown) | Not supported |
+| Photos | Supported (send and receive) |
+| Documents | Supported (send and receive) |
+| Audio/Video | Supported (send and receive) |
+| Tapback reactions | Supported (inbound + outbound via BlueBubbles API) |
+| Reply threading | Supported |
+| Message editing | Not supported |
+| Message deletion | Not supported |
+| Typing indicator | Supported |
+| Read receipts | Supported |
+| Max message length | 4,000 characters |
+| Max attachment size | 100 MB |
+| Stream protocol | `None` |
 
 ## Prerequisites
+
+### Local Transport
 
 <Steps>
 <Step>
 
-### macOS Requirement
+#### macOS Requirement
 
-The iMessage interface only works on macOS. It is conditionally compiled with `#[cfg(target_os = "macos")]` and will not be available on Linux or Windows builds.
+The local transport is only registered on macOS (`#[cfg(target_os = "macos")]`). On Linux/Windows builds, only `BlueBubblesChannel` is available.
 
 </Step>
 <Step>
 
-### Full Disk Access
+#### Full Disk Access
 
 Aleph needs **Full Disk Access** permission to read `~/Library/Messages/chat.db`:
 
@@ -74,7 +117,7 @@ Without this permission, the database open will fail with a "permission denied" 
 </Step>
 <Step>
 
-### Automation Permission
+#### Automation Permission
 
 Aleph needs **Automation** permission to control Messages.app via AppleScript:
 
@@ -85,44 +128,46 @@ Aleph needs **Automation** permission to control Messages.app via AppleScript:
 </Step>
 </Steps>
 
+### BlueBubbles Transport
+
+<Steps>
+<Step>
+
+#### Run a BlueBubbles Server
+
+You need a running BlueBubbles server (typically on the same Mac that owns the iMessage account). Install and start it per the BlueBubbles docs; note the server URL and the account password.
+
+</Step>
+<Step>
+
+#### Open the REST + Webhook Ports
+
+Make sure Aleph can reach the BlueBubbles server (HTTPS) and that the BlueBubbles webhook can reach Aleph (the gateway's HTTP server).
+
+</Step>
+</Steps>
+
 ## Configuration
 
-### Minimal Configuration
+### Local Transport
 
 ```toml
 [[channels]]
-id = "imessage"
+id = "imessage-local"
 channel_type = "imessage"
 enabled = true
 
 [channels.config]
-enabled = true
-```
-
-### Full Configuration Reference
-
-```toml
-[[channels]]
-id = "imessage"
-channel_type = "imessage"
-enabled = true
-
-[channels.config]
-# Enable the iMessage channel (default: false)
-enabled = true
-
 # Path to the Messages database (default: ~/Library/Messages/chat.db)
 db_path = "~/Library/Messages/chat.db"
 
 # Poll interval in milliseconds (default: 1000)
 poll_interval_ms = 1000
 
-# DM policy for incoming messages
-# Options: "pairing", "allowlist", "open", "disabled"
+# DM policy: pairing | allowlist | open | disabled
 dm_policy = "pairing"
 
-# Group message policy
-# Options: "open", "allowlist", "disabled"
+# Group message policy: open | allowlist | disabled
 group_policy = "open"
 
 # Allowlist of phone numbers/emails for DMs
@@ -144,11 +189,37 @@ include_attachments = true
 max_attachment_size = 0
 
 # Inbound message debounce in milliseconds (default: 500)
-# Prevents processing rapid bursts of messages
 inbound_debounce_ms = 500
 ```
 
-## DM Policy
+### BlueBubbles Transport
+
+```toml
+[[channels]]
+id = "imessage-bb"
+channel_type = "imessage.bluebubbles"
+enabled = true
+
+[channels.config]
+# BlueBubbles server URL (HTTPS)
+server_url = "https://bluebubbles.local:1234"
+
+# BlueBubbles account password
+password = "${BLUEBUBBLES_PASSWORD}"
+
+# Optional webhook URL (set on the BlueBubbles server side)
+webhook_url = "https://aleph.example.com/webhooks/imessage"
+
+# Poll interval in milliseconds for the fallback poll loop
+poll_interval_ms = 1000
+
+# Same DM / group / allowlist policy as the local transport
+dm_policy = "pairing"
+group_policy = "open"
+allow_from = ["+15551234567"]
+```
+
+## DM and Group Policy
 
 The `dm_policy` setting controls how Aleph handles direct messages from unknown senders:
 
@@ -160,7 +231,7 @@ The `dm_policy` setting controls how Aleph handles direct messages from unknown 
 | **`disabled`** | DMs are completely disabled |
 
 <Callout type="info">
-The **pairing** policy integrates with Aleph's invitation system. An owner can generate a pairing code, and when an unknown sender sends that code via iMessage, their phone number or email is automatically added to the allowlist.
+The **pairing** policy uses the gateway's single `PairingStore`. An operator generates a pairing code, the unknown sender sends that code via iMessage, and the operator approves it from the Panel via `channel.pairing.approve`. The phone number or email is added to the allowlist on approval. There is no per-channel pairing database.
 </Callout>
 
 ### Group Policy
@@ -173,20 +244,26 @@ The **pairing** policy integrates with Aleph's invitation system. An owner can g
 
 ## How Message Polling Works
 
-The polling loop operates in a background Tokio task:
+### Local Transport (`IMessageChannel`)
 
-1. **Open database** -- `chat.db` is opened in read-only mode with `SQLITE_OPEN_READ_ONLY`
-2. **Record last ROWID** -- On startup, the current maximum message ROWID is recorded as the baseline
-3. **Poll loop** -- Every `poll_interval_ms` milliseconds:
+The polling loop runs in a background Tokio task:
+
+1. **Open database** — `chat.db` is opened read-only (`SQLITE_OPEN_READ_ONLY`)
+2. **Record last ROWID** — On startup, the current max ROWID is the baseline
+3. **Poll loop** — Every `poll_interval_ms`:
    - Query for messages with `ROWID > last_seen` and `is_from_me = 0`
    - For each new message, resolve the sender handle and chat info
    - Extract attachments if `cache_has_attachments` is set
-   - Convert to an `InboundMessage` and send through the mpsc channel
-4. **Update marker** -- The last seen ROWID is updated after each batch
+   - Convert to an `InboundMessage` and broadcast through the channel state
+4. **Update marker** — The last seen ROWID is updated after each batch
+
+### BlueBubbles Transport (`BlueBubblesChannel`)
+
+`BlueBubblesChannel` registers a webhook with the BlueBubbles server for push delivery and falls back to a poll loop (`poll_interval_ms`) for catch-up. The shared `OffsetTracker` makes both transports resume after restart from the last persisted GUID/ROWID instead of jumping straight to the newest message.
 
 ### Apple Timestamps
 
-Messages.app uses "Apple Cocoa Core Data timestamps" -- nanoseconds since January 1, 2001 UTC. Aleph converts these to standard Unix timestamps:
+Messages.app uses "Apple Cocoa Core Data timestamps" — nanoseconds since January 1, 2001 UTC. Aleph converts these to standard Unix timestamps:
 
 ```
 unix_timestamp = apple_timestamp / 1,000,000,000 + 978,307,200
@@ -194,9 +271,7 @@ unix_timestamp = apple_timestamp / 1,000,000,000 + 978,307,200
 
 ## Sending Messages
 
-Messages are sent via AppleScript controlling the Messages.app:
-
-### Text Messages
+### Local Transport — AppleScript
 
 ```applescript
 tell application "Messages"
@@ -206,20 +281,7 @@ tell application "Messages"
 end tell
 ```
 
-### File Attachments
-
-```applescript
-tell application "Messages"
-    set targetService to 1st account whose service type = iMessage
-    set targetBuddy to participant "+15551234567" of targetService
-    set theFile to POSIX file "/path/to/file.png"
-    send theFile to targetBuddy
-end tell
-```
-
-### Group Chat Messages
-
-Group chats are addressed by chat ID rather than participant:
+Group chats are addressed by chat ID:
 
 ```applescript
 tell application "Messages"
@@ -228,35 +290,52 @@ tell application "Messages"
 end tell
 ```
 
+### BlueBubbles Transport — REST
+
+The BlueBubbles transport sends through the BlueBubbles REST API; no AppleScript is required, so BlueBubbles works on any host and from non-Mac accounts. Reactions, replies, typing indicators, and read receipts go through the same REST surface.
+
+## Tapback Reactions
+
+The single source for tapback codes (`src/gateway/interfaces/imessage/reaction.rs`) maps Apple/BlueBubbles numeric `associatedMessageType` values to canonical names and emoji:
+
+| Code | Name | Emoji |
+|------|------|-------|
+| 2000 | love | ❤️ |
+| 2001 | like | 👍 |
+| 2002 | dislike | 👎 |
+| 2003 | laugh | 😂 |
+| 2004 | emphasize | ‼️ |
+| 2005 | question | ❓ |
+
+The "remove" variants (3000–3005) and unknown codes are intentionally absent, so any emoji lookup against them yields `None` and the reaction is dropped at the mapping layer — this is how "only surface add tapbacks" is enforced without a second filter. Inbound *add* tapbacks are surfaced to the model as context (the user's reaction to a prior assistant message); *remove* tapbacks are dropped.
+
 ## Media Handling
 
 ### Receiving Attachments
 
-Attachments are detected via the `cache_has_attachments` flag in the message table and resolved through the `message_attachment_join` table:
+Attachments are detected via the `cache_has_attachments` flag in the message table and resolved through `message_attachment_join` (local transport) or the BlueBubbles attachment metadata (BlueBubbles transport):
 
 | Field | Source |
 |-------|--------|
 | `id` | Attachment GUID |
-| `mime_type` | From `attachment.mime_type` column |
+| `mime_type` | From `attachment.mime_type` (local) or BlueBubbles `TransferName` |
 | `filename` | From `attachment.filename` or `transfer_name` |
 | `size` | From `attachment.total_bytes` |
 
 ### Sending Attachments
 
-Outbound file attachments must be provided as local file paths. The file is sent via the AppleScript `send POSIX file` command.
+The local transport requires local file paths (sent via AppleScript `send POSIX file`). The BlueBubbles transport uploads through the BlueBubbles REST API.
 
 ## Session Routing
 
-iMessage conversations map to session keys based on the chat context:
-
 | Context | Session Key |
 |---------|------------|
-| DM with +15551234567 | `agent:main:dm:+15551234567` or `agent:main:imessage:dm:+15551234567` |
+| DM with `+15551234567` | `agent:main:dm:+15551234567` or `agent:main:imessage:dm:+15551234567` |
 | Group chat (chat ID) | `agent:main:imessage:group:{chat_identifier}` |
 
 The `chat_identifier` is typically the phone number for DMs or an internal ID for group chats.
 
-## Database Schema
+## Database Schema (Local Transport)
 
 Aleph reads from three primary tables in `chat.db`:
 
@@ -292,48 +371,31 @@ Aleph reads from three primary tables in `chat.db`:
 
 ## Limitations
 
-- **macOS only** -- Cannot run on Linux or Windows
-- **Full Disk Access required** -- The database is protected by macOS TCC (Transparency, Consent, and Control)
-- **No real-time delivery** -- Polling-based with configurable interval (minimum practical: ~500ms)
-- **No rich text** -- iMessage supports rich text internally but AppleScript sends plain text only
-- **No typing indicator** -- Would require deeper system integration
-- **Tapback reactions** -- Sending tapbacks via AppleScript is not reliably supported across macOS versions; receiving tapbacks is not yet implemented
-- **No message editing/deletion** -- AppleScript does not expose these operations
+### Local Transport
+
+- **macOS only** — Cannot run on Linux or Windows
+- **Full Disk Access required** — Database is protected by macOS TCC
+- **No real-time delivery** — Polling-based with configurable interval (minimum practical: ~500ms)
+- **No rich text** — AppleScript sends plain text only
+- **No typing indicator** — Would require deeper system integration
+- **Outbound tapbacks unreliable** — Sending tapbacks via AppleScript is not reliably supported across macOS versions
+- **No message editing/deletion** — AppleScript does not expose these operations
+
+### BlueBubbles Transport
+
+- **Requires a BlueBubbles server** — Run it on a Mac with an iMessage account; Aleph talks to it over HTTPS
+- **No rich text** — Plain text only
+- **No message editing/deletion** — BlueBubbles REST API does not expose these operations
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| "Failed to open Messages database" | Grant Full Disk Access to the Aleph binary in System Settings |
+| "Failed to open Messages database" | Grant Full Disk Access to the Aleph binary in System Settings (local transport) |
 | "AppleScript execution failed" | Grant Automation permission; ensure Messages.app is installed and signed in |
 | Bot does not see new messages | Verify `db_path` points to the correct database; check that `is_from_me = 0` filter is working |
-| Messages.app opens unexpectedly | This is normal -- AppleScript may activate the app when sending |
+| Messages.app opens unexpectedly | This is normal — AppleScript may activate the app when sending |
 | Slow response time | Decrease `poll_interval_ms` (e.g., to 500); note this increases SQLite read frequency |
 | "Invalid target" error | Ensure the recipient is a valid phone number (with country code) or email address |
 | Group messages ignored | Check `group_policy` and `group_allow_from`; verify `require_mention` settings |
-
----
-
-## 26.7.x Addendum
-
-> Note: this section supplements 26.7.x from the user view; RPC and implementation details are in [Protocol Adapters (Concept)](/docs/en/concepts/protocol-adapters) and [Gateway RPC](/docs/en/gateway/methods).
-
-### Cross-Channel Reachability
-
-26.7.x: configured channels are now truly reachable and addressable — previously some configurations never took effect.
-
-### Telegram Parallel-Layer Cleanup
-
-26.7.21 shed ~2.6k lines of dead code (an uncompiled webhook server, an unconstructed session manager, a dead draft API, duplicated status reactions). Access / pairing / allowlist **single-sourced on the router**.
-
-### Discord Parallel-Layer Cleanup
-
-26.7.21 removed duplicated nested-config / account-pool / resolver layers.
-
-### iMessage
-
-26.7.21+ enhancement: inbound add-tapbacks (add-reactions) surface to the model as context.
-
-### Full `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-See [Gateway RPC channels](/docs/en/gateway/methods/channels).
+| BlueBubbles: webhook not received | Verify `webhook_url` is reachable from the BlueBubbles host; check the Aleph gateway HTTP port |

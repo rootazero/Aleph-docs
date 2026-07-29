@@ -5,65 +5,93 @@ description: "为多通道消息架构提供支持，驱动 Aleph 的多态通�
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Aleph 通过**接口**（也称为频道）与用户通信——可插拔的适配器，将消息平台桥接到 Gateway 的统一消息总线。单个 Aleph 实例可以同时为 Telegram、Discord、iMessage、WebChat 和 CLI 提供服务，所有这些都共享同一个 Agent 大脑、记忆和工具生态系统。
+Aleph 通过**接口**（也称为频道）与用户通信——可插拔的适配器，将消息平台桥接到 Gateway 的统一消息总线。单个 Aleph 实例可以同时为 Telegram、Discord、iMessage、WebChat、CLI 以及其余已支持的频道族提供服务，所有这些都共享同一个 Agent 大脑、记忆和工具生态系统。
 
 ## 架构
 
 每个接口遵循相同的数据流：
 
 ```
-平台 API ──> 接口适配器 ──> InboundMessage ──> Gateway 路由器
-                                                              │
-                                                         会话密钥
-                                                              │
-                                                          执行器
-                                                               │
+平台 API ──> 接口适配器 ──> InboundMessage ──> ChannelRegistry
+                                                  │
+                                          InboundMessageRouter
+                                       （单源：access / pairing /
+                                        allowlist / session key /
+                                        agent binding）
+                                                  │
+                                                Harness
+                                                  │
 平台 API <── 接口适配器 <── OutboundMessage <── 响应
 ```
 
-Gateway 的 **ChannelRegistry** 管理所有活动接口的生命周期。当 Aleph 启动时，它读取频道配置，通过 **ChannelFactory** 实例化每个启用的接口，并调用 `start()`。从那时起，入站消息通过 `mpsc` 频道流向 Gateway，出站响应通过同一个适配器调度回去。
+`ChannelRegistry`（`src/gateway/channel_registry.rs`）管理所有活动接口的生命周期。启动时它读取频道配置，通过 `ChannelFactory` 实例化每个启用的接口，调用 `start()`，并对外暴露一个共享的 `broadcast::Receiver<InboundMessage>` 以及类型化的出站 `send` 路径。此后每条入站消息都汇入同一队列，每条出站回复也经由同一个适配器派发。
+
+**InboundMessageRouter**（`src/gateway/inbound_router/`）是访问策略、配对、白名单强制、去重、群聊处理与会话密钥解析的**单一来源**。每个频道适配器把原始消息交给路由；适配器只做粗粒度预过滤（在到达路由前丢弃明显不应放行的流量）；路由是唯一签发配对码、决定谁能抵达 Agent 的地方。配对状态由单一的 `PairingStore`（`src/gateway/pairing_store.rs`）持久化。
 
 ## Channel Trait
 
-所有接口都实现 `Channel` trait，无论底层平台如何，都提供统一的 API：
+所有接口都实现 `src/gateway/channel.rs:738` 处定义的 `Channel` trait，无论底层平台如何，都提供统一的 API：
 
 ```rust
 #[async_trait]
 pub trait Channel: Send + Sync {
-    /// 频道元数据（id、名称、类型、状态、能力）
+    /// 频道元数据（id、name、type、status、capabilities）
     fn info(&self) -> &ChannelInfo;
 
-    /// 启动频道（连接、认证、开始轮询/监听）
+    /// 共享的可变状态（status + 入站 broadcast sender/receiver）
+    fn state(&self) -> &ChannelState;
+
+    fn id(&self) -> &ChannelId { &self.info().id }
+    fn channel_type(&self) -> &str { &self.info().channel_type }
+    fn status(&self) -> ChannelStatus { self.state().status() }
+    async fn health(&self) -> ChannelHealth { self.state().health().await }
+    fn capabilities(&self) -> &ChannelCapabilities { &self.info().capabilities }
+
+    /// 审批下发能力（默认 None；支持审批的频道 opt-in）
+    fn approval_capability(&self) -> Option<Arc<dyn ChannelApprovalCapability>> { None }
+
+    async fn get_pairing_data(&self) -> ChannelResult<PairingData> { Ok(PairingData::None) }
+    async fn list_active_pairing_codes(&self) -> ChannelResult<Vec<(String, u64)>> { Ok(vec![]) }
+
     async fn start(&mut self) -> ChannelResult<()>;
-
-    /// 停止频道（断开连接、清理）
     async fn stop(&mut self) -> ChannelResult<()>;
-
-    /// 通过此频道发送消息
     async fn send(&self, message: OutboundMessage) -> ChannelResult<SendResult>;
 
-    /// 获取入站消息接收器
-    fn inbound_receiver(&self) -> Option<mpsc::Receiver<InboundMessage>>;
+    /// 订阅入站消息——每个订阅者拿到自己的 broadcast receiver
+    fn inbound_subscribe(&self) -> broadcast::Receiver<InboundMessage> {
+        self.state().inbound_subscribe()
+    }
 
-    /// 发送输入中指示器
     async fn send_typing(&self, conversation_id: &ConversationId) -> ChannelResult<()>;
+    async fn mark_read(&self, message_id: &MessageId) -> ChannelResult<()>;
+    async fn react(&self, conversation_id: &ConversationId,
+                   message_id: &MessageId, reaction: &str) -> ChannelResult<()>;
+    async fn edit(&self, conversation_id: &ConversationId,
+                  message_id: &MessageId, new_text: &str) -> ChannelResult<()>;
+    async fn delete(&self, conversation_id: &ConversationId,
+                    message_id: &MessageId) -> ChannelResult<()>;
 
-    /// 对消息做出反应
-    async fn react(&self, message_id: &MessageId, reaction: &str) -> ChannelResult<()>;
+    /// 列出 Agent 可寻址的对话（只读，仅路由元数据）
+    async fn list_conversations(&self, query: &str, limit: usize)
+        -> ChannelResult<ConversationPage>;
 
-    /// 编辑先前发送的消息
-    async fn edit(&self, message_id: &MessageId, new_text: &str) -> ChannelResult<()>;
-
-    /// 删除消息
-    async fn delete(&self, message_id: &MessageId) -> ChannelResult<()>;
+    fn native_stream_handler(&self) -> Option<Arc<dyn NativeStreamHandler>> { None }
 }
 ```
 
-每个接口还有一个 **ChannelFactory**，用于在运行时从 JSON/TOML 配置创建实例，当配置文件更改时支持热重载。
+每个接口还有一个 **ChannelFactory**，在运行时从 JSON 配置创建实例：
+
+```rust
+#[async_trait]
+pub trait ChannelFactory: Send + Sync {
+    fn channel_type(&self) -> &str;
+    async fn create(&self, config: serde_json::Value) -> ChannelResult<Box<dyn Channel>>;
+}
+```
 
 ## 频道能力
 
-并非每个平台都支持每个功能。每个频道声明一个 `ChannelCapabilities` 结构体，以便 Agent 可以调整其行为：
+并非每个平台都支持每个功能。每个频道声明一个 `ChannelCapabilities` 结构体（`src/gateway/channel.rs:384`），以便 Agent 调整其行为：
 
 ```rust
 pub struct ChannelCapabilities {
@@ -78,39 +106,45 @@ pub struct ChannelCapabilities {
     pub typing_indicator: bool,
     pub read_receipts: bool,
     pub rich_text: bool,
-    pub max_message_length: usize,
-    pub max_attachment_size: u64,
+    pub max_message_length: usize,    // 0 = 无限制
+    pub max_attachment_size: u64,     // 0 = 无限制
+    pub stream_protocol: StreamProtocol, // None | EditBased | Native
 }
 ```
 
+独立的 `StreamProtocol` 枚举区分「完成后再发送」（`None`）、「编辑同一条草稿消息以流式追加」（`EditBased`——Telegram、Discord）以及「原生支持流式」（`Native`——Teams）。
+
 ### 频道对比表
 
-| 功能 | Telegram | Discord | iMessage | WebChat | CLI |
-|---------|:--------:|:-------:|:--------:|:-------:|:---:|
-| **富文本 (Markdown)** | 是 | 是 | 否 | 是 | 是 |
-| **附件** | 是 | 是 | 是 | 是 | 否 |
-| **图片** | 是 | 是 | 是 | 是 | 否 |
-| **音频/视频** | 是 | 是 | 是 | 否 | 否 |
-| **反应** | 有限 | 是 | 轻点反馈 | 否 | 否 |
-| **回复线程** | 是 | 是 | 否 | 否 | 否 |
-| **消息编辑** | 是 | 是 | 否 | 否 | 否 |
-| **消息删除** | 是 | 是 | 否 | 否 | 否 |
-| **输入中指示器** | 是 | 是 | 否 | 否 | 否 |
-| **内联键盘** | 是 | 否 | 否 | 否 | 否 |
-| **最大消息长度** | 4,096 | 2,000 | ~20,000 | 无限制 | 无限制 |
-| **最大附件大小** | 50 MB | 25 MB | 100 MB | 可配置 | N/A |
-| **配置键** | `telegram` | `discord` | macOS 独有 | `gateway` | `cli` |
-| **设置难度** | 简单 | 中等 | 中等 | 包含 | 包含 |
+| 功能 | Telegram | Discord | iMessage（Local） | iMessage（BlueBubbles） | WebChat | CLI |
+|---------|:--------:|:-------:|:----------------:|:---------------------:|:-------:|:---:|
+| **富文本 (Markdown)** | 是 | 是 | 否 | 否 | 是 | 是 |
+| **附件** | 是 | 是 | 是 | 是 | 是 | 否 |
+| **图片** | 是 | 是 | 是 | 是 | 是 | 否 |
+| **音频/视频** | 是 | 是 | 是 | 是 | 否 | 否 |
+| **反应** | 是 | 是 | Tapback（入站） | Tapback | 否 | 否 |
+| **回复线程** | 是 | 是 | 否 | 是 | 否 | 否 |
+| **消息编辑** | 是 | 是 | 否 | 否 | 否 | 否 |
+| **消息删除** | 是 | 是 | 否 | 否 | 否 | 否 |
+| **输入中指示器** | 是 | 是 | 否 | 是 | 视觉 | 否 |
+| **已读回执** | 否 | 否 | 否 | 是 | 否 | 否 |
+| **内联键盘** | 是 | 是 | 否 | 否 | 否 | 否 |
+| **最大消息长度** | 4,096 | 2,000 | ~20,000 | 4,000 | 无限制 | 无限制 |
+| **最大附件大小** | 50 MB | 25 MB | 100 MB | 100 MB | 可配置 | N/A |
+| **流式协议** | `EditBased` | `EditBased` | `None` | `None` | `EditBased` | `None` |
+| **设置难度** | 简单 | 中等 | 仅限 macOS | 中等 | 包含 | 包含 |
+
+同适配器树（`src/gateway/interfaces/`）下的其他频道：CLI、Email、Feishu、IRC、Line、Matrix、Mattermost、MSteams、Nostr、QQ、Signal、Slack、Webhook、WeChat、WhatsApp、XMPP。
 
 ## InteractionManifest
 
-除了原始能力之外，Aleph 还使用 **InteractionManifest** 系统来通知 AI 当前频道可以做什么。每个频道属于一个 `InteractionParadigm`：
+除了原始能力之外，Aleph 还使用 **InteractionManifest** 系统通知 AI 当前频道可以做什么。每个频道属于一个 `InteractionParadigm`：
 
 | 范式 | 频道 | 能力 |
 |----------|----------|-------------|
-| **CLI** | 终端 | 富文本、代码高亮、流式传输 |
+| **CLI** | CLI | 富文本、代码高亮、流式传输 |
 | **WebRich** | WebChat、桌面应用 | 完整交互式 UI、canvas、mermaid 图表、流式传输 |
-| **Messaging** | Telegram、Discord、iMessage | 富文本、内联图片 |
+| **Messaging** | Telegram、Discord、iMessage 等 | 富文本、内联图片 |
 | **Background** | Cron 作业、webhooks | 仅静默回复 |
 | **Embedded** | 最小 UI 上下文 | 无特殊能力 |
 
@@ -168,29 +202,29 @@ guild_id = "123456789"
 
 ## 功能编译
 
-Aleph 默认编译所有生产功能。接口通过配置启用（而非编译时功能）。只需在 `~/.aleph/config.toml` 中启用你需要的频道。
-
-iMessage 接口仅在 macOS 上有条件编译（`#[cfg(target_os = "macos")]`）。
+Aleph 默认编译所有频道适配器；频道通过配置（`config.toml`）启用，而非编译时功能开关。iMessage 的 *local* 传输由 `#[cfg(target_os = "macos")]` 门控——BlueBubbles 传输可在任何 OS 上运行，因此 `BlueBubblesChannel` 处处可用。
 
 ## 频道配置
 
-所有频道都通过 Aleph 配置文件（`~/.aleph/config.toml`）进行配置。文件监视器检测到更改，并在 600 毫秒内通过热重载应用：
+所有频道都通过 Aleph 配置文件（`~/.aleph/config.toml`）进行配置。文件监视器检测到更改并在较短的间隔内热重载：
 
 ```toml
 [channels.telegram]
 enabled = true
 token = "${TELEGRAM_BOT_TOKEN}"
-allowed_chats = []
 
 [channels.discord]
 enabled = true
 token = "${DISCORD_BOT_TOKEN}"
 allowed_guilds = [123456789]
 
-[channels.webchat]
+[channels.imessage]
+# Local（仅 macOS）：轮询 ~/Library/Messages/chat.db
+# 和/或
+# BlueBubbles（任意 OS）：REST + webhook 对接 BlueBubbles 服务器
 enabled = true
-port = 18790
-cors_origins = ["http://localhost:*"]
+db_path = "~/Library/Messages/chat.db"
+poll_interval_ms = 1000
 ```
 
 配置支持 `${ENV_VAR}` 扩展用于密钥，因此令牌永远不需要以明文存储。
@@ -199,33 +233,7 @@ cors_origins = ["http://localhost:*"]
 
 深入了解各个接口指南：
 
-- [Telegram](/docs/interfaces/telegram) — 机器人设置、白名单、媒体处理
-- [Discord](/docs/interfaces/discord) — 公会权限、斜杠命令、嵌入
-- [iMessage](/docs/interfaces/imessage) — 通过 Messages.app 进行 macOS 原生集成
-- [WebChat](/docs/interfaces/webchat) — 带有 WebSocket 流式传输的嵌入式 Web 聊天
-
----
-
-## 26.7.x 补充
-
-> 注：本节以用户视角补充 26.7.x 的新内容；具体 RPC 与实现细节见 [协议适配器（概念）](/docs/zh/concepts/protocol-adapters) 与 [网关 RPC](/docs/zh/gateway/methods)。
-
-### 跨通道可达性
-
-26.7.x：所有配置的 channel 现在真的可达且可寻址——之前有些配置从未生效。
-
-### Telegram 平行层清理
-
-26.7.21 砍掉 ~2.6k 行死代码（一个未编译的 webhook 服务器、一个未构造的 session manager、一个死的 draft API、重复的 status reactions）。access / pairing / allowlist **单源到路由器**。
-
-### Discord 平行层清理
-
-26.7.21 移除重复的嵌套配置 / account-pool / 解析器层。
-
-### iMessage
-
-26.7.21+ 增强：入站 add-tapback（add-reaction）会上抛为模型上下文。
-
-### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
-
-详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。
+- [Telegram](/docs/interfaces/telegram) — 基于 teloxide 的机器人
+- [Discord](/docs/interfaces/discord) — 基于 serenity 的机器人
+- [iMessage](/docs/interfaces/imessage) — macOS local + BlueBubbles 双传输
+- [WebChat](/docs/interfaces/webchat) — WebAssembly Panel + Gateway WebSocket
