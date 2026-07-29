@@ -17,7 +17,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## 主要特性
 
 - **多提供商 AI** — Claude、GPT、Gemini、Ollama（含多模），带原子计数器与原子 regen marker 的故障转移；`session.usage` 走核心定价
-- **多通道** — Telegram、Discord、iMessage、WebChat、桌面应用（macOS / Windows / Linux）、iPhone / iPad Panel；Telegram/Discord 已对齐路由器单源
+- **多通道** — Telegram、Discord、iMessage、WebChat 与桌面应用共享同一认证网关、入站路由、会话模型、记忆和工具生态
 - **会话模式（chat / work / code）** — 与 `exec_tier`、`think_level` 并列的第三维，对工具**呈现**面做静态分区；可被 `session_set_mode` 工具动态切换
 - **原生性能** — 100% Rust 核心，无解释型语言
 - **壳核分离** — 桌面壳纯 OS 集成；核心可独立运行
@@ -31,7 +31,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 - **Artifact / Deliverables** — 50 MB 上限 + 4 个 origin 的 artifact store；模型用 `artifact_publish` 发布可交付物，Panel 钉到顶部
 - **Vault 面板重构** — 卡片视图 + 双轨搜索 + 证据链 + 跨代理选择 + 来源三元组
 - **流式语音对话** — Deepgram / WhisperLiveKit 流式 ASR；TTS provider fallback 上限 2；Voice-as-Context 接入上下文聚合
-- **可扩展** — MCP 集成（按需发现）、Hub 单一源、Markdown 技能、自定义工具
+- **可扩展** — 类型安全的内置工具、能力门控的 MCP 发现、插件、Markdown 技能和自定义工具共享 scoped tool service 与审批路径
 - **自托管** — 在你自己的硬件上运行，完全控制
 
 ## 架构
@@ -57,11 +57,11 @@ import { Cards, Card } from "fumadocs-ui/components/card";
     │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
     │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
     │  │  Approval / │  │  Extension   │  │   Heartbeat / Cron   │  │
-    │  │  Guardrails │  │  / Skill     │  │   (stub→real)        │  │
+    │  │  Guardrails │  │  / Skill     │  │   调度与探测           │  │
     │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
     └───────────────────────────────────────────────────────────────┘
                                   │
-                                  │ RPC over UDS / cluster lane
+                                  │ 经认证的执行调度
                                   ▼
                         集群节点（远程执行体）
 ```
@@ -111,25 +111,25 @@ cargo build --bin aleph-server --release
   <Card
     icon="🏗️"
     title="架构"
-    description="系统设计、网关、Agent 循环、会话、记忆与治理拓扑"
+    description="接口、网关、编排器、Harness 与存储五层请求流，以及会话、工具和记忆架构"
     href="./architecture/overview"
   />
   <Card
     icon="🔌"
     title="Gateway RPC"
-    description="WebSocket 协议、TLS + TOFU、认证、JSON-RPC 方法全集"
+    description="WebSocket 协议、TLS + TOFU、认证、方法族与注册状态"
     href="./gateway/protocol"
   />
   <Card
     icon="💬"
     title="接口"
-    description="Telegram、Discord、iMessage、WebChat、桌面集成"
+    description="Telegram、Discord、iMessage、WebChat 与桌面客户端的统一适配器"
     href="./interfaces/overview"
   />
   <Card
     icon="🔧"
     title="工具与扩展"
-    description="内置工具、MCP（按需发现）、插件、自定义工具与 Markdown 技能"
+    description="类型安全的内置工具、作用域权限、MCP 发现、浏览器自动化与自定义工具"
     href="./tools/overview"
   />
   <Card
@@ -141,7 +141,7 @@ cargo build --bin aleph-server --release
   <Card
     icon="⚡"
     title="自动化"
-    description="Cron 作业（已实化）、Hooks（注入限额 + 同意 + 库存）和事件"
+    description="持久化 Cron 调度、Heartbeat 探测、同意感知 Hooks 与网关事件"
     href="./automation/cron-jobs"
   />
   <Card
@@ -183,7 +183,7 @@ cargo build --bin aleph-server --release
   <Card
     icon="📋"
     title="更新日志"
-    description="26.7.x 发布历史与近三个月重要变更"
+    description="自 26.7.21 起，覆盖到 26.7.22+ 滚动更新"
     href="./changelog"
   />
   <Card

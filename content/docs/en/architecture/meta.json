@@ -2,15 +2,19 @@
   "title": "Architecture",
   "pages": [
     "overview",
+    "1-2-3-4-model",
     "gateway",
+    "routing",
     "orchestrator",
     "harness",
     "thinker",
     "dispatcher",
     "executor",
+    "tools",
     "memory",
     "sandbox",
     "session-service",
+    "sessions",
     "providers",
     "memory-evolution",
     "desktop-bridge",
@@ -23,6 +27,7 @@
     "workflow",
     "worldmodel",
     "proactive-dispatcher",
+    "resilience",
     "design-patterns"
   ]
 }

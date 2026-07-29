@@ -17,7 +17,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## Key Features
 
 - **Multi-Provider AI** — Claude, GPT, Gemini, Ollama with atomic-counter failover and an atomic regen marker; `session.usage` is computed in-core from a single source of pricing
-- **Multi-Channel** — Telegram, Discord, iMessage, WebChat, Desktop app; Telegram/Discord are now single-sourced on the inbound router
+- **Multi-Channel** — Telegram, Discord, iMessage, WebChat, and the desktop app share one authenticated gateway, inbound router, session model, memory, and tool ecosystem
 - **Session Mode (chat / work / code)** — the third twin of `exec_tier` and `think_level`; statically partitions the tool *presentation* surface; switchable at runtime via `session_set_mode`
 - **Native Performance** — 100% Rust core, no interpreted languages
 - **Shell-Core Separation** — desktop shell is pure OS integration; the core runs standalone
@@ -26,7 +26,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 - **Cluster Federation** — one center core orchestrates many machines (nodes) as execution arms; node keys are Unicode-normalized (CJK node names work)
 - **Three-Tier Security Model** — fail-closed approval / sandbox / pairing, with `exec_tier`, session mode, and a capability ledger
 - **Loop-Graph Governance Layer** — team node / independent-evidence auditor (`loop-auditor`) / victory-claim watchers / objective ACLs
-- **Extensible** — MCP integration (on-demand discovery), plugins (unified `plugin.install` entry), Markdown skills, custom tools
+- **Extensible** — type-safe built-in tools, capability-gated MCP discovery, plugins, Markdown skills, and custom tools share the scoped tool service and approval path
 - **Self-Hosted** — run on your own hardware, full control
 
 ## Architecture
@@ -52,11 +52,11 @@ import { Cards, Card } from "fumadocs-ui/components/card";
     │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
     │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
     │  │  Approval / │  │  Extension   │  │  Heartbeat / Cron   │ │
-    │  │  Guardrails │  │  / Skill     │  │  (stub→real)        │ │
+    │  │  Guardrails │  │  / Skill     │  │  Schedulers         │ │
     │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
     └────────────────────────────────────────────────────────────┘
                                   │
-                                  │ RPC over UDS / cluster lane
+                                  │ Authenticated execution dispatch
                                   ▼
                         Cluster Nodes (remote executors)
 ```
@@ -106,25 +106,25 @@ Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
   <Card
     icon="🏗️"
     title="Architecture"
-    description="System design, gateway, agent loop, sessions, memory, and loop-graph governance"
+    description="Five-layer request flow across interfaces, gateway, orchestrator, harness, storage, sessions, tools, and memory"
     href="./architecture/overview"
   />
   <Card
     icon="🔌"
     title="Gateway RPC"
-    description="WebSocket protocol, TLS + TOFU, authentication, the complete JSON-RPC method set"
+    description="WebSocket protocol, TLS + TOFU, authentication, method families, and registration status"
     href="./gateway/protocol"
   />
   <Card
     icon="💬"
     title="Interfaces"
-    description="Telegram, Discord, iMessage, WebChat, desktop integration"
+    description="Unified adapters for Telegram, Discord, iMessage, WebChat, and desktop clients"
     href="./interfaces/overview"
   />
   <Card
     icon="🔧"
     title="Tools & Extensions"
-    description="Built-in tools, MCP (on-demand discovery), plugins, custom tools, and Markdown skills"
+    description="Type-safe built-ins, scoped permissions, MCP discovery, browser automation, and custom tools"
     href="./tools/overview"
   />
   <Card
@@ -136,7 +136,7 @@ Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
   <Card
     icon="⚡"
     title="Automation"
-    description="Cron (now real), Hooks (bound context + consent + inventory), and events"
+    description="Persistent cron schedules, heartbeat probes, consent-aware hooks, and gateway events"
     href="./automation/cron-jobs"
   />
   <Card
@@ -178,7 +178,7 @@ Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
   <Card
     icon="📋"
     title="Changelog"
-    description="26.7.x release history and notable changes from the last three months"
+    description="Rolling release notes from 26.7.21 through the 26.7.22+ update stream"
     href="./changelog"
   />
   <Card
