@@ -1,349 +1,400 @@
 ---
 title: "Routing System"
-description: "Session key resolution and channel-aware message routing"
+description: "Aleph's real routing layer: session-key resolution (SessionKey), DmScope isolation, hierarchical RouteBinding matching, two-stage command/keyword routing rules, runtime overlay, provider failover, and VESR."
 ---
 
-The routing system determines how incoming messages are mapped to agents and sessions. It answers two questions: **which agent should handle this message?** and **which conversation session does it belong to?** The answers depend on the channel (Telegram, Discord, CLI), the peer (user or group), and the configured routing rules.
+> **This page describes Aleph's real routing layer (`src/routing/` + `src/config/types/routing.rs`)**, not a generic web routing framework.
 
-## Session Keys
+The Aleph routing system has four layers:
 
-A `SessionKey` is a channel-aware identifier that uniquely identifies a conversation session. It encodes the agent identity, channel, peer, and scope information into a single hierarchical key.
+1. **Slash-command parsing** (`src/command/parser.rs`) — resolves `/cmd` input to a `ParsedCommand` via `ToolCatalog::resolve_command`'s three-tier match
+2. **Session-key resolution** (`src/routing/session_key.rs`) — parses every inbound message into a hierarchical `SessionKey` that decides agent / conversation / scope
+3. **Route-binding resolution** (`src/routing/resolve.rs` + `config.rs`) — maps `channel / peer / guild / team / account / default` to a `ResolvedRoute` via conjunctive scope matching
+4. **Runtime overlay** (`src/routing/overlay.rs`) — applies `agent_switch` bindings + ghost-binding detection so the `gateway_route` tool reports the truth
 
-### The Six Variants
+The two-stage command/keyword AI routing rules live in `src/config/types/routing.rs`; the `[[rules]]` middleware delivery lives in `src/config/methods.rs`.
 
-```rust
-pub enum SessionKey {
-    /// Cross-channel shared session
-    Main {
-        agent_id: String,
-        main_key: String,  // default: "main"
-    },
+---
 
-    /// Direct message session with scope strategy
-    DirectMessage {
-        agent_id: String,
-        channel: String,    // "telegram", "discord", etc.
-        peer_id: String,    // user identifier
-        dm_scope: DmScope,
-    },
+## 1. Slash-command parsing (`src/command/parser.rs`)
 
-    /// Group or channel session
-    Group {
-        agent_id: String,
-        channel: String,
-        peer_kind: PeerKind,  // Group | Channel | Thread
-        peer_id: String,
-        thread_id: Option<String>,
-    },
-
-    /// Scheduled task session (cron, webhook)
-    Task {
-        agent_id: String,
-        task_type: String,  // "cron" | "webhook" | "scheduled"
-        task_id: String,
-    },
-
-    /// Nested subagent session
-    Subagent {
-        parent_key: Box<SessionKey>,
-        subagent_id: String,
-    },
-
-    /// Temporary session (no persistence)
-    Ephemeral {
-        agent_id: String,
-        ephemeral_id: String,  // UUID
-    },
-}
-```
-
-### String Serialization
-
-Session keys serialize to human-readable colon-separated strings for storage and lookup:
-
-| Variant | Format | Example |
-|---------|--------|---------|
-| Main | `agent:{id}:{key}` | `agent:main:main` |
-| DM (PerPeer) | `agent:{id}:dm:{peer}` | `agent:main:dm:user123` |
-| DM (PerChannelPeer) | `agent:{id}:{channel}:dm:{peer}` | `agent:main:telegram:dm:user123` |
-| Group | `agent:{id}:{channel}:{kind}:{peer}` | `agent:main:discord:group:guild456` |
-| Group (threaded) | `...:{kind}:{peer}:thread:{tid}` | `agent:main:telegram:group:chat789:thread:t1` |
-| Task | `agent:{id}:{type}:{task_id}` | `agent:main:cron:daily-summary` |
-| Subagent | `{parent}:subagent:{id}` | `agent:main:main:subagent:coding` |
-| Ephemeral | `agent:{id}:ephemeral:{uuid}` | `agent:main:ephemeral:abc-123` |
-
-All keys are normalized: lowercased, trimmed, and the agent ID is restricted to alphanumeric characters plus dashes and underscores (max 64 chars).
-
-## DM Scope Strategies
-
-Direct message sessions support three isolation strategies that control how conversation context is shared:
-
-```rust
-pub enum DmScope {
-    /// All DMs collapse into the main session
-    Main,
-
-    /// Each user gets their own session (cross-channel)
-    PerPeer,      // default
-
-    /// Each user gets a separate session per channel
-    PerChannelPeer,
-}
-```
-
-### Comparison
-
-| Strategy | Key for Telegram user 123 | Key for Discord user 123 | Shared? |
-|----------|--------------------------|--------------------------|---------|
-| `Main` | `agent:main:main` | `agent:main:main` | Yes (all DMs share one session) |
-| `PerPeer` | `agent:main:dm:123` | `agent:main:dm:123` | Yes (same user, same session) |
-| `PerChannelPeer` | `agent:main:telegram:dm:123` | `agent:main:discord:dm:123` | No (separate per channel) |
-
-**PerPeer** is the default because it provides a natural "one person, one conversation" model across platforms. If user "john" messages from both Telegram and Discord, they share the same context.
-
-**PerChannelPeer** is useful when the same user has different roles on different platforms (e.g., personal Telegram vs. work Slack).
-
-**Main** collapses all DMs into the global session, useful for personal single-user setups.
-
-## Route Resolution
-
-When a message arrives, the routing system resolves it to an agent and session key through hierarchical matching:
+`CommandParser` is the single entry point for every `/cmd` input. It delegates to `ToolCatalog::resolve_command` (`src/tool_metadata/registry/query.rs`):
 
 ```
-Incoming Message
+Input "/session new my-topic"
     │
-    ├── channel: "telegram"
-    ├── account_id: "bot-123"
-    ├── peer: { kind: Dm, id: "user456" }
-    ├── guild_id: None
-    └── team_id: None
-         │
-         ▼
-    resolve_route(bindings, session_cfg, default_agent, input)
-         │
-         ▼
-    ResolvedRoute {
-        agent_id: "main",
-        channel: "telegram",
-        account_id: "bot-123",
-        session_key: SessionKey::DirectMessage { ... },
-        main_session_key: SessionKey::Main { ... },
-        matched_by: MatchedBy::Default,
-    }
+    ▼
+trim + must start with '/'
+    │
+    ▼
+strip "@botname" (Telegram group commands: /gen@mybot)
+    │
+    ▼
+split on whitespace → ["session", "new", "my-topic"]
+    │
+    ▼
+ToolCatalog::resolve_command(input):
+    ① greedy longest-match: try session_new_my_topic → session_new → session
+    ② find_best_match three tiers: canonical name → alias → `.`↔`_` fallback
+    ③ max_depth = 3
+    │
+    ▼
+ParsedCommand { tool_id, command_name, source_type, context, arguments }
 ```
 
-### Match Priority
+`tool_id` is the verbatim `UnifiedTool::id` (e.g. `builtin:session_new`, `mcp:fs:read_file`, `plugin:diagnostics:ping`, `custom:3:translate`). Downstream consumers — the `command.execute` RPC, the channel fast-path serializer — no longer reconstruct it lossily from `source_type + command_name`, which is the fix that stopped plugin slash commands from being mangled into `mcp__plugin:<id>_<name>` and silently failing.
 
-Route bindings are evaluated in strict priority order. The first match wins:
+`CommandContext` derives from `tool.source`:
 
-| Priority | Match Type | Example |
-|----------|-----------|---------|
-| **1 (highest)** | Peer | Specific user or group in a channel |
-| **2** | Guild | Discord guild ID |
-| **3** | Team | Slack team ID |
-| **4** | Account | Specific bot account (non-wildcard) |
-| **5** | Channel | Channel with wildcard account (`*`) |
-| **6 (lowest)** | Default | Fallback to default agent |
+| `ToolSource` | `CommandContext` | Notes |
+|---|---|---|
+| `Builtin` / `Native` | `Builtin { tool_name }` | Direct-tool fast path |
+| `Mcp { server }` | `Mcp { server_name, tool_name }` | MCP server namespace |
+| `Skill { id }` | `Skill { skill_id, instructions, display_name, allowed_tools }` | Inject skill instructions + allowed-tools whitelist |
+| `Plugin { .. }` | `Builtin { tool_name: tool.id }` | Plugin runs through direct-tool fast path; canonical id `plugin:<plugin_id>:<name>` survives intact |
+| `Custom { .. }` | `Custom { system_prompt, provider, pattern }` | Custom rules carry system_prompt + regex template |
 
-This hierarchy ensures that specific bindings always take precedence over general ones. A VIP user can be routed to a dedicated agent even if a channel-level binding exists.
+---
 
-## Route Bindings
+## 2. SessionKey (`src/routing/session_key.rs`)
 
-Route bindings are configured in TOML and map match rules to agent IDs:
+```rust
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionKey {
+    Main { agent_id: String, main_key: String, epoch: u32 },
+    DirectMessage { agent_id: String, channel: String, peer_id: String, dm_scope: DmScope, epoch: u32 },
+    Group { agent_id: String, channel: String, peer_kind: PeerKind, peer_id: String, thread_id: Option<String> },
+    Task { agent_id: String, task_type: String, task_id: String },
+    Subagent { parent_key: Box<Self>, subagent_id: String },
+    Ephemeral { agent_id: String, ephemeral_id: String },
+}
+
+#[derive(Default)]
+pub enum DmScope { Main, #[default] PerPeer, PerChannelPeer }
+
+pub enum PeerKind { Group, Channel, Thread }
+```
+
+### Constructors and key strings
+
+| Constructor | Purpose | Example key string |
+|-------------|---------|---------------------|
+| `SessionKey::main("main")` | Cross-channel shared main session | `agent:main:main` |
+| `SessionKey::dm(agent, channel, peer, DmScope::PerPeer)` | Per-user DM | `agent:main:telegram:dm:user123` |
+| `SessionKey::group(agent, channel, PeerKind::Group, id)` | Group | `agent:main:discord:group:guild-id` |
+| `SessionKey::task(agent, "cron", "daily-summary")` | cron / heartbeat / a2a / webhook | `agent:main:cron:daily-summary` |
+| `SessionKey::subagent(parent, id)` | Sub-agent nested | `agent:main:main:subagent:translator` |
+| `SessionKey::ephemeral(agent)` | Ephemeral (no persistence) | `agent:main:ephemeral:<uuid>` |
+
+### Key methods
+
+- **`format_dm_base`** — folds DM into `agent:{id}:main` when `DmScope::Main`
+- **`base_key_pattern`** — strips the `:sN` epoch suffix for SQL LIKE queries; for non-epoch variants (Group / Task / Subagent / Ephemeral) it equals `to_key_string`
+- **`with_epoch` / `with_next_epoch`** — epoch roll (only Main / DirectMessage carry epoch)
+- **`is_interactive`** — `true` only for Main + DirectMessage + Group; `false` for Task / Subagent / Ephemeral. This is the naked-loop planner gate: a cron job, group-chat member, or sub-agent's **first turn** must never trip the planner (R7 — an origin fact, not a message-content heuristic). Fail-closed for any future internal variant
+- **`main_session_key`** — return to the parent's main session
+- **`task_type` guard** — `SessionKey::task(..)` rejects `peer` / `dm` / `ephemeral` at construction so the serialized key cannot parse as a DM or Ephemeral
+
+### Identity links (`identity_links.rs`)
+
+Cross-channel identity links: `canonical_name → [channel:id, ...]`. `validate_identity_links` rejects the same `channel:id` under two canonicals at config-load time (otherwise a reload can flip the tie-break and leak messages across users):
+
+```toml
+[session.identity_links]
+john = ["telegram:123", "discord:456"]
+```
+
+---
+
+## 3. Route-binding resolution (`resolve.rs` + `config.rs`)
+
+`resolve_route(bindings, session_cfg, default_agent, input) -> ResolvedRoute` is a deterministic pure function — intent classification is the LLM's job (R7); no regex layer lives here.
+
+### `RouteBinding` configuration
 
 ```rust
 pub struct RouteBinding {
     pub agent_id: String,
-    pub match_rule: MatchRule,
+    pub match_rule: MatchRule,   // Serialized as [match] in TOML
 }
 
 pub struct MatchRule {
-    pub channel: Option<String>,     // "telegram", "discord", "slack"
-    pub account_id: Option<String>,  // Specific bot account or "*"
+    pub channel: Option<String>,     // "telegram" / "discord" / "slack" / "*"
+    pub account_id: Option<String>,  // Specific bot account; absent → matches default account; "*" → wildcard
     pub peer: Option<PeerMatchConfig>,
     pub guild_id: Option<String>,    // Discord guild
     pub team_id: Option<String>,     // Slack workspace
+    pub workspace: Option<String>,   // Force this workspace on match (overrides the user's active workspace)
 }
 ```
 
-### Configuration Examples
+### Match order (`MatchedBy`)
 
-Route all Telegram messages to a specific agent:
+Bindings are evaluated in this priority; first match wins:
+
+| Priority | `MatchedBy` | Trigger |
+|---|---|---|
+| 1 | `Peer` | `match_rule.peer` matches `input.peer` (kind + id) |
+| 2 | `Guild` | `match_rule.guild_id` matches `input.guild_id` |
+| 3 | `Team` | `match_rule.team_id` matches `input.team_id` |
+| 4 | `Account` | `account_id` is non-wildcard (and no `peer` / `guild` / `team` scope) |
+| 5 | `Channel` | `account_id` is wildcard or absent (and no narrower scope) |
+| 6 | `Default` | Nothing matched → fall through to `default_agent` |
+
+**Scopes are conjunctive.** `scope_satisfied` filters candidates by the full conjunction of `channel / account / peer / guild / team`: a `{ team_id, peer }` rule means "**this peer in that team**", not "any peer" or "any peer in that team". This closes the cross-workspace conversation-id collision that previously routed Slack channels from the wrong workspace.
+
+**`agent_id` is reported as configured.** `session_keys_for` normalizes internally for the key, but the binding's `agent_id` is returned verbatim — `[[agents.list]] id = "Work_Bot"` is also stored verbatim in the registry, so normalizing it during routing pointed at an agent that didn't exist and triggered a misleading "agent deleted" gate.
+
+### Configuration examples
 
 ```toml
+# All traffic on the default Telegram account goes to telegram-agent
 [[routing.bindings]]
 agent_id = "telegram-agent"
-[routing.bindings.match]
+[bindings.match]
 channel = "telegram"
 account_id = "*"
-```
 
-Route a specific Slack workspace to a work agent:
-
-```toml
+# Only within a specific Slack workspace, route to work
 [[routing.bindings]]
 agent_id = "work"
-[routing.bindings.match]
+[bindings.match]
 channel = "slack"
 account_id = "*"
-team_id = "T12345"
-```
+team_id  = "T12345"
 
-Route a VIP user to a dedicated agent:
-
-```toml
+# VIP user (on any channel) → vip-agent
 [[routing.bindings]]
 agent_id = "vip-agent"
-[routing.bindings.match]
-channel = "telegram"
-account_id = "*"
-[routing.bindings.match.peer]
-kind = "dm"
-id = "user-vip"
-```
+[bindings.match]
+peer = { kind = "dm", id = "user-vip" }
 
-## Identity Links
-
-Identity links enable cross-channel user identity resolution. When a user is known across multiple platforms, their messages can be routed to the same session regardless of which platform they use.
-
-```rust
-pub struct SessionConfig {
-    pub dm_scope: DmScope,
-    pub identity_links: HashMap<String, Vec<String>>,
-}
-```
-
-### Configuration
-
-```toml
-[routing.session]
-dm_scope = "per-peer"
-
-[routing.session.identity_links]
-john = ["telegram:123456", "discord:789012", "slack:U345678"]
-alice = ["telegram:654321", "imessage:+1234567890"]
-```
-
-### Resolution Flow
-
-When a message arrives from Telegram user `123456`:
-
-```
-1. Look up "123456" in identity_links
-2. Found: "telegram:123456" maps to canonical name "john"
-3. Use "john" as the peer_id in the session key
-4. Result: agent:main:dm:john
-```
-
-Now when the same person messages from Discord as user `789012`:
-
-```
-1. Look up "789012" in identity_links
-2. Found: "discord:789012" maps to canonical name "john"
-3. Use "john" as the peer_id
-4. Result: agent:main:dm:john  (same session!)
-```
-
-The resolution function checks both bare peer IDs and channel-scoped IDs:
-
-```rust
-pub fn resolve_linked_peer_id(
-    identity_links: &HashMap<String, Vec<String>>,
-    channel: &str,
-    peer_id: &str,
-) -> Option<String> {
-    // Check each canonical name's linked IDs
-    // Match against "peer_id" (bare) or "channel:peer_id" (scoped)
-    // Return the canonical name if found
-}
-```
-
-## Peer Kinds
-
-Group sessions distinguish between different peer types:
-
-```rust
-pub enum PeerKind {
-    Group,    // Chat group (Telegram group, Discord server)
-    Channel,  // Broadcast channel (Slack channel, Telegram channel)
-    Thread,   // Thread within a group or channel
-}
-```
-
-Group sessions with threads use nested keys:
-
-```
-agent:main:telegram:group:chat789           (group session)
-agent:main:telegram:group:chat789:thread:t1 (thread within group)
-```
-
-This allows threads to have independent context while sharing the parent group's agent binding.
-
-## Full Resolution Example
-
-Consider this configuration:
-
-```toml
-[routing.session]
-dm_scope = "per-peer"
-
-[routing.session.identity_links]
-john = ["telegram:123", "discord:456"]
-
+# Force matched Telegram sessions onto the "crypto" workspace
 [[routing.bindings]]
-agent_id = "work"
-[routing.bindings.match]
-channel = "slack"
+agent_id = "main"
+[bindings.match]
+channel    = "telegram"
 account_id = "*"
-team_id = "T12345"
-
-[[routing.bindings]]
-agent_id = "general"
-[routing.bindings.match]
-channel = "telegram"
-account_id = "*"
+workspace  = "crypto"
 ```
 
-| Incoming Message | Matched By | Agent | Session Key |
-|------------------|-----------|-------|-------------|
-| Telegram DM from user `123` | Channel | `general` | `agent:general:dm:john` (identity linked) |
-| Telegram group `grp1` | Channel | `general` | `agent:general:telegram:group:grp1` |
-| Discord DM from user `456` | Default | `main` | `agent:main:dm:john` (identity linked) |
-| Slack DM in team `T12345` | Team | `work` | `agent:work:dm:user789` |
-| CLI local session | Default | `main` | `agent:main:main` |
+### Startup-time error visibility
 
-## Module Structure
+`binding_problems` scans `[[bindings]]` at boot and translates bindings that can never match (empty `agent_id`, `peer.kind` not in `dm|group|channel`, empty `peer.id`, or a rule with no scope at all that would shadow every binding after it) into startup log lines — reporting, not rejecting, so a bad binding cannot brick the daemon and the rest of the table still routes.
 
-```
-src/routing/
-├── mod.rs              # Module entry, re-exports
-├── session_key.rs      # SessionKey enum, DmScope, PeerKind, serialization
-├── resolve.rs          # resolve_route(): hierarchical route matching
-├── config.rs           # RouteBinding, MatchRule, SessionConfig
-└── identity_links.rs   # Cross-channel identity resolution
+---
+
+## 4. Runtime overlay (`overlay.rs`)
+
+`resolve_route` answers from **config** — the `[[bindings]]` table snapshotted at boot. Two runtime facts sit on top:
+
+1. An explicit per-channel binding set at runtime by `agent_switch` or the Panel, which must beat a merely-default config answer (otherwise the namesake action is a silent no-op on any deployment that has bindings)
+2. Whether the agent a *specific* binding names still exists — `agents.delete` cannot rewrite routing config, so a binding can outlive its target, and routing to the ghost would brick the channel forever
+
+Both rules used to live only inside the inbound router, so `gateway_route` — whose entire job is telling the model where a message would go — answered from config alone and confidently reported the wrong agent. `overlay::overlay_route` is the shared decision: each caller supplies the runtime facts it can see, and the composition is written once.
+
+```rust
+pub struct RuntimeOverlay<'a> {
+    pub channel_override: Option<&'a str>,  // agent_switch binding whose target still exists
+    pub bound_agent_exists: bool,           // does the binding's named agent still exist?
+}
+
+pub enum OverlaySource {
+    Binding(MatchedBy),             // config wins
+    ChannelOverride,                // explicit override wins
+    BindingAgentMissing,            // named agent gone → fall through to default
+}
+
+pub struct OverlaidRoute {
+    pub agent_id: Option<String>,   // None → caller fills in default agent
+    pub source: OverlaySource,
+}
 ```
 
 ---
 
-## 26.7.x Addendum
+## 5. `RoutingRuleConfig` (`src/config/types/routing.rs`)
 
-### `routing_rules.*` Full RPC
+```rust
+pub struct RoutingRuleConfig {
+    pub rule_type: Option<String>,         // "command" | "keyword" | auto-detected by regex
+    pub is_builtin: bool,                  // true: read-only in Settings UI
+    pub regex: String,
+    pub provider: Option<String>,          // required for command rules
+    pub system_prompt: Option<String>,     // required for keyword rules; optional for command
+    pub strip_prefix: Option<bool>,        // default true for command; ignored for keyword
+    pub intent_type: Option<String>,       // "translation" / "research" / "code_generation" / "skills:build-macos-apps"
+    pub preferred_model: Option<String>,   // overrides automatic model selection
+    pub icon: Option<String>,              // SF Symbol icon (command-mode display)
+}
+```
 
-26.7.x routing rules:
+`get_rule_type()` auto-detects from the `^/` prefix; `should_strip_prefix()` returns `false` for keyword rules and the configured value (defaulting to `true`) for command rules.
 
-- `routing_rules.create` / `list` / `get` / `update` / `delete` / `move`
-- `route_config.get` / `route_config.update`
+### Configuration examples
 
-### `channels.set_agent` Validation
+```toml
+[[rules]]
+rule_type = "command"
+regex = "^/draw\\s+"
+provider = "gemini"
+system_prompt = "Draw a picture based on the prompt"
+intent_type = "image_generation"
+preferred_model = "gemini-2.5-pro-image"
+icon = "paintbrush.fill"
 
-26.7.15+: `channels.set_agent` now **must** specify an existing agent — previously it accepted non-existent agents.
+[[rules]]
+rule_type = "keyword"
+regex = "translate to English"
+system_prompt = "Translate the target language to English"
+intent_type = "translation"
 
-### Cross-Channel Addressability
+# Bypass: the regex already strips (e.g. /^/echo\s+(.+)/ → only \1 reaches the AI)
+[[rules]]
+rule_type = "command"
+regex = "^/echo\\s+(.+)"
+provider = "default"
+strip_prefix = false   # AI side does not strip again
+```
 
-26.7.x: configured channels are now **truly reachable and addressable**. `gateway.credentials` / `channels.set_agent` / `channel.pairing_data` provide full addressing + credentials.
+---
 
-### See Also
+## 6. Two-stage matching (command + keyword)
 
-- [Protocol Adapters](/docs/en/concepts/protocol-adapters)
-- [Interfaces Overview](/docs/en/interfaces/overview)
-- [Gateway RPC `routing_rules.*`](/docs/en/gateway/methods)
+The matching pipeline runs two ordered phases per input:
+
+```
+process_clipboard / inbound message
+    │
+    ├─ Phase 1: command rules (first-match-stops)
+    │     ├─ regex starts with ^/ → exactly one match → stop
+    │     └─ on hit → use its provider + optional strip_prefix
+    │
+    └─ Phase 2: keyword rules (all-match)
+          ├─ regex does not start with / → accumulate all matches
+          └─ on hits → concatenate system_prompts with \n\n, use default_provider
+```
+
+`strip_prefix` is applied to slash commands (e.g. `/loop`, `/goal`, `/mode`) so the AI never sees the command name as literal text. The `command.executor` dispatches via `RegistryToolRegistry::resolve`; the fast path lives in `gateway::execution_engine::slash_command::try_resolve_slash_command` (L0 direct) and falls back to `execute_slash_command_fast_path`.
+
+---
+
+## 7. Context-aware inference (`[smart_matching]`)
+
+`SmartMatchingConfig` (`src/config/types/smart_flow.rs`) defines a four-layer semantic matcher:
+
+| Layer | Name | Threshold field | Purpose |
+|---|---|---|---|
+| 1 | Fast path (command/regex) | `command_confidence = 1.0` | First-match-stops |
+| 2 | Keyword matching | `keyword_threshold = 0.7` | Weighted scoring |
+| 3 | Context-aware inference | `enable_context_inference = true` | Multi-turn, app context, time context |
+| 4 | AI detection fallback | `ai_threshold = 0.6` | AI-first |
+
+Layer 3 (context-aware) is configured via `context_rules: Vec<ContextRuleConfig>`:
+
+```toml
+[smart_matching]
+enabled = true
+enable_context_inference = true
+
+[[smart_matching.context_rules]]
+id = "complete-pending-language"
+condition_type = "pending_param"     # pending_param | app_context | time_context | conversation
+param_name = "target_lang"
+intent = "translation"
+action_type = "complete_param"       # complete_param | add_capability | set_provider | add_prompt
+use_input_as_value = true
+
+[[smart_matching.context_rules]]
+id = "weekend-tone"
+condition_type = "time_context"
+days_of_week = [0, 6]                # 0=Sun, 6=Sat
+action_type = "add_prompt"
+system_prompt = "Use a casual tone on weekends."
+```
+
+Layer 2 uses weighted keywords via `[[smart_matching.keyword_rules]]` (`"keyword"` or `"keyword:1.5"`), match modes `any | all | weighted`.
+
+---
+
+## 8. Provider failover and VESR
+
+After routing picks a provider, the actual "which model can do the work" judgment lives in `routing/recall.rs` and VESR:
+
+- **`ProviderAvailability`** (`recall.rs`) — predicate `Fn(&str) -> ProviderStatus` compiled once at boot from config + vault
+- **`ProviderStatus::Available | Deconfigured | Unknown`** — render-time gate; unknown ids (e.g. `""`, `"failover"`, `"(dynamic)"`) fail OPEN, never penalizing what we cannot identify
+- **`RoutingRecall::build_routing_experience_message`** — called **exactly once per run** at run-start: embed the user query, backfill `RoutingAttribution::task_emb`, recall k-NN neighbors, mark unavailable-provider entries (O4: mark, not filter), fence-wrap via `wrap_memory_context`
+- **`RoutingExperienceStore`** (`experience_store.rs`) — sqlite-vec k-NN over recorded sessions to recall **measured-good** models for the task
+- **`RoutingAttribution`** (`mod.rs`) — per-run handle correlating run-start recall (writes `task_emb`) with the completion observer (reads it). One per run; lives in the gateway run loop, outside the harness
+- **`OutcomeObserver`** (`observer.rs`) — `TraceSink::SessionCompleted` → write to the routing experience table (tokens / cost / model / provider / agent_id)
+
+See [AI Providers](/docs/en/concepts/ai-providers) for the full model-recall surface.
+
+---
+
+## 9. Composite keys (Loop / Goal / Strategy / Team)
+
+`SessionKey` is the root of several composite-key namespaces (the `task_type` discriminates the `Task` variant; `agent_id` shares the same normalize rules everywhere):
+
+| `task_type` / namespace | Source | Purpose |
+|---|---|---|
+| `cron` | `src/tasks/cron/` | cron trigger |
+| `heartbeat` | `src/tasks/heartbeat/` | daemon probe trigger |
+| `a2a` | `src/a2a/` | sub-agent delegation |
+| `webhook` | webhook | webhook trigger |
+| `team_chat` | `src/teams/broadcast/` | team chat |
+
+See [Loop / Goal / Strategy](/docs/en/concepts/looping-goal-strategy) and [Cron Jobs](/docs/en/automation/cron-jobs).
+
+---
+
+## 10. RPC surface
+
+| Method | Purpose |
+|---|---|
+| `routing_rules.list` | List all routing rules (in `[[rules]]` order) |
+| `routing_rules.get` | Fetch a single rule |
+| `routing_rules.upsert` | Create/update (guarded by `is_builtin`) |
+| `routing_rules.move` | Reorder (affects command-rule match priority) |
+| `routing_rules.delete` | Delete (non-builtin only) |
+| `route_config.get` / `update` | Whole `[route_config]` block |
+| `channels.set_agent` | Bind a channel to a specific agent (**26.7.15+ validates that the agent exists**) |
+| `agent.resolve_session` | Resolve any inbound metadata into a `SessionKey` |
+| `gateway_route` | Tool: report which agent the message would reach, with `OverlaySource` |
+
+Full RPC listings: [Gateway methods · config-routing](/docs/en/gateway/methods/config) and [Gateway methods · session](/docs/en/gateway/methods/session).
+
+---
+
+## 11. Module layout
+
+```
+src/routing/
+├── mod.rs                # entry; re-exports SessionKey / DmScope / resolve_route / overlay
+├── session_key.rs        # SessionKey / DmScope / PeerKind / parse / to_key_string
+├── resolve.rs            # resolve_route + scope_satisfied + session_keys_for
+├── config.rs             # RouteBinding / MatchRule / SessionConfig / binding_problems
+├── identity_links.rs     # resolve_linked_peer_id + validate_identity_links
+├── overlay.rs            # overlay_route + RuntimeOverlay + OverlaySource
+├── recall.rs             # RoutingRecall + ProviderAvailability + provider_availability_from_config
+├── experience_store.rs   # VESR store (k-NN over sqlite-vec)
+└── observer.rs           # OutcomeObserver + outcome_from_session_completed
+
+src/command/
+├── mod.rs                # CommandParser entry
+└── parser.rs             # parse_async → ParsedCommand + tool_to_command_context
+
+src/tool_metadata/registry/
+├── mod.rs                # ToolCatalog — unified tool registry
+└── query.rs              # resolve_command + find_best_match + suggest_commands
+```
+
+---
+
+## See also
+
+- [Session mode](/docs/en/architecture/overview#the-third-twin-session-mode) — `session_mode` static partition
+- [Loop / Goal / Strategy](/docs/en/concepts/looping-goal-strategy) — composite-key namespaces
+- [AI Providers](/docs/en/concepts/ai-providers) — provider failover + VESR
+- [Config `route_config.*`](/docs/en/getting-started/configuration) — full fields
+- [Gateway methods · config-routing](/docs/en/gateway/methods/config) — RPC

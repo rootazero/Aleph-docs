@@ -204,7 +204,7 @@ pub trait MemoryExtension: Send + Sync {
 
 ### SkillOpt 自我演化纪律
 
-26.7.x 端口自 SkillOpt（arXiv 2605.23904）：bounded、validation-gated edit loop 加在 LLM 提出的编辑之上（R7：*content* is the model's; this layer only enforces discipline）。
+26.7.x 端口自 SkillOpt（arXiv 2605.23904）：梦境守护进程的笔记层由三件套约束 —— `evaluate_gate`（纯确定性的接受/拒绝判定，跟踪历史最佳得分）、`memory_health_score`（来自 `SignalSnapshot` 的记忆健康分）+ `score_merge_candidate`（合并候选的本地质量分）、`EditBudget`（每晚编辑字节预算 —— SkillOpt 论文里的"textual learning rate"）。R7 不变量：内容仍由 LLM 提出；这一层只施加**纪律**（单调改进压力 + 预算 + 防退化），不替代 LLM 推理。代码位于 `src/memory/dreaming/evolution/`（`gate.rs` / `score.rs` / `budget.rs` / `evidence.rs`）。
 
 ### 笔记层第 2–4 轮
 

@@ -1,89 +1,91 @@
 ---
 title: "Resilience System"
-description: "Multi-agent elasticity, task recovery, and fault tolerance"
+description: "SQLite persistence core, StateDatabase, skeleton/pulse event model, and task/trace types — the storage substrate that backs Shadow Replay and risk-aware recovery."
 ---
 
-The resilience system makes Aleph fault-tolerant. It ensures that interrupted tasks can be recovered, running agents can checkpoint gracefully, and the system degrades predictably under failure. The system is built around a SQLite-based `StateDatabase` and three core mechanisms: **Shadow Replay**, **Graceful Shutdown**, and **Risk-Aware Recovery**.
+The resilience system is Aleph's persistence and state layer. After the agent-loop migration, `src/resilience/` only retains the **database layer (`StateDatabase`) and shared types** — governance, collaboration, perception, and recovery middleware have been removed; higher-level recovery is now orchestrated by the harness in `src/agents/` together with the gateway event bus.
 
-## Architecture Overview
+> `src/resilience/mod.rs` after the 26.7.x migration only exports `database` and `types`:
+> ```
+> pub mod database;
+> pub mod types;
+> ```
+> The historical `recovery/`, `collaboration/`, and shadow-replay submodules no longer exist. Their responsibilities now live in `src/agents/swarm/tasks/`, `src/harness/trace.rs`, and `src/gateway/event_bus.rs`.
+
+---
+
+## Current layout
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     Resilience System                             │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌──────────────┐  ┌────────────────┐  ┌──────────────────────┐ │
-│  │   Recovery    │  │   Graceful     │  │   Collaboration      │ │
-│  │   Manager     │  │   Shutdown     │  │   Coordinator        │ │
-│  │              │  │               │  │                      │ │
-│  │  Scan tasks  │  │  SIGTERM trap │  │  Session-as-Service  │ │
-│  │  Risk assess │  │  Checkpoint   │  │  Context swapping    │ │
-│  │  Auto-resume │  │  Mark tasks   │  │  Handle reuse        │ │
-│  └──────┬───────┘  └───────┬───────┘  └──────────┬───────────┘ │
-│         │                   │                      │             │
-│         └───────────────────┼──────────────────────┘             │
-│                             │                                     │
-│                   ┌─────────┴─────────┐                          │
-│                   │   StateDatabase    │                          │
-│                   │     (SQLite)       │                          │
-│                   │                   │                          │
-│                   │  - events         │                          │
-│                   │  - tasks          │                          │
-│                   │  - traces         │                          │
-│                   │  - sessions       │                          │
-│                   └───────────────────┘                          │
-│                                                                   │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                  Shadow Replay Engine                       │  │
-│  │  Reconstruct conversation state from traces without LLM    │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                   │
-└──────────────────────────────────────────────────────────────────┘
+src/resilience/
+├── mod.rs        # entry; only re-exports database + types
+├── types.rs      # AgentTask / TaskTrace / AgentEvent / Lane / RiskLevel / TaskStatus
+└── database/
+    ├── mod.rs                 # module entry; DEFAULT_EMBEDDING_DIM etc.
+    ├── state_database/        # StateDatabase implementation + schema migrations
+    ├── channel_offsets.rs     # channel offset persistence
+    ├── events.rs              # AgentEvent persistence
+    ├── group_chat.rs          # group-chat history persistence
+    ├── memory_events.rs       # memory-system event log
+    ├── migration.rs           # schema migrations
+    ├── paired_users.rs        # paired-user records
+    ├── tasks.rs               # AgentTask CRUD
+    └── traces.rs              # TaskTrace CRUD
 ```
+
+---
 
 ## StateDatabase
 
-The `StateDatabase` is the persistence backbone of the resilience system. It uses SQLite (via rusqlite) to store four categories of data:
+`StateDatabase` is the persistence backbone of the resilience system. SQLite via `rusqlite`:
 
-| Table | Purpose | Key Fields |
-|-------|---------|------------|
-| **events** | Tiered event persistence (Skeleton + Pulse) | `task_id`, `seq`, `event_type`, `is_structural` |
-| **tasks** | Task state and recovery metadata | `id`, `status`, `risk_level`, `lane`, `checkpoint_snapshot_path` |
-| **traces** | Execution traces for Shadow Replay | `task_id`, `step_index`, `role`, `content_json` |
-| **sessions** | Subagent session lifecycle | `id`, `agent_type`, `status`, `context_path` |
+| Table / entity | Purpose | Key fields |
+|---|---|---|
+| **AgentEvent** | Tiered event persistence (Skeleton + Pulse) | `task_id`, `seq`, `event_type`, `is_structural` |
+| **AgentTask** | Task state + recovery metadata | `id`, `status`, `risk_level`, `lane`, `checkpoint_snapshot_path` |
+| **TaskTrace** | Shadow Replay execution trace | `task_id`, `step_index`, `event`, `timestamp` |
+| **group_chat** | Group-chat history | per-team persistence |
+| **memory_events** | Memory-system events | write log |
+| **paired_users** | Paired-user records | pairing |
+| **channel_offsets** | Channel read offsets | webhook / event-source resync |
 
-### Event Tiers: Skeleton and Pulse
+`AgentUsageTotal` and `MemoryStats` are also exported and reused by recall and experience-store submodules in `src/memory/`.
+
+### Event tiers: skeleton and pulse
 
 Events follow a two-tier persistence model:
 
 ```rust
 impl AgentEvent {
-    // Structural events (Skeleton) -- persisted immediately
-    pub const TYPE_TASK_STARTED: &str = "task_started";
-    pub const TYPE_TOOL_CALL_STARTED: &str = "tool_call_started";
-    pub const TYPE_TOOL_CALL_COMPLETED: &str = "tool_call_completed";
-    pub const TYPE_ARTIFACT_CREATED: &str = "artifact_created";
-    pub const TYPE_TASK_COMPLETED: &str = "task_completed";
-    pub const TYPE_TASK_FAILED: &str = "task_failed";
+    // Structural events (Skeleton) — persisted immediately
+    pub const TYPE_TASK_STARTED:        &str = "task_started";
+    pub const TYPE_TOOL_CALL_STARTED:    &str = "tool_call_started";
+    pub const TYPE_TOOL_CALL_COMPLETED:  &str = "tool_call_completed";
+    pub const TYPE_ARTIFACT_CREATED:     &str = "artifact_created";
+    pub const TYPE_TASK_COMPLETED:       &str = "task_completed";
+    pub const TYPE_TASK_FAILED:          &str = "task_failed";
 
-    // Streaming events (Pulse) -- batched before persistence
-    pub const TYPE_AI_STREAMING: &str = "ai_streaming";
+    // Streaming events (Pulse) — batched before persistence
+    pub const TYPE_AI_STREAMING:         &str = "ai_streaming";
+
+    pub fn structural(task_id, seq, etype, payload) -> Self { /* is_structural = true */ }
+    pub fn pulse(task_id, seq, etype, payload)        -> Self { /* is_structural = false */ }
 }
 ```
 
 **Skeleton events** represent state transitions that must survive crashes. They are written synchronously and used for recovery. **Pulse events** are high-frequency streaming data (token-by-token output) that is batched and can be dropped without affecting correctness.
 
-## Core Types
+---
 
-### AgentTask
+## Core types (`src/resilience/types.rs`)
 
-Every task dispatched to a subagent is represented as an `AgentTask`:
+### `AgentTask`
 
 ```rust
 pub struct AgentTask {
     pub id: String,
     pub parent_session_id: String,
-    pub agent_id: String,              // "explorer", "coder", etc.
+    pub agent_id: String,              // "explorer" / "coder" / …
     pub task_prompt: String,
     pub status: TaskStatus,
     pub risk_level: RiskLevel,
@@ -100,206 +102,103 @@ pub struct AgentTask {
 }
 ```
 
-### TaskStatus
+Helpers: `AgentTask::new` (defaults: `Pending` + `Subagent` lane), `with_parent_task` (recursion depth), `with_lane`, `should_auto_resume` (only `RiskLevel::Low`), `needs_resume_confirmation` (only `RiskLevel::High`).
 
-Tasks move through a state machine:
-
-```
-                ┌──────────┐
-                │ Pending  │
-                └────┬─────┘
-                     │ start
-                ┌────▼─────┐
-         ┌──────│ Running  │──────┐
-         │      └────┬─────┘      │
-    SIGTERM     │         │    error
-         │      │ success  │      │
-    ┌────▼──────┐    ┌────▼─────┐ │
-    │Interrupted│    │Completed │ │
-    └───────────┘    └──────────┘ │
-                              ┌───▼────┐
-                              │ Failed │
-                              └────────┘
-```
+### `TaskStatus`
 
 ```rust
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
-    Pending,      // Waiting to execute
-    Running,      // Currently executing
-    Completed,    // Finished successfully
-    Failed,       // Finished with error
-    Interrupted,  // System shutdown during execution
-    Idle,         // Paused (Session-as-a-Service)
-    Swapped,      // Context swapped to disk
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Interrupted,   // system shutdown during execution
+    Idle,          // Session-as-a-Service pause
+    Swapped,       // context swapped to disk
 }
 
 impl TaskStatus {
-    pub fn is_recoverable(&self) -> bool {
-        matches!(self, TaskStatus::Running | TaskStatus::Interrupted)
+    pub const fn is_recoverable(&self) -> bool {
+        matches!(self, Self::Running | Self::Interrupted)
     }
 }
 ```
 
-### RiskLevel
-
-Risk levels drive recovery decisions:
+### `RiskLevel`
 
 ```rust
-pub enum RiskLevel {
-    Low,   // Read-only operations -- safe to auto-resume
-    High,  // Write operations -- requires user confirmation
-}
+pub enum RiskLevel { Low, High }
 ```
 
-### Lane
+- `Low` — read-only operations; safe to auto-resume on restart
+- `High` — write operations; requires user confirmation
 
-The lane system provides resource isolation between user interactions and background work:
+### `Lane`
 
 ```rust
-pub enum Lane {
-    Main,      // User interactions, abort commands (high priority)
-    Subagent,  // Background work (normal priority)
-}
+pub enum Lane { Main, Subagent }
 ```
+
+- `Main` — user interactions, abort commands (high priority)
+- `Subagent` — background work (normal priority)
 
 The Main lane is never starved by subagent work. User-facing requests (conversation, abort commands) always get priority scheduling.
 
-## Shadow Replay
-
-Shadow Replay is the mechanism for deterministic task recovery without consuming LLM tokens. When a task is interrupted, its execution traces (the sequence of assistant messages and tool results) are stored in the StateDatabase. On recovery, these traces are replayed to reconstruct the exact conversation state.
-
-### How It Works
-
-```
-1. During Execution: Record every step as a TaskTrace
-   ┌────────────┐     ┌────────────┐     ┌────────────┐
-   │ Assistant:  │────▶│ Tool:      │────▶│ Assistant:  │
-   │ "search..." │     │ result     │     │ "found..." │
-   │ step_index=0│     │ step_index=1│     │ step_index=2│
-   └────────────┘     └────────────┘     └────────────┘
-
-2. On Crash: Tasks marked as Interrupted
-
-3. On Recovery: Shadow Replay reconstructs conversation
-   ┌──────────────────────────────────────────┐
-   │  ShadowReplayEngine.replay_task(task_id)  │
-   │                                           │
-   │  Load traces from DB                      │
-   │  Convert each trace → Message             │
-   │  Return ReplayResult {                    │
-   │    messages: [msg1, msg2, msg3],          │
-   │    last_step: 2,                          │
-   │    last_tool_call_id: Some("call_xyz"),   │
-   │  }                                        │
-   └──────────────────────────────────────────┘
-
-4. Continue: Agent Loop resumes from last step
-   No LLM re-inference needed for past steps
-```
-
-### Trace Recording
-
-Each step in execution is recorded as a `TaskTrace`:
+### `TaskTrace`
 
 ```rust
 pub struct TaskTrace {
-    pub id: i64,
+    pub id: i64,                // assigned by the database
     pub task_id: String,
-    pub step_index: u32,          // 0-based step counter
-    pub role: TraceRole,          // Assistant | Tool
-    pub content_json: String,     // Serialized message content
+    pub step_index: u32,        // 0-based
+    pub event: AgentTraceEvent, // from aleph_protocol
     pub timestamp: i64,
 }
 
-pub enum TraceRole {
-    Assistant,  // LLM output (including tool calls)
-    Tool,       // Tool execution result
+impl TaskTrace {
+    pub fn new(task_id, step_index, event) -> Self;
+    pub fn with_timestamp(self, ts: i64) -> Self;   // override the wall-clock stamp; for ordered fixtures
+    pub const fn event_kind(&self) -> &'static str;
 }
 ```
 
-### Divergence Detection
+`AgentTraceEvent` comes from the `aleph_protocol` crate (unified protocol); `task_id` and `step_index` are written by the dispatcher; `event_kind()` returns a stable string for indexing and filtering.
 
-After replay, the system performs a "Handover Inference" check. It asks the LLM what it would do next, and compares that to the recorded next step:
+> The integration test in `src/routing/integration_tests.rs::observer_*` verifies the full trace path: `RoutingAttribution` → `OutcomeObserver::on_trace` → `RoutingExperienceStore::recall` round-trips correctly.
 
-```rust
-pub enum DivergenceStatus {
-    Aligned,    // LLM agrees with recorded next step
-    Diverged {  // LLM wants a different action
-        expected_tool: String,
-        actual_tool: String,
-    },
-    ReachedEnd, // No more recorded steps -- start live execution
-}
+---
+
+## Shadow Replay & state recovery
+
+### State machine
+
+```
+                 ┌──────────┐
+                 │ Pending  │
+                 └────┬─────┘
+                      │ start
+                 ┌────▼─────┐
+         ┌──────│ Running  │──────┐
+         │      └────┬─────┘      │
+     SIGTERM       │        │   error
+         │         │ success │     │
+     ┌────▼──────┐  │  ┌────▼────┐ │
+     │Interrupted│  │  │Completed│ │
+     └───────────┘  │  └─────────┘ │
+                    │              │
+                    └─► Failed ◄───┘
 ```
 
-If the LLM diverges, the system can either follow the LLM's new direction (adapting to changed state) or continue the recorded path (preserving determinism).
+`is_recoverable()` is true only for `Running` and `Interrupted` — those two statuses drive recovery decisions combined with `RiskLevel` and trace availability.
 
-## Graceful Shutdown
-
-When Aleph receives SIGTERM or SIGINT, the `GracefulShutdown` handler checkpoints all running tasks:
-
-```rust
-pub struct GracefulShutdown {
-    db: Arc<StateDatabase>,
-    shutdown_tx: broadcast::Sender<ShutdownSignal>,
-}
-
-pub enum ShutdownSignal {
-    Term,       // SIGTERM
-    Interrupt,  // SIGINT (Ctrl+C)
-    Requested,  // Programmatic shutdown
-}
-```
-
-The checkpoint process:
-
-1. Signal handler receives SIGTERM/SIGINT
-2. Broadcast shutdown signal to all subsystems
-3. Mark all `Running` tasks as `Interrupted` in the StateDatabase
-4. Each task's trace history is already persisted (traces are written during execution)
-5. Process exits cleanly
-
-```rust
-impl GracefulShutdown {
-    pub async fn checkpoint(&self) -> Result<u64> {
-        // Mark all running tasks as interrupted
-        let count = self.db.mark_running_as_interrupted().await?;
-        info!(interrupted_tasks = count,
-              "Marked running tasks as interrupted for recovery");
-        Ok(count)
-    }
-}
-```
-
-On restart, the Recovery Manager finds these interrupted tasks and decides how to handle them.
-
-## Recovery Manager
-
-The `RecoveryManager` scans for recoverable tasks on startup and makes risk-aware decisions:
-
-```rust
-pub enum RecoveryDecision {
-    AutoResume {
-        task: AgentTask,
-        replay_engine: Arc<ShadowReplayEngine>,
-    },
-    PendingConfirmation {
-        task: AgentTask,
-    },
-    Skip {
-        task_id: String,
-        reason: String,
-    },
-}
-```
-
-### Decision Logic
+### Decision logic (orchestrated by `agents/swarm/tasks/` + `harness/trace.rs`)
 
 ```
 For each task where status = Running | Interrupted:
     │
     ├── No traces available?
-    │   └── Skip("No execution traces available")
+    │   └── Skip ("no execution traces available")
     │
     ├── RiskLevel::Low?
     │   └── AutoResume (Shadow Replay + continue)
@@ -308,136 +207,68 @@ For each task where status = Running | Interrupted:
         └── PendingConfirmation (wait for user approval)
 ```
 
-The rationale is simple: read-only operations (file search, code analysis) are safe to retry automatically. Write operations (file modification, shell commands) need human confirmation because the system state may have changed since the interrupt.
-
-### Recovery Summary
-
-```rust
-pub struct RecoverySummary {
-    pub auto_resume_count: usize,
-    pub pending_confirmation_count: usize,
-    pub skipped_count: usize,
-    pub total_count: usize,
-}
-```
-
-On startup, Aleph logs a recovery summary and begins auto-resuming low-risk tasks while queuing high-risk tasks for user confirmation.
-
-## Subagent Sessions (Session-as-a-Service)
-
-Subagent sessions allow specialized agents (explorer, coder, researcher) to persist across multiple task invocations:
-
-```rust
-pub struct SubagentSession {
-    pub id: String,
-    pub agent_type: String,        // "explorer", "coder", etc.
-    pub status: SessionStatus,     // Active | Idle | Swapped
-    pub context_path: Option<String>, // Disk path for swapped context
-    pub parent_session_id: String,
-    pub created_at: i64,
-    pub last_active_at: i64,
-    pub total_tokens_used: u64,
-    pub total_tool_calls: u64,
-}
-
-pub enum SessionStatus {
-    Active,   // Executing right now
-    Idle,     // In memory, waiting for reuse
-    Swapped,  // Context serialized to disk
-}
-```
-
-### Context Swapping
-
-When memory pressure is high, idle sessions can be swapped to disk:
-
-```
-Active ──(task completes)──▶ Idle ──(memory pressure)──▶ Swapped
-                              │                              │
-                              │◀──(new task for agent)───────┘
-                              │   (deserialize from disk)
-```
-
-Swapped sessions are stored as serialized context files. When a new task arrives for a swapped agent type, the system deserializes the context and the session resumes with its full conversation history intact.
-
-### Handle Reuse
-
-Session handles enable efficient reuse:
-
-```
-Task 1: "Search for auth code" → spawn explorer session (sess-001)
-Task 2: "Find the test files"  → reuse explorer session (sess-001)
-                                  (session retains context from Task 1)
-```
-
-This avoids the cold-start cost of building context from scratch for related tasks.
-
-## Module Structure
-
-```
-src/resilience/
-├── types.rs                   # Core types: AgentTask, TaskTrace, AgentEvent, etc.
-├── database/
-│   ├── mod.rs                 # Database module entry
-│   ├── state_database.rs      # StateDatabase: SQLite connection + init
-│   ├── events.rs              # Event CRUD operations
-│   ├── tasks.rs               # Task CRUD operations
-│   ├── traces.rs              # Trace CRUD operations
-│   ├── sessions.rs            # Session CRUD operations
-│   └── migration.rs           # Schema migrations
-├── recovery/
-│   ├── mod.rs                 # Recovery module entry
-│   ├── manager.rs             # RecoveryManager: startup task recovery
-│   ├── shadow_replay.rs       # ShadowReplayEngine: trace-based recovery
-│   ├── graceful_shutdown.rs   # GracefulShutdown: SIGTERM handler
-│   └── risk_adapter.rs        # Risk level assessment utilities
-├── collaboration/
-│   ├── mod.rs                 # Collaboration module entry
-│   ├── coordinator.rs         # Multi-agent coordination
-│   ├── handle.rs              # Session handle management
-│   └── swapping.rs            # Context swap to/from disk
-└── tests/
-    ├── recovery_tests.rs      # Recovery integration tests
-    └── governance_tests.rs    # Governance policy tests
-```
+Read-only operations (file search, code analysis) are safe to retry automatically; write operations (file modification, shell commands) need human confirmation because the system state may have changed since the interrupt.
 
 ---
 
-## 26.7.x Addendum
+## Trace data flow
 
-### Gateway Error Chain Single-Source
+```
+Execution: every step writes a TaskTrace
+    │
+    ▼
+harness::trace::TraceSink::on_trace(SessionCompleted { … })
+    │
+    ▼
+gateway event bus routes to OutcomeObserver (src/routing/observer.rs)
+    │
+    ▼
+RoutingExperienceStore.record (src/routing/experience_store.rs, sqlite-vec k-NN)
+```
 
-26.7.21+: the raw error chain never leaks to the Panel; `ErrorReceipt` is the single-source user-readable error.
+`OutcomeObserver` is the VESR write side; `RoutingRecall::build_routing_experience_message` is the read side (once per run, at run-start). They are paired through `RoutingAttribution.task_emb` (`OnceLock<Vec<f32>>`).
 
-### WS Task-Leak Fixes
+---
 
-26.7.21+: per-connection event-forward tasks no longer leak; `broadcast::RecvError::Lagged` recovers rather than dies permanently; webhook backpressure returns 503.
+## Fail-closed
 
-### Cluster Fixes
+26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused** (never silently allowed). `DiminishingReturnsDetector` was removed from `harness/tests/budget.rs` — it was a deterministic completion judgment *inside* the loop, which R10 forbids. Hard stops are now bounded by `max_iterations`, the tool-loop verifier, and the model's own stop instead.
 
-- Dead cold-start enrollment fixed
-- Deregistration made to stick
-- Reverse RPC hardened
-- `connect` handshake precedes the method in `gateway call`
+---
 
-### Cluster `file.write` No TOCTOU
+## Guardian Judge & Heartbeat
 
-26.7.21+: no time-of-check-to-time-of-use window between the existence check and the write.
+26.7.21+: the LLM judge for heartbeat probes — **payload masks secrets**. Heartbeat probes refuse to use dangerous tools or confirmation-gated tools. See [Heartbeat](/docs/en/automation/heartbeat) for the full spec.
 
-### Fail-Closed
+---
 
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization is refused.
+## Module layout
 
-### Guardian Judge
+```
+src/resilience/
+├── mod.rs                       # only re-exports database + types
+├── types.rs                     # AgentTask / TaskTrace / AgentEvent / Lane / RiskLevel / TaskStatus
+└── database/
+    ├── mod.rs                   # module entry
+    ├── state_database/          # StateDatabase + schema migrations
+    ├── channel_offsets.rs
+    ├── events.rs                # AgentEvent persistence
+    ├── group_chat.rs
+    ├── memory_events.rs
+    ├── migration.rs
+    ├── paired_users.rs
+    ├── tasks.rs                 # AgentTask CRUD
+    └── traces.rs                # TaskTrace CRUD
+```
 
-26.7.21+: the LLM judge for heartbeat probes — **payload masks secrets**.
+> The historical stub RPCs (`heartbeat.*_stub` / `cron.*_stub`) have been realized; the full RPC is driven by the [Daemon](/docs/en/concepts/daemon), backed by `src/tasks/cron/` and `src/tasks/heartbeat/` and wired at startup in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_cron_handlers / register_heartbeat_handlers`.
 
-### Heartbeat Refuses Dangerous Tools
+---
 
-26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
-
-### See Also
+## See Also
 
 - [Security Overview](/docs/en/security/overview)
 - [Fail-Closed Principle](/docs/en/security/overview#fail-closed)
 - [Daemon](/docs/en/concepts/daemon)
+- [Heartbeat](/docs/en/automation/heartbeat)
+- [Cron Jobs](/docs/en/automation/cron-jobs)

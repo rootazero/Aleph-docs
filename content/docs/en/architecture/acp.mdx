@@ -1,114 +1,113 @@
 ---
 title: "ACP Protocol"
-description: "Agent Client Protocol for integrating external CLI tools (Claude Code, Codex, Gemini) as agent adapters."
+description: "Agent Client Protocol — integrate external CLIs (Claude Code, Codex, Gemini) as ACP adapters; AcpAdapterManager owns the session lifecycle, the process-isolation kernel backs sandbox safety."
 ---
 
-The `acp` module implements the Agent Client Protocol (ACP), enabling Aleph to integrate external CLI tools as first-class agent adapters.
+The `acp` module implements the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol), integrating external CLI tools as first-class ACP adapters.
+
+> The historical `AcpManager::create_session / send_message / stream_response` surface has been replaced by `AcpAdapterManager` (`src/acp/manager/`). Session lifecycle, persistence, and re-authorization all live under the `manager/` submodule.
 
 ## Overview
 
-ACP manages external CLI tools as agent adapters, supporting two modes:
-- **Tool Mode** — LLM-dispatched tool calls (read-only operations)
-- **Agent Mode** — Direct conversation with full read/write capabilities
+ACP manages external CLI tools as ACP adapters, supporting two execution modes:
+- **`NativeAcp`** — Full ACP protocol over persistent stdio (Gemini CLI `--acp`). Lazy-start sessions that are automatically respawned when the child dies.
+- **`Oneshot`** — Fresh process per prompt (Claude Code `--print`, Codex `exec`). No persistent session.
 
-Supported adapters:
-- Claude Code
-- Codex (OpenAI)
-- Gemini CLI
+Supported adapters: Claude Code, Codex (OpenAI), Gemini CLI, plus any CLI harness exposed via `acp/adapters/custom.rs` / `acp/adapters/generic.rs`.
 
 ## Architecture
 
 ```
-ACP Manager
-  ├── Adapter — Protocol abstraction
-  ├── Adapters — Concrete implementations
-  │     ├── ClaudeCodeAdapter
-  │     ├── CodexAdapter
-  │     └── GeminiAdapter
-  ├── Session — ACP session lifecycle
-  ├── Transport — Communication layer
-  └── Protocol — Message protocol definitions
+src/acp/
+├── mod.rs            # entry; re-exports AcpAdapterManager + AcpSession + AcpSessionEvent
+├── adapter.rs        # AcpAdapter trait + AdapterMode (NativeAcp | Oneshot)
+├── adapters/         # concrete adapters
+│   ├── mod.rs
+│   ├── custom.rs     # custom CLI configuration
+│   └── generic.rs    # generic harness
+├── protocol.rs       # ACP message protocol
+├── transport.rs      # communication layer
+├── output_format.rs  # output formatting
+├── incoming.rs       # inbound message parsing
+├── session.rs        # AcpSession + AdapterConfig + PersistedAcpSession + CancelHandle
+├── manager/          # AcpAdapterManager
+│   ├── mod.rs        # struct + SessionSnapshot
+│   ├── harness_admin.rs    # harness CRUD / queries / hooks / restore_sessions / list_sessions
+│   ├── lifecycle.rs        # ensure_session / prompt / cancel / control RPCs / shutdown_*
+│   ├── persistence.rs      # disk persistence + wire_persistence boot helper
+│   └── session_key.rs      # SessionKey + path canonicalization
+├── mock_server.rs    # test mock
+└── tests.rs
 ```
 
-## Core Components
+## Core components
 
-### ACP Manager
-
-Central coordinator for all ACP sessions:
+### `AcpAdapterManager` (`src/acp/manager/mod.rs`)
 
 ```rust
-// src/acp/manager.rs
-pub struct AcpManager {
-    sessions: HashMap<String, AcpSession>,
-    persistence_hook: Option<PersistenceHook>,
+pub struct AcpAdapterManager {
+    pub(super) adapters: RwLock<HashMap<String, Arc<dyn AcpAdapter>>>,
+    pub(super) configs:  RwLock<HashMap<String, AcpAdapterEntry>>,
+    pub(super) sessions: /* active NativeAcp sessions, keyed by (harness_id, cwd) */,
 }
 
-impl AcpManager {
-    pub async fn create_session(
-        &mut self,
-        harness_id: String,
-        cwd: String,
-        adapter_type: AdapterType,
-    ) -> Result<String>;  // Returns acp_session_id
-    
-    pub async fn send_message(
-        &self,
-        acp_session_id: String,
-        message: String,
-    ) -> Result<()>;
-    
-    pub async fn stream_response(
-        &self,
-        acp_session_id: String,
-        callback: AcpChunkCallback,
-    ) -> Result<()>;
+pub struct SessionEntry {
+    pub session: Arc<AsyncMutex<AcpSession>>,
+    pub cancel:  CancelHandle,        // writes session/cancel directly to the child's stdin
 }
 ```
 
-### Adapter Trait
+Supports:
+- Runtime dynamic harness registration / unregistration (`harness_admin`)
+- Boot-time `wire_persistence` to restore sessions from disk
+- Concurrent prompts in the same `(harness, cwd)` serialize via the inner mutex; different keys progress in parallel
+- `cancel` does NOT need to hold the session mutex — can interrupt an in-flight prompt
 
-Abstract interface for all ACP adapters:
+### `AcpAdapter` trait (`src/acp/adapter.rs`)
 
 ```rust
-// src/acp/adapter.rs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterMode {
+    NativeAcp,  // full ACP protocol (initialize → session/new → session/prompt)
+    Oneshot,    // fresh process per prompt, read stdout, done
+}
+
+#[async_trait]
 pub trait AcpAdapter: Send + Sync {
-    fn name(&self) -> &str;
+    fn id(&self) -> &str;                  // "claude-code" / "codex" / "gemini"
     fn is_available(&self) -> bool;
-    async fn execute(
-        &self, 
-        cwd: &str, 
-        args: &[String]
-    ) -> Result<AcpOutput>;
+    async fn execute(&self, cwd: &str, args: &[String]) -> Result<AcpOutput>;
+    /* … */
 }
 ```
 
-### Session
+`AdapterMode::as_str` gives a stable wire label (`native_acp` / `oneshot`), aligned with serde rename.
 
-Represents a single ACP conversation:
+### `AcpSession` (`src/acp/session.rs`)
 
 ```rust
-// src/acp/session.rs
-pub struct AcpSession {
-    harness_id: String,
-    acp_session_id: String,
-    cwd: String,
-    adapter: Box<dyn AcpAdapter>,
-}
+pub struct AdapterConfig { /* command / args / env / mode */ }
+pub struct PersistedAcpSession { /* harness_id / acp_session_id / cwd / session_name / created_at */ }
+pub struct AcpSession { /* harness_id / acp_session_id / cwd / adapter */ }
+pub struct CancelHandle;       // cloneable; writes session/cancel directly to the child's stdin
 ```
 
-## Session Events
+`AcpSession::harness_id()` / `acp_session_id()` / `is_alive()` / `cancel_handle()` are the common handles.
 
-The ACP manager emits events for session persistence:
+### Session events
 
 ```rust
 pub enum AcpSessionEvent {
-    Created { harness_id, acp_session_id, cwd },
-    Updated { harness_id, acp_session_id },
-    Removed { harness_id, cwd },
+    Created { harness_id, acp_session_id, cwd, session_name: Option<String> },
+    Removed { harness_id, cwd, session_name: Option<String> },
 }
+
+pub type PersistenceHook = Arc<dyn Fn(AcpSessionEvent) + Send + Sync>;
 ```
 
-## Modes of Operation
+`session_name` is `None` for the default unnamed session; `Some(name)` for parallel named sessions in the same `(harness, cwd)` slot — mirrors acpx's `-s backend` / `-s frontend` shape. `PersistenceHook` covers disk persistence; the separate live-broadcast `AcpSessionsChangedNotifier` drives `acp.sessions.changed` push.
+
+## Modes of operation
 
 ### Tool Mode
 
@@ -116,7 +115,7 @@ In Tool Mode, the LLM dispatches read-only operations through ACP:
 
 ```
 LLM ──> Tool Call ──> ACP Adapter ──> External CLI
-         (read-only)       (claude code read)
+         (read-only)        (claude-code read)
 ```
 
 ### Agent Mode
@@ -124,9 +123,19 @@ LLM ──> Tool Call ──> ACP Adapter ──> External CLI
 In Agent Mode, the user converses directly with the external tool:
 
 ```
-User ──> Aleph ──> ACP Manager ──> External CLI
+User ──> Aleph ──> AcpAdapterManager ──> External CLI
               (full read/write)
 ```
+
+## RPC surface (wired at startup by `register_acp_handlers`)
+
+| Group | Methods |
+|-------|---------|
+| Adapter CRUD | `acp.create`, `acp.delete`, `acp.get`, `acp.list`, `acp.update` |
+| Adapter presets | `acp.presets`, `acp.presets_meta`, `acp.test`, `acp.set_enabled` |
+| Sessions | `acp.sessions_list`, `acp.sessions_cancel`, `acp.sessions_shutdown` |
+
+Wiring lives in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_acp_handlers` (sibling of `register_cron_handlers` / `register_heartbeat_handlers`).
 
 ## Configuration
 
@@ -144,37 +153,14 @@ command = "codex"
 args = []
 ```
 
-## Code Location
+## Process-isolation kernel
 
-- `src/acp/mod.rs` — Module entry point
-- `src/acp/manager.rs` — ACP session management
-- `src/acp/adapter.rs` — Adapter trait
-- `src/acp/adapters/` — Concrete adapters
-- `src/acp/session.rs` — Session lifecycle
-- `src/acp/transport.rs` — Communication layer
-- `src/acp/protocol.rs` — Message protocol
+ACP sessions are backed by the process-isolation kernel — sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn ([R1 carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
 
 ## See Also
 
 - [A2A](./a2a) — Agent-to-Agent protocol for internal agents
 - [Tools](../tools/overview) — Built-in tool system
-
----
-
-## 26.7.x Addendum
-
-### Full RPC
-
-- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
-- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
-- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
-
-### Process-Isolation Kernel
-
-26.7.x: ACP sessions are backed by the process-isolation kernel — sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn ([R1 carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
-
-### See Also
-
 - [ACP Concept](/docs/en/concepts/acp-protocol) — full concept
 - [Sandbox](/docs/en/architecture/sandbox) — isolation mechanisms
 - [Gateway RPC `acp.*`](/docs/en/gateway/methods)

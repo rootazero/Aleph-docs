@@ -1,141 +1,63 @@
 ---
 title: "ClawHub"
-description: "用于 ClawHub 技能注册表集成的 HTTP 客户端和类型。"
+description: "历史参考：ClawHub 在 Hub 目录中以 `via: \"clawhub\"` 来源标签形式存在；`src/clawhub/` 模块已删除。"
 ---
 
-> **已弃用 —— 历史参考。** ClawHub 不再是一等源。它的专属设置标签页已被移除，其发现职责被纳入[扩展商店](/docs/zh/concepts/extensions-store)，该商店以**扩展**为统一概念，按功能类别浏览技能、插件和 MCP 服务器。如今的一等源是 Claude/Aleph 插件市场、Official MCP Registry 和 Docker MCP Catalog。ClawHub 仅可通过商店智能体的长尾路径访问（智能体读取某个 URL/仓库，以安装任何已编排源都未覆盖的扩展）。以下架构作为 `clawhub` 模块的历史参考予以保留。
+> **已删除——历史参考。** `src/clawhub/` 模块不再存在于源码树中。ClawHub 的专属设置标签页已被移除；其发现职责被纳入[扩展商店](/docs/zh/concepts/extensions-store)，以**扩展**为统一概念，按功能类别浏览技能、插件和 MCP 服务器。
 
-`clawhub` 模块提供与 [ClawHub](https://clawhub.ai) 的 HTTP 客户端集成，ClawHub 是一个用于发现和安装社区贡献技能技能注册表。
+如今 ClawHub 仍可通过 **Hub 目录的长尾来源标签**访问：`src/hub/types.rs::ExtensionProvenance::via = "clawhub"`（参见 `src/hub/catalog_client.rs::CatalogEntry.via` 的 `via: "clawhub"` wire 形态）。商店代理读取某个 URL / 仓库安装任何已编排源未覆盖的扩展。下文结构仅作为历史参考。
 
-## 概览
+---
 
-ClawHub 集成使 Aleph 能够：
+## 历史概览
+
+ClawHub 集成原本让 Aleph 能够：
+
 - **浏览技能** —— 搜索和发现社区技能
-- **安装技能** —— 从注册表下载和安装技能
+- **安装技能** —— 从注册表下载并安装
 - **同步元数据** —— 保持技能元数据最新
 
-## 架构
+## 历史架构（已删除）
 
 ```
-ClawHubClient
+ClawHubClient  （src/clawhub/client.rs——已删除）
   ├── HTTP 客户端 (reqwest)
-  ├── 类型 —— 请求/响应模式
+  ├── 类型 —— 请求/响应模式   （src/clawhub/types.rs——已删除）
   └── 认证 (API token)
 ```
 
-## 核心组件
-
-### ClawHubClient
-
-ClawHub API 的 HTTP 客户端：
+### 历史 `ClawHubClient`（已删除）
 
 ```rust
-// src/clawhub/client.rs
 pub struct ClawHubClient {
-    base_url: String,
-    client: reqwest::Client,
-    auth_token: Option<String>,
+    pub base_url: String,
+    pub client: reqwest::Client,
+    pub auth_token: Option<String>,
 }
 
 impl ClawHubClient {
     pub fn new(base_url: String) -> Self;
-    
-    pub async fn search_skills(
-        &self,
-        query: &str,
-    ) -> Result<Vec<SkillListing>>;
-    
-    pub async fn get_skill(
-        &self,
-        id: &str,
-    ) -> Result<SkillDetail>;
-    
-    pub async fn download_skill(
-        &self,
-        id: &str,
-        dest: &Path,
-    ) -> Result<()>;
+
+    pub async fn search_skills(&self, query: &str) -> Result<Vec<SkillListing>>;
+    pub async fn get_skill(&self, id: &str) -> Result<SkillDetail>;
+    pub async fn download_skill(&self, id: &str, dest: &Path) -> Result<()>;
 }
 ```
 
-### 类型
+## 如今的接入路径
 
-```rust
-// src/clawhub/types.rs
-pub struct SkillListing {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub author: String,
-    pub version: String,
-    pub downloads: u64,
-    pub rating: f32,
-}
+- **Hub 目录**（`src/hub/`）作为**扩展**的统一发现层
+- ClawHub 内容以 `via: "clawhub"` 的 provenance 标签流入 Hub 目录（`catalog_client.rs` 测试明确 wire `via` 字段）
+- 兼容命名空间 `ClawHub` 仍被识别（参考 `src/skill/guard.rs::is_hidden_dir` 与 `src/tools/markdown_skill/spec.rs`）
+- 一等源现在是 Claude / Aleph 插件市场、Official MCP Registry、Docker MCP Catalog
 
-pub struct SkillDetail {
-    pub listing: SkillListing,
-    pub readme: String,
-    pub dependencies: Vec<String>,
-    pub tools: Vec<String>,
-}
-```
+## 历史 RPC
 
-## 用法
-
-```rust
-use alephcore::clawhub::ClawHubClient;
-
-let client = ClawHubClient::new(
-    "https://api.clawhub.ai".to_string()
-);
-
-// 搜索技能
-let results = client.search_skills("code review").await?;
-
-// 下载技能
-client.download_skill("code-review", 
-    Path::new("~/.aleph/skills/")
-).await?;
-```
-
-## 配置
-
-```toml
-[clawhub]
-enabled = true
-base_url = "https://api.clawhub.ai"
-api_token = "${CLAWHUB_TOKEN}"
-```
-
-## 代码位置
-
-- `src/clawhub/mod.rs` —— 模块入口点
-- `src/clawhub/client.rs` —— HTTP 客户端
-- `src/clawhub/types.rs` —— 请求/响应类型
+历史上曾提供 `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install` 等 RPC；这些端点已在当前源码中移除。
 
 ## 另请参阅
 
 - [扩展商店](/docs/zh/concepts/extensions-store) —— 当前用于发现和安装技能、插件及 MCP 服务器的统一入口（取代 ClawHub）
 - [技能](/docs/zh/concepts/skills) —— 技能系统概览
 - [技能安装器](/docs/zh/concepts/skills#installation) —— 安装技能
-
----
-
-## 26.7.x 补充
-
-### 降级为长尾
-
-ClawHub **不再是一级扩展源**：
-
-- 设置标签页**已移除**（并入 Settings → Advanced）
-- 降级为长尾
-- 不再维护为独立面板模式
-
-### 历史 RPC
-
-历史上曾提供 `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install` 等 RPC；这些端点已在当前源码中移除，长尾内容通过 Hub 目录的 `via: "clawhub"` 标签与兼容的 `ClawHub` 技能命名空间读取。
-
-### 见另请参阅
-
-- [ClawHub 概念](/docs/zh/concepts/clawhub) — 完整概念
-- [扩展商店](/docs/zh/concepts/extensions-store) — 替代品
+- [ClawHub 概念](/docs/zh/concepts/clawhub) —— 完整概念

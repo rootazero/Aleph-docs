@@ -1,388 +1,232 @@
 ---
 title: "会话服务"
-description: "SessionService 架构、Actor 模型、CRDT 与持久化、命令与查询分离、以及通道与认证管理。"
+description: "每会话的仅追加事件日志，配合进程内 tokio actor。"
 ---
 
-会话服务是 Aleph 中所有对话状态的中心枢纽。它不仅处理活动会话的生命周期，还负责持久化会话数据、协调参与者、以及管理会话的 CRDT 合并。本页涵盖会话服务外观、Actor 模型实现、CRDT 持久化、命令查询分离、通道生命周期，以及会话与认证系统的交互。
+会话服务为每个 Aleph 会话提供持久的、仅追加的事件存储。它取代了原有的 `messages` 表，改用由 SQLite 支撑的结构化事件日志，从而支持崩溃恢复、实时订阅与精确的状态重建。
+
+关于网关如何管理会话，请参阅[网关架构](./gateway)。关于智能体工具链如何消费事件，请参阅[智能体工具链](./harness)。
 
 ---
 
-## SessionService 外观
+## 概览
+
+`InProcessActorSessionService` 是默认实现。它为每个会话 spawn 一个 tokio 任务。每个任务（`SessionActor`）在启动时从 SQLite 重放事件，然后服务命令，直到收件箱关闭或空闲超时触发。
+
+**位置**：`src/session/in_process.rs`
+
+关键属性：
+
+- **仅追加**：事件永远不会被修改或删除 —— 只能追加到日志末尾。
+- **持久**：所有事件在确认前已持久化到 SQLite。
+- **每会话一个 actor**：每个会话拥有自己的 tokio 任务，保证顺序与隔离。
+- **实时订阅**：消费者可以订阅实时事件流。
+
+---
+
+## 公共接口
+
+`SessionService` trait 是公共接口：
 
 ```rust
 #[async_trait]
 pub trait SessionService: Send + Sync + 'static {
-    /// 创建新会话
-    async fn create(
+    /// 确保 actor 在跑；返回当前 head seq
+    async fn attach(&self, id: SessionId) -> Result<SessionHandle, SessionError>;
+
+    /// 追加 + 同步持久化；返回新 seq
+    async fn emit_event(&self, id: &SessionId, event: SessionEvent) -> Result<EventSeq, SessionError>;
+
+    /// 半开读区间 [from, to)
+    async fn get_events(
         &self,
-        owner_id: String,
-        model_id: String,
-        config: SessionConfig,
-    ) -> Result<Session, SessionError>;
+        id: &SessionId,
+        from: Option<EventSeq>,
+        to: Option<EventSeq>,
+    ) -> Result<Vec<SessionEventRecord>, SessionError>;
 
-    /// 获取会话（包括活跃和已归档）
-    async fn get(&self, id: &str) -> Result<Session, SessionError>;
-
-    /// 列出用户可访问的会话
-    async fn list(&self, user_id: &str) -> Result<Vec<Session>, SessionError>;
-
-    /// 向会话发送消息（命令入口）
-    async fn send_message(
-        &self,
-        session_id: &str,
-        message: Message,
-    ) -> Result<MessageResponse, SessionError>;
-
-    /// 订阅会话事件流
+    /// 实时事件扇出
     async fn subscribe(
         &self,
-        session_id: &str,
-    ) -> Result<mpsc::Receiver<SessionEvent>, SessionError>;
+        id: &SessionId,
+    ) -> Result<broadcast::Receiver<SessionEventRecord>, SessionError>;
 
-    /// 归档会话（软删除）
-    async fn archive(&self, id: &str) -> Result<(), SessionError>;
+    /// 强制替换 actor（崩溃恢复）
+    async fn wake(&self, id: &SessionId) -> Result<SessionHandle, SessionError>;
 
-    /// 删除会话（硬删除）
-    async fn delete(&self, id: &str) -> Result<(), SessionError>;
+    /// 停止 actor，保留事件
+    async fn detach(&self, id: &SessionId) -> Result<(), SessionError>;
 }
 ```
 
-**位置**: `src/sessions/service.rs`
+**位置**：`src/session/service.rs`
 
-外观隐藏了 Actor 模型、CRDT 合并和持久化的复杂性。所有操作通过命令发送到对应的会话 Actor，Actor 处理状态变更并响应。
+`SessionId` 是 `crate::routing::session_key::SessionKey` 的别名 —— 会话以网关其他各处使用的同一个 key 标识。
 
 ---
 
-## Actor 模型实现
+## 实现
 
-每个活跃会话由一个独立的 `SessionActor` 管理：
+`InProcessActorSessionService` 持有从 `SessionId` 到该会话 actor 的 mpsc 收件箱的路由表：
 
 ```rust
-pub struct SessionActor {
-    session_id: String,
-    state: SessionState,           // 当前会话状态
-    crdt: SessionCRDT,             // CRDT 文档
-    participants: Vec<Participant>, // 参与者列表
-    event_tx: broadcast::Sender<SessionEvent>,
-    command_rx: mpsc::Receiver<SessionCommand>,
-}
-
-impl SessionActor {
-    async fn run(mut self) {
-        while let Some(cmd) = self.command_rx.recv().await {
-            match cmd {
-                SessionCommand::SendMessage { message, respond_to } => {
-                    let result = self.handle_send_message(message).await;
-                    let _ = respond_to.send(result);
-                }
-                SessionCommand::AddParticipant { participant, respond_to } => {
-                    let result = self.handle_add_participant(participant).await;
-                    let _ = respond_to.send(result);
-                }
-                SessionCommand::MergeCRDT { delta, respond_to } => {
-                    let result = self.handle_merge_crdt(delta).await;
-                    let _ = respond_to.send(result);
-                }
-                // ... 其他命令
-            }
-        }
-    }
+pub struct InProcessActorSessionService {
+    store: Arc<dyn SessionEventStore>,
+    senders: RwLock<HashMap<SessionId, mpsc::Sender<ActorCommand>>>,
+    broadcasters: RwLock<HashMap<SessionId, broadcast::Sender<SessionEventRecord>>>,
+    idle_timeout: Duration,
 }
 ```
 
-**位置**: `src/sessions/actor.rs`
+**位置**：`src/session/in_process.rs`
 
-### 为什么使用 Actor 模型
-
-- **顺序处理**: 每个 Actor 单线程处理命令，无需在会话状态上加锁
-- **容错性**: Actor 崩溃只影响单个会话，监督者可以重启它
-- **背压**: `mpsc` 通道在 Actor 过载时自然产生背压
-- **事件广播**: `broadcast` 通道向所有订阅者发送会话事件
-
-### 监督树
-
-```
-SessionSupervisor
-    ├── SessionActor (session-001)
-    ├── SessionActor (session-002)
-    ├── SessionActor (session-003)
-    └── ...
-```
-
-`SessionSupervisor` 监控所有会话 Actor。如果 Actor 崩溃，监督者根据策略决定：重启 Actor（从持久化状态恢复）、停止 Actor（终止会话）或升级错误（影响整个节点）。
+每个 `SessionActor`（在 `src/session/actor.rs` 定义）在启动时从 SQLite 重放事件，维护内存中的状态（`src/session/state.rs`），并一直处理命令直到关闭。每个 actor 的状态存放在 `src/session/state.rs`；事件类型存放在 `src/session/events.rs`。
 
 ---
 
-## CRDT 持久化
+## 存储
 
-会话状态使用无冲突复制数据类型（CRDT）建模，支持多设备实时协作：
+事件存储在 SQLite 表中：
 
-```rust
-pub struct SessionCRDT {
-    messages: ListCRDT<Message>,       // 消息的有序列表
-    metadata: MapCRDT<String, Value>,  // 键值元数据
-    participants: SetCRDT<Participant>, // 参与者集合
-}
+```sql
+CREATE TABLE session_events (
+    session_id   TEXT    NOT NULL,
+    seq          INTEGER NOT NULL,
+    turn_id      TEXT,
+    event_type   TEXT    NOT NULL,
+    payload_json TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);
 ```
 
-### 持久化流程
+**位置**：`src/session/store.rs`
 
-```
-消息到达
-    │
-    ▼
-┌──────────────────────────────────────────────┐
-│ 1. 应用到本地 CRDT                           │
-│    → 生成本地 delta                          │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│ 2. 广播 delta 给所有参与者                    │
-│    → 通过 event_tx.broadcast()               │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│ 3. 异步持久化到存储                           │
-│    → SQLite / PostgreSQL / S3                │
-│    → 每 N 秒或 M 条消息批量写入               │
-└──────────────────────────────────────────────┘
-```
+加上两个支撑索引（`idx_session_events_session_turn`、`idx_session_events_session_type`）。
 
-### 合并策略
-
-当离线编辑的设备重新连接时：
-
-```rust
-impl SessionCRDT {
-    pub fn merge(&mut self, other: &SessionCRDT) {
-        self.messages.merge(&other.messages);
-        self.metadata.merge(&other.metadata);
-        self.participants.merge(&other.participants);
-    }
-}
-```
-
-CRDT 保证：无论合并顺序如何，所有设备最终都会收敛到相同状态，无需中央协调器。消息列表使用 LWW（最后写入胜出）元素集，元数据使用 LWW 寄存器，参与者集合使用 OR-Set。
+| 属性 | 值 |
+|----------|-------|
+| 写入模式 | 同步（确认前 fsync） |
+| SQLite 模式 | WAL（预写日志） |
+| 排序 | `(session_id, seq)` 主键强制每个会话单调递增 |
 
 ---
 
-## 命令与查询分离
+## 事件 schema
 
-会话服务遵循 CQRS 模式：
+`SessionEvent` 是一个 `#[non_exhaustive]` 枚举，覆盖：
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Command Side                        │
-│  send_message() → SessionCommand::SendMessage          │
-│  add_participant() → SessionCommand::AddParticipant    │
-│  merge_crdt() → SessionCommand::MergeCRDT              │
-│                                                         │
-│  → 发送到 SessionActor → 状态变更 → 事件广播            │
-└─────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                     Query Side                          │
-│  get() → 从持久化存储读取最新快照                       │
-│  list() → 从索引查询用户会话列表                        │
-│  subscribe() → 连接到 event_rx 接收实时事件             │
-│                                                         │
-│  → 不修改状态，可水平扩展                               │
-└─────────────────────────────────────────────────────────┘
-```
+| 类别 | 变体 |
+|----------|----------|
+| 生命周期 | `SessionCreated`, `SessionWoken`, `SessionDetached`, `SessionForked` |
+| 运行边界 | `RunStarted`, `RunFinished` |
+| 回合边界 | `TurnStarted`, `TurnEnded` |
+| 消息 | `UserMessage`, `AssistantMessage`, `AssistantRunMeta`, `SystemMessage` |
+| 工具调用 | `ToolCallRequested`, `ToolCallApproved`, `ToolCallDenied`, `ToolResult`, `ToolError` |
+| 子代理委派 | `SubagentSpawned`, `SubagentReturned` |
+| 预算 / 压缩 | `BudgetUpdated`, `CompactionPerformed` |
+| 错误 | `Error` |
 
-### 为什么使用 CQRS
+**位置**：`src/session/events.rs`
 
-- **读优化**: 查询可以走单独的读取副本或缓存，不干扰写入
-- **事件溯源**: 所有状态变更都通过事件表示，支持审计和回放
-- **扩展性**: 读侧可以独立扩展（更多查询节点），写侧保证一致性
-- **实时同步**: 事件流天然支持实时协作
+辅助类型：`EventSeq`、`TurnId`、`MessageContent`、`ToolOutput`、`RunOutcome`、`TurnTrigger`、`TurnOutcome`、`ApprovalSource`、`ErrorKind`、`Timestamp`。
 
 ---
 
-## 通道生命周期
+## 投影
 
-会话通过通道（Channel）连接到外部客户端：
-
-```
-客户端连接
-    │
-    ▼
-┌──────────────────────────────────────────────┐
-│ 1. WebSocket / SSE / HTTP 连接建立            │
-│    → 创建 Channel                            │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│ 2. 认证                                        │
-│    → validate_token()                          │
-│    → 获取 IdentityContext                      │
-│    → 检查会话访问权限                          │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│ 3. 加入会话                                    │
-│    → SessionCommand::AddParticipant            │
-│    → 广播 participant_joined 事件              │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│ 4. 消息循环                                    │
-│    → 接收客户端消息 → send_message()           │
-│    → 订阅事件 → 转发给客户端                   │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────┐
-│ 5. 断开连接                                    │
-│    → SessionCommand::RemoveParticipant         │
-│    → 广播 participant_left 事件                │
-│    → 如果没有参与者，启动超时归档              │
-└──────────────────────────────────────────────┘
-```
-
-### 空闲超时
-
-会话在没有参与者时不会立即销毁，而是进入"空闲"状态：
+不是所有消费者都想要原始事件。`project_messages` 辅助函数把事件区间折叠为经典的消息历史视图：
 
 ```rust
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 分钟
-
-// 当最后一个参与者离开时
-if self.participants.is_empty() {
-    self.idle_since = Some(Instant::now());
-    self.schedule_idle_check();
-}
-
-// 空闲检查
-if self.idle_since.map(|t| t.elapsed() > IDLE_TIMEOUT).unwrap_or(false) {
-    self.archive().await;
-}
+pub fn project_messages(
+    events: &[SessionEventRecord],
+) -> Vec<ProjectedMessage>;
 ```
 
-这允许用户短暂断开（网络波动、页面刷新）后重新连接而不会丢失会话。
+**位置**：`src/session/projection.rs`
+
+它把 `RunStarted`、`TurnStarted`、`UserMessage`、`AssistantMessage`、`ToolCallRequested`、`ToolResult`、`TurnEnded`、`RunFinished` 折叠成一个线性的 `Vec<ProjectedMessage>`，看起来就像旧的 `messages` 表 —— 对 LLM 上下文窗口和 UI 渲染很有用。
 
 ---
 
-## 会话与认证
+## wake() 语义
 
-会话服务与认证系统紧密集成：
+`wake(session_id)` 是崩溃恢复机制：
 
-### 创建会话
+1. **关闭旧 actor**（如有），宽限期 5 秒。
+2. **在 spawn 新 actor 前捕获 `prior_head`**。
+3. **Spawn 全新 actor** —— 它从 SQLite 重放所有持久化事件。
+4. **发出 `SessionWoken { prior_head }`** 标记写入日志。
+5. **返回新的 `SessionHandle`**。
 
-```rust
-pub async fn create(
-    &self,
-    token: &str,           // JWT 或 API key
-    model_id: String,
-    config: SessionConfig,
-) -> Result<Session, SessionError> {
-    // 1. 验证令牌
-    let identity = self.auth.verify(token).await
-        .map_err(|_| SessionError::Unauthorized)?;
+中途崩溃的 Harness 会表现为一条没有匹配 `TurnEnded` 的 `TurnStarted` —— 替换上来的 Harness 自己决定是重试、放弃还是用 `Error` 事件关闭回合。
 
-    // 2. 检查模型访问权限
-    if !identity.can_use_model(&model_id) {
-        return Err(SessionError::ModelNotAllowed);
-    }
+| 参数 | 值 |
+|-----------|-------|
+| 空闲超时 | 30 分钟 |
+| 关闭宽限期 | 5 秒 |
 
-    // 3. 检查会话数量限制
-    let count = self.count_user_sessions(&identity.user_id).await?;
-    if count >= identity.max_sessions {
-        return Err(SessionError::SessionLimitExceeded);
-    }
-
-    // 4. 创建会话
-    let session = Session::new(identity.user_id.clone(), model_id, config);
-
-    // 5. 启动 Actor
-    self.supervisor.spawn_actor(session.id.clone(), session.clone()).await?;
-
-    // 6. 持久化
-    self.store.save(&session).await?;
-
-    Ok(session)
-}
-```
-
-### 访问控制
-
-每个会话操作都检查调用者的权限：
-
-```rust
-pub enum SessionPermission {
-    Owner,      // 所有者：完全控制
-    Member,     // 成员：发送消息、查看历史
-    Viewer,     // 观察者：只读访问
-}
-
-impl Session {
-    pub fn check_permission(&self, user_id: &str) -> Result<SessionPermission, SessionError> {
-        if self.owner_id == user_id {
-            Ok(SessionPermission::Owner)
-        } else if self.participants.iter().any(|p| p.user_id == user_id) {
-            Ok(SessionPermission::Member)
-        } else if self.is_public {
-            Ok(SessionPermission::Viewer)
-        } else {
-            Err(SessionError::AccessDenied)
-        }
-    }
-}
-```
+**集成测试**：`tests/session_wake_recovery.rs`
 
 ---
 
-## 会话状态机
+## 网关 RPC 关系
+
+网关 `session.*` RPC 方法仍然在 `SessionManager`（`src/gateway/session_manager/`）。一个双写垫片（`src/session/shim.rs`）把每个 `SessionManager` 的追加镜像进 `SessionService`，让 `session_events` 与遗留的 `messages` 表并行保持填充。
 
 ```
-┌─────────┐    create()    ┌─────────┐
-│  None   │ ─────────────→ │ Created │
-└─────────┘                └────┬────┘
-                                │ join()
-                                ▼
-                          ┌───────────┐
-                          │  Active   │◄────────┐
-                          └─────┬─────┘         │
-                                │               │
-                    ┌───────────┼───────────┐   │
-                    │           │           │   │
-                    ▼           ▼           ▼   │
-               ┌────────┐  ┌────────┐  ┌────────┐
-               │Paused  │  │Error   │  │Merging │
-               └───┬────┘  └───┬────┘  └───┬────┘
-                   │           │           │
-                   │  resume() │  retry()  │  complete()
-                   └───────────┴───────────┘
-                                   │
-                                   ▼
-                             ┌───────────┐
-                             │ Archived  │
-                             └───────────┘
+网关 RPC（session.append、session.get 等）
+        │
+        ▼
+┌─────────────────┐     ┌──────────────────┐
+│  SessionManager │────►│  遗留 messages   │
+│                 │     │  表              │
+└────────┬────────┘     └──────────────────┘
+         │
+         │ 双写垫片（src/session/shim.rs）
+         ▼
+┌─────────────────┐     ┌──────────────────┐
+│  SessionService │────►│  session_events  │
+│                 │     │  表              │
+└─────────────────┘     └──────────────────┘
 ```
 
-| 状态 | 说明 | 允许的操作 |
-|------|------|----------|
-| Created | 刚创建，等待第一个参与者 | 加入、删除 |
-| Active | 正常运行中 | 发送消息、添加参与者、归档 |
-| Paused | 所有者暂停 | 恢复、归档 |
-| Error | 处理错误 | 重试、归档、删除 |
-| Merging | 正在合并 CRDT | 等待完成 |
-| Archived | 已归档（软删除） | 查看、恢复、硬删除 |
+未来阶段会把网关 RPC 直接迁移到 `SessionService`，届时会移除垫片。
+
+---
+
+## 消费者迁移状态
+
+| 消费者 | 状态 | 备注 |
+|----------|--------|-------|
+| `AgentHarness` | 已就绪 | 读/写历史完全通过 `SessionService` |
+| `SubagentTool` | 已就绪 | 临时子会话用 `SessionService` |
+| 网关 `session.*` RPC | 在 `SessionManager` | 双写垫片镜像进 `SessionService` |
+| 记忆 / 梦境 / 其他 | 只读采用 | `SessionService::get_events` 可用，按需逐案采用 |
+
+---
+
+## 源码地图
+
+| 文件 | 角色 |
+|------|------|
+| `src/session/service.rs` | `SessionService` trait 定义 |
+| `src/session/in_process.rs` | `InProcessActorSessionService` 实现 |
+| `src/session/actor.rs` | `SessionActor` —— 每会话 tokio 任务 |
+| `src/session/state.rs` | 每个 actor 的内存状态 |
+| `src/session/events.rs` | `SessionEvent` 枚举与辅助类型 |
+| `src/session/store.rs` | SQLite schema 与 `SessionEventStore` trait |
+| `src/session/projection.rs` | `project_messages` 等读侧投影 |
+| `src/session/shim.rs` | `SessionManager` 到 `SessionService` 的双写垫片 |
+| `tests/session_wake_recovery.rs` | 崩溃恢复集成测试 |
 
 ---
 
 ## 相关页面
 
-- [架构概览](./overview) — 会话在整体架构中的位置
-- [认证与授权](../security/auth) — JWT、API key 和权限系统
-- [工具链](./harness) — 代理如何使用会话上下文
-- [CRDT 数据结构](../concepts/crdt) — CRDT 的详细设计
+- [网关架构](./gateway) —— RPC 层与会话路由
+- [智能体工具链](./harness) —— 智能体如何消费会话事件
+- [记忆系统](./memory) —— 记忆工具与持久化
 
 ---
 

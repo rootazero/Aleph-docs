@@ -1,0 +1,474 @@
+---
+title: "Design Patterns"
+description: "Aleph core design patterns: Context, Newtype, FromStr, Builder, Adapter + Trait Object, Composite Keys, and the JSON-RPC bridge pattern."
+---
+
+An overview of Aleph's core design patterns and architectural decisions. Each pattern states its motivation, gives an implementation example, points at source locations, and notes when to use / not use it.
+
+## Contents
+
+- [Context pattern](#context-pattern)
+- [Newtype pattern](#newtype-pattern)
+- [FromStr trait pattern](#fromstr-trait-pattern)
+- [Builder pattern](#builder-pattern)
+- [Adapter + Trait Object pattern](#adapter--trait-object-pattern)
+- [Composite Keys pattern](#composite-keys-pattern)
+- [JSON-RPC bridge pattern](#json-rpc-bridge-pattern)
+- [Pattern combinations](#pattern-combinations)
+
+---
+
+## Context Pattern
+
+### Motivation
+
+As APIs evolve, function signatures accumulate parameters, becoming:
+- Hard to read and understand
+- Difficult to extend without breaking existing callers
+- Error-prone when parameters share similar types
+- Cumbersome when many are optional
+
+### Solution
+
+The **Context Pattern** groups related parameters into a dedicated struct, reducing parameter count and improving API ergonomics.
+
+### Implementation: `HarnessDeps`
+
+```rust
+// src/harness/deps.rs
+pub struct HarnessDeps {
+    pub session: Arc<dyn SessionService>,
+    pub tools: Arc<dyn ToolService>,
+    pub llm: Arc<dyn AiProvider>,
+
+    pub robustness_profile: ModelRobustnessProfile,
+    pub verifier_chain: Option<Arc<VerifierChain>>,
+    pub context_budget: Option<Arc<Mutex<ContextBudget>>>,
+    pub context_compactor: Option<Arc<ContextCompactor>>,
+    pub preflight_pipeline: Option<Arc<PreflightPipeline>>,
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
+
+    pub system_prompt: Option<String>,
+    pub system_prompt_parts: Option<Vec<SystemPromptPart>>,
+    pub recall_context: Option<String>,
+
+    pub chain_context: ChainContext,
+    pub guardrails: Option<Arc<GuardrailRegistry>>,
+    pub max_iterations: Option<usize>,
+    pub power: Option<Arc<dyn PowerCapability>>,
+    pub stall_config: Option<StallConfig>,
+    pub consecutive_failure_cap: Option<usize>,
+    /* … */
+}
+```
+
+`HarnessDeps` is assembled once at startup and injected as a single struct into `AgentHarness::new`. Every field is `Arc<dyn Trait>` so the harness is cheaply cloneable and thread-safe. `orchestrator::deps_builder` provides consistent sub-agent inheritance.
+
+### Benefits
+
+1. **Extensibility** — add parameters without breaking existing code
+2. **Readability** — call sites see a clean parameter grouping
+3. **Type safety** — required parameters are compile-time checked
+4. **Ergonomics** — optional parameters via Builder
+5. **Self-documentation** — parameter relationships are explicit
+
+### When to use
+
+- Function has 5+ parameters
+- Multiple parameters are optional
+- Parameters form a logical group
+- API is likely to evolve
+- Many call sites
+
+### Locations
+
+- `HarnessDeps` — `src/harness/deps.rs`
+- `FlowRunContext` — `src/orchestrator/flow_run_tool.rs`
+- `RunContext` — `src/agents/run_context.rs`
+
+---
+
+## Newtype Pattern
+
+### Motivation
+
+Primitive types (`String`, `u64`, …) lack semantic meaning and are easy to confuse:
+
+```rust
+fn assign(experiment_id: String, variant_id: String) { /* … */ }
+// Easy to swap
+assign(variant_id, experiment_id); // compiles but is wrong!
+```
+
+### Solution
+
+The **Newtype Pattern** wraps primitives in distinct structs:
+- Type safety (no mixing different IDs)
+- Self-documentation (semantic meaning)
+- Encapsulation (controlled access)
+- Extension point (add methods without changing the primitive)
+
+### Implementation examples
+
+#### Strong Newtype (with constructor + `Deref`)
+
+```rust
+// src/domain/skill.rs
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(String);
+
+impl SkillId {
+    pub fn new(id: impl Into<String>) -> Self { Self(id.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl Deref for SkillId {
+    type Target = str;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl Display for SkillId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+```
+
+#### Type aliases (semantic without full Newtype)
+
+```rust
+// src/teams/types.rs
+pub type TeamId = String;
+
+// src/orchestrator/flow_spec.rs
+pub type FlowId = String;
+pub type AgentId = String;
+pub type ProviderId = String;
+
+// src/agents/swarm/tasks/mod.rs
+pub type CoordTaskId = String;
+pub type AgentId = String;
+```
+
+Aliases are lighter than full Newtypes — they aren't distinguishable at the type level, but they still document the semantics for the reader and the schema.
+
+#### Strict Newtype (with strong invariants)
+
+```rust
+// src/event/global_bus.rs
+pub struct SubscriptionId(String);
+
+impl SubscriptionId {
+    pub fn new(id: impl Into<String>) -> Self { Self(id.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+```
+
+### Standard trait implementations
+
+| Required | Recommended | Optional |
+|---|---|---|
+| `Debug`, `Clone`, `PartialEq`/`Eq`, `Hash` | `Display`, `From<T>`, `Deref`, `Serialize`/`Deserialize` | `FromStr`, `FromIterator`, `Default` |
+
+### Newtype catalog
+
+| Type | Inner | Purpose | Location |
+|---|---|---|---|
+| `SkillId` | `String` | Skill id | `src/domain/skill.rs` |
+| `PluginId` | `String` | Plugin id | `src/domain/skill.rs` |
+| `SubscriptionId` | `String` | Event-bus subscription id | `src/event/global_bus.rs` |
+| `TeamId` (alias) | `String` | Team id | `src/teams/types.rs` |
+| `CoordTaskId` (alias) | `String` | Coord-task id | `src/agents/swarm/tasks/mod.rs` |
+| `FlowId` (alias) | `String` | Flow id | `src/orchestrator/flow_spec.rs` |
+| `SessionId` (alias) | `SessionKey` | Session id (also routing key) | `src/session/service.rs` |
+
+### When to use
+
+- **Identifiers**: user IDs, session IDs, resource IDs
+- **Domain values**: emails, phone numbers, URLs
+- **Collections**: domain-specific operations over a collection
+- **Units**: measurements, currencies, durations
+- **Validated data**: types that must validate on construction
+
+Avoid for: DTOs, internal implementation details, types that don't benefit from additional type safety.
+
+---
+
+## FromStr Trait Pattern
+
+### Motivation
+
+Consistent parsing interface across the codebase:
+- Uniform error handling
+- Standard-library integration (`str::parse()`)
+- Enables generic parsing code
+
+### Implementation
+
+```rust
+// src/resilience/types.rs
+impl std::str::FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending"       => Ok(Self::Pending),
+            "running"       => Ok(Self::Running),
+            "completed"     => Ok(Self::Completed),
+            "failed"        => Ok(Self::Failed),
+            "interrupted"   => Ok(Self::Interrupted),
+            "idle"          => Ok(Self::Idle),
+            "swapped"       => Ok(Self::Swapped),
+            _               => Err(format!("Unknown task status: {s}")),
+        }
+    }
+}
+```
+
+### Usage
+
+```rust
+// Direct parsing
+let status: TaskStatus = "pending".parse()?;
+
+// Generic parsing
+fn parse_config<T: FromStr>(value: &str) -> Result<T, T::Err> {
+    value.parse()
+}
+
+// Configuration loading
+let status = config.get("status")?.parse::<TaskStatus>()?;
+```
+
+### Types implementing `FromStr`
+
+- `TaskStatus`, `RiskLevel`, `Lane` (`src/resilience/types.rs`)
+- `CoordTaskStatus` (with `from_stored` / `from_filter_str` — the former deliberately rejects derived variants; `src/agents/swarm/tasks/mod.rs`)
+- `TeamStatus`, `TeamMemberKind` (`src/teams/types.rs`)
+- `AdapterMode` (with `as_str` / `to_serde` / `from_serde`, `src/acp/adapter.rs`)
+- `SessionKey::parse` / `from_key_string` / `from_legacy` (`src/routing/session_key.rs`)
+
+---
+
+## Builder Pattern
+
+### Motivation
+
+Ergonomic construction of complex objects with optional parameters.
+
+### Implementation
+
+```rust
+// src/agents/run_context.rs (illustrative)
+impl RunContext {
+    pub fn new(/* required params */) -> Self { /* … */ }
+
+    pub fn with_abort_signal(mut self, signal: watch::Receiver<bool>) -> Self {
+        self.abort_signal = Some(signal);
+        self
+    }
+
+    pub fn with_initial_history(mut self, history: impl Into<String>) -> Self {
+        self.initial_history = Some(history);
+        self
+    }
+}
+
+// src/tool_metadata/types/unified/builders.rs — UnifiedTool's chained builder
+let tool = UnifiedTool::new(id, name, description, source)
+    .with_routing_regex("^/foo\\s+")
+    .with_routing_strip_prefix(true)
+    .with_routing_intent_type("skills")
+    .with_alias("foo")
+    .with_visible_channels(vec![ChannelType::Cli, ChannelType::Web])
+    .with_sort_order(100);
+
+// src/agents/swarm/tasks/mod.rs — NewCoordTask / CoordTaskUpdate
+let task = NewCoordTask { /* required fields */ };
+let update = CoordTaskUpdate::default()
+    .with_status(CoordTaskStatus::InProgress)
+    .with_metadata(json!({ "key": "value" }));
+```
+
+### Benefits
+
+- Fluent API (method chaining)
+- Optional parameters without `Option<T>` scattered through the constructor
+- Self-documenting (method names describe what they set)
+- Compile-time validation of required parameters
+
+---
+
+## Adapter + Trait Object Pattern
+
+### Motivation
+
+Abstract cross-cutting components behind traits so multiple implementations remain swappable, and no caller is hard-coded to a concrete type.
+
+### Implementation
+
+```rust
+// src/executor/tool_registry.rs
+pub trait ToolRegistry: Send + Sync {
+    fn get_tool(&self, name: &str) -> Option<&UnifiedTool>;
+    fn execute_tool(&self, tool_name: &str, arguments: Value)
+        -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>>;
+
+    fn workspace_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
+    fn session_key_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
+    // …
+}
+
+// src/executor/builtin_registry/registry.rs
+pub struct BuiltinToolRegistry { /* … */ }
+impl ToolRegistry for BuiltinToolRegistry { /* … */ }
+
+// src/tools/adapters/registry_adapter.rs
+pub struct RegistryToolAdapter { /* wraps any ToolRegistry as LoopTool */ }
+```
+
+### Design notes
+
+- **Trait bound**: `Send + Sync + 'static` lets implementations cross tasks
+- **Empty defaults**: optional handles like `workspace_handle` / `session_key_handle` default to `None`; concrete implementors opt in
+- **Adapter wrapping**: trait object → `LoopTool` / `HarnessDeps` field, raising the abstraction one more layer
+
+### Common trait objects in the codebase
+
+| Trait | Purpose | Typical implementor |
+|---|---|---|
+| `AiProvider` | LLM provider (with failover) | `FailoverProvider`, `AnthropicAdapter`, `OpenAIAdapter` |
+| `ToolService` / `LoopTool` | Tool execution | `BuiltinToolRegistry` + `RegistryToolAdapter` |
+| `Sandbox` | Process isolation | `WorkspaceSandbox`, `WorktreeSandbox`, `OsSandboxDriver` |
+| `EmbeddingProvider` | Embedding backend | `OpenAIEmbedding`, `FastEmbedEmbedding` |
+| `Clock` | Injectable clock | `SystemClock`, test fake |
+| `TraceSink` | Harness observability | `GatewayTraceSink`, `SpySink` (tests) |
+
+---
+
+## Composite Keys Pattern
+
+### Motivation
+
+Multiple independent subsystems each have their own "what counts as the same session" semantics. A **composite-key namespace** lets routing, caching, and invalidation evolve independently inside each subsystem.
+
+### Implementation: `SessionKey`
+
+```rust
+// src/routing/session_key.rs
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionKey {
+    Main         { agent_id, main_key, epoch },
+    DirectMessage{ agent_id, channel, peer_id, dm_scope, epoch },
+    Group        { agent_id, channel, peer_kind, peer_id, thread_id },
+    Task         { agent_id, task_type, task_id },
+    Subagent     { parent_key: Box<Self>, subagent_id },
+    Ephemeral    { agent_id, ephemeral_id },
+}
+```
+
+Each variant names a distinct namespace; the string form is round-trippable via `to_key_string` / `parse`. `agent_id` is the shared field and runs through `normalize_agent_id` everywhere.
+
+### Namespace table
+
+| `task_type` / namespace | Source | Purpose |
+|---|---|---|
+| `main` | default | cross-channel shared main session |
+| `dm` / `peer` | `DmScope` | DM isolation strategy |
+| `group` / `channel` / `thread` | `PeerKind` | group / channel / thread |
+| `cron` | `src/tasks/cron/` | cron trigger |
+| `heartbeat` | `src/tasks/heartbeat/` | daemon probe trigger |
+| `a2a` | `src/a2a/` | sub-agent delegation |
+| `webhook` | webhook | webhook trigger |
+| `team_chat` | `src/teams/broadcast/` | team chat |
+| `subagent` | nested | sub-agent |
+| `ephemeral` | one-shot | no persistence |
+
+### Benefits
+
+- Routing, caching, invalidation, "same session" all use the same key
+- Each namespace can grow independently (new `task_type`, new `PeerKind` variant) without polluting others
+- The string form makes SQL LIKE / pattern matching work
+
+---
+
+## JSON-RPC Bridge Pattern
+
+When a system call must run in another language runtime (e.g. AVFoundation requires Swift/Objective-C), Aleph uses a **long-lived JSON-RPC subprocess over stdio** rather than spawning a new process per call or embedding a language runtime.
+
+### Key design decisions and rationale
+
+**Stdio over sockets** — no port collisions, no permission prompts on a socket file, parent death detected automatically (when the parent closes the pipe the child's read returns EOF). Debugging is trivial: pipe any JSON line to the binary by hand to inspect its response.
+
+**Handshake-driven capability negotiation** — on startup the helper advertises its `supported_methods` list. The Rust client consults this list at runtime rather than inferring capability from the binary's version number. If a method is absent the client returns `DesktopError::BridgeDisabled` for that call, allowing graceful degradation without a hard version dependency.
+
+**Self-describing errors** — every TCC-gated method that hits an unauthorized state returns a `-32001` error whose `data` field carries a `PermissionGuide` — a structured object containing `deep_link`, `human_readable_steps`, and `rationale`. The LLM can surface this guidance verbatim to the user without any out-of-band metadata lookups. See `desktop/shared/src/error.rs::From<JsonRpcError> for DesktopError`.
+
+**Long-lived process over spawn-per-call** — spawning a new process per call adds roughly 50 ms cold-start latency, duplicates handshake state, and loses in-process caches (e.g. AVCaptureSession device enumeration). A long-lived process requires a supervisor with exponential backoff and a parent-death watchdog, both implemented in `desktop/shared/src/bridge/`.
+
+The pattern is realized in `desktop/macos/bridge/` (Swift helper) and `desktop/shared/src/bridge/` (Rust client + supervisor). The schema is owned by Rust in `shared/protocol/src/desktop_bridge/` and exported to Swift as a golden JSON Schema fixture validated in CI. See [DESKTOP_BRIDGE.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/DESKTOP_BRIDGE.md) for the complete protocol reference.
+
+---
+
+## Pattern Combinations
+
+### Context + Builder
+
+`HarnessDeps` combines Context (aggregate all dependencies) with Builder (`orchestrator::deps_builder` for sub-agent inheritance):
+
+```rust
+let deps = HarnessDeps::builder()
+    .session(session)
+    .tools(tools)
+    .llm(llm)
+    .with_recall_context(recall)
+    .with_chain_context(chain.child())
+    .build();
+```
+
+### Newtype + FromStr
+
+Many types implement both Newtype (with constructor + `Deref`) and `FromStr`:
+
+```rust
+let status: TaskStatus = "pending".parse()?;
+let id = TeamId::new("team-001");
+```
+
+### Adapter + Trait Object
+
+The `ToolRegistry` trait is implemented by `BuiltinToolRegistry`, wrapped by `RegistryToolAdapter` as a `LoopTool`, and consumed by the harness via `Arc<dyn ToolService>` — one trait per layer, each with its own job.
+
+---
+
+## Migration Guide
+
+### Adding the Context Pattern
+
+1. Identify a candidate function (5+ params, multiple optional)
+2. Create a Context struct (required + optional fields)
+3. Implement the required-fields constructor
+4. Add builder methods (optional fields)
+5. Update the function signature to take the Context
+6. Update all call sites
+7. Export the Context from the module's public API
+
+### Adding a Newtype
+
+1. Identify the primitive that needs semantics
+2. Create the Newtype struct wrapping the primitive
+3. Implement standard traits (`Debug`, `Clone`, `PartialEq`, …)
+4. Add constructor and accessors
+5. Implement `Deref` if transparent access is appropriate
+6. Update all usage sites
+7. Add an entry to the Newtype catalog above
+
+---
+
+## References
+
+- [Rust API Guidelines — Newtype Pattern](https://rust-lang.github.io/api-guidelines/type-safety.html#c-newtype)
+- [Rust Design Patterns — Builder](https://rust-unofficial.github.io/patterns/patterns/creational/builder.html)
+- [Effective Rust — Item 6: Use newtypes for type safety](https://www.lurklurk.org/effective-rust/newtype.html)
+- [DESKTOP_BRIDGE.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/DESKTOP_BRIDGE.md) — full bridge protocol
+- [ARCHITECTURE.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/ARCHITECTURE.md) — overall architecture

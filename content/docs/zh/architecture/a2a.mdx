@@ -1,121 +1,150 @@
 ---
 title: "A2A 协议"
-description: "用于代理间通信和子代理生成的代理到代理协议适配器。"
+description: "A2A 协议适配器：AgentCard / Task / Message 域、port trait、A2AService 子代理委派、CardRegistry / SmartRouter / LlmMatcher。"
 ---
 
-`a2a` 模块提供代理到代理（A2A）协议适配器，使 Aleph 代理能够相互通信并生成子代理以进行协作任务执行。
+`a2a` 模块是 [Agent-to-Agent (A2A)](https://github.com/anthropics/a2a) 协议适配器。它让 Aleph 既能与外部 A2A 代理通信，也能在内部把子代理委派给外部实现。
+
+> 文档历史版本的"domain/port/service/adapter"五桶划分仍然适用，但 `service` 子模块不再只有 `sub_agent`：现在 `service/` 同时承载 `card_builder` / `card_refresh` / `card_registry` / `llm_matcher` / `notification` / `smart_router`。
 
 ## 概览
 
-A2A 是一种代理间通信协议，允许：
-- **子代理生成** —— 创建子代理以并行执行任务
-- **代理间消息传递** —— 在同一系统中的代理之间发送消息
-- **任务委托** —— 将子任务委托给专门的代理
-- **结果聚合** —— 收集和合并多个代理的结果
+A2A 支持：
+- **Agent Card 发现** —— 通过 `card_registry` 拉取并缓存 `AgentCard`；`card_refresh` 周期 + 健康监测
+- **LLM 智能路由** —— `llm_matcher` + `smart_router` 把自然语言任务描述路由到最匹配的 A2A 代理
+- **子代理委派** —— `A2ASubAgent`（`a2a/sub_agent.rs`）把委派链内的 A2A 子代理接回 Aleph 的记忆 / 运行时
+- **A2A 协议消息** —— `domain/message.rs::A2AMessage`（`text | file | data` Parts）、`A2ATask`（多轮 task with state machine）、`TaskState` 转换
+- **客户端 / 服务端** —— `adapter/client/` 与 `adapter/server/` 是 A2A JSON-RPC 双向适配
 
 ## 架构
 
 ```
-A2A 适配器
-  ├── 域 —— 核心 A2A 类型和消息
-  ├── 端口 —— 协议接口定义
-  ├── 服务 —— 代理协调的业务逻辑
-  ├── 适配器 —— 具体协议实现
-  ├── 配置 —— A2A 配置
-  └── 子代理 —— 子代理生命周期管理
+src/a2a/
+├── mod.rs              # 模块入口；导出五个子模块
+├── config.rs           # A2A 配置
+├── sub_agent.rs        # A2ASubAgent / DelegationOutcome：子代理委派链
+├── tests.rs            # 模块测试
+├── domain/             # 核心 A2A 类型
+│   ├── mod.rs
+│   ├── agent_card.rs   # AgentCard / AgentProvider / AgentInterface / TransportProtocol / AgentSkill / AgentExtension
+│   ├── message.rs      # A2ARole / A2AMessage / Part (text | file | data) / FileContent / Artifact
+│   ├── task.rs         # TaskState (state machine) / TaskStatus / A2ATask / ListTasksParams / ListTasksResult
+│   ├── events.rs       # A2A 事件
+│   ├── security.rs     # 安全相关域类型
+│   └── error.rs        # A2A 错误
+├── port/               # 协议接口（trait）
+│   ├── mod.rs
+│   ├── agent_resolver.rs
+│   ├── authenticator.rs
+│   ├── message_handler.rs
+│   ├── streaming.rs
+│   └── task_manager.rs
+├── service/            # 业务逻辑 / 适配层
+│   ├── mod.rs
+│   ├── card_builder.rs        # AgentCard 构造
+│   ├── card_refresh.rs        # 周期刷新 + spawn_card_refresh / spawn_health_monitor / refresh_all_cards
+│   ├── card_registry.rs       # CardRegistry：缓存 + 查询
+│   ├── llm_matcher.rs         # SemanticLlmMatcher：用 LLM 做语义匹配
+│   ├── notification.rs        # NotificationService / PushNotificationConfig
+│   └── smart_router.rs        # SmartRouter / LlmMatcher / RoutingDecision / RoutingMethod
+└── adapter/            # 协议实现
+    ├── mod.rs
+    ├── auth/           # A2A auth 适配
+    ├── client/         # A2A client：JSON-RPC over HTTP/stdio
+    └── server/         # A2A server：把 Aleph 暴露为 A2A 代理
 ```
 
-## 核心组件
-
-### 域
-
-A2A 消息的核心类型：
+## 域类型（`src/a2a/domain/`）
 
 ```rust
-// src/a2a/domain/mod.rs
-pub struct AgentMessage {
-    pub from: AgentId,
-    pub to: AgentId,
-    pub payload: MessagePayload,
-}
+// agent_card.rs
+pub struct AgentCard { /* name / description / url / version / capabilities / skills / provider / interfaces / security / extensions */ }
+pub struct AgentProvider { pub organization: String, pub url: String }
+pub struct AgentInterface { /* TransportProtocol + URL */ }
+pub enum TransportProtocol { Grpc, HttpJson, WebSocket, /* … */ }
+pub struct AgentSkill { /* id / name / description / tags / examples / input_modes / output_modes */ }
+pub struct AgentExtension { /* uri / required / params */ }
 
-pub enum MessagePayload {
-    TaskRequest { task: TaskSpec },
-    TaskResponse { result: TaskResult },
-    StatusUpdate { state: AgentState },
-}
+// message.rs
+pub enum A2ARole { User, Agent, System }
+pub struct A2AMessage { pub role: A2ARole, pub parts: Vec<Part>, pub metadata: Option<JsonValue> }
+pub enum Part { Text { text: String, metadata: Option<JsonValue> }, File(FileContent), Data(JsonValue) }
+pub struct FileContent { pub name: Option<String>, pub mime_type: Option<String>, pub uri: String, pub bytes: Option<Vec<u8>> }
+pub struct Artifact { pub name: Option<String>, pub parts: Vec<Part> }
+
+// task.rs
+pub enum TaskState { Submitted, Working, InputRequired, Completed, Canceled, Failed, Unknown }
+impl TaskState { pub fn can_transition_to(&self, target: &Self) -> bool }
+pub struct TaskStatus { pub state: TaskState, pub message: Option<A2AMessage> }
+pub struct A2ATask { /* id / context_id / status / artifacts / history / metadata */ }
+pub fn new(id: impl Into<String>, context_id: impl Into<String>) -> Self;
+pub struct ListTasksParams { /* session_id / context_id / status / page_size / page_token */ }
+pub struct ListTasksResult { /* tasks / next_page_token */ }
 ```
 
-### 服务
-
-编排代理间通信：
+## Port 接口（`src/a2a/port/`）
 
 ```rust
-// src/a2a/service/mod.rs
-pub struct A2AService {
-    adapter: Box<dyn A2AAdapter>,
-}
+// trait 形态：每个文件一个 trait，由 adapter 模块实现
 
-impl A2AService {
-    pub async fn spawn_sub_agent(
-        &self,
-        spec: AgentSpec,
-    ) -> Result<AgentId>;
-    
-    pub async fn send_message(
-        &self,
-        msg: AgentMessage,
-    ) -> Result<()>;
-    
-    pub async fn collect_results(
-        &self,
-        task_id: TaskId,
-    ) -> Result<Vec<TaskResult>>;
-}
+// agent_resolver.rs   —— 把 AgentCard / agent_id 解析为可调用的 endpoint
+// authenticator.rs    —— A2A auth scheme
+// message_handler.rs  —— 入站 A2AMessage 处理
+// streaming.rs        —— 流式响应（subscribe）
+// task_manager.rs     —— 任务持久化 / 状态推进
 ```
 
-### 子代理
+每个 trait 由 `adapter::client`（远程 A2A 代理）与 `adapter::server`（本地 Aleph 暴露为 A2A）两侧实现。
 
-管理子代理生命周期：
+## 服务层（`src/a2a/service/`）
 
 ```rust
-// src/a2a/sub_agent/mod.rs
-pub struct SubAgentManager {
-    active: HashMap<AgentId, SubAgentHandle>,
+pub use card_builder::CardBuilder;
+pub use card_refresh::{refresh_all_cards, spawn_card_refresh, spawn_health_monitor};
+pub use card_registry::CardRegistry;
+pub use llm_matcher::SemanticLlmMatcher;
+pub use notification::{NotificationService, PushNotificationConfig};
+pub use smart_router::{LlmMatcher, RoutingDecision, RoutingMethod, SmartRouter};
+```
+
+`SmartRouter` 聚合 `LlmMatcher` 与 `CardRegistry`，把用户的自然语言任务映射到最佳 A2A 代理：
+
+- **`LlmMatcher::route(task_description)` → `RoutingDecision`** —— LLM 评分
+- **`CardRegistry::lookup(decision)`** —— 取对应 `AgentCard` + endpoint
+- **`SmartRouter::route_and_invoke`** —— 端到端：评分 → 选卡 → 委派
+
+`spawn_card_refresh` + `spawn_health_monitor` 在后台保持 `CardRegistry` 新鲜；`refresh_all_cards` 一次性全量重拉。
+
+## 子代理委派（`src/a2a/sub_agent.rs`）
+
+```rust
+pub struct A2ASubAgent { /* smart_router + client_pool */ }
+pub struct DelegationOutcome { /* success / tokens / artifacts */ }
+
+impl A2ASubAgent {
+    pub fn new(smart_router: Arc<SmartRouter>, client_pool: Arc<A2AClientPool>) -> Self;
+    pub fn with_raw_memory_writer(self, writer: Arc<dyn RawMemoryStore>) -> Self;
+    pub fn with_capture_registry(self, registry: Arc<MemoryExtensionRegistry>) -> Self;
 }
-
-impl SubAgentManager {
-    pub async fn spawn(
-        &mut self,
-        spec: AgentSpec,
-    ) -> Result<AgentId>;
-    
-    pub async fn terminate(
-        &mut self,
-        id: AgentId,
-    ) -> Result<()>;
-}
 ```
 
-## 消息流
+`A2ASubAgent` 把 A2A 子代理接回 Aleph：
+- `with_raw_memory_writer` —— 让委派结果写入 Aleph 的 raw memory（`src/memory/store/`）
+- `with_capture_registry` —— 注册记忆扩展捕获，让跨代理的成果被 memory system 看见
+- 委派链内**闭包**——A2A 子代理可重新授权（`with_raw_memory_writer` 等就是重新挂接通道）
+
+## Adapter 层（`src/a2a/adapter/`）
 
 ```
-父代理                        A2A 服务                       子代理
-     │                            │                            │
-     │── spawn(spec) ────────────▶│                            │
-     │                            │── create ─────────────────▶│
-     │                            │◀─ AgentId ─────────────────│
-     │◀─ AgentId ─────────────────│                            │
-     │                            │                            │
-     │── send(task) ─────────────▶│── forward ────────────────▶│
-     │                            │                            │
-     │                            │◀─ result ──────────────────│
-     │◀─ TaskResult ──────────────│                            │
+adapter/
+├── auth/      # A2A auth 适配（Bearer / API key / OAuth）
+├── client/    # A2A client 实现：JSON-RPC over HTTP / stdio
+└── server/    # A2A server 实现：把 Aleph 暴露为外部可发现的 A2A 代理
 ```
+
+客户端侧把 A2A JSON-RPC 调用映射到 Aleph `A2AMessage` / `A2ATask` 域类型；服务端侧则把 Aleph 的 agent registry 投影为 `AgentCard` + handler。
 
 ## 配置
-
-A2A 通过 `config.toml` 配置：
 
 ```toml
 [a2a]
@@ -124,39 +153,14 @@ max_sub_agents = 10
 sub_agent_timeout = 300  # 秒
 ```
 
-## 代码位置
+## 子代理树 RPC
 
-- `src/a2a/mod.rs` —— 模块入口点
-- `src/a2a/domain/` —— 核心类型和消息
-- `src/a2a/service/` —— 业务逻辑
-- `src/a2a/adapter/` —— 协议实现
-- `src/a2a/sub_agent/` —— 子代理生命周期
-- `src/a2a/config.rs` —— 配置
+`subagent.tree` 返回代理的子代理树（节点身份 + 实时事件 + 树 RPC）。`Interrupt` **真实取消 fan-out**（不再退化为入队）；长跑 detach 成员不再泄漏。
 
 ## 另请参阅
 
 - [编排器](./orchestrator) —— 父代理编排
 - [团队](./teams) —— 多代理团队管理
 - [ACP](./acp) —— 用于外部工具的代理客户端协议
-
----
-
-## 26.7.x 补充
-
-### Interrupt 真实取消
-
-`Interrupt` 现在**真实取消 fan-out**，不再退化为入队。长跑 detach 成员不再泄漏。
-
-### 子代理授权恢复
-
-委托链内闭包——A2A 子代理可重新授权。
-
-### `subagent.tree` RPC
-
-返回代理的子代理树（节点身份 + 实时事件 + 树 RPC）。
-
-### 见另请参阅
-
-- [A2A 概念](/docs/zh/concepts/a2a-protocol) — 完整概念
-- [团队](/docs/zh/architecture/teams) — 团队协调
+- [A2A 概念](/docs/zh/concepts/a2a-protocol) —— 完整概念
 - [网关 RPC `subagent.tree`](/docs/zh/gateway/methods/agents)

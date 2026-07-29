@@ -166,7 +166,7 @@ pub fn open_sqlite_readonly(path: &Path) -> rusqlite::Result<Connection>;
 - `synchronous = NORMAL` (safe under WAL)
 - `foreign_keys = ON`
 
-Every `goal_store.db`, `memory.db`, `hub/cache.sqlite`, `loop_graph.db`, and `strategies/` in the daemon goes through this helper; the Spec C lock-safety entry point is **the only** place that constructs a `Connection`.
+Every `goal_store.db`, `memory.db`, `hub_catalog.db`, `loop_graph.db`, and `strategies/` in the daemon goes through this helper; the Spec C lock-safety entry point is **the only** place that constructs a `Connection`.
 
 `open_sqlite_readonly` only sets `busy_timeout`, opens with `SQLITE_OPEN_READ_ONLY`, and is used by doctor / lint paths. **Fail-fast**: a missing file returns `Err`; the doctor treats this as "no graph yet", not a fault.
 

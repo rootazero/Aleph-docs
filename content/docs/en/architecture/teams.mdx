@@ -1,143 +1,117 @@
 ---
 title: "Teams"
-description: "Team management for multi-agent collaboration with lifecycle, plans, and approval workflows."
+description: "Team management: SQLite persistence, CoordTask DAG dispatch, leader strategy planning, ACP members, Snapshot / Workflow Canvas."
 ---
 
-The `teams` module provides team management for multi-agent collaboration, enabling structured teamwork with lifecycle management, plan approval, and task tracking.
+The `teams` module provides team management for multi-agent collaboration, supporting structured teamwork with lifecycle management, Coord-Task DAG dispatch, plan approval (Team Strata), and task tracking.
+
+> The historical standalone modules/enums that earlier docs referenced — `TeamLifecycle`, `TeamPlan`, `ApprovalState`, plus `teams/lifecycle.rs`, `teams/plans.rs`, `teams/sessions.rs`, `teams/artifacts.rs`, `teams/messages.rs` — no longer exist as separate constructs. This page describes the code as it lives in `src/teams/` today.
 
 ## Overview
 
 Teams enables:
-- **Team creation** — Define teams of agents with a designated **leader** and members
+- **Team creation** — Define teams of agents with a designated **leader** and members; members may be in-process agents or ACP sessions (`TeamMemberKind::Agent | AcpSession`)
 - **Strategic coordination** ("Team Strata") — The leader plans first; the plan is welded into every member's prompt
-- **Coord Tasks** — Per-member task assignment with a `Pending → InProgress → WaitingReview → Completed` lifecycle
-- **Verification loop** — The leader accepts or rejects member deliverables before they are considered done
-- **Lifecycle management** — Track team state from formation to completion
-- **SQLite persistence** — Durable storage for team data
+- **Coord Tasks** — Per-member task assignment through the unified `coord_tasks` DAG in `src/agents/swarm/tasks/`, with status `Pending | Blocked | InProgress | WaitingReview | Completed | Failed | Cancelled | Skipped | Paused | Unsatisfiable`
+- **Verification loop** — Leader accepts or rejects member deliverables via the `task_review` tool (see [Coord Tasks](#coord-tasks))
+- **Team protocol** — Each team can set `Team.protocol` (≤32 KiB); the dispatcher injects it into every member's launch context
+- **ACP members** — `teams.acp_member.add / list / remove` wire external CLIs (Claude Code / Codex / Gemini)
+- **Snapshot / Kanban** — `teams.snapshot.*` records team state; `team_workflow_canvas` tool exposes a drag-and-drop board
+- **JSON-RPC driven** — Full `teams.*` surface (lifecycle, tasks, messages, snapshots, workflow)
 
 ## Architecture
 
 ```
-TeamStore (SQLite)
-  ├── Team — Team definition and metadata
-  ├── TeamMember — Membership and roles
-  ├── Plans — Team plans and approval state
-  ├── Sessions — Active team sessions
-  └── Artifacts — Deliverables and outputs
+src/teams/
+├── mod.rs              # entry; re-exports core types
+├── store.rs            # SqliteTeamStore: teams / team_members tables
+├── types.rs            # Team / TeamMember / TeamMemberKind / TeamStatus / TeamSummary
+├── plans.rs            # PlanSubmission / PlanManager
+├── context.rs          # TeamInboxContextProvider
+├── events.rs           # SqliteEventLogStore / TeamEventLogger
+├── artifacts.rs        # ArtifactStore + ArtifactType / TaskArtifact / TaskStatus
+├── snapshots.rs        # SqliteSnapshotStore + capture/restore
+├── workflow_canvas.rs  # workflow canvas
+├── run_mode.rs         # team run-mode (usage_mode pin)
+├── leader_prompt.rs    # leader-prompt construction
+├── member_provision.rs # member provisioning
+├── notifier.rs         # TeamNotifier
+├── dispatcher/         # TeamDispatcher (autonomous) + handoff + runner + clarify + acp_bridge + schedule
+├── broadcast/          # GroupChatBroadcaster (deterministic fan-out; targets / transcript / member_prompt)
+├── messages/           # TeamMessage persistence (store / inbox / router / mentions / aggregator / types)
+├── sessions/           # collaborative session (coordinator / store / types)
+└── templates/          # builtin team-template loader + materialize + substitute
 ```
 
-## Core Components
-
-### TeamStore
-
-SQLite-backed storage for team data:
+## Core types (`src/teams/types.rs`)
 
 ```rust
-// src/teams/store.rs
-pub trait TeamStore: Send + Sync {
-    fn create_team(&self, team: NewTeam) -> Result<TeamId>;
-    fn get_team(&self, id: TeamId) -> Result<Option<Team>>;
-    fn list_teams(&self) -> Result<Vec<TeamSummary>>;
-    fn add_member(
-        &self, 
-        team_id: TeamId, 
-        member: NewTeamMember
-    ) -> Result<()>;
-    fn update_status(
-        &self, 
-        id: TeamId, 
-        status: TeamStatus
-    ) -> Result<()>;
-}
-
-pub struct SqliteTeamStore {
-    conn: rusqlite::Connection,
-}
-```
-
-### Team Types
-
-```rust
-// src/teams/types.rs
 pub struct Team {
     pub id: TeamId,
     pub name: String,
     pub description: String,
-    pub status: TeamStatus,
-    pub created_at: DateTime<Utc>,
+    pub leader_id: String,
+    pub status: TeamStatus,         // actually only Active | Disbanded
+    pub created_at: i64,
+    pub disbanded_at: Option<i64>,
+    pub protocol: Option<String>,   // leader-authored operating protocol (≤32 KiB)
 }
+
+pub enum TeamStatus { Active, Disbanded }   // snake_case on the wire
+
+pub enum TeamMemberKind { Agent, AcpSession }
 
 pub struct TeamMember {
-    pub id: MemberId,
     pub team_id: TeamId,
-    pub agent_id: AgentId,
-    pub role: TeamRole,
-    pub permissions: Permissions,
-}
-
-pub enum TeamStatus {
-    Forming,
-    Active,
-    Paused,
-    Completed,
-    Disbanded,
+    pub agent_id: String,           // Agent: registry id; AcpSession: synthetic `acp:<harness>:<cwd>[:name]`
+    pub role: String,
+    pub joined_at: i64,
+    pub kind: TeamMemberKind,
+    pub acp_harness_id: Option<String>,
+    pub acp_cwd: Option<String>,
+    pub acp_session_name: Option<String>,
 }
 ```
 
-### Lifecycle
+`TeamMember.kind` discriminates runtime dispatch — in-process agents flow through `MemberDispatchTarget::Agent`, ACP sessions through `MemberDispatchTarget::AcpSession` (`src/teams/dispatcher/runner.rs`).
 
-Team lifecycle management:
+`TeamSummary` is the list view (id / name / description / leader / status / member_count / timestamps) and **does not include task counts** — those live in the `coord_tasks` DAG (a separate database); use the `team_status` tool for an accurate task breakdown.
+
+## Storage (`SqliteTeamStore`)
 
 ```rust
-// src/teams/lifecycle.rs
-pub struct TeamLifecycle;
-
-impl TeamLifecycle {
-    pub fn can_transition(
-        from: TeamStatus,
-        to: TeamStatus,
-    ) -> bool;
-    
-    pub fn on_forming(team: &mut Team);
-    pub fn on_active(team: &mut Team);
-    pub fn on_completed(team: &mut Team);
+#[async_trait]
+pub trait TeamStore: Send + Sync {
+    async fn create_team(&self, input: NewTeam) -> Result<Team>;
+    async fn get_team(&self, id: &str) -> Result<Option<Team>>;
+    async fn get_team_by_name(&self, name: &str) -> Result<Option<Team>>;
+    async fn list_teams(&self) -> Result<Vec<TeamSummary>>;
+    async fn disband_team(&self, id: &str) -> Result<()>;
+    async fn delete_team(&self, id: &str) -> Result<()>;          // Disbanded only
+    async fn add_member(&self, input: NewTeamMember) -> Result<TeamMember>;
+    async fn get_members(&self, team_id: &str) -> Result<Vec<TeamMember>>;
+    async fn remove_member(&self, team_id: &str, agent_id: &str) -> Result<()>;  // cannot remove leader
+    async fn get_agent_teams(&self, agent_id: &str) -> Result<Vec<TeamSummary>>;
+    async fn set_protocol(&self, team_id: &str, protocol: Option<String>) -> Result<()>;
+    async fn rename_team(&self, id: &str, name: &str) -> Result<()>;
+    async fn set_name_auto(&self, id: &str, value: bool) -> Result<()>;
+    async fn take_auto_name_flag(&self, id: &str) -> Result<bool>;  // atomic once-only fire
 }
+
+pub struct SqliteTeamStore { /* Arc<Mutex<Connection>> */ }
 ```
 
-### Plans
+`MAX_PROTOCOL_LEN = 32 KiB` is enforced — the protocol is rendered verbatim into the leader's launch context, so an unbounded value would let whoever can call `set_protocol` inject arbitrary instructions into the leader context.
 
-Plan approval workflow:
+## Strategic coordination ("Team Strata")
 
-```rust
-// src/teams/plans.rs
-pub struct TeamPlan {
-    pub id: PlanId,
-    pub team_id: TeamId,
-    pub title: String,
-    pub steps: Vec<PlanStep>,
-    pub approval_state: ApprovalState,
-}
-
-pub enum ApprovalState {
-    Draft,
-    PendingReview,
-    Approved,
-    Rejected,
-}
-```
-
-## Strategic Coordination ("Team Strata")
-
-Teams have a **leader** and members. On a team's **first message**, the leader plans
-first — before any member begins work. This planning pass fires **once per team** (a
-fire-once strategy keyed by the team), and the resulting plan is **welded into every
-member's prompt** so that all members share the same strategic context.
+Teams have a **leader** and members. On a team's **first message**, the leader plans first — before any member begins work. This planning pass fires **once per team** (a fire-once strategy keyed by the team, race-safe via `atomic put_if_absent`), and the resulting plan is **welded into every member's prompt** so that all members share the same strategic context.
 
 ```
 First message to a team
         │
         ▼
-  Leader plans first  ──►  Strategy (fire-once, keyed by team)
+  Leader plans first  ──►  Strategy (fire-once, keyed by team; atomic put_if_absent)
         │
         ▼
   Plan welded into every member's prompt
@@ -146,41 +120,82 @@ First message to a team
   Members work under assigned Coord Tasks
 ```
 
-Members do not act independently of the plan: each member operates against an assigned
-**Coord Task**, and the welded plan keeps their work aligned with the leader's strategy.
+`team_key(team_id)` is one of the composite-key namespaces (alongside loop / goal / session); see [Loop / Goal / Strategy](/docs/en/concepts/looping-goal-strategy).
 
-## Coord Tasks & the Verification Loop
+## Coord Tasks
 
-Each member works under a **Coord Task** whose status moves through a fixed lifecycle:
+`coord_tasks` is the unified DAG (in `src/agents/swarm/tasks/`), **not** a table owned by `src/teams/`. Members' work is expressed through it:
 
+| Status | Meaning |
+|---|---|
+| `Pending` | waiting on deps + dispatcher pickup |
+| `Blocked` | **Derived** (never stored): deps unresolved |
+| `InProgress` | dispatcher claimed, running |
+| `WaitingReview` | run finished, awaiting lead review; downstream stays blocked |
+| `Completed` | terminal-success (satisfies deps) |
+| `Failed` | terminal-failure (does not satisfy deps; triggers derived `Unsatisfiable`) |
+| `Cancelled` | cancelled |
+| `Skipped` | manually marked not-required (still satisfies deps) |
+| `Paused` | manually paused; dispatcher does not claim; **does not** satisfy deps |
+| `Unsatisfiable` | **Derived**: a dependency terminally failed; the task can never run on its own |
+
+> `Blocked` and `Unsatisfiable` are derived at query time; `from_stored` deliberately rejects both. `CoordTaskStatus::is_terminal()` (stored-terminal) and `is_settled()` (observer-side) give the predicates used by team / workflow completion checks.
+
+Dependency edges are stored in `coord_task.blocked_by`. The dispatcher in `src/teams/dispatcher/schedule/` (select / settle / reclaim / failure) keeps readiness, reschedule, zombie reclamation, and failure propagation correct.
+
+### Verification loop: `task_review`
+
+```rust
+// src/builtin_tools/team/task_review.rs
+#[derive(Clone)] pub struct TaskReviewTool { /* … */ }
+impl AlephTool for TaskReviewTool {
+    const NAME: &'static str = "task_review";
+
+    async fn call(&self, args: TaskReviewArgs) -> Result<TaskReviewOutput> {
+        // soft leader-only guard (prompt-gating is the primary gate; this is defense-in-depth)
+        // Approve → CoordTaskStatus::Completed (satisfies deps)
+        // Reject  → CoordTaskStatus::InProgress (owner redoes)
+        // when task metadata.require_grounding=true and approve has no grounding → bounce
+    }
+}
 ```
-Pending → InProgress → WaitingReview → Completed
-```
-
-When a member submits a deliverable, the task enters `WaitingReview` and a **synthetic
-re-dispatch** deterministically routes the submission back to the **leader** for review.
-The leader accepts or rejects the deliverable using the `task_review` tool:
 
 ```jsonc
 // task_review tool call
 {
   "task_id": "<coord-task-id>",
-  "verdict": "approve",   // or "reject"
-  "feedback": "..."        // optional
+  "decision": "approve",       // or "reject"
+  "feedback": "…",             // written back to owner on reject
+  "grounding": {               // optional; required on approve when require_grounding=true
+    "kind": "exit_code",       // exit_code | numeric | line_count
+    "source": "cargo test -p alephcore --lib",
+    "value": "0"
+  }
 }
 ```
 
-An `approve` verdict advances the task to `Completed`; a `reject` verdict sends it back
-for rework. This loop keeps deliverables under the leader's control rather than being
-auto-accepted on submission.
+> The leader's accept/reject decision goes through `task_review` (not a JSON-RPC method). Members work under Coord Tasks created/updated via `teams.create_task` / `teams.update_task`. `workflow_step_review` is the equivalent tool for workflow steps (`src/builtin_tools/team/workflow_step.rs`).
 
-### Coord Tasks & the group-chat broadcaster
+### G2 — per-task git-worktree isolation
 
-`CoordTaskStore` is threaded into the group-chat broadcaster, so task state and the team
-work-thread stay in sync. A member task submit is the trigger for the deterministic
-re-dispatch described above: the broadcaster routes the submission to the leader, who
-reviews it via `task_review`. The durable team work-thread is what later powers the
-attribution-bubble replay in the [group chat](./groupchat) window.
+`execute_member_task` (`src/teams/dispatcher/runner.rs`) optionally wraps each member task in a detached-HEAD git worktree, wrapping `WorktreeSandbox` and pointing the run's `workspace_override` at the worktree so concurrent workers cannot corrupt each other's index. Outside a git repo the call silently falls back to the pre-G2 behaviour and logs a warning.
+
+## Team run-mode pin
+
+26.7.25+: when `teams.run` runs, the leader **stamps** `usage_mode` (chat / work / code) and inherits it to sub-members:
+
+- **Sub-agents cannot invoke `session_set_mode`** — inheritance is one-way
+- `teams.run` rejects any `session_set_mode` request from a sub-agent
+- When the leader switches mode via `task_review`, the entire team re-aligns
+
+```rust
+// src/teams/run_mode.rs
+if turn.is_subagent() {
+    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
+    ensure!(request.action != Some("session_set_mode"),
+        "subagents inherit parent mode; cannot switch mid-team-run");
+}
+```
 
 ## Configuration
 
@@ -191,14 +206,14 @@ max_team_size = 10
 require_plan_approval = true
 ```
 
-## JSON-RPC Surface
+`[team_broadcast]` exposes tunable `BroadcastConfig` parameters (`max_chain_depth` / `max_fanout_width` / `max_total_activations` / `transcript_token_budget` / `member_run_timeout_secs`).
 
-Teams are driven over JSON-RPC. The confirmed `teams.*` methods:
+## JSON-RPC surface
 
 | Group | Methods |
 |-------|---------|
 | Lifecycle | `teams.create` (leader + members + optional `auto_name`), `teams.get`, `teams.list`, `teams.rename`, `teams.disband`, `teams.delete` |
-| Work-thread | `teams.chat.send`, `teams.chat.thread`, `teams.chat.history` |
+| Work-thread | `teams.chat.send`, `teams.chat.thread`, `teams.chat.history`, `teams.chat.cancel` |
 | Coord Tasks | `teams.create_task`, `teams.update_task`, `teams.list_tasks`, `teams.add_task_comment`, `teams.list_task_comments`, `teams.list_task_events`, `teams.list_task_runs` |
 | Task control | `teams.task.pause`, `teams.task.resume`, `teams.task.retry`, `teams.task.skip`, `teams.task.trace`, `teams.task.journal.get`, `teams.task.journal.list` |
 | Snapshots | `teams.snapshot.create`, `teams.snapshot.get`, `teams.snapshot.list`, `teams.snapshot.restore`, `teams.snapshot.delete` |
@@ -206,71 +221,25 @@ Teams are driven over JSON-RPC. The confirmed `teams.*` methods:
 | ACP members | `teams.acp_member.add`, `teams.acp_member.list`, `teams.acp_member.remove` |
 | Misc | `teams.list_templates`, `teams.usage` |
 
-The durable per-team group-chat thread is exposed through `teams.chat.send` /
-`teams.chat.thread` / `teams.chat.history`; this history powers the attribution-bubble
-replay in the [group chat](./groupchat) window. The `agents.teams` method returns a team
-list augmented with a small `members_preview` and `last_message`.
+The durable per-team group-chat thread is exposed through `teams.chat.send` / `teams.chat.thread` / `teams.chat.history` / `teams.chat.cancel`; this history powers the attribution-bubble replay in the [group chat](./groupchat) window. The `agents.teams` method returns a team list augmented with `members_preview` + `last_message`.
 
-> The leader's accept/reject decision is taken via the `task_review` tool (not a JSON-RPC
-> method). Members work under Coord Tasks created/updated through `teams.create_task` /
-> `teams.update_task`.
+## Team templates (`src/teams/templates/`)
 
-## Code Location
+Members of built-in team templates can declare their tool surface (sharing `agents.tools_schema`); no longer hardcoded:
 
-- `src/teams/mod.rs` — Module entry point
-- `src/teams/store.rs` — SQLite storage
-- `src/teams/types.rs` — Core types
-- `src/teams/lifecycle.rs` — Lifecycle management
-- `src/teams/plans.rs` — Plan approval
-- `src/teams/sessions.rs` — Active sessions
-- `src/teams/artifacts.rs` — Deliverables
-- `src/teams/messages.rs` — Team messaging
-- `src/teams/context.rs` — Shared context
-- `src/teams/events.rs` — Team events
+- `templates/builtin/` — built-in templates
+- `templates/loader.rs` — template loader
+- `templates/materialize.rs` — materialize a template into `Team` + member rows
+- `templates/substitute.rs` — `${var}` substitution
+- `templates/types.rs` — template types
+
+`loop-auditor` is the 26.7.21+ built-in audit / supervision template; it defaults to independent-context evidence.
 
 ## See Also
 
 - [Group Chat](./groupchat) — Multi-persona conversations
 - [A2A](./a2a) — Agent-to-Agent protocol
 - [Orchestrator](./orchestrator) — Agent orchestration
-
----
-
-## 26.7.x Addendum
-
-### Team Node Fused with Graph
-
-26.7.21+: `team` node kind, live-joined teams in graph status, team pair targets, victory-claim watchers triggered on team disband.
-
-### Teams Kanban Deep Refactor
-
-26.7.24+: drag-and-drop, shared lifecycle/column sources, richer cards, operator-tunable broadcast storm-prevention guards.
-
-### Template Tool Surface
-
-26.7.25+: members of built-in team templates can declare their tool surface (sharing `agents.tools_schema`), no longer hardcoded.
-
-### Grounding Evidence Gate
-
-26.7.21+: `task_review` approvals can require grounding.
-
-### Full `teams.*` RPC
-
-`teams.create` / `delete` / `disband` / `rename` / `get` / `list` / `list_templates` / `usage`
-`teams.create_task` / `update_task` / `list_tasks` / `delete` / `add_task_comment` / `list_task_comments` / `list_task_events` / `list_task_runs`
-`teams.chat.send` / `history` / `thread` / `cancel` / `task.trace`
-`agents.teams`
-
-### Built-in `loop-auditor`
-
-26.7.21+: audit / supervision templates default to independent-context evidence.
-
-### Coord Task Status
-
-`Pending → InProgress → WaitingReview → Completed`, reviewed by the leader via `task_review`. The historical fictional "coordination: sequential|parallel|hierarchical" modes were removed.
-
-### See Also
-
 - [Teams Concept](/docs/en/concepts/teams)
 - [Group Chat Concept](/docs/en/concepts/group-chat)
 - [Gateway RPC `teams.*`](/docs/en/gateway/methods/teams)

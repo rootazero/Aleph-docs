@@ -1,207 +1,191 @@
 ---
-title: "Proactive Dispatcher"
-description: "Proactive dispatcher for background task execution, action planning, and risk assessment within the daemon."
+title: "Proactive Task Scheduling"
+description: "Daemon background tasks: cron / heartbeat services; runtimes capability ledger; wake queue and storm-prevention guards; no `src/daemon/`."
 ---
 
-The `daemon::dispatcher` module provides proactive action dispatching for the Aleph daemon, enabling autonomous background task execution with risk assessment and policy enforcement.
+> The historical `daemon::dispatcher` module, the `src/daemon/` directory, and the `ProposedAction` / `PolicyEngine` / `DispatcherMode` enums have all been removed. This page describes the real code in `src/tasks/cron/` and `src/tasks/heartbeat/`, with collaboration from `src/tasks/shared/`, `src/runtimes/`, and `src/components/`.
+
+Proactive background task execution is now served by two orthogonal services:
+- **Cron** (`src/tasks/cron/`) — scheduled tasks triggered by cron expressions / intervals / one-shots
+- **Heartbeat** (`src/tasks/heartbeat/`) — periodic probes + L1 probe + L2 LLM judge
+
+They share `src/tasks/shared/` (`clock` / `delivery` / `schedule` / `reaper`).
+
+---
 
 ## Overview
 
-The Proactive Dispatcher enables:
-- **Autonomous actions** — Execute tasks without direct user prompting
-- **Risk assessment** — Evaluate action risk before execution
-- **Policy enforcement** — Apply configurable policies to actions
-- **Notification management** — Prioritize and batch notifications
-- **Resource-aware scheduling** — Respect system resource limits
-
-## Architecture
-
-```
-ProactiveDispatcher
-  ├── PolicyEngine — Risk evaluation and policy checks
-  ├── ActionExecutor — Task execution
-  ├── RiskAssessment — Risk scoring
-  └── NotificationQueue — Priority-based notifications
-```
-
-## Core Components
-
-### ProactiveDispatcher
-
-Central dispatch coordinator:
-
-```rust
-// src/daemon/dispatcher/mod.rs
-pub struct Dispatcher {
-    config: DispatcherConfig,
-    policy_engine: PolicyEngine,
-    executor: ActionExecutor,
-}
-
-impl Dispatcher {
-    pub async fn dispatch(
-        &self,
-        action: ProposedAction,
-    ) -> Result<ActionResult>;
-    
-    pub async fn evaluate_risk(
-        &self,
-        action: &ProposedAction,
-    ) -> RiskLevel;
-    
-    pub async fn queue_notification(
-        &self,
-        notification: Notification,
-    ) -> Result<()>;
-}
-```
-
-### PolicyEngine
-
-Evaluates actions against policies:
-
-```rust
-// src/daemon/dispatcher/policy.rs
-pub struct PolicyEngine {
-    policies: Vec<Policy>,
-}
-
-impl PolicyEngine {
-    pub fn check(
-        &self,
-        action: &ProposedAction,
-    ) -> PolicyResult;
-}
-
-pub enum PolicyResult {
-    Allow,
-    Deny { reason: String },
-    RequireApproval { approver: Role },
-}
-```
-
-### ProposedAction
-
-Actions submitted for dispatch:
-
-```rust
-// src/daemon/dispatcher/mod.rs
-pub struct ProposedAction {
-    pub id: ActionId,
-    pub action_type: ActionType,
-    pub payload: serde_json::Value,
-    pub proposed_by: AgentId,
-    pub urgency: Urgency,
-}
-
-pub enum ActionType {
-    NotifyUser,
-    ExecuteTool,
-    ScheduleTask,
-    DelegateToAgent,
-}
-```
-
-### Risk Levels
-
-```rust
-pub enum RiskLevel {
-    Safe,      // No risk, execute immediately
-    Low,       // Minor risk, log and execute
-    Medium,    // Moderate risk, notify user
-    High,      // Significant risk, require approval
-    Critical,  // Severe risk, deny unless emergency
-}
-```
-
-### Notification Priority
-
-```rust
-pub enum NotificationPriority {
-    Background,  // No immediate notification
-    Normal,      // Standard notification
-    Urgent,      // Immediate notification
-    Emergency,   // Interrupt user
-}
-```
-
-## Action Flow
-
-```
-ProposedAction
-     │
-     ▼
-PolicyEngine.check()
-     │
-     ├──▶ Deny → Log + Notify (if required)
-     │
-     ├──▶ RequireApproval → Queue for approval
-     │
-     └──▶ Allow → RiskAssessment
-                          │
-                          ├──▶ Safe → Execute immediately
-                          │
-                          └──▶ Risky → Notify user + Execute
-```
-
-## Dispatcher Modes
-
-```rust
-pub enum DispatcherMode {
-    Passive,    // Only react to explicit requests
-    Assistive,  // Suggest actions, wait for approval
-    Proactive,  // Execute low-risk actions autonomously
-    Autonomous, // Execute all allowed actions
-}
-```
-
-## Configuration
-
-```toml
-[daemon.dispatcher]
-mode = "assistive"
-max_concurrent_actions = 5
-notification_batch_interval = 300  # seconds
-
-[daemon.dispatcher.risk]
-default_level = "medium"
-auto_execute_below = "low"
-require_approval_above = "high"
-```
-
-## Code Location
-
-- `src/daemon/dispatcher/mod.rs` — Dispatcher and types
-- `src/daemon/dispatcher/policy.rs` — Policy engine
-- `src/daemon/mod.rs` — Daemon module entry
-
-## See Also
-
-- [World Model](./worldmodel) — Context inference and action prediction
-- [Task Dispatcher](./dispatcher) — Task scheduling DAG (different component)
-- [Daemon](../concepts/daemon) — Background service management
-- [Security](../security/overview) — Policy and permission system
+Proactive scheduling enables:
+- **Cron schedules** — cron expressions / intervals / one-shots / chain triggers (`on_success` / `on_failure`)
+- **Heartbeat probes** — periodic L1 probes + proactive wake, decided by the LLM judge
+- **Runtimes capability ledger** — `src/runtimes/` manages external tool capabilities (python / node / uv / ffmpeg / yt-dlp …) via a three-phase Probe → Bootstrap → Register flow, persisted to `~/.aleph/runtimes/ledger.json`
+- **Failure alert / delivery pipeline** — `DeliveryEngine` routes execution results to webhooks / notifications
+- **Event-bus push** — `CronTaskChanged` / `HeartbeatTaskChanged` events replace panel polling
 
 ---
 
-## 26.7.x Addendum
+## Cron (`src/tasks/cron/`)
 
-### Heartbeat / Cron Realized
+```
+src/tasks/cron/
+├── mod.rs            # entry; re-exports CronService / CronJob / ScheduleKind / etc.
+├── config.rs         # CronJob / CronJobView / ScheduleKind / JobStateV2 / CronConfig
+├── store.rs          # JSON atomic persistence
+├── executor.rs       # executes a job (runs the harness)
+├── history.rs        # run history
+├── alert.rs          # FailureAlertConfig / FailureAlert delivery
+├── chain.rs          # on_success / on_failure triggers (with cycle detection)
+├── template.rs       # Prompt template rendering (variable substitution)
+├── stagger.rs        # hash-based stagger across many cron jobs
+├── carryover.rs      # cross-daemon-restart carryover
+├── webhook_target.rs # webhook delivery target
+└── service/          # ServiceState / ops / timer / concurrency / catchup
+    ├── mod.rs
+    ├── ops.rs
+    ├── timer.rs
+    ├── concurrency.rs
+    └── catchup.rs
+```
 
-26.7.x: the historical stub RPCs (`heartbeat.*_stub` / `cron.*_stub`) have been **realized**. The full `heartbeat.*` / `cron.*` RPC is driven by the [Daemon](/docs/en/concepts/daemon).
+`ScheduleKind` supports:
+- `Cron { expression }` — 5/6-field cron expression
+- `Interval { every_secs }` — periodic
+- `At { timestamp }` — one-shot (auto-disabled after firing)
 
-### Proactive Wake
+Chain triggers (`on_success` / `on_failure`) register follow-up jobs in `chain.rs`; cycle detection blocks self-loops.
 
-`heartbeat.wake` — proactive wake trigger. The `Guardian Judge` LLM judge decides whether proactive wake is needed (**payload masks secrets**).
+After execution, `DeliveryEngine` delivers results via `DeliveryTarget::Webhook | DeliveryTarget::Notification | ...`; `FailureAlertConfig` controls failure-alert cadence and channel.
 
-### Proactive Decisions
+### Startup wiring
 
-- Day-boundary log rotation
-- `ALEPH-BOOT` marker
-- Sleep inhibitor silent on stderr
+The full RPC surface is wired by `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_cron_handlers` at startup, replacing `cron.*_stub`:
 
-### See Also
+| RPC | Purpose |
+|---|---|
+| `cron.list` | List all cron jobs |
+| `cron.get` | Fetch a single job |
+| `cron.create` | Create (with `CronConfig.validate()`) |
+| `cron.update` | Update |
+| `cron.delete` | Delete |
+| `cron.status` | Current execution state |
+| `cron.run` | Trigger now |
+| `cron.runs` | Run history |
+| `cron.toggle` | Enable / pause |
 
-- [Daemon](/docs/en/concepts/daemon)
-- [Cron Jobs](/docs/en/automation/cron-jobs)
-- [Heartbeat](/docs/en/automation/heartbeat)
+Each successful write also publishes `GatewayEventFrame::CronJobChanged` to `gateway::event_bus` so the panel updates without polling. `carryover::bootstrap_global_carryover_sweeper()` spawns the carry-over sweeper exactly once at first construction (guarded by `OnceLock`).
+
+---
+
+## Heartbeat (`src/tasks/heartbeat/`)
+
+```
+src/tasks/heartbeat/
+├── mod.rs            # entry; re-exports HeartbeatService / HeartbeatTask
+├── config.rs         # HeartbeatConfig / HeartbeatTask / HeartbeatTaskView
+├── store.rs          # persistence
+├── executor.rs       # executes a probe
+├── probe.rs          # L1 probe
+├── dedup.rs          # deduplication (avoid repeated triggers)
+├── wake.rs           # WakeQueue
+├── history.rs        # probe history
+└── service/          # HeartbeatServiceState / ops / timer
+    ├── mod.rs
+    ├── ops.rs
+    └── timer.rs
+```
+
+`HeartbeatService` owns `state` + `wake_queue` + optional `event_bus`. The `wake_queue` is the external proactive-wake trigger — the daemon detects an event and wants an immediate probe.
+
+The full RPC surface is wired by `register_heartbeat_handlers`:
+
+| RPC | Purpose |
+|---|---|
+| `heartbeat.list` | List all probes |
+| `heartbeat.get` | Fetch a single probe |
+| `heartbeat.create` | Create |
+| `heartbeat.update` | Update |
+| `heartbeat.delete` | Delete |
+| `heartbeat.toggle` | Enable / pause |
+| `heartbeat.wake` | Proactive wake trigger (Guardian Judge LLM decides whether to wake — **payload masks secrets**) |
+| `heartbeat.runs` | Probe history |
+
+Writes also publish `HeartbeatTaskChanged` to `gateway::event_bus`.
+
+### Guardian Judge
+
+The LLM judge for heartbeat probes:
+- 26.7.21+: **payload masks secrets** — sensitive credentials never appear in the judge prompt
+- Heartbeat probes **refuse dangerous tools and confirmation-gated tools**
+
+---
+
+## Runtimes capability ledger (`src/runtimes/`)
+
+```rust
+// src/runtimes/mod.rs
+pub mod bootstrap;
+mod  capability;
+pub mod ensure;
+pub mod ledger;
+pub mod os;
+pub mod post_install;
+pub mod probe;
+pub mod specs;
+
+pub use bootstrap::{dependencies, has_spec, install, BootstrapError, BootstrapResult};
+pub use capability::{format_entries_for_prompt, RuntimeCapability};
+pub use ensure::ensure_capability;
+pub use ledger::{CapabilityEntry, CapabilityLedger, CapabilitySource, CapabilityStatus};
+pub use os::TargetOs;
+pub use post_install::PostInstallError;
+pub use probe::ProbeResult;
+pub use specs::{
+    find_spec, select_install, supported_on_current_os,
+    InstallStrategy, OsInstall, PostInstallAction, RuntimeSpec, SPECS,
+};
+
+pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
+```
+
+`CapabilityLedger` replaces the legacy `RuntimeRegistry` and only tracks **state** of each capability (`Missing | Probing | Bootstrapping | Ready | Stale`); it never downloads or installs anything — those responsibilities belong to `Bootstrapper` and `Prober` separately. Persisted to `~/.aleph/runtimes/ledger.json`.
+
+Three-phase flow:
+1. **Probe** — detect system PATH + Aleph-managed binaries
+2. **Bootstrap** — install missing tools via shell scripts
+3. **Ledger** — persist state to `ledger.json`
+
+`ensure_capability(name, &ledger) -> Result<bin_path>` is the single entry the `exec` layer uses for PATH injection.
+
+---
+
+## Components (`src/components/`)
+
+`src/components/` is now a thin shell: `mod.rs` + `types/`. It exists as the **composite-component namespace** for types (tasks, plans, events) shared across cron / heartbeat / task pipelines. Specific modules (e.g. `ComponentSpec` / `ComponentState`) are added on demand — do not assume the legacy sub-directory listing.
+
+---
+
+## Shared infrastructure (`src/tasks/shared/`)
+
+| Module | Responsibility |
+|---|---|
+| `clock.rs` | `Clock` trait + `SystemClock`: injectable clock for tests |
+| `schedule.rs` | pure scheduling computation (next_run_at, etc.) |
+| `delivery.rs` | `DeliveryEngine` + `DeliveryTarget` + `DeliveryPayload`: cross-service delivery |
+| `reaper.rs` | orphan / stuck job reclamation |
+
+---
+
+## Divergence from historical `daemon::dispatcher`
+
+- **No `ProposedAction` / `PolicyEngine` / `DispatcherMode`** — risk evaluation, policy enforcement live in the execution engine's `PermissionLayer` + `ContextRuleLayer` + `SmartFilter`
+- **No `src/daemon/` directory** — cron / heartbeat live directly under `src/tasks/`
+- **No standalone notification queue / scheduling DAG** — notifications flow through `DeliveryEngine` and the gateway `event_bus`
+- **No `ActionExecutor` sub-component** — execution reuses the existing harness via `execution_engine::RunRequest`
+
+## See Also
+
+- [Daemon concept](/docs/en/concepts/daemon) — daemon service management
+- [Cron Jobs](/docs/en/automation/cron-jobs) — full cron configuration
+- [Heartbeat](/docs/en/automation/heartbeat) — full heartbeat configuration
+- [Runtimes](/docs/en/architecture/runtimes) — capability ledger and bootstrap
+- [Event bus](/docs/en/architecture/event-bus) — `CronTaskChanged` / `HeartbeatTaskChanged` push

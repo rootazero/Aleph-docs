@@ -118,18 +118,18 @@ Plus two supporting indexes (`idx_session_events_session_turn`, `idx_session_eve
 
 | Category | Variants |
 |----------|----------|
-| Lifecycle | `SessionStarted`, `SessionWoken`, `SessionEnded` |
+| Lifecycle | `SessionCreated`, `SessionWoken`, `SessionDetached`, `SessionForked` |
+| Run boundaries | `RunStarted`, `RunFinished` |
 | Turn boundaries | `TurnStarted`, `TurnEnded` |
-| Messages | `UserMessage`, `AssistantMessage`, `SystemMessage` |
-| LLM interaction | `LlmRequested`, `LlmResponded`, `LlmError` |
-| Tool calls | `ToolCalled`, `ToolResponded`, `ToolError` |
-| Subagent delegation | `SubagentSpawned`, `SubagentResult` |
-| Budget / compaction | `BudgetUpdated`, `Compacted` |
+| Messages | `UserMessage`, `AssistantMessage`, `AssistantRunMeta`, `SystemMessage` |
+| Tool calls | `ToolCallRequested`, `ToolCallApproved`, `ToolCallDenied`, `ToolResult`, `ToolError` |
+| Subagent delegation | `SubagentSpawned`, `SubagentReturned` |
+| Budget / compaction | `BudgetUpdated`, `CompactionPerformed` |
 | Errors | `Error` |
 
 **Location**: `src/session/events.rs`
 
-Helper types: `EventSeq`, `TurnId`, `MessageContent`, `ToolOutput`, `TurnOutcome`, `TurnTrigger`, `ApprovalSource`, `ErrorKind`, `Timestamp`.
+Helper types: `EventSeq`, `TurnId`, `MessageContent`, `ToolOutput`, `RunOutcome`, `TurnTrigger`, `TurnOutcome`, `ApprovalSource`, `ErrorKind`, `Timestamp`.
 
 ---
 
@@ -145,7 +145,7 @@ pub fn project_messages(
 
 **Location**: `src/session/projection.rs`
 
-This collapses `TurnStarted`, `UserMessage`, `AssistantMessage`, `ToolCalled`, `ToolResponded`, and `TurnEnded` into a linear `Vec<ProjectedMessage>` that looks like the old `messages` table — useful for LLM context windows and UI rendering.
+This collapses `RunStarted`, `TurnStarted`, `UserMessage`, `AssistantMessage`, `ToolCallRequested`, `ToolResult`, `TurnEnded`, and `RunFinished` into a linear `Vec<ProjectedMessage>` that looks like the old `messages` table — useful for LLM context windows and UI rendering.
 
 ---
 

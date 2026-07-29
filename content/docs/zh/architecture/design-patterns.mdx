@@ -1,0 +1,475 @@
+---
+title: "设计模式"
+description: "Aleph 核心设计模式：Context、Newtype、FromStr、Builder、Adapter + Trait Object、Composite Keys，以及 JSON-RPC 桥接模式。"
+---
+
+本页是 Aleph 核心设计模式与架构决策的概览。每条模式都给出动机、实现示例、在源码中的位置，以及何时使用 / 不使用的判断。
+
+## 目录
+
+- [Context 模式](#context-模式)
+- [Newtype 模式](#newtype-模式)
+- [FromStr Trait 模式](#fromstr-trait-模式)
+- [Builder 模式](#builder-模式)
+- [Adapter + Trait Object 模式](#adapter--trait-object-模式)
+- [Composite Keys 模式](#composite-keys-模式)
+- [JSON-RPC 桥接模式](#json-rpc-桥接模式)
+- [Pattern 组合](#pattern-组合)
+
+---
+
+## Context 模式
+
+### 动机
+
+随着 API 演化，函数签名容易堆积很多参数，导致：
+- 难以阅读和理解
+- 难以在不破坏调用方的前提下扩展
+- 当参数类型相似时容易填错顺序
+- 可选参数多时构造繁琐
+
+### 解决方案
+
+**Context 模式** 把相关参数聚合成一个独立 struct，减少参数数量并提升 API 可读性。
+
+### 实现：`HarnessDeps`
+
+```rust
+// src/harness/deps.rs
+pub struct HarnessDeps {
+    pub session: Arc<dyn SessionService>,
+    pub tools: Arc<dyn ToolService>,
+    pub llm: Arc<dyn AiProvider>,
+
+    pub robustness_profile: ModelRobustnessProfile,
+    pub verifier_chain: Option<Arc<VerifierChain>>,
+    pub context_budget: Option<Arc<Mutex<ContextBudget>>>,
+    pub context_compactor: Option<Arc<ContextCompactor>>,
+    pub preflight_pipeline: Option<Arc<PreflightPipeline>>,
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
+
+    pub system_prompt: Option<String>,
+    pub system_prompt_parts: Option<Vec<SystemPromptPart>>,
+    pub recall_context: Option<String>,
+
+    pub chain_context: ChainContext,
+    pub guardrails: Option<Arc<GuardrailRegistry>>,
+    pub max_iterations: Option<usize>,
+    pub power: Option<Arc<dyn PowerCapability>>,
+    pub stall_config: Option<StallConfig>,
+    pub consecutive_failure_cap: Option<usize>,
+    pub /* … */ …
+}
+```
+
+`HarnessDeps` 是启动时一次性组装、单 struct 注入到 `AgentHarness::new`。所有字段是 `Arc<dyn Trait>`，让 harness 廉价克隆且线程安全。`orchestrator::deps_builder` 提供一致的子代理继承构造。
+
+### 收益
+
+1. **可扩展**：新增参数不破坏现有代码
+2. **可读**：调用方一眼看清参数分组
+3. **类型安全**：编译期验证必填项
+4. **人体工学**：可选参数经 Builder Pattern 提供
+5. **自文档化**：参数关系清晰
+
+### 何时使用
+
+- 函数 ≥ 5 个参数
+- 多个参数可选
+- 参数自然成组
+- API 可能演化（加新参数）
+- 调用方多
+
+### 源码位置
+
+- `HarnessDeps` —— `src/harness/deps.rs`
+- `FlowRunContext` —— `src/orchestrator/flow_run_tool.rs`
+- `RunContext` —— `src/agents/run_context.rs`
+
+---
+
+## Newtype 模式
+
+### 动机
+
+原始类型（`String`、`u64` 等）缺乏语义，容易混淆：
+
+```rust
+fn assign(experiment_id: String, variant_id: String) { /* … */ }
+// 容易传错顺序
+assign(variant_id, experiment_id); // 编译通过但语义错误！
+```
+
+### 解决方案
+
+**Newtype Pattern** 把原始类型包装在独立 struct 中，提供：
+
+- 类型安全（防止不同 id 互换）
+- 自文档化（语义清晰）
+- 封装（受控访问内部值）
+- 扩展点（无需修改原语即可加方法）
+
+### 实现示例
+
+#### ID 类型（带构造与 `Deref`）
+
+```rust
+// src/domain/skill.rs
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(String);
+
+impl SkillId {
+    pub fn new(id: impl Into<String>) -> Self { Self(id.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl Deref for SkillId {
+    type Target = str;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl Display for SkillId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+```
+
+#### 类型别名（不引入新类型，仅提供语义）
+
+```rust
+// src/teams/types.rs
+pub type TeamId = String;
+
+// src/orchestrator/flow_spec.rs
+pub type FlowId = String;
+pub type AgentId = String;
+pub type ProviderId = String;
+
+// src/agents/swarm/tasks/mod.rs
+pub type CoordTaskId = String;
+pub type AgentId = String;
+```
+
+类型别名比完整 Newtype 更轻量——它们不可区分，但仍然给读者和文档提供语义。
+
+#### 严格 Newtype（带强校验）
+
+```rust
+// src/event/global_bus.rs
+pub struct SubscriptionId(String);
+
+impl SubscriptionId {
+    pub fn new(id: impl Into<String>) -> Self { Self(id.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+```
+
+### 收益与典型实现 trait
+
+| 必需 | 推荐 | 可选 |
+|---|---|---|
+| `Debug`、`Clone`、`PartialEq`/`Eq`、`Hash` | `Display`、`From<T>`、`Deref`、`Serialize`/`Deserialize` | `FromStr`、`FromIterator`、`Default` |
+
+### Newtype 目录
+
+| 类型 | 内部类型 | 用途 | 位置 |
+|---|---|---|---|
+| `SkillId` | `String` | 技能 id | `src/domain/skill.rs` |
+| `PluginId` | `String` | 插件 id | `src/domain/skill.rs` |
+| `SubscriptionId` | `String` | 事件总线订阅 id | `src/event/global_bus.rs` |
+| `TeamId` (alias) | `String` | 团队 id | `src/teams/types.rs` |
+| `CoordTaskId` (alias) | `String` | 协调任务 id | `src/agents/swarm/tasks/mod.rs` |
+| `FlowId` (alias) | `String` | 流程 id | `src/orchestrator/flow_spec.rs` |
+| `SessionId` (alias) | `SessionKey` | 会话 id（同时是路由键） | `src/session/service.rs` |
+
+### 何时使用
+
+- **标识符**：用户 id、会话 id、资源 id
+- **域值**：邮箱、电话、URL
+- **集合**：领域特定操作的集合
+- **单位**：测量、币种、时间
+- **校验数据**：构造时必须校验的类型
+
+避免用于：DTO、内部实现细节、不受益于类型安全的场景。
+
+---
+
+## FromStr Trait 模式
+
+### 动机
+
+代码库内一致的解析接口：
+- 统一的错误处理
+- 与标准库集成（`str::parse()`）
+- 支持泛型解析代码
+
+### 实现
+
+```rust
+// src/resilience/types.rs
+impl std::str::FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending"       => Ok(Self::Pending),
+            "running"       => Ok(Self::Running),
+            "completed"     => Ok(Self::Completed),
+            "failed"        => Ok(Self::Failed),
+            "interrupted"   => Ok(Self::Interrupted),
+            "idle"          => Ok(Self::Idle),
+            "swapped"       => Ok(Self::Swapped),
+            _               => Err(format!("Unknown task status: {s}")),
+        }
+    }
+}
+```
+
+### 使用
+
+```rust
+// 直接解析
+let status: TaskStatus = "pending".parse()?;
+
+// 泛型解析
+fn parse_config<T: FromStr>(value: &str) -> Result<T, T::Err> {
+    value.parse()
+}
+
+// 配置加载
+let status = config.get("status")?.parse::<TaskStatus>()?;
+```
+
+### 实现 `FromStr` 的类型
+
+- `TaskStatus`、`RiskLevel`、`Lane`（`src/resilience/types.rs`）
+- `CoordTaskStatus`（带 `from_stored` / `from_filter_str` 两种入口——`from_stored` 显式拒绝派生状态；`src/agents/swarm/tasks/mod.rs`）
+- `TeamStatus`、`TeamMemberKind`（`src/teams/types.rs`）
+- `AdapterMode`（带 `as_str` / `to_serde` / `from_serde`，`src/acp/adapter.rs`）
+- `SessionKey` 的 `parse` / `from_key_string` / `from_legacy`（`src/routing/session_key.rs`）
+
+---
+
+## Builder 模式
+
+### 动机
+
+复杂对象 + 多个可选参数的舒适构造。
+
+### 实现
+
+```rust
+// src/agents/run_context.rs（示意）
+impl RunContext {
+    pub fn new(/* required params */) -> Self { /* … */ }
+
+    pub fn with_abort_signal(mut self, signal: watch::Receiver<bool>) -> Self {
+        self.abort_signal = Some(signal);
+        self
+    }
+
+    pub fn with_initial_history(mut self, history: impl Into<String>) -> Self {
+        self.initial_history = Some(history);
+        self
+    }
+}
+
+// src/tool_metadata/types/unified/builders.rs：UnifiedTool 的链式 builder
+let tool = UnifiedTool::new(id, name, description, source)
+    .with_routing_regex("^/foo\\s+")
+    .with_routing_strip_prefix(true)
+    .with_routing_intent_type("skills")
+    .with_alias("foo")
+    .with_visible_channels(vec![ChannelType::Cli, ChannelType::Web])
+    .with_sort_order(100);
+
+// src/agents/swarm/tasks/mod.rs：NewCoordTask / CoordTaskUpdate
+let task = NewCoordTask { /* required fields */ };
+let update = CoordTaskUpdate::default()
+    .with_status(CoordTaskStatus::InProgress)
+    .with_metadata(json!({ "key": "value" }));
+```
+
+### 收益
+
+- 流式 API（链式调用）
+- 可选参数不需要 Option 字段散在构造函数里
+- 自文档化（方法名即说明）
+- 编译期验证必填参数
+
+---
+
+## Adapter + Trait Object 模式
+
+### 动机
+
+通过 trait 抽象跨多实现可替换的组件，避免硬编码具体类型。
+
+### 实现
+
+```rust
+// src/executor/tool_registry.rs
+pub trait ToolRegistry: Send + Sync {
+    fn get_tool(&self, name: &str) -> Option<&UnifiedTool>;
+    fn execute_tool(&self, tool_name: &str, arguments: Value)
+        -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>>;
+
+    fn workspace_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
+    fn session_key_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
+    // …
+}
+
+// src/executor/builtin_registry/registry.rs
+pub struct BuiltinToolRegistry { /* … */ }
+impl ToolRegistry for BuiltinToolRegistry { /* … */ }
+
+// src/tools/adapters/registry_adapter.rs
+pub struct RegistryToolAdapter { /* wraps any ToolRegistry as LoopTool */ }
+```
+
+### 设计要点
+
+- **Trait 边界**：`Send + Sync + 'static` 让实现可跨任务分享
+- **空默认**：`workspace_handle`、`session_key_handle` 等可选句柄默认 `None`，具体实现按需覆盖
+- **Adapter 包装**：把 trait object 转成 LoopTool / HarnessDeps 字段，进一步提升抽象层级
+
+### 源码中的典型 trait object
+
+| Trait | 用途 | 典型实现 |
+|---|---|---|
+| `AiProvider` | LLM provider（含 failover） | `FailoverProvider`、`AnthropicAdapter`、`OpenAIAdapter` |
+| `ToolService` / `LoopTool` | 工具执行 | `BuiltinToolRegistry` + `RegistryToolAdapter` |
+| `Sandbox` | 进程隔离 | `WorkspaceSandbox`、`WorktreeSandbox`、`OsSandboxDriver` |
+| `EmbeddingProvider` | embedding 后端 | `OpenAIEmbedding`、`FastEmbedEmbedding` |
+| `Clock` | 可注入时钟 | `SystemClock`、测试 fake |
+| `TraceSink` | harness 观测 | `GatewayTraceSink`、`SpySink`（测试） |
+
+---
+
+## Composite Keys 模式
+
+### 动机
+
+多个独立子系统各自有独立的"什么算同一会话"语义。引入**复合键命名空间**让路由 / 缓存 / 失效能在每个子系统内独立演进。
+
+### 实现：`SessionKey`
+
+```rust
+// src/routing/session_key.rs
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionKey {
+    Main         { agent_id, main_key, epoch },
+    DirectMessage{ agent_id, channel, peer_id, dm_scope, epoch },
+    Group        { agent_id, channel, peer_kind, peer_id, thread_id },
+    Task         { agent_id, task_type, task_id },
+    Subagent     { parent_key: Box<Self>, subagent_id },
+    Ephemeral    { agent_id, ephemeral_id },
+}
+```
+
+每个变体对应一个独立命名空间；字符串格式由 `to_key_string` / `parse` 双向序列化。`agent_id` 是共享字段，全部走同一份 `normalize_agent_id`。
+
+### 命名空间表
+
+| `task_type` / 命名空间 | 来源 | 说明 |
+|---|---|---|
+| `main` | default | 跨通道共享主会话 |
+| `dm` / `peer` | `DmScope` | DM 隔离策略 |
+| `group` / `channel` / `thread` | `PeerKind` | 群 / 频道 / 线程 |
+| `cron` | `src/tasks/cron/` | cron 触发 |
+| `heartbeat` | `src/tasks/heartbeat/` | 守护探针触发 |
+| `a2a` | `src/a2a/` | 子代理委托 |
+| `webhook` | webhook | webhook 触发 |
+| `team_chat` | `src/teams/broadcast/` | 团队聊天 |
+| `subagent` | 嵌套 | 子代理 |
+| `ephemeral` | 一次性 | 不持久化 |
+
+### 收益
+
+- 路由、缓存、失效、判断"同会话"全部用同一键
+- 每个命名空间独立加字段（`task_type`、新 `PeerKind` 变体），不互相污染
+- 字符串格式让 SQL LIKE / 模式匹配可工作
+
+---
+
+## JSON-RPC 桥接模式
+
+当系统调用必须运行在另一个语言 runtime（例如 Swift/Objective-C 独占的 AVFoundation），Aleph 用**长生命周期 stdio JSON-RPC 子进程**，而不是每次调用 spawn 新进程或嵌入语言 runtime。
+
+### 关键设计决策与理由
+
+**Stdio over sockets** —— 没有端口冲突、没有 socket 文件的权限提示、父进程死亡通过 EOF 自动检测（管道关闭时子进程 read 返回 EOF）。调试简单：手工 pipe 一行 JSON 给二进制即可观察响应。
+
+**握手驱动的能力协商** —— 启动时 helper 通告 `supported_methods` 列表。Rust 客户端在运行时查这个列表，而不是从二进制版本号推断能力。若方法缺失，客户端对该调用返回 `DesktopError::BridgeDisabled`，优雅降级而无硬版本依赖。
+
+**自描述错误** —— 每个撞到未授权状态的 TCC-gated 方法返回 `-32001` 错误，`data` 字段携带 `PermissionGuide`（结构化对象含 `deep_link` / `human_readable_steps` / `rationale`）。LLM 可逐字把指引呈现给用户，无需任何带外元数据查询。参考 `desktop/shared/src/error.rs::From<JsonRpcError> for DesktopError`。
+
+**长生命周期进程 over spawn-per-call** —— 每次调用 spawn 新进程大约 50 ms 冷启动延迟，重复握手状态，丢失进程内缓存（如 AVCaptureSession 设备枚举）。长生命周期进程需要带指数回退与父进程死亡看门狗的监督器；两者都在 `desktop/shared/src/bridge/` 实现。
+
+模式落地：`desktop/macos/bridge/`（Swift helper）与 `desktop/shared/src/bridge/`（Rust 客户端 + 监督器）。Schema 由 Rust 在 `shared/protocol/src/desktop_bridge/` 拥有，作为 golden JSON Schema fixture 导出给 Swift 并在 CI 校验。完整协议参见 [DESKTOP_BRIDGE.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/DESKTOP_BRIDGE.md)。
+
+---
+
+## Pattern 组合
+
+### Context + Builder
+
+`HarnessDeps` 组合了 Context（聚合所有依赖）与 Builder（`orchestrator::deps_builder` 的子代理继承构造）：
+
+```rust
+let deps = HarnessDeps::builder()
+    .session(session)
+    .tools(tools)
+    .llm(llm)
+    .with_recall_context(recall)
+    .with_chain_context(chain.child())
+    .build();
+```
+
+### Newtype + FromStr
+
+很多类型同时实现 Newtype（带构造与 `Deref`）和 `FromStr`：
+
+```rust
+let status: TaskStatus = "pending".parse()?;
+let id = TeamId::new("team-001");
+```
+
+### Adapter + Trait Object
+
+`ToolRegistry` trait 被 `BuiltinToolRegistry` 实现后，由 `RegistryToolAdapter` 包装为 `LoopTool`，再被 harness 通过 `Arc<dyn ToolService>` 消费——一层 trait 一层适配，每层都有自己的职责。
+
+---
+
+## 迁移指南
+
+### 添加 Context Pattern
+
+1. 识别候选函数（5+ 参数、多个可选）
+2. 创建 Context struct（必填 + 可选字段）
+3. 实现必填构造函数
+4. 添加 Builder 方法（可选）
+5. 更新函数签名接受 Context
+6. 更新所有调用方
+7. 在模块公共 API 中导出 Context
+
+### 添加 Newtype
+
+1. 识别需要语义的原始类型
+2. 创建 Newtype struct 包装原语
+3. 实现标准 trait（Debug、Clone、PartialEq、…）
+4. 添加构造与访问方法
+5. 实现 `Deref`（若透明访问适用）
+6. 更新所有使用点
+7. 在本目录登记
+
+---
+
+## 参考
+
+- [Rust API Guidelines — Newtype Pattern](https://rust-lang.github.io/api-guidelines/type-safety.html#c-newtype)
+- [Rust Design Patterns — Builder](https://rust-unofficial.github.io/patterns/patterns/creational/builder.html)
+- [Effective Rust — Item 6: Use newtypes for type safety](https://www.lurklurk.org/effective-rust/newtype.html)
+- [DESKTOP_BRIDGE.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/DESKTOP_BRIDGE.md) — 完整桥接协议
+- [ARCHITECTURE.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/ARCHITECTURE.md) — 整体架构

@@ -204,7 +204,7 @@ Specs currently in design (not yet shipped):
 
 ### SkillOpt Self-Evolution Discipline
 
-26.7.x ports from SkillOpt (arXiv 2605.23904): a bounded, validation-gated edit loop layered over the LLM-proposed edits (R7: the *content* is the model's; this layer only enforces discipline).
+26.7.x ports from SkillOpt (arXiv 2605.23904): the dream daemon's note-layer mutations are constrained by three pieces — `evaluate_gate` (pure deterministic accept/reject that tracks the best-ever score), `memory_health_score` (the `SignalSnapshot`-derived memory-health score) + `score_merge_candidate` (a local quality score for merge candidates), and `EditBudget` (the per-cycle byte budget that is SkillOpt's "textual learning rate"). R7 invariant: the *content* of edits is still proposed by the model; this layer only enforces *discipline* (monotonic-improvement pressure + budget + anti-degradation), never replaces LLM reasoning. Code lives in `src/memory/dreaming/evolution/` (`gate.rs` / `score.rs` / `budget.rs` / `evidence.rs`).
 
 ### Note Layer Rounds 2–4
 

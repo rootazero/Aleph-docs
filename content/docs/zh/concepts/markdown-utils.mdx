@@ -166,7 +166,7 @@ pub fn open_sqlite_readonly(path: &Path) -> rusqlite::Result<Connection>;
 - `synchronous = NORMAL`（WAL 下足够安全）
 - `foreign_keys = ON`
 
-全 daemon 的 `goal_store.db`、`memory.db`、`hub/cache.sqlite`、`loop_graph.db`、`strategies/` 全部走这个 helper；不直连构造 `Connection::open`，就是 Spec C 锁安全的唯一入口。
+全 daemon 的 `goal_store.db`、`memory.db`、`hub_catalog.db`、`loop_graph.db`、`strategies/` 全部走这个 helper；不直连构造 `Connection::open`，就是 Spec C 锁安全的唯一入口。
 
 `open_sqlite_readonly` 只加 `busy_timeout`，挂 `SQLITE_OPEN_READ_ONLY`，给 doctor / lint 之类的只读诊断路径用。**失败 fast**：文件不存在直接返 `Err`，doctor 把它当作「图尚未建立」处理而不是故障。
 

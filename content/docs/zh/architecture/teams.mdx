@@ -1,140 +1,117 @@
 ---
 title: "团队"
-description: "面向多代理协作的团队管理，涵盖生命周期、计划与审批工作流。"
+description: "团队管理：SQLite 持久化、CoordTask DAG 调度、leader 战略规划、ACP 成员、Snapshot / Workflow Canvas。"
 ---
 
-`teams` 模块为多代理协作提供团队管理，支持具有生命周期管理、计划审批和任务跟踪的结构化团队协作。
+`teams` 模块为多代理协作提供团队管理，支持具有生命周期管理、Coord Task DAG 调度、计划审批（团队战略）和任务跟踪的结构化团队协作。
+
+> 历史上文档中提到的 `TeamLifecycle`、`TeamPlan`、`ApprovalState` 枚举以及 `teams/lifecycle.rs`、`teams/plans.rs`、`teams/sessions.rs`、`teams/artifacts.rs`、`teams/messages.rs` 已不再以独立模块/枚举形式存在。本页描述当前 `src/teams/` 中的真实代码。
 
 ## 概览
 
 团队支持：
-- **团队创建** —— 定义由指定**队长**与成员组成的代理团队
+- **团队创建** —— 定义由指定**队长**与成员组成的代理团队；成员可以是 in-process agent 或 ACP session（`TeamMemberKind::Agent | AcpSession`）
 - **战略协调**（"团队战略协调"，Team Strata）—— 队长先制定计划，该计划被焊入每位成员的提示词
-- **协调任务**（Coord Task）—— 为每位成员分配任务，遵循 `Pending → InProgress → WaitingReview → Completed` 生命周期
-- **验证循环** —— 队长在成员交付物被视为完成前进行接受或拒绝
-- **生命周期管理** —— 跟踪团队从组建到完成的状态
-- **SQLite 持久化** —— 团队数据的持久存储
+- **协调任务**（Coord Task）—— 通过 `src/agents/swarm/tasks/` 的统一 `coord_tasks` DAG；状态机为 `Pending | Blocked | InProgress | WaitingReview | Completed | Failed | Cancelled | Skipped | Paused | Unsatisfiable`
+- **验证循环** —— 队长通过 `task_review` 工具接受或拒绝交付物（详见 [Coord Tasks](#协调任务-coord-task)）
+- **团队协议** —— 每个团队可设置 `Team.protocol`（≤32 KiB），由 dispatcher 注入每个成员的启动上下文
+- **ACP 成员** —— 通过 `teams.acp_member.add / list / remove` 接入外部 CLI（Claude Code / Codex / Gemini）
+- **Snapshot / Kanban** —— `teams.snapshot.*` 记录团队状态；`team_workflow_canvas` 工具暴露可拖放的看板
+- **JSON-RPC 驱动** —— `teams.*` 全套 RPC（创建、任务、消息、快照、工作流）
 
 ## 架构
 
 ```
-TeamStore (SQLite)
-  ├── Team —— 团队定义和元数据
-  ├── TeamMember —— 成员资格和角色
-  ├── Plans —— 团队计划和审批状态
-  ├── Sessions —— 活动团队会话
-  └── Artifacts —— 可交付成果和输出
+src/teams/
+├── mod.rs              # 模块入口；导出核心类型
+├── store.rs            # SqliteTeamStore：teams / team_members 表
+├── types.rs            # Team / TeamMember / TeamMemberKind / TeamStatus / TeamSummary
+├── plans.rs            # PlanSubmission / PlanManager
+├── context.rs          # TeamInboxContextProvider
+├── events.rs           # SqliteEventLogStore / TeamEventLogger
+├── artifacts.rs        # ArtifactStore + ArtifactType / TaskArtifact / TaskStatus（不是 TaskStatus enum）
+├── snapshots.rs        # SqliteSnapshotStore + capture/restore
+├── workflow_canvas.rs  # 工作流画布
+├── run_mode.rs         # 团队运行模式（usage_mode 锁定）
+├── leader_prompt.rs    # 队长提示词构造
+├── member_provision.rs # 成员配置
+├── notifier.rs         # TeamNotifier
+├── dispatcher/         # TeamDispatcher（自动调度）+ handoff + runner + clarify + acp_bridge + schedule
+├── broadcast/          # GroupChatBroadcaster（确定性扇出；targets / transcript / member_prompt）
+├── messages/           # TeamMessage 持久化（store / inbox / router / mentions / aggregator / types）
+├── sessions/           # 协作 session（coordinator / store / types）
+└── templates/          # builtin 团队模板加载 + 物化 + 替换
 ```
 
-## 核心组件
-
-### TeamStore
-
-团队数据的 SQLite 支持存储：
+## 核心类型（`src/teams/types.rs`）
 
 ```rust
-// src/teams/store.rs
-pub trait TeamStore: Send + Sync {
-    fn create_team(&self, team: NewTeam) -> Result<TeamId>;
-    fn get_team(&self, id: TeamId) -> Result<Option<Team>>;
-    fn list_teams(&self) -> Result<Vec<TeamSummary>>;
-    fn add_member(
-        &self, 
-        team_id: TeamId, 
-        member: NewTeamMember
-    ) -> Result<()>;
-    fn update_status(
-        &self, 
-        id: TeamId, 
-        status: TeamStatus
-    ) -> Result<()>;
-}
-
-pub struct SqliteTeamStore {
-    conn: rusqlite::Connection,
-}
-```
-
-### 团队类型
-
-```rust
-// src/teams/types.rs
 pub struct Team {
     pub id: TeamId,
     pub name: String,
     pub description: String,
-    pub status: TeamStatus,
-    pub created_at: DateTime<Utc>,
+    pub leader_id: String,
+    pub status: TeamStatus,         // 实际只有 Active | Disbanded
+    pub created_at: i64,
+    pub disbanded_at: Option<i64>,
+    pub protocol: Option<String>,   // 队长团队操作协议（≤32 KiB）
 }
+
+pub enum TeamStatus { Active, Disbanded }   // snake_case on the wire
+
+pub enum TeamMemberKind { Agent, AcpSession }
 
 pub struct TeamMember {
-    pub id: MemberId,
     pub team_id: TeamId,
-    pub agent_id: AgentId,
-    pub role: TeamRole,
-    pub permissions: Permissions,
-}
-
-pub enum TeamStatus {
-    Forming,
-    Active,
-    Paused,
-    Completed,
-    Disbanded,
+    pub agent_id: String,           // Agent: 注册表 id；AcpSession: 合成 id `acp:<harness>:<cwd>[:name]`
+    pub role: String,
+    pub joined_at: i64,
+    pub kind: TeamMemberKind,
+    pub acp_harness_id: Option<String>,
+    pub acp_cwd: Option<String>,
+    pub acp_session_name: Option<String>,
 }
 ```
 
-### 生命周期
+`TeamMember` 通过 `kind` 区分运行时分发目标——in-process agent 经 `MemberDispatchTarget::Agent`，ACP session 经 `MemberDispatchTarget::AcpSession`（见 `src/teams/dispatcher/runner.rs`）。
 
-团队生命周期管理：
+`TeamSummary` 是列表视图（id / name / description / leader / status / member_count / 时间戳），**不含任务计数**——任务计数在 `coord_tasks` DAG（独立数据库）中，使用 `team_status` 工具获取准确分解。
+
+## 存储（`SqliteTeamStore`）
 
 ```rust
-// src/teams/lifecycle.rs
-pub struct TeamLifecycle;
-
-impl TeamLifecycle {
-    pub fn can_transition(
-        from: TeamStatus,
-        to: TeamStatus,
-    ) -> bool;
-    
-    pub fn on_forming(team: &mut Team);
-    pub fn on_active(team: &mut Team);
-    pub fn on_completed(team: &mut Team);
+#[async_trait]
+pub trait TeamStore: Send + Sync {
+    async fn create_team(&self, input: NewTeam) -> Result<Team>;
+    async fn get_team(&self, id: &str) -> Result<Option<Team>>;
+    async fn get_team_by_name(&self, name: &str) -> Result<Option<Team>>;
+    async fn list_teams(&self) -> Result<Vec<TeamSummary>>;
+    async fn disband_team(&self, id: &str) -> Result<()>;
+    async fn delete_team(&self, id: &str) -> Result<()>;          // 仅 Disbanded 状态可删除
+    async fn add_member(&self, input: NewTeamMember) -> Result<TeamMember>;
+    async fn get_members(&self, team_id: &str) -> Result<Vec<TeamMember>>;
+    async fn remove_member(&self, team_id: &str, agent_id: &str) -> Result<()>;  // 不能移除 leader
+    async fn get_agent_teams(&self, agent_id: &str) -> Result<Vec<TeamSummary>>;
+    async fn set_protocol(&self, team_id: &str, protocol: Option<String>) -> Result<()>;
+    async fn rename_team(&self, id: &str, name: &str) -> Result<()>;
+    async fn set_name_auto(&self, id: &str, value: bool) -> Result<()>;
+    async fn take_auto_name_flag(&self, id: &str) -> Result<bool>;  // atomic once-only fire
 }
+
+pub struct SqliteTeamStore { /* Arc<Mutex<Connection>> */ }
 ```
 
-### 计划
-
-计划审批工作流：
-
-```rust
-// src/teams/plans.rs
-pub struct TeamPlan {
-    pub id: PlanId,
-    pub team_id: TeamId,
-    pub title: String,
-    pub steps: Vec<PlanStep>,
-    pub approval_state: ApprovalState,
-}
-
-pub enum ApprovalState {
-    Draft,
-    PendingReview,
-    Approved,
-    Rejected,
-}
-```
+`MAX_PROTOCOL_LEN = 32 KiB` 强制——protocol 会逐字注入每个成员的启动提示词，无界值会让 `set_protocol` 的调用者向队长上下文注入任意指令。
 
 ## 战略协调（"团队战略协调"，Team Strata）
 
-团队拥有一名**队长**和若干成员。在团队的**首条消息**时，队长先制定计划 —— 在任何成员开始工作之前。该计划环节**每个团队仅触发一次**（按团队键控的 fire-once 策略），生成的计划会被**焊入每位成员的提示词**，使所有成员共享同一战略上下文。
+团队拥有一名**队长**和若干成员。在团队的**首条消息**时，队长先制定计划——在任何成员开始工作之前。该计划环节**每个团队仅触发一次**（按团队键控的 fire-once 策略），生成的计划被**焊入每位成员的提示词**，使所有成员共享同一战略上下文。
 
 ```
 向团队发送首条消息
         │
         ▼
-  队长先制定计划  ──►  策略（fire-once，按团队键控）
+  队长先制定计划  ──►  Strategy（fire-once，按团队键控；atomic put_if_absent 防 race）
         │
         ▼
   计划被焊入每位成员的提示词
@@ -143,32 +120,82 @@ pub enum ApprovalState {
   成员在分配的协调任务下工作
 ```
 
-成员不会脱离计划独立行动：每位成员针对一个分配的**协调任务**（Coord Task）工作，被焊入的计划使他们的工作与队长的战略保持一致。
+`team_key(team_id)` 是 composite-key 命名空间之一，与 loop / goal / session 并列，详见 [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy)。
 
-## 协调任务与验证循环
+## 协调任务（Coord Task）
 
-每位成员在一个**协调任务**（Coord Task）下工作，其状态沿固定生命周期推进：
+`coord_tasks` 是统一 DAG（在 `src/agents/swarm/tasks/` 下），**不**是 `src/teams/` 自己的表。团队成员的工作通过该 DAG 表达：
 
+| 状态 | 含义 |
+|---|---|
+| `Pending` | 等待依赖 + dispatcher 拾取 |
+| `Blocked` | **派生**（永不存储）：依赖未完成 |
+| `InProgress` | dispatcher 已 claimed，正在运行 |
+| `WaitingReview` | 运行完成，等待 lead review；下游仍阻塞 |
+| `Completed` | 完成（满足依赖） |
+| `Failed` | 失败（不满足依赖；触发派生 `Unsatisfiable`） |
+| `Cancelled` | 取消 |
+| `Skipped` | 手动跳过（仍满足依赖） |
+| `Paused` | 手动暂停；不被 dispatcher claim；**不**满足依赖 |
+| `Unsatisfiable` | **派生**：依赖终结失败，自身永远不可运行 |
+
+> `Blocked` 与 `Unsatisfiable` 由查询时派生；`from_stored` 显式拒绝两者（写回路径上不允许）。`CoordTaskStatus::is_terminal()` 与 `is_settled()` 分别给出"持久终态"与"观察者角度已结束"的判定；后者用于团队 / 工作流"全部 settled"完成谓词。
+
+依赖边通过 `coord_task.blocked_by` 表示，dispatcher 通过 `src/teams/dispatcher/schedule/` 的 `select_schedulable` / `settle` / `reclaim` / `failure` 维护就绪性、重新调度、超时回收与失败传播。
+
+### 验证循环：`task_review`
+
+```rust
+// src/builtin_tools/team/task_review.rs
+#[derive(Clone)] pub struct TaskReviewTool { /* … */ }
+impl AlephTool for TaskReviewTool {
+    const NAME: &'static str = "task_review";
+
+    async fn call(&self, args: TaskReviewArgs) -> Result<TaskReviewOutput> {
+        // 软 leader-only guard（prompt-gating 是主门，此为 defense-in-depth）
+        // Approve → CoordTaskStatus::Completed（满足依赖）
+        // Reject  → CoordTaskStatus::InProgress（owner 返工）
+        // 当 task metadata.require_grounding=true 且 approve 无 grounding 字段 → 回弹
+    }
+}
 ```
-Pending → InProgress → WaitingReview → Completed
-```
-
-当成员提交交付物时，任务进入 `WaitingReview`，一次**合成式再分发**（synthetic re-dispatch）会确定性地将提交路由回**队长**进行审查。队长使用 `task_review` 工具接受或拒绝交付物：
 
 ```jsonc
 // task_review 工具调用
 {
   "task_id": "<coord-task-id>",
-  "verdict": "approve",   // 或 "reject"
-  "feedback": "..."        // 可选
+  "decision": "approve",       // 或 "reject"
+  "feedback": "…",             // reject 时写回 owner
+  "grounding": {               // 可选；approve 时若 require_grounding 则必填
+    "kind": "exit_code",       // exit_code | numeric | line_count
+    "source": "cargo test -p alephcore --lib",
+    "value": "0"
+  }
 }
 ```
 
-`approve` 裁定将任务推进至 `Completed`；`reject` 裁定将其退回返工。该循环使交付物处于队长的掌控之下，而非在提交时被自动接受。
+> 队长的接受/拒绝通过 `task_review` 工具完成（不是 JSON-RPC 方法）；成员通过 `teams.create_task` / `teams.update_task` 创建/更新的协调任务工作。`workflow_step_review` 是工作流步骤的等价工具（`src/builtin_tools/team/workflow_step.rs`）。
 
-### 协调任务与群聊广播器
+### G2 — 每任务 git worktree 隔离
 
-`CoordTaskStore` 被接入群聊广播器，使任务状态与团队工作线程保持同步。成员任务提交是上述确定性再分发的触发点：广播器将提交路由给队长，由队长通过 `task_review` 进行审查。持久的团队工作线程随后驱动[群聊](./groupchat)窗口中的归属气泡回放。
+`execute_member_task`（`src/teams/dispatcher/runner.rs`）可选地为每次成员任务创建 detached-HEAD git worktree，包装 `WorktreeSandbox` 并把 `workspace_override` 指向 worktree——并发 worker 不会互相污染索引。非 git 仓库下静默回退到 G2 前行为并 log 警告。
+
+## 团队 Run Mode Pin
+
+26.7.25+：队长在 `teams.run` 时把 `usage_mode`（chat / work / code）**盖戳**并向子成员继承：
+
+- **子代理不能发起 `session_set_mode` 工具调用**——继承是单向的
+- `teams.run` 拒绝任何来自子代理的 `session_set_mode` 请求
+- 队长通过 `task_review` 切换模式时，整队重新对齐
+
+```rust
+// src/teams/run_mode.rs
+if turn.is_subagent() {
+    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
+    ensure!(request.action != Some("session_set_mode"),
+        "subagents inherit parent mode; cannot switch mid-team-run");
+}
+```
 
 ## 配置
 
@@ -179,14 +206,14 @@ max_team_size = 10
 require_plan_approval = true
 ```
 
-## JSON-RPC 接口
+`[team_broadcast]` 暴露 `BroadcastConfig` 的可调参数（`max_chain_depth` / `max_fanout_width` / `max_total_activations` / `transcript_token_budget` / `member_run_timeout_secs`）。
 
-团队通过 JSON-RPC 驱动。已确认的 `teams.*` 方法：
+## JSON-RPC 接口
 
 | 分组 | 方法 |
 |-------|---------|
 | 生命周期 | `teams.create`（leader + members + 可选 `auto_name`）、`teams.get`、`teams.list`、`teams.rename`、`teams.disband`、`teams.delete` |
-| 工作线程 | `teams.chat.send`、`teams.chat.thread`、`teams.chat.history` |
+| 工作线程 | `teams.chat.send`、`teams.chat.thread`、`teams.chat.history`、`teams.chat.cancel` |
 | 协调任务 | `teams.create_task`、`teams.update_task`、`teams.list_tasks`、`teams.add_task_comment`、`teams.list_task_comments`、`teams.list_task_events`、`teams.list_task_runs` |
 | 任务控制 | `teams.task.pause`、`teams.task.resume`、`teams.task.retry`、`teams.task.skip`、`teams.task.trace`、`teams.task.journal.get`、`teams.task.journal.list` |
 | 快照 | `teams.snapshot.create`、`teams.snapshot.get`、`teams.snapshot.list`、`teams.snapshot.restore`、`teams.snapshot.delete` |
@@ -194,95 +221,25 @@ require_plan_approval = true
 | ACP 成员 | `teams.acp_member.add`、`teams.acp_member.list`、`teams.acp_member.remove` |
 | 杂项 | `teams.list_templates`、`teams.usage` |
 
-持久的每团队群聊线程通过 `teams.chat.send` / `teams.chat.thread` / `teams.chat.history` 暴露；该历史驱动[群聊](./groupchat)窗口中的归属气泡回放。`agents.teams` 方法返回的团队列表会附带一个精简的 `members_preview` 和 `last_message`。
+持久的每团队群聊线程通过 `teams.chat.send` / `teams.chat.thread` / `teams.chat.history` 暴露；该历史驱动[群聊](./groupchat)窗口中的归属气泡回放。`agents.teams` 方法返回的团队列表会附带 `members_preview` 和 `last_message`。
 
-> 队长的接受/拒绝决策通过 `task_review` 工具完成（而非 JSON-RPC 方法）。成员在通过 `teams.create_task` / `teams.update_task` 创建/更新的协调任务下工作。
+## 团队模板（`src/teams/templates/`）
 
-## 代码位置
+内置团队模板的成员可声明工具面（`agents.tools_schema` 共享），不再硬编码：
 
-- `src/teams/mod.rs` —— 模块入口点
-- `src/teams/store.rs` —— SQLite 存储
-- `src/teams/types.rs` —— 核心类型
-- `src/teams/lifecycle.rs` —— 生命周期管理
-- `src/teams/plans.rs` —— 计划审批
-- `src/teams/sessions.rs` —— 活动会话
-- `src/teams/artifacts.rs` —— 可交付成果
-- `src/teams/messages.rs` —— 团队消息传递
-- `src/teams/context.rs` —— 共享上下文
-- `src/teams/events.rs` —— 团队事件
+- `templates/builtin/` — 内置模板
+- `templates/loader.rs` — 模板加载
+- `templates/materialize.rs` — 把模板物化为 `Team` + 成员列表
+- `templates/substitute.rs` — `${var}` 替换
+- `templates/types.rs` — 模板类型
+
+`loop-auditor` 是 26.7.21+ 的内置审计 / 监督模板，默认走独立上下文证据。
 
 ## 另请参阅
 
 - [群聊](./groupchat) —— 多角色对话
 - [A2A](./a2a) —— 代理到代理协议
 - [编排器](./orchestrator) —— 代理编排
-
----
-
-## 26.7.x 补充
-
-### Team 节点融合 Graph
-
-26.7.21+：`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher。
-
-### Teams Kanban 深度重构
-
-26.7.24+：拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
-
-### 模板工具面
-
-26.7.25+：内置团队模板的成员可声明工具面（`agents.tools_schema` 共享），不再硬编码。
-
-### 接地证据门
-
-26.7.21+：`task_review` 审批可要求 grounding；附带 `GroundingVerdict` 验收元数据。
-
-### 团队 Run Mode Pin
-
-26.7.25+：队长在 `teams.run` 时把 `usage_mode`（chat / work / code）**盖戳**并向子成员继承：
-
-- **子代理不能发起 `session_set_mode` 工具调用**——继承是单向的
-- `teams.run` 拒绝任何来自子代理的 `session_set_mode` 请求
-- 队长通过 `task_review` 切换模式时，整队重新对齐
-
-```rust
-// src/teams/runner.rs（节选）
-if turn.is_subagent() {
-    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
-    ensure!(request.action != Some("session_set_mode"),
-        "subagents inherit parent mode; cannot switch mid-team-run");
-}
-```
-
-### Team Chat Strategy 与 `/loop` / `/goal` 优先级
-
-26.7.26+：
-
-- **`team_chat` strategy** 与成员的 `/loop` / `/goal` 共存时，优先级为 `loop > session > team_chat`
-- 团队聊天中 `planner` fire-once（`atomic put_if_absent` 防 race）
-- **`team_key(team_id)` composite key** —— strategy 的命名空间之一（详见 [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy)）
-
-### 防风暴守卫
-
-26.7.22+：每任务执行超时覆盖；操作者可调广播防风暴守卫（`group-chat anti-storm activation budget + entropy reduction`）。
-
-### 完整 `teams.*` RPC
-
-`teams.create` / `delete` / `disband` / `rename` / `get` / `list` / `list_templates` / `usage`
-`teams.create_task` / `update_task` / `list_tasks` / `delete` / `add_task_comment` / `list_task_comments` / `list_task_events` / `list_task_runs`
-`teams.chat.send` / `history` / `thread` / `cancel` / `task.trace`
-`agents.teams`
-
-### 内置 `loop-auditor`
-
-26.7.21+：审计 / 监督模板默认走独立上下文证据。
-
-### 协调任务状态
-
-`Pending → InProgress → WaitingReview → Completed`，由队长通过 `task_review` 审核。历史虚构的 `coordination: sequential|parallel|hierarchical` 模式已删除。
-
-### 详见
-
 - [团队概念](/docs/zh/concepts/teams)
 - [群聊概念](/docs/zh/concepts/group-chat)
 - [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams)

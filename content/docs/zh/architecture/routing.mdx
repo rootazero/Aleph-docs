@@ -1,22 +1,64 @@
 ---
 title: "路由系统"
-description: "Aleph 真实的路由层：会话键解析（SessionKey）、DmScope 隔离、RoutingRuleConfig（command / keyword 两阶段匹配）、DmScope、provider failover、loop / goal / strategy composite keys。"
+description: "Aleph 真实的路由层：会话键解析（SessionKey）、DmScope 隔离、RouteBinding 分层匹配、RoutingRuleConfig（command / keyword 两阶段）、runtime overlay、provider failover 与 VESR。"
 ---
 
 > **本页描述 Aleph 真实路由层（`src/routing/` + `src/config/types/routing.rs`）**，而非通用 Web 路由框架。
 
-Aleph 路由系统由两层组成：
+Aleph 路由系统由四层组成：
 
-1. **会话键解析**（`src/routing/session_key.rs`）—— 把每条入站消息解析为一个分层的 `SessionKey`，决定它归哪个会话、上下文、agent
-2. **AI 路由规则**（`src/config/types/routing.rs` + `src/gateway/handlers/routing_rules.rs`）—— 决定该会话/消息走哪个 provider / system prompt / 模型（`command` / `keyword` 两阶段匹配）
+1. **斜杠命令解析**（`src/command/parser.rs`）—— 把 `/cmd` 形式的入站文本解析成 `ParsedCommand`，通过 `ToolCatalog::resolve_command` 三层匹配定位已注册工具
+2. **会话键解析**（`src/routing/session_key.rs`）—— 把每条入站消息解析为分层 `SessionKey`，决定它归哪个会话、上下文、agent
+3. **路由绑定解析**（`src/routing/resolve.rs` + `config.rs`）—— 把 `channel / peer / guild / team / account / default` 命中分层解析为 `ResolvedRoute`
+4. **运行时叠加**（`src/routing/overlay.rs`）—— `agent_switch` 绑定 + ghost-binding 检测，纠正 `gateway_route` 工具对 config-only 的误报
+
+AI 路由规则（`command` / `keyword` 两阶段匹配）由 `src/config/types/routing.rs` 定义；`[[rules]]` 中间件交付位于 `src/config/methods.rs`。
 
 ---
 
-## SessionKey 解析（`src/routing/session_key.rs`）
+## 1. 斜杠命令解析（`src/command/parser.rs`）
+
+`CommandParser` 是所有 `/cmd` 输入的唯一入口，委托 `ToolCatalog::resolve_command`（`src/tool_metadata/registry/query.rs`）做匹配：
+
+```
+输入 "/session new my-topic"
+    │
+    ▼
+trim + 前缀必须是 '/'
+    │
+    ▼
+strip "@botname"（Telegram 群组命令形如 /gen@mybot）
+    │
+    ▼
+按空白切词 → ["session", "new", "my-topic"]
+    │
+    ▼
+ToolCatalog::resolve_command(input)：
+    ① greedy longest-match：尝试 session_new_my_topic → session_new → session
+    ② find_best_match 三层：canonical name → alias → `.`↔`_` 容错
+    ③ max_depth = 3
+    │
+    ▼
+ParsedCommand { tool_id, command_name, source_type, context, arguments }
+```
+
+`tool_id` 直接来自 `UnifiedTool::id`（如 `builtin:session_new`、`mcp:fs:read_file`、`plugin:diagnostics:ping`、`custom:3:translate`），不再由 `source_type + command_name` 在下游重建——这正是修复了 plugin slash 命令被错误地改写成 `mcp__plugin:<id>_<name>` 失效的根源。
+
+`CommandContext` 由 `tool.source` 派生：
+
+| `ToolSource` | `CommandContext` | 说明 |
+|---|---|---|
+| `Builtin` / `Native` | `Builtin { tool_name }` | 直连工具 fast-path |
+| `Mcp { server }` | `Mcp { server_name, tool_name }` | MCP 服务器命名空间 |
+| `Skill { id }` | `Skill { skill_id, instructions, display_name, allowed_tools }` | 注入 skill instructions 与允许工具白名单 |
+| `Plugin { .. }` | `Builtin { tool_name: tool.id }` | 插件走 direct-tool fast-path，id 完整保留为 `plugin:<plugin_id>:<name>` |
+| `Custom { .. }` | `Custom { system_prompt, provider, pattern }` | 自定义规则携带 system_prompt 与 regex 模板 |
+
+---
+
+## 2. SessionKey（`src/routing/session_key.rs`）
 
 ```rust
-// src/routing/session_key.rs
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionKey {
     Main { agent_id: String, main_key: String, epoch: u32 },
@@ -28,38 +70,34 @@ pub enum SessionKey {
 }
 
 #[derive(Default)]
-pub enum DmScope {
-    Main,                  // 所有 DM 共享主会话
-    #[default]
-    PerPeer,               // 每用户隔离（跨通道）
-    PerChannelPeer,        // 每通道每用户隔离
-}
+pub enum DmScope { Main, #[default] PerPeer, PerChannelPeer }
 
 pub enum PeerKind { Group, Channel, Thread }
 ```
 
-### 构造器
+### 构造器与 key 字符串
 
 | 构造器 | 用途 | 示例 key 字符串 |
 |--------|------|----------------|
 | `SessionKey::main("main")` | 跨通道共享主会话 | `agent:main:main` |
 | `SessionKey::dm(agent, channel, peer, DmScope::PerPeer)` | 每用户 DM | `agent:main:telegram:dm:user123` |
 | `SessionKey::group(agent, channel, PeerKind::Group, id)` | 群组 | `agent:main:discord:group:guild-id` |
-| `SessionKey::task(agent, "cron", "daily-summary")` | cron / webhook | `agent:main:cron:daily-summary` |
+| `SessionKey::task(agent, "cron", "daily-summary")` | cron / heartbeat / a2a / webhook | `agent:main:cron:daily-summary` |
 | `SessionKey::subagent(parent, id)` | 子代理嵌套 | `agent:main:main:subagent:translator` |
 | `SessionKey::ephemeral(agent)` | 临时会话（不持久化） | `agent:main:ephemeral:<uuid>` |
 
 ### 关键方法
 
 - **`format_dm_base`**：按 `DmScope` 决定 DM 是否折叠到 main；`DmScope::Main` 把所有 DM 都路由到 `agent:{id}:main`
-- **`base_key_pattern`**：剥离 epoch 后的基础模式（用于会话合并 / 模式匹配）
-- **`with_epoch` / `with_next_epoch`**：epoch 推进（用于轮换 / 重置）
-- **`is_interactive`**：判断是否人机交互会话（影响 `session_set_mode`、strategy planner 等的取舍）
+- **`base_key_pattern`**：剥离 epoch 后的基础模式（用于会话合并 / 模式匹配）；Group / Task / Subagent / Ephemeral 的 `base_key_pattern == to_key_string`
+- **`with_epoch` / `with_next_epoch`**：epoch 推进（仅 Main / DirectMessage 有 epoch 槽）
+- **`is_interactive`**：仅 Main + DirectMessage + Group 返回 `true`，其余（Task / Subagent / Ephemeral）`false`。这是裸 loop planner gate 的判定依据——cron / heartbeat / 子代理的**首轮**绝不应该触发 strategy planner（R7：origin 是事实，不是消息内容启发式）
 - **`main_session_key`**：子代理回到父 main 会话
+- **`task_type` 受限**：`SessionKey::task(..)` 在构造时拒绝 `peer` / `dm` / `ephemeral`，否则会与 DM / Ephemeral 变体产生歧义
 
 ### Identity Links（`identity_links.rs`）
 
-跨通道身份链接：`canonical_name → [channel:id, ...]`。`validate_identity_links` 在配置加载时校验——同一个 `channel:id` 不能挂在两个 canonical 下（否则 reload 时 tie-break 翻转，用户消息会跨用户泄漏）。
+跨通道身份链接：`canonical_name → [channel:id, ...]`。`validate_identity_links` 在配置加载时校验——同一个 `channel:id` 不能挂在两个 canonical 下（否则 reload 时 tie-break 翻转，用户消息会跨用户泄漏）：
 
 ```toml
 [session.identity_links]
@@ -68,25 +106,114 @@ john = ["telegram:123", "discord:456"]
 
 ---
 
-## RoutingRuleConfig（`src/config/types/routing.rs`）
+## 3. 路由绑定解析（`resolve.rs` + `config.rs`）
 
-AI 路由规则支持两种类型：
+`resolve_route(bindings, session_cfg, default_agent, input) -> ResolvedRoute` 是确定性的纯函数——任何 intent 分类由 LLM 完成（R7），这里不引入正则层。
 
-### Command 规则
+### RouteBinding 配置
 
-- Pattern 以 `^/` 开头（如 `^/draw\s+`、`^/translate`）
-- **首匹即停**：每条请求最多一条 command 规则匹配
-- **必须指定 `provider`**：决定走哪个 AI
-- **自动剥离命令前缀**后再发给 AI
-- **有** `strip_prefix` 字段（默认 true）
+```rust
+pub struct RouteBinding {
+    pub agent_id: String,
+    pub match_rule: MatchRule,   // TOML 序列化为 [match]
+}
 
-### Keyword 规则
+pub struct MatchRule {
+    pub channel: Option<String>,     // "telegram" / "discord" / "slack" / "*"
+    pub account_id: Option<String>,  // 具体 bot account；缺省匹配 default 账户；"*" 通配
+    pub peer: Option<PeerMatchConfig>,
+    pub guild_id: Option<String>,    // Discord guild
+    pub team_id: Option<String>,     // Slack workspace
+    pub workspace: Option<String>,   // 命中后强制使用的工作空间（覆盖用户当前 workspace）
+}
+```
 
-- Pattern 不以 `/` 开头（如 `translate to English`、`code optimization`）
-- **全匹**：多条 keyword 规则可同时匹配
-- **不需要 `provider`**：使用 `default_provider`
-- 多条匹配的 prompt 用 `\n\n` 串联
-- **`strip_prefix` 字段被忽略**
+### 匹配顺序（`MatchedBy`）
+
+绑定按以下优先级，先匹即停：
+
+| 优先级 | `MatchedBy` | 触发条件 |
+|---|---|---|
+| 1 | `Peer` | `match_rule.peer` 与 `input.peer` 同时命中（kind + id） |
+| 2 | `Guild` | `match_rule.guild_id` 命中 `input.guild_id` |
+| 3 | `Team` | `match_rule.team_id` 命中 `input.team_id` |
+| 4 | `Account` | `account_id` 非通配（且非 `peer` / `guild` / `team` 范围） |
+| 5 | `Channel` | `account_id` 为通配或缺省（且无更窄范围） |
+| 6 | `Default` | 全部不命中，回落到 `default_agent` |
+
+**作用域是合取的**——`scope_satisfied` 在筛选候选时把 `channel / account` 上游过滤，把 `peer / guild / team` 整体取交：一条 `{ team_id, peer }` 规则的语义是"**那个团队里**的这个 peer"，不是"任何团队里"或"那个团队的任意 peer"。这是修复了跨 Slack workspace 同名 conversation id 串扰的关键点。
+
+**agent_id 按配置原文返回**——`session_keys_for` 在内部对它做 normalize，但绑定写的是什么 id，路由就报什么 id。原因是 `[[agents.list]] id = "Work_Bot"` 在注册表里也是按原文存的，normalize 之后会指向一个不存在的 agent、触发"该 agent 已被删除"的误报。
+
+### 配置文件示例
+
+```toml
+# 把 telegram 主账户的所有流量交给 telegram-agent
+[[routing.bindings]]
+agent_id = "telegram-agent"
+[bindings.match]
+channel = "telegram"
+account_id = "*"
+
+# 仅在某个 Slack workspace 里交给 work agent
+[[routing.bindings]]
+agent_id = "work"
+[bindings.match]
+channel = "slack"
+account_id = "*"
+team_id  = "T12345"
+
+# 把 VIP 用户（任何通道）单独交给 vip-agent
+[[routing.bindings]]
+agent_id = "vip-agent"
+[bindings.match]
+peer = { kind = "dm", id = "user-vip" }
+
+# 把 telegram 上命中这条绑定的会话强制切到 "crypto" workspace
+[[routing.bindings]]
+agent_id = "main"
+[bindings.match]
+channel   = "telegram"
+account_id = "*"
+workspace = "crypto"
+```
+
+### 启动期错误可见性
+
+`binding_problems` 在启动时扫描 `[[bindings]]`，把"永远无法匹配"的规则（空 `agent_id`、`peer.kind` 不是 `dm|group|channel`、`peer.id` 为空、或某条规则无任何 scope 且会 shadow 后续全部）翻译成启动日志——只报不拒，保证不阻止 daemon boot。
+
+---
+
+## 4. 运行时叠加（`overlay.rs`）
+
+`resolve_route` 回答的是 **config**——boot 时快照下来的 `[[bindings]]`。下面这两个运行时事实会改变答案：
+
+1. **运行时 `agent_switch` / Panel 显式绑定**——必须胜过 merely-default 的 config 答案，否则该 action 就在任何有 bindings 的部署上变成静默 no-op
+2. **被命名 agent 是否仍存在**——`agents.delete` 不能改写 routing config，所以一条 binding 可能指向一个已删除的 agent，路由到 ghost 会让 channel 永远卡住
+
+两层 lived 仅在 inbound router 里，于是 `gateway_route` 工具（职责就是告诉模型消息会被送到哪）只从 config 出发，信心十足地报错。`overlay::overlay_route` 是统一决策：每个调用方提供自己看得到的运行时事实，组合逻辑写一次。
+
+```rust
+pub struct RuntimeOverlay<'a> {
+    pub channel_override: Option<&'a str>,  // 仍存在的 agent_switch 绑定
+    pub bound_agent_exists: bool,           // 当前 binding 命名的 agent 是否还在
+}
+
+pub enum OverlaySource {
+    Binding(MatchedBy),             // config 胜出
+    ChannelOverride,                // 显式覆盖胜出
+    BindingAgentMissing,            // 命名 agent 已删，回落到默认
+}
+
+pub struct OverlaidRoute {
+    pub agent_id: Option<String>,   // None → 回落到 default agent
+    pub source: OverlaySource,
+}
+```
+
+---
+
+## 5. RoutingRuleConfig（`src/config/types/routing.rs`）
 
 ```rust
 pub struct RoutingRuleConfig {
@@ -101,6 +228,8 @@ pub struct RoutingRuleConfig {
     pub icon: Option<String>,              // SF Symbol icon（命令模式显示）
 }
 ```
+
+`get_rule_type()` 自动按 `^/` 前缀检测；`should_strip_prefix()` 对 keyword 规则永远返回 `false`，对 command 默认 `true`。
 
 ### 配置示例
 
@@ -125,59 +254,101 @@ intent_type = "translation"
 rule_type = "command"
 regex = "^/echo\\s+(.+)"
 provider = "default"
-strip_prefix = false   // 不在 AI 端再做剥离
+strip_prefix = false   # AI 端不再做剥离
 ```
 
 ---
 
-## 二阶段匹配（`match_rules`）
+## 6. 二阶段匹配（command + keyword）
 
-26.7.22+ 引入的匹配管线：
+匹配管线对每条用户输入跑两个阶段，按顺序：
 
 ```
 process_clipboard / inbound message
     │
-    ├─ Phase 1: command 规则（first-match-stops；按 [[rules]] 顺序遍历）
-    │     ├─ ^/ 前缀命中 → 唯一一条匹配 → 立即停止
+    ├─ Phase 1: command 规则（first-match-stops）
+    │     ├─ regex 以 ^/ 开头命中 → 唯一一条匹配 → 立即停止
     │     └─ 命中 → 用其 provider + 可选 strip_prefix
     │
     └─ Phase 2: keyword 规则（all-match）
-          ├─ 非 / 前缀命中 → 累加所有匹配
+          ├─ regex 不以 / 开头命中 → 累加所有匹配
           └─ 全部命中 → system_prompts \n\n 拼接，用 default_provider
 ```
 
-**`strip_prefix`** 用于斜杠命令（如 `/loop` `/goal` `/mode`），匹配后从输入剥除前缀再发 AI——避免模型把命令名当字面文本处理。
+`strip_prefix` 用于斜杠命令（如 `/loop` `/goal` `/mode`），匹配后从输入剥除前缀再发 AI——避免模型把命令名当字面文本处理。`command.executor` 内部用 `RegistryToolRegistry::resolve` 做最终 dispatch；fast-path 由 `gateway::execution_engine::slash_command::try_resolve_slash_command` 走 L0 直连，回退到 `gateway::execution_engine::slash_command::execute_slash_command_fast_path` 执行。
 
 ---
 
-## Provider Failover 与 VESR
+## 7. 上下文感知（`[smart_matching]`）
+
+`SmartMatchingConfig`（`src/config/types/smart_flow.rs`）定义一个四层语义匹配栈：
+
+| Layer | 名称 | 阈值字段 | 用途 |
+|---|---|---|---|
+| 1 | Fast path（command/regex） | `command_confidence = 1.0` | first-match-stops |
+| 2 | Keyword matching | `keyword_threshold = 0.7` | 加权打分 |
+| 3 | Context-aware inference | `enable_context_inference = true` | 多轮 / 应用上下文 / 时间上下文 |
+| 4 | AI detection fallback | `ai_threshold = 0.6` | AI 兜底 |
+
+**第三层（context-aware）**通过 `context_rules: Vec<ContextRuleConfig>` 配置：
+
+```toml
+[smart_matching]
+enabled = true
+enable_context_inference = true
+
+[[smart_matching.context_rules]]
+id = "complete-pending-language"
+condition_type = "pending_param"     # pending_param | app_context | time_context | conversation
+param_name = "target_lang"
+intent = "translation"
+action_type = "complete_param"       # complete_param | add_capability | set_provider | add_prompt
+use_input_as_value = true
+
+[[smart_matching.context_rules]]
+id = "weekend-tone"
+condition_type = "time_context"
+days_of_week = [0, 6]                # 0=Sun, 6=Sat
+action_type = "add_prompt"
+system_prompt = "Use a casual tone on weekends."
+```
+
+第四层通过 `[[smart_matching.keyword_rules]]` 用加权关键词（`"keyword"` 或 `"keyword:1.5"`）触发。
+
+---
+
+## 8. Provider Failover 与 VESR
 
 路由到 provider 后，**真正的"哪个模型能干活"判定由 `routing/recall.rs` 与 VESR 完成**：
 
-- **`ProviderAvailability`**（`recall.rs`）：provider 当前是否在线 / 是否限流 / 是否配额耗尽
+- **`ProviderAvailability`**（`recall.rs`）：provider 当前是否在线 / 是否限流 / 是否配额耗尽；`provider_availability_from_config` 把配置 + vault 编译成一个谓词 `Fn(&str) -> ProviderStatus`，boot 时一次构造
+- **`ProviderStatus::Available | Deconfigured | Unknown`**：render-time gate，对未识别 provider（"" / "failover" / "(dynamic)"）显式 fail-open，不惩罚无法识别的
+- **`RoutingRecall::build_routing_experience_message`**：每 run 在 run-start **只调用一次**，嵌入用户 query、把 `task_emb` 回填到 `RoutingAttribution`、回溯 k-NN 邻居、标记不可用 provider、fence-wrap 通过 `wrap_memory_context`
 - **`RoutingExperienceStore`**（`experience_store.rs`）：基于 sqlite-vec 的 k-NN，按本次任务描述回溯**实测可用**的模型
-- **Failover**：`failover` 配置的 `[providers] failover.behavior` 协议透传；新一次请求不再克隆整段会话
+- **`RoutingAttribution`**（`mod.rs`）：per-run handle，把 run-start recall（写 `task_emb`）和 completion observer（读它）串起来
+- **`OutcomeObserver`**（`observer.rs`）：`TraceSink::SessionCompleted` → 写入 routing experience 表（含实际 token / cost / 模型 / provider / agent_id）
 
-详细参见 [AI 提供商](/docs/zh/concepts/ai-providers)。
-
----
-
-## Composite Keys（Loop / Goal / Strategy）
-
-`src/routing/session_key.rs::SessionKey` 是四 composite-key 命名空间的根基之一：
-
-| 命名空间 | 来源 | 说明 |
-|----------|------|------|
-| `goal_key(goal_id)` | `src/goal/` | goal 状态变更时自动 invalidate welded strategy |
-| `loop_key(loop_id)` | `src/looping/` | loop tick 完成时触发 strategy |
-| `session_key(session_id)` | `src/strategy/` | 裸 loop plan 触发 |
-| `team_key(team_id)` | `src/strategy/` | 团队 chat planner（fire-once） |
-
-详见 [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy)。
+完整说明参见 [AI 提供商](/docs/zh/concepts/ai-providers)。
 
 ---
 
-## RPC 接口
+## 9. Composite Keys（Loop / Goal / Strategy / Team）
+
+`SessionKey` 是多个 composite-key 命名空间的根基（其中 task 族由 `task_type` 区分，`agent_id` 字段共享同一个 normalize 规则）：
+
+| `task_type` / 命名空间 | 来源 | 说明 |
+|---|---|---|
+| `cron` | `src/tasks/cron/` | cron 触发 |
+| `heartbeat` | `src/tasks/heartbeat/` | 守护探针触发 |
+| `a2a` | `src/a2a/` | 子代理委托 |
+| `webhook` | 触发器 | webhook 触发 |
+| `team_chat` | `src/teams/broadcast/` | 团队聊天 |
+
+详见 [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy) 与 [Cron 作业](/docs/zh/automation/cron-jobs)。
+
+---
+
+## 10. RPC 接口
 
 | 方法 | 用途 |
 |------|------|
@@ -189,23 +360,33 @@ process_clipboard / inbound message
 | `route_config.get` / `update` | 整段 `[route_config]` 段 |
 | `channels.set_agent` | 把通道绑到指定 agent（**26.7.15+ 校验 agent 存在**） |
 | `agent.resolve_session` | 把任意入站元数据解析为 `SessionKey` |
+| `gateway_route` | 工具：以 `OverlaySource` 报告消息将去往哪个 agent |
 
 完整 RPC 列表参见 [网关方法 · 配置路由](/docs/zh/gateway/methods/config) 与 [网关方法 · 会话](/docs/zh/gateway/methods/session)。
 
 ---
 
-## 模块清单
+## 11. 模块清单
 
 ```
 src/routing/
-├── mod.rs                  # 入口
-├── session_key.rs          # SessionKey / DmScope / PeerKind
-├── resolve.rs              # resolve_route + RoutePeerKind + MatchedBy
-├── config.rs               # SessionConfig + RouteBinding + MatchRule
-├── identity_links.rs       # 跨通道身份链接 + 校验
-├── recall.rs               # ProviderAvailability + provider_availability_from_config
-├── experience_store.rs     # VESR 经验库（k-NN over sqlite-vec）
-└── observer.rs             # outcome_from_session_completed → 写入 experience
+├── mod.rs                # 入口；导出 SessionKey / DmScope / resolve_route / overlay
+├── session_key.rs        # SessionKey / DmScope / PeerKind / parse / to_key_string
+├── resolve.rs            # resolve_route + scope_satisfied + session_keys_for
+├── config.rs             # RouteBinding / MatchRule / SessionConfig / binding_problems
+├── identity_links.rs     # resolve_linked_peer_id + validate_identity_links
+├── overlay.rs            # overlay_route + RuntimeOverlay + OverlaySource
+├── recall.rs             # RoutingRecall + ProviderAvailability + provider_availability_from_config
+├── experience_store.rs   # VESR 经验库（k-NN over sqlite-vec）
+└── observer.rs           # OutcomeObserver + outcome_from_session_completed
+
+src/command/
+├── mod.rs                # CommandParser 入口
+└── parser.rs             # parse_async → ParsedCommand + tool_to_command_context
+
+src/tool_metadata/registry/
+├── mod.rs                # ToolCatalog 统一工具注册
+└── query.rs              # resolve_command + find_best_match + suggest_commands
 ```
 
 ---

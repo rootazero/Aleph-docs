@@ -1,56 +1,160 @@
 ---
 title: "执行器"
-description: "具有 3 个处理程序源、分层中间件和超时管理的工具执行引擎。"
+description: "基于 ToolRegistry trait 的工具执行引擎，通过 RegistryToolAdapter 接入 Harness Think→Act 循环。"
 ---
 
 # 执行器
 
-执行器是工具执行引擎。它接收来自思考器（通过分发器）的工具决策，并将它们路由到适当的处理程序。
+执行器是工具执行引擎。它接收来自网关执行引擎（`src/gateway/execution_engine/`）的工具决策，并把它们路由到正确的处理程序；底层实现是 `src/executor/` 中的统一 `BuiltinToolRegistry`。
 
-**位置**: `src/tools/`
+**位置**: `src/executor/`
 
 ---
 
-## 执行流程
+## 与 Harness 的关系
 
 ```
 Thinker 决策 (tool_use)
      │
      ▼
-分发器
+Harness 循环（harness::agent::loop_graph / harness::agent::think）
+     │
+     ▼
+ToolService (scoped tool stack: src/tools/scoped/builder.rs)
+     │   Adapter: src/tools/adapters/registry_adapter
+     │   将 Arc<dyn ToolService> 暴露为 LoopTool
      │
      ▼
 执行器
      │
-     ├───▶ 内置工具 (AlephTool trait)
-     │       直接 Rust 执行
+     ├─ BuiltinToolRegistry  （src/executor/builtin_registry/）
+     │     把 Arc<ToolRegistry> 暴露给 tool stack
      │
-     ├───▶ MCP 工具 (Model Context Protocol)
-     │       对外部进程的 JSON-RPC
-     │
-     └───▶ 扩展工具 (WASM / Node.js)
-             插件运行时执行
+     └─ ToolRegistry trait   （src/executor/tool_registry.rs）
+           把名称解析为 UnifiedTool，执行工具调用
 ```
 
-Exec 类工具 (`code_exec`, `bash_exec`) 在工具和进程执行之间通过额外的**沙箱层** (`src/sandbox/`)。沙箱拥有每会话工作空间配置、能力执行和通过 `OsSandboxDriver` 的 OS 级 seatbelt 隔离。
+Exec 类工具（`code_exec`、`bash_exec`）通过 `src/sandbox/` 之间的**沙箱层**。沙箱拥有每会话工作空间配置、能力执行、以及通过 `OsSandboxDriver` 的 OS 级 seatbelt 隔离（macOS sandbox-exec / Windows job-object / Linux cgroups-v2 / seccomp）。
 
 ---
 
-## ToolService 外观
-
-消费者仅依赖 `Arc<dyn ToolService>`：
+## `ToolRegistry` trait（`src/executor/tool_registry.rs`）
 
 ```rust
-pub trait ToolService: Send + Sync + 'static {
-    async fn execute(&self, name: &str, input: Value) -> Result<ToolOutput, ToolError>;
-    async fn list(&self) -> Vec<ToolDefinition>;
-    async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+pub trait ToolRegistry: Send + Sync {
+    fn get_tool(&self, name: &str) -> Option<&UnifiedTool>;
+
+    fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + '_>>;
+
+    // 可选的 per-run 共享句柄（默认 None）：
+
+    /// 共享 workspace 句柄：执行引擎在 workspace 解析后写入，工具（memory_search 等）读
+    fn workspace_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
+
+    /// 共享的 per-agent SmartRecallConfig map：memory_search 的两阶段 smart recall
+    fn smart_recall_config_handle(&self) -> Option<Arc<tokio::sync::RwLock<HashMap<String, SmartRecallConfig>>>> { None }
+
+    /// 共享的 SessionContext：agent 切换需要绑定到正确的会话
+    fn session_context_handle(&self) -> Option<Arc<tokio::sync::RwLock<SessionContext>>> { None }
+
+    /// 共享的 ToolContextHandle：workspace-scoped 输出路径
+    fn tool_context_handle(&self) -> Option<crate::tools::ToolContextHandle> { None }
+
+    /// 共享的 session key 句柄：memory_search 的 scope=current_session 过滤
+    fn session_key_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
 }
 ```
+
+生产实现是 `BuiltinToolRegistry`（`src/executor/builtin_registry/registry/`），由 `src/tools/adapters/registry_adapter::RegistryToolAdapter` 包装为 `LoopTool`，再由 gateway 的 `ScopedToolService` 暴露给 harness。句柄访问器让执行引擎在不污染每次调用签名的情况下，把 workspace 和 session-scoped 上下文传递给工具。
+
+---
+
+## `BuiltinToolRegistry`（`src/executor/builtin_registry/`）
+
+```rust
+pub struct BuiltinToolRegistry { /* 真实定义见 src/executor/builtin_registry/registry/ */ }
+
+impl ToolRegistry for BuiltinToolRegistry {
+    fn get_tool(&self, name: &str) -> Option<&UnifiedTool> { /* … */ }
+    fn execute_tool(&self, name: &str, args: Value) -> BoxFuture<'_, Result<Value>> { /* … */ }
+    // workspace_handle / tool_context_handle / session_key_handle 全部返回真实 Arc
+}
+
+pub struct BuiltinToolConfig {
+    pub gateway_context: Option<Arc<GatewayContext>>,
+    pub tool_catalog: Option<Arc<ToolCatalog>>,
+    pub /* 其余依赖 */ …
+}
+
+impl BuiltinToolRegistry {
+    pub async fn new() -> Result<Arc<Self>>;
+    pub async fn with_config(config: BuiltinToolConfig) -> Result<Arc<Self>>;
+}
+```
+
+公开类型（`src/executor/builtin_registry/definitions.rs` + `groups.rs`）：
+
+| 类型 | 用途 |
+|---|---|
+| `BUILTIN_TOOL_DEFINITIONS` | 全部内置工具的 JSON Schema / 参数定义（单一来源） |
+| `TOOL_CATEGORIES` | 工具按功能分组的元数据（Settings UI 用） |
+| `BuiltinToolConfig` | 构造 `BuiltinToolRegistry` 的可选项（gateway context、tool catalog 等） |
+| `get_builtin_tool_names()` | 列出全部已注册名字 |
+| `create_tool_boxed()` | 类型擦除的工具构造工厂 |
+
+测试（`tests/gateway_feature_gate.rs::BuiltinToolRegistry::test_resolve_plugin_handler_*`）验证插件工具走 `plugin:<plugin_id>:<name>` 直接 fast-path，并通过 `ExtensionManager::sync_runtime_snapshots` 同步。
+
+---
+
+## 工具元数据来源
+
+注册表里每个工具都是 `UnifiedTool`（`src/tool_metadata/types/unified/`）：
+
+```rust
+pub struct UnifiedTool {
+    pub id: String,                          // "builtin:search" | "mcp:fs:read_file" | "plugin:diagnostics:ping" | ...
+    pub name: String,                        // 命令名（不含命名空间前缀）
+    pub source: ToolSource,                  // Builtin | Native | Mcp { server } | Skill { id } | Plugin { .. } | Custom { .. }
+    pub routing_regex: Option<String>,       // 用于 builtin → RoutingRuleConfig 的转换
+    pub routing_strip_prefix: bool,          // 命令匹配后是否剥离前缀
+    pub routing_system_prompt: Option<String>,
+    pub routing_capabilities: Vec<String>,   // skill 允许的工具白名单
+    pub routing_intent_type: Option<String>,
+    pub routing_context_format: Option<String>,
+    pub aliases: Vec<String>,                // 模糊匹配 + slash 命令解析
+    pub visible_channels: Vec<ChannelType>,
+    pub sort_order: u32,
+    pub is_active: bool,
+    pub is_builtin: bool,
+    pub /* … */ …
+}
+```
+
+`ToolCatalog::get_builtin_routing_rules`（`src/tool_metadata/registry/query.rs`）把 `UnifiedTool.routing_regex` 反向编译为 `RoutingRuleConfig`——单一来源，配置模块不应再硬编码命令规则。
+
+---
+
+## 公共结果类型（`src/executor/types.rs`）
+
+```rust
+pub struct ExecutionResult { content, tool_calls, task_results, execution_time_ms, success, error }
+pub struct ToolCallRecord { tool_name, parameters, result, success, execution_time_ms }
+pub struct TaskExecutionResult { task_id, description, success, output, error, execution_time_ms }
+pub struct ExecutionContext { app_context, window_title, session_id, stream }
+pub enum ExecutorError { ExecutionFailed, ToolError, TaskFailed { task_id, error }, Timeout, Cancelled }
+```
+
+`ExecutionResult.task_results` 字段承载多任务计划（`TaskExecutionResult`）的逐项结果——这只是数据结构，不是独立调度器。`src/orchestrator/summary_format.rs` 中的 `TerminateReason::DiminishingReturns` 是 loop 在输出停滞时的**停止原因标签**，不是预先存在的硬检测器；R10 之后硬检测器已被删除，循环通过 `max_iterations`、工具循环验证和模型自停来约束。
 
 ---
 
 ## 中间件栈
+
+所有工具调用都经过 `src/tools/scoped/` 中的标准中间件栈：
 
 ```
 ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → CoreDispatch
@@ -59,93 +163,26 @@ ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → Cor
 | 层 | 用途 |
 |-------|---------|
 | `ExecAuditLayer` | 审计日志 |
-| `PermissionLayer` | 权限检查 (`SmartFilter`) |
+| `PermissionLayer` | 权限检查（`SmartFilter`） |
 | `ContextRuleLayer` | 基于上下文的规则 |
 | `TimeoutLayer` | 超时执行 |
-| `CoreDispatch` | 最内层，持有 `ToolRegistry`，包含 `BuiltinHandler`、`McpHandler` 和 `ExtensionHandler` |
+| `CoreDispatch` | 最内层，持有 `ToolRegistry` |
 
-`CoreDispatch` 持有由 `ArcSwap` 支持的 `ToolRegistry`，包含三个处理程序源：
-- `BuiltinHandler`
-- `McpHandler`
-- `ExtensionHandler`
+斜杠快路径（`execute_slash_command_fast_path`）、`tools.invoke`、后台延续旁路**全部**被强制走 `src/tools/scoped/` 审批门——这是 26.7.15+ 的修复，确保审批对实际命令可见。
 
 ---
 
-## 核心分发
+## Exec 类工具与沙箱
 
-工具作者实现 `AlephTool` —— 外观通过 `BuiltinHandler` 适配它们。作者端 API 无需更改。
-
-会话事件跟踪：调用者通过 `crate::session::invoke_with_session_trace(tool_svc, session_svc, ...)` 捆绑 `ToolService` 分发 + `SessionService` 事件发送。
-
----
-
-## AlephTool Trait
-
-### 静态分发（编译时）
-
-```rust
-pub trait AlephTool: Clone + Send + Sync + 'static {
-    /// 工具名称（在 LLM tool_use 中使用）
-    const NAME: &'static str;
-
-    /// LLM 的工具描述
-    const DESCRIPTION: &'static str;
-
-    /// 参数类型（通过 schemars 自动生成 JSON Schema）
-    type Args: Serialize + DeserializeOwned + JsonSchema + Send;
-
-    /// 返回类型
-    type Output: Serialize + Send;
-
-    /// 执行工具
-    async fn call(&self, args: Self::Args) -> Result<Self::Output>;
-}
-```
-
-### 动态分发（运行时）
-
-```rust
-pub trait AlephToolDyn: Send + Sync {
-    fn name(&self) -> &str;
-    fn definition(&self) -> ToolDefinition;
-    fn call(&self, args: Value) -> BoxFuture<'_, Result<Value>>;
-}
-
-// 空实现：任何 AlephTool 也是 AlephToolDyn
-impl<T: AlephTool> AlephToolDyn for T { // 空实现 }
-```
-
----
-
-## Exec 类工具 & 沙箱
-
-- `code_exec`, `bash_exec` 通过沙箱层路由
+- `code_exec`、`bash_exec` 通过沙箱层路由
 - `Sandbox` trait → `WorkspaceSandbox` → `OsSandboxDriver`
 - 每会话工作空间位于 `~/.aleph/workspaces/{hash(session_id)}/`
-- 工具级权限 (`SmartFilter`) 控制*是否*允许调用
-- 沙箱的能力检查控制一旦允许*子进程可以做什么*
+- 工具级权限（`SmartFilter`）控制**是否**允许调用
+- 沙箱的能力检查控制一旦允许**子进程可以做什么**
 
 ---
 
-## 另请参阅
-
-- [工具架构](./tools) — 工具开发指南
-- 沙箱 — 执行隔离
-- MCP — 模型上下文协议
-
----
-
-## 26.7.x 补充
-
-### Action-aware Approval
-
-26.7.15+ 执行审批门是**动作感知的**——人看到真实命令且授权指纹键**绑定在命令上**。
-
-### Slash 快路径旁路关闭
-
-斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走 `src/tools/scoped/` 审批门。
-
-### 三级执行权限
+## 三级执行权限
 
 | 等级 | 行为 |
 |------|------|
@@ -153,12 +190,19 @@ impl<T: AlephTool> AlephToolDyn for T { // 空实现 }
 | `auto` | 幂等工具自动放行，破坏性工具仍需审批 |
 | `full` | 全部自动放行（独立的安全硬过滤除外） |
 
-### 进程隔离内核
+---
 
-沙箱 restricted-token / job-object / AppContainer 在 spawn 时就地发起（R1 进程隔离例外）。
+## 进程隔离内核
 
-### 详见
+沙箱 restricted-token / job-object / AppContainer / integrity-level / SID·ACL 系统调用在 spawn 时就地发起（R1 进程隔离例外）。
 
+---
+
+## 另请参阅
+
+- [工具架构](../tools) — 工具开发指南
+- [沙箱](./sandbox) — 执行隔离
+- MCP — 模型上下文协议
 - [执行引擎](/docs/zh/concepts/execution-engine)
 - [执行审批](/docs/zh/security/exec-approval)
 - [架构红线 R7 / R10](/docs/zh/philosophy/redlines)

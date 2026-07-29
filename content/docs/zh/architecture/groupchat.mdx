@@ -1,84 +1,88 @@
 ---
 title: "群聊"
-description: "多智能体团队群聊：广播器扇出、队长战略规划、团队事件主题，以及三面板归属 UI。"
+description: "团队群聊：GroupChatBroadcaster 扇出、防风暴三道闸（chain depth / fanout width / total activations）、团队事件主题、以及三面板归属 UI。"
 ---
 
 群聊是一**团队**智能体进行共享、持久对话的方式。用户消息被分发到团队，
-队长先行规划，`@` 目标被解析，被点名的成员运行，每个成员的回复作为
+策略只触发一次，`@` 目标被解析，被点名的成员运行，每个成员的回复作为
 `team.<id>.message` 事件扇出，面板将其渲染为归属气泡。
 
-> 群聊是一个**团队**界面。关于团队、队长和协调任务（Coord Task）如何定义，
-> 参见 [团队](/docs/zh/architecture/teams)。
+> 群聊是**团队** UI。`src/group_chat/` 是多角色协作会话原语（`group_chat.*` RPC），与 `src/teams/broadcast/`（`teams.chat.*` RPC）属于不同的两层——关于团队、队长和协调任务（Coord Task）如何定义，参见 [团队](/docs/zh/architecture/teams)。
 
 ## 概览
 
 群聊支持：
 
-- **多智能体对话** —— 一个团队中的多个智能体参与单个共享线程。
-- **队长主导的战略** —— 在团队的首条消息上，队长先行规划；该计划被焊入每个成员的提示词中（参见 [团队战略协调](/docs/zh/architecture/teams)）。
-- **定向点名** —— `@<id>` 点名单个成员；`@all` 点名整个名册。
-- **逐智能体归属** —— 每条回复都带有其作者（智能体 emoji + 显示名称 + 稳定的逐智能体颜色），从持久历史中回放。
+- **多智能体对话** —— 一个团队中的多个智能体参与单个共享线程
+- **队长主导的战略** —— 在团队的首条消息上，队长先行规划（strategy round 2）；该计划被焊入每个成员的提示词中（参见 [团队战略协调](/docs/zh/architecture/teams)）
+- **定向点名** —— `@<id>` 点名单个成员；`@all` 点名整个名册
+- **逐智能体归属** —— 每条回复都带有其作者（智能体 emoji + 显示名称 + 稳定的逐智能体颜色），从持久历史中回放
 
-## GroupChatBroadcaster
+## GroupChatBroadcaster（`src/teams/broadcast/`）
 
-`GroupChatBroadcaster`（`src/teams/broadcast/`）是引擎。单条用户消息以确定性流水线
-流经它 —— 广播器负责**路由**（从状态到分发）；**认知**则留在队长和成员的提示词中。
+`GroupChatBroadcaster`（`src/teams/broadcast/mod.rs`）是引擎。单条用户消息以确定性流水线流经它——广播器负责**路由**（状态→分发）；**认知**留在队长和成员的提示词里。
 
 ```
-用户消息 → 团队
+用户消息 → team
      │
      ▼
 GroupChatBroadcaster::dispatch_user
      │
-     ├─① 战略只触发一次（Strategy fire-once）
-     │     若团队战略槽为空，队长先行规划
-     │     （plan_strategy 通过原子 put_if_absent 仅铸造一次），
+     ├─① Strategy fire-once（round 2）
+     │     若团队 strategy 槽为空，队长先行规划
+     │     （plan_strategy 通过 atomic put_if_absent 仅铸造一次），
      │     并在团队生命周期内焊入每个成员的提示词。
      │
-     ├─② 解析 @目标（resolve_targets）
-     │     @<id> → 该成员 · @all → 整个名册 · 不在名册中的
-     │     token 被丢弃。当战略槽为空时，硬门（hard gate）
-     │     仅路由到队长，并浮现被丢弃的 @。
+     ├─② 解析 @目标（targets::resolve_targets）
+     │     @<id> → 该成员 · @all / @everyone → 整个名册 · 不在名册中的
+     │     token 被丢弃。当 strategy 槽为空且 leader_first 为真时，
+     │     硬门（hard gate）仅路由到队长，并浮现被丢弃的 @。
+     │     sender=self/@user 被丢弃以防自循环。
      │
      ├─③ 逐成员运行（run_member，扇出）
      │     每个被点名的成员在焊入团队战略 + 实时看板的情况下运行。
-     │     受 MAX_CHAIN_DEPTH / MAX_FANOUT_WIDTH /
-     │     MAX_TOTAL_ACTIVATIONS 限制。
+     │     受三道闸限制：
+     │       • MAX_CHAIN_DEPTH = 6            （每条链的最大深度）
+     │       • MAX_FANOUT_WIDTH = 5           （每轮最多唤醒 5 个成员）
+     │       • MAX_TOTAL_ACTIVATIONS = 32     （整棵树累计最多 32 次激活）
+     │       • MEMBER_RUN_TIMEOUT_SECS = 600  （单次成员运行超时 600 秒）
      │
      └─④ 事件扇出
-           每条成员回复作为 team.<id>.message 发出，并持久化
-           到团队聊天历史（驱动归属气泡回放）。
+           每条成员回复作为 team.<id>.message 发出（经
+           TeamFanoutEmitter / publish_team_event），并持久化到
+           团队聊天历史（驱动归属气泡回放）。
 ```
+
+> 三道闸全在 `BroadcastConfig`（`src/teams/broadcast/mod.rs`）下统一配置；默认值与裸常量对齐。广播器是**纯脚手架**，不参与推理（R10）。
 
 ### 队长审查重分发
 
-当成员提交一个交付物时，其协调任务翻转为 `WaitingReview`。广播器将成员的任务
-与回合前快照进行 diff，对于任何新提交的任务，发出一个**合成重分发**，重新点名
-回队长。接受/拒绝的判断本身是队长的 `task_review` 回合 —— 广播器只做确定性的
-状态到路由的管道工作。
+当成员提交一个交付物时，其协调任务翻转为 `WaitingReview`。广播器将成员的任务与回合前快照进行 diff，对于任何新提交的任务，发出一个**合成重分发**，重新点名回队长。接受/拒绝的判断本身是队长的 `task_review` 回合——广播器只做确定性的状态→路由管道工作。
 
 ## 两个 RPC 层
 
-群聊横跨两个互补的 RPC 界面。它们**没有**被合并 —— 各自拥有不同的关注点。
+群聊横跨两个互补的 RPC 界面。它们**没有**被合并——各自拥有不同的关注点：
 
 | 层 | 方法 | 拥有 |
 |-------|---------|------|
-| **群聊会话原语** | `group_chat.start`、`group_chat.continue`、`group_chat.end`、`group_chat.history`、`group_chat.list`、`group_chat.mention` | 实时会话生命周期：打开会话、推送一个回合、解析点名、列出/回放会话、关闭。 |
-| **团队工作线程** | `teams.chat.send`、`teams.chat.thread`、`teams.chat.history` | 持久的逐团队群聊线程。`teams.chat.history` 返回聊天**气泡**（每个都标记了 `agent_id`），驱动归属回放；`teams.chat.thread` 返回工作线程的**交付物 / 任务**。 |
+| **群聊会话原语** | `group_chat.start`、`group_chat.continue`、`group_chat.mention`、`group_chat.end`、`group_chat.list`、`group_chat.history` | 多角色协作会话生命周期：`src/group_chat/orchestrator.rs::GroupChatOrchestrator` + `session.rs::GroupChatSession` |
+| **团队工作线程** | `teams.chat.send`、`teams.chat.thread`、`teams.chat.history`、`teams.chat.cancel` | 持久的逐团队群聊线程：`src/teams/messages/`（`store.rs`、`inbox.rs`、`router.rs`、`mentions.rs`、`aggregator.rs`） |
 
-> `teams.chat.history`（气泡）和 `teams.chat.thread`（交付物）被刻意分开：
-> 面板从 `history` 注水消息流，从 `thread` 注水工作区窗格。关于完整的 `teams.*`
-> 界面（创建、任务、快照、工作流），参见 [团队](/docs/zh/architecture/teams)。
+> `teams.chat.history`（气泡）和 `teams.chat.thread`（交付物）被刻意分开：面板从 `history` 注水消息流，从 `thread` 注水工作区窗格。关于完整的 `teams.*` 界面（创建、任务、快照、工作流），参见 [团队](/docs/zh/architecture/teams)。
+
+实际启动时两个 RPC 层由两个独立的 handler 注册器装配：
+- `src/bin/aleph-server/commands/start/builder/handlers/system.rs::register_group_chat_handlers` 注册 `group_chat.*`
+- `src/bin/aleph-server/commands/start/builder/handlers/agents.rs`（teams 相关 RPC）注册 `teams.*`
 
 ## 团队事件主题
 
-面板订阅 `team.<id>.*`（通过 `subscribe_team_events`），并将每个子主题渲染到不同的界面：
+面板通过 `TeamFanoutEmitter` 订阅 `team.<id>.*`（`src/gateway/event_emitter/team_fanout.rs`），将每个子主题渲染到不同的 UI：
 
 | 主题 | 承载 | 渲染为 |
 |-------|---------|-------------|
 | `team.<id>.message` | 广播器扇出发出的成员回复 | 消息流中的归属气泡 |
 | `team.<id>.activity` | 名册 / 运行状态变更 | 左侧名册上的状态圆点 |
-| `team.<id>.task` | 协调任务生命周期更新 | 右侧工作区（任务 / 看板） |
+| `team.<id>.task` | Coord Task 生命周期更新（`CoordTaskStore` 发布 `task.<verb>`） | 右侧工作区（任务 / 看板） |
 
 ## 面板渲染
 
@@ -104,48 +108,28 @@ GroupChatBroadcaster::dispatch_user
 
 ### 侧边栏与编辑器
 
-- **群聊历史。** 侧边栏新增一个"群聊"区，列出每个团队聊天，带有 `members_preview`（成员图标）和最后一条消息的摘要片段。该摘要来自 `agents.teams`，它为团队列表增补了 `members_preview` + `last_message`。
-- **`@` 自动补全。** 在编辑器中输入 `@` 会打开一个名册自动补全面板（`@<id>`、`@all`）。点名按 `agent_id` 解析 —— 不在名册中的 token 被丢弃。
-- **自动命名。** 一个空名团队会在其首条消息上被赋予一个 LLM 生成的名称。
+- **群聊历史。** 侧边栏列出每个团队聊天，带有 `members_preview`（成员图标）和最后一条消息的摘要片段（由 `agents.teams` 方法返回的团队列表增补）。
+- **`@` 自动补全。** 在编辑器中输入 `@` 会打开一个名册自动补全面板（`@<id>`、`@all`）。点名按 `agent_id` 解析——不在名册中的 token 被丢弃。
+- **自动命名。** 一个空名团队（`set_name_auto=true`）会在其首条消息上被赋予一个 LLM 生成的名称。
 
-## 代码位置
+## `src/group_chat/`（多角色协作会话原语）
 
-- `src/teams/broadcast/mod.rs` —— `GroupChatBroadcaster`（`dispatch_user`、`run_member`）
-- `src/teams/broadcast/targets.rs` —— `resolve_targets`（`@<id>` / `@all`，硬门）
-- `src/teams/messages/mentions.rs` —— 点名解析（`@<id>`、`@all` → `MENTION_ALL`）
-- `src/group_chat/` —— 群聊会话原语（`group_chat.*`）
+| 模块 | 职责 |
+|---|---|
+| `mod.rs` | 入口；导出 `GroupChatOrchestrator` / `GroupChatSession` / `GroupChatExecutor` / `PersonaRegistry` |
+| `orchestrator.rs` | `GroupChatOrchestrator` + `SharedSession`：跨会话共享的编排器 |
+| `session.rs` | `GroupChatSession`：单个会话的状态机 |
+| `executor.rs` | `GroupChatExecutor`：执行回合、调用 LLM |
+| `persona.rs` | `PersonaRegistry`：persona 元数据 |
+| `channel.rs` | `GroupChatCommandParser` / `GroupChatRenderer`：命令解析与渲染 |
+| `protocol.rs` | 协议消息类型 |
+| `coordinator.rs` | 多人协作编排 |
 
 ## 另请参阅
 
 - [团队](/docs/zh/architecture/teams) —— 团队、队长、协调任务、团队战略协调，以及完整的 `teams.*` RPC 界面
 - [A2A](/docs/zh/architecture/a2a) —— 智能体到智能体协议
 - [网关](/docs/zh/gateway/protocol) —— 频道接口
-
----
-
-## 26.7.x 补充
-
-### 群聊聊天线程
-
-26.6.29+：持久的每团队聊天线程（`teams.chat.*`）驱动三面板群聊窗口。`teams.chat.send` / `history` / `thread` / `cancel`。
-
-### 团队协调
-
-- 队长 + 成员
-- 团队战略协调（Team Strata）—— 首条消息时队长先规划
-- Coord Task —— `Pending → InProgress → WaitingReview → Completed`
-- 任务模板 + 工具面
-
-### 团队看板深度重构
-
-26.7.24+：拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
-
-### 接地证据门
-
-26.7.21+：`task_review` 审批可要求 grounding。
-
-### 详见
-
 - [团队概念](/docs/zh/concepts/teams)
 - [群聊概念](/docs/zh/concepts/group-chat)
 - [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams)

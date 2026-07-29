@@ -1,132 +1,141 @@
 ---
 title: "ACP 协议"
-description: "用于将外部 CLI 工具（Claude Code、Codex、Gemini）集成为代理适配器的代理客户端协议。"
+description: "代理客户端协议——将外部 CLI（Claude Code、Codex、Gemini）集成为 ACP adapter；AcpAdapterManager 负责会话生命周期，进程隔离内核支撑 sandbox 安全。"
 ---
 
-`acp` 模块实现代理客户端协议（ACP），使 Aleph 能够将外部 CLI 工具作为一等代理适配器集成。
+`acp` 模块实现 [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol)，把外部 CLI 工具作为一等 ACP adapter 集成进 Aleph。
+
+> 文档历史版本的 `AcpManager::create_session / send_message / stream_response` 已被 `AcpAdapterManager`（`src/acp/manager/`）替代。会话生命周期、持久化与重新授权都集中在 `manager/` 子模块下。
 
 ## 概览
 
-ACP 管理外部 CLI 工具作为代理适配器，支持两种模式：
-- **工具模式** —— LLM 分派的工具调用（只读操作）
-- **代理模式** —— 具有完整读/写能力的直接对话
+ACP 管理外部 CLI 工具作为 ACP adapter，支持两种执行模式：
+- **`NativeAcp`** —— 持续 stdio 上的完整 ACP 协议（Gemini CLI `--acp`）。lazy-start 会话，子进程死了自动重启
+- **`Oneshot`** —— 每次 prompt spawn 新进程（Claude Code `--print`、Codex `exec`）。无持久会话
 
-支持的适配器：
-- Claude Code
-- Codex (OpenAI)
-- Gemini CLI
+支持的 adapter：Claude Code、Codex（OpenAI）、Gemini CLI，以及 `acp/adapters/custom.rs` / `acp/adapters/generic.rs` 暴露的任意 CLI harness。
 
 ## 架构
 
 ```
-ACP 管理器
-  ├── 适配器 —— 协议抽象
-  ├── 适配器 —— 具体实现
-  │     ├── ClaudeCodeAdapter
-  │     ├── CodexAdapter
-  │     └── GeminiAdapter
-  ├── 会话 —— ACP 会话生命周期
-  ├── 传输 —— 通信层
-  └── 协议 —— 消息协议定义
+src/acp/
+├── mod.rs            # 模块入口；导出 AcpAdapterManager + AcpSession + AcpSessionEvent
+├── adapter.rs        # AcpAdapter trait + AdapterMode (NativeAcp | Oneshot)
+├── adapters/         # 具体 adapter 实现
+│   ├── mod.rs
+│   ├── custom.rs     # 自定义 CLI 配置
+│   └── generic.rs    # 通用 harness
+├── protocol.rs       # ACP 消息协议
+├── transport.rs      # 通信层
+├── output_format.rs  # 输出格式化
+├── incoming.rs       # 入站消息解析
+├── session.rs        # AcpSession + AdapterConfig + PersistedAcpSession + CancelHandle
+├── manager/          # AcpAdapterManager
+│   ├── mod.rs        # struct + SessionSnapshot
+│   ├── harness_admin.rs    # harness CRUD / queries / hooks / restore_sessions / list_sessions
+│   ├── lifecycle.rs        # ensure_session / prompt / cancel / control RPCs / shutdown_*
+│   ├── persistence.rs      # disk persistence + wire_persistence boot helper
+│   └── session_key.rs      # SessionKey + path canonicalization
+├── mock_server.rs    # 测试 mock
+└── tests.rs
 ```
 
 ## 核心组件
 
-### ACP 管理器
-
-所有 ACP 会话的中央协调器：
+### `AcpAdapterManager`（`src/acp/manager/mod.rs`）
 
 ```rust
-// src/acp/manager.rs
-pub struct AcpManager {
-    sessions: HashMap<String, AcpSession>,
-    persistence_hook: Option<PersistenceHook>,
+pub struct AcpAdapterManager {
+    pub(super) adapters: RwLock<HashMap<String, Arc<dyn AcpAdapter>>>,
+    pub(super) configs:  RwLock<HashMap<String, AcpAdapterEntry>>,
+    pub(super) sessions: /* NativeAcp harness 的活跃会话，按 (harness_id, cwd) 键控 */,
 }
 
-impl AcpManager {
-    pub async fn create_session(
-        &mut self,
-        harness_id: String,
-        cwd: String,
-        adapter_type: AdapterType,
-    ) -> Result<String>;  // 返回 acp_session_id
-    
-    pub async fn send_message(
-        &self,
-        acp_session_id: String,
-        message: String,
-    ) -> Result<()>;
-    
-    pub async fn stream_response(
-        &self,
-        acp_session_id: String,
-        callback: AcpChunkCallback,
-    ) -> Result<()>;
+pub struct SessionEntry {
+    pub session: Arc<AsyncMutex<AcpSession>>,
+    pub cancel:  CancelHandle,        // 直写 session/cancel 给子进程 stdin
 }
 ```
 
-### 适配器 Trait
+支持：
+- 运行时动态 harness 注册 / 注销（harness_admin）
+- 启动期 `wire_persistence` 从磁盘恢复 sessions
+- 并发 prompt 在同一 (harness, cwd) 通过内层 mutex 串行化；不同 key 并行推进
+- `cancel` 不需要持有 session mutex——能中断正在 in-flight prompt
 
-所有 ACP 适配器的抽象接口：
+### `AcpAdapter` trait（`src/acp/adapter.rs`）
 
 ```rust
-// src/acp/adapter.rs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterMode {
+    NativeAcp,  // 完整 ACP 协议（initialize → session/new → session/prompt）
+    Oneshot,    // 每次 prompt spawn 新进程，读 stdout
+}
+
+#[async_trait]
 pub trait AcpAdapter: Send + Sync {
-    fn name(&self) -> &str;
+    fn id(&self) -> &str;                  // "claude-code" / "codex" / "gemini"
     fn is_available(&self) -> bool;
-    async fn execute(
-        &self, 
-        cwd: &str, 
-        args: &[String]
-    ) -> Result<AcpOutput>;
+    async fn execute(&self, cwd: &str, args: &[String]) -> Result<AcpOutput>;
+    // …
 }
 ```
 
-### 会话
+`AdapterMode::as_str` 给出稳定的 wire 标签（`native_acp` / `oneshot`），与 serde rename 对齐。
 
-表示单个 ACP 对话：
+### `AcpSession`（`src/acp/session.rs`）
 
 ```rust
-// src/acp/session.rs
-pub struct AcpSession {
-    harness_id: String,
-    acp_session_id: String,
-    cwd: String,
-    adapter: Box<dyn AcpAdapter>,
-}
+pub struct AdapterConfig { /* command / args / env / mode */ }
+pub struct PersistedAcpSession { /* harness_id / acp_session_id / cwd / session_name / created_at */ }
+pub struct AcpSession { /* harness_id / acp_session_id / cwd / adapter */ }
+pub struct CancelHandle;       // 可 clone；直写 session/cancel 给子进程 stdin
 ```
 
-## 会话事件
+`AcpSession::harness_id()` / `acp_session_id()` / `is_alive()` / `cancel_handle()` 是常用句柄。
 
-ACP 管理器发出会话持久化事件：
+### 会话事件
 
 ```rust
 pub enum AcpSessionEvent {
-    Created { harness_id, acp_session_id, cwd },
-    Updated { harness_id, acp_session_id },
-    Removed { harness_id, cwd },
+    Created { harness_id, acp_session_id, cwd, session_name: Option<String> },
+    Removed { harness_id, cwd, session_name: Option<String> },
 }
+
+pub type PersistenceHook = Arc<dyn Fn(AcpSessionEvent) + Send + Sync>;
 ```
 
-## 操作模式
+`session_name` 为 `None` 表示默认未命名 session；`Some(name)` 表示同一 `(harness, cwd)` 下的并行命名 session（仿 acpx 的 `-s backend` / `-s frontend`）。`PersistenceHook` 用于磁盘持久化；独立于 live-broadcast 的 `AcpSessionsChangedNotifier`（用于 `acp.sessions.changed` 推送）。
 
-### 工具模式
+## 运行模式
 
-在工具模式中，LLM 通过 ACP 分派只读操作：
+### 工具模式（Tool Mode）
 
-```
-LLM ──> 工具调用 ──> ACP 适配器 ──> 外部 CLI
-         (只读)       (claude code read)
-```
-
-### 代理模式
-
-在代理模式中，用户直接与外部工具对话：
+LLM 通过 ACP adapter 分派只读操作：
 
 ```
-用户 ──> Aleph ──> ACP 管理器 ──> 外部 CLI
+LLM ──> Tool Call ──> ACP Adapter ──> External CLI
+         (只读)        (claude-code read)
+```
+
+### 代理模式（Agent Mode）
+
+用户直接与外部工具对话：
+
+```
+User ──> Aleph ──> AcpAdapterManager ──> External CLI
               (完整读/写)
 ```
+
+## RPC 接口（启动期 `register_acp_handlers` 注册）
+
+| 分组 | 方法 |
+|-------|---------|
+| Adapter CRUD | `acp.create`、`acp.delete`、`acp.get`、`acp.list`、`acp.update` |
+| Adapter 预设 | `acp.presets`、`acp.presets_meta`、`acp.test`、`acp.set_enabled` |
+| 会话 | `acp.sessions_list`、`acp.sessions_cancel`、`acp.sessions_shutdown` |
+
+完整注册位于 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_acp_handlers`（同一文件里的 `register_cron_handlers` / `register_heartbeat_handlers` 同源）。
 
 ## 配置
 
@@ -144,37 +153,14 @@ command = "codex"
 args = []
 ```
 
-## 代码位置
+## 进程隔离内核
 
-- `src/acp/mod.rs` —— 模块入口点
-- `src/acp/manager.rs` —— ACP 会话管理
-- `src/acp/adapter.rs` —— 适配器 trait
-- `src/acp/adapters/` —— 具体适配器
-- `src/acp/session.rs` —— 会话生命周期
-- `src/acp/transport.rs` —— 通信层
-- `src/acp/protocol.rs` —— 消息协议
+ACP 会话由进程隔离内核支撑：沙箱 restricted-token / job-object / AppContainer / integrity-level / SID·ACL 系统调用在 spawn 时就地发起（[R1 例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
 
 ## 另请参阅
 
 - [A2A](./a2a) —— 用于内部代理的代理到代理协议
 - [工具](../tools/overview) —— 内置工具系统
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC
-
-- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
-- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
-- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
-
-### 进程隔离内核
-
-26.7.x：ACP 会话由进程隔离内核支撑——沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起（[R1 例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
-
-### 见另请参阅
-
-- [ACP 概念](/docs/zh/concepts/acp-protocol) — 完整概念
-- [沙箱](/docs/zh/architecture/sandbox) — 隔离机制
+- [ACP 概念](/docs/zh/concepts/acp-protocol) —— 完整概念
+- [沙箱](/docs/zh/architecture/sandbox) —— 隔离机制
 - [网关 RPC `acp.*`](/docs/zh/gateway/methods)

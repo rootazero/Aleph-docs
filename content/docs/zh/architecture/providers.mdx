@@ -108,16 +108,18 @@ pub struct ProtocolRegistry {
 
 ## 支持的提供商
 
-Aleph 附带**28 个预设**，涵盖主要供应商和别名。每个预设自动配置 `base_url`、`protocol` 和 `color`。
+Aleph 内置一个广泛的预设目录（`src/providers/presets/registry.rs` 中的 `PROFILES`），覆盖主要供应商、区域提供商与别名。每个预设自动配置 `base_url`、`protocol` 与 `color`；别名共享同一预设，因此不会漂移。
 
 ### 主要协议（原生适配器）
 
 | 提供商 | 协议 | 默认模型 | 基础 URL |
 |--------|------|----------|----------|
-| **openai** | `openai` | `gpt-4o` | `api.openai.com/v1` |
-| **claude** | `anthropic` | `claude-sonnet-4-5-20250514` | `api.anthropic.com` |
-| **gemini** | `gemini` | `gemini-2.5-flash` | `generativelanguage.googleapis.com` |
-| **chatgpt** | `codex` | `gpt-5.4` | `chatgpt.com` |
+| **openai** | `openai` | `gpt-5.6` | `api.openai.com/v1` |
+| **claude** | `anthropic` | `claude-sonnet-5` | `api.anthropic.com` |
+| **gemini** | `gemini` | `gemini-3.1-pro-preview` | `generativelanguage.googleapis.com` |
+| **chatgpt** | `codex` | `gpt-5.6` | `chatgpt.com` |
+| **amazon-bedrock** / `bedrock` | `anthropic` | `anthropic.claude-sonnet-5` | `bedrock-runtime.us-east-1.amazonaws.com` |
+| **vertex-anthropic** | `anthropic` | `claude-sonnet-5` | `us-east5-aiplatform.googleapis.com/v1` |
 
 ### OpenAI 兼容提供商
 
@@ -125,27 +127,50 @@ Aleph 附带**28 个预设**，涵盖主要供应商和别名。每个预设自�
 
 | 提供商 | 基础 URL | 默认模型 | 特色 |
 |--------|----------|----------|------|
-| **deepseek** | `api.deepseek.com` | `deepseek-chat` | 经济高效的编码模型 |
-| **moonshot** / **kimi** | `api.moonshot.ai/v1` | `kimi-k2-0905-preview` | 中文语言模型 |
-| **kimi-for-coding** / **kimi-coding** | `api.kimi.com/coding/v1` | `Kimi-K2.6` | Anthropic 兼容 IDE/代理端点 |
-| **doubao** / **volcengine** / **ark** | `ark.cn-beijing.volces.com/api/v3` | `doubao-1.5-pro-256k` | 字节跳动模型 |
+| **deepseek** | `api.deepseek.com` | `deepseek-v4-flash` | 经济高效的编码模型 |
+| **moonshot** / **kimi** | `api.moonshot.cn/anthropic` | `kimi-k2.6` | 中文语言模型（Anthropic 兼容） |
+| **moonshot-openai** / **kimi-openai** | `api.moonshot.ai/v1` | `kimi-k2.6` | Moonshot / Kimi 的 OpenAI 端点 |
+| **moonshot-cn** / **kimi-cn** | `api.moonshot.cn/v1` | `kimi-k2.6` | 中国区域 Moonshot OpenAI 端点 |
+| **kimi-for-coding** / **kimi-coding** | `api.kimi.com/coding/v1` | `kimi-for-coding` | Anthropic 兼容 IDE/代理端点 |
+| **doubao** / **volcengine** / **ark** | `ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-8-251228` | 字节跳动模型 |
 | **siliconflow** | `api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3` | 中文 AI 云平台 |
-| **zhipu** / **glm** | `open.bigmodel.cn/api/paas/v4` | `GLM-5` | 中文 AI 研究实验室 |
-| **minimax** | `api.minimax.io/v1` | `MiniMax-M2.5` | 中文多模态 AI |
+| **zhipu** / **glm** | `open.bigmodel.cn/api/paas/v4` | `GLM-5.2` | 中文 AI 研究实验室 |
+| **qwen** | `dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-max-2026-01-23` | 阿里 Qwen |
+| **hunyuan** | `api.hunyuan.cloud.tencent.com/v1` | `hunyuan-pro` | 腾讯混元 |
+| **baichuan** | `api.baichuan-ai.com/v1` | `Baichuan4` | 百川智能 |
+| **spark** | `spark-api-open.xf-yun.com/v1` | *(无)* | 科大讯飞星火 |
+| **stepfun** | `api.stepfun.com/v1` | *(无)* | 阶跃星辰 |
 | **t8star** | `api.t8star.cn/v1` | *(无)* | 区域提供商 |
 | **groq** | `api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | 超快速推理 |
-| **together** | `api.together.xyz/v1` | *(无)* | 开源模型托管 |
-| **perplexity** | `api.perplexity.ai` | *(无)* | 搜索增强 LLM |
-| **mistral** | `api.mistral.ai/v1` | *(无)* | 欧洲 AI 领导者 |
-| **cohere** | `api.cohere.ai/v1` | *(无)* | 企业焦点 |
-| **fireworks** | `api.fireworks.ai/inference/v1` | *(无)* | 快速 API |
+| **together** | `api.together.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | 开源模型托管 |
+| **perplexity** | `api.perplexity.ai` | `sonar` | 搜索增强 LLM |
+| **mistral** | `api.mistral.ai/v1` | `mistral-large-latest` | 欧洲 AI 领导者 |
+| **cohere** | `api.cohere.ai/compatibility/v1` | *(无)* | 企业焦点 |
+| **fireworks** | `api.fireworks.ai/inference/v1` | `accounts/fireworks/models/llama-v3p3-70b-instruct` | 快速 API |
 | **anyscale** | `api.endpoints.anyscale.com/v1` | *(无)* | Ray 生态系统 |
 | **replicate** | `api.replicate.com/v1` | *(无)* | OSS 模型托管 |
-| **openrouter** | `openrouter.ai/api` | `openai/gpt-4o` | 多模型路由器（Responses API） |
+| **openrouter** | `openrouter.ai/api` | `openai/gpt-5.6` | 多模型路由器（Responses API） |
 | **lepton** | `api.lepton.ai/api/v1` | *(无)* | 模型部署 |
-| **hyperbolic** | `api.hyperbolic.xyz/v1` | *(无)* | GPU 市场 |
+| **hyperbolic** | `api.hyperbolic.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct` | GPU 市场 |
+| **xai** / **grok** | `api.x.ai/v1` | `grok-4.3` | xAI Grok |
+| **cerebras** | `api.cerebras.ai/v1` | *(无)* | Cerebras 推理 |
+| **novita** | `api.novita.ai/v3/openai` | *(无)* | GPU 云 |
+| **chutes** | `api.chutes.ai/v1` | *(无)* | GPU 推理 |
+| **nous** | `inference.nousresearch.com/v1` | *(无)* | Nous Research |
+| **deepinfra** | `api.deepinfra.com/v1/openai` | *(无)* | 无服务器推理 |
+| **huggingface** | `router.huggingface.co/v1` | *(无)* | HF 路由 |
+| **gmi** | `api.gmi-serving.com/v1` | *(无)* | GMI 云 |
+| **inflection** | `api.inflection.ai/v1` | `inflection_3_pi` | Inflection AI |
+| **zai** | `api.z.ai/api/paas/v4` | *(无)* | Z.ai（GLM 镜像） |
+| **litellm** | *(代理)* | *(无)* | LiteLLM 代理 |
+| **lmstudio** | `localhost:1234/v1` | *(无)* | 本地 LM Studio |
+| **cloudflare-ai** / **workers-ai** | `api.cloudflare.com/client/v4/accounts/{id}/ai/v1` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Cloudflare Workers AI |
 
-**注意：** `kimi-for-coding` 使用 `anthropic` 协议（不是 `openai`），专为 Claude Code 和 Cline 等 IDE/代理工具使用场景设计。对于一般聊天，使用 `moonshot` / `kimi` 预设。
+**注意：**
+- `kimi-for-coding` 使用 `anthropic` 协议（不是 `openai`），专为 Claude Code 和 Cline 等 IDE/代理工具使用场景设计。对于一般聊天，使用 `moonshot` / `kimi` 预设（现在默认走 Anthropic 兼容端点）。
+- `minimax` 单独注册为 Anthropic 兼容端点 `https://api.minimaxi.com/anthropic`，默认模型 `MiniMax-M3`；旧的 `api.minimax.io` OpenAI 形端点已下线。
+- `cohere` 的 `/compatibility/v1` 是 OpenAI 兼容端点；裸 `/v1` 是 Cohere 原生 API，在 OpenAI 协议适配器下会 404。
+- `openrouter` 默认 `openai/gpt-5.6`（Responses API 路径）。其完整目录最好通过 `model_catalog::discovery` 按需发现，而不是手工维护清单。
 
 ## 提供商配置
 
@@ -154,7 +179,7 @@ Aleph 附带**28 个预设**，涵盖主要供应商和别名。每个预设自�
 ```toml
 [providers.claude]
 protocol = "anthropic"
-models = ["claude-sonnet-4-5-20250514"]
+models = ["claude-sonnet-5"]
 api_key = "sk-ant-..."
 max_tokens = 8192
 temperature = 0.7
@@ -230,7 +255,7 @@ pub struct ProviderConfig {
 ```toml
 [providers.deepseek]
 # 无需指定协议或 base_url —— 预设处理它
-models = ["deepseek-chat"]
+models = ["deepseek-v4-flash"]
 api_key = "sk-..."
 enabled = true
 ```

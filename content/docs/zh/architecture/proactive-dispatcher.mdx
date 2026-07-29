@@ -1,207 +1,191 @@
 ---
-title: "主动分派器"
-description: "守护进程中的后台任务执行、行动规划和风险评估的主动分派器。"
+title: "主动任务调度"
+description: "守护后台任务：cron / heartbeat 实化服务；runtimes 能力 ledger；wake queue 与防风暴守卫；不再有 `src/daemon/`。"
 ---
 
-`daemon::dispatcher` 模块为 Aleph 守护进程提供主动行动分派，支持具有风险评估和策略执行的自主后台任务执行。
+> 文档历史版本中的 `daemon::dispatcher` 模块、`src/daemon/` 目录、`ProposedAction` / `PolicyEngine` / `DispatcherMode` 枚举**已全部移除**。本页描述当前 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 中的真实代码，附 `src/tasks/shared/`、`src/runtimes/` 与 `src/components/` 协作。
+
+主动后台任务现在由两条正交的服务组成：
+- **Cron**（`src/tasks/cron/`）—— 计划任务，按 cron 表达式 / 间隔 / 一次性触发
+- **Heartbeat**（`src/tasks/heartbeat/`）—— 周期探针 + L1 probe + L2 LLM 判官
+
+它们共享 `src/tasks/shared/`（`clock` / `delivery` / `schedule` / `reaper`）。
+
+---
 
 ## 概览
 
-主动分派器支持：
-- **自主行动** —— 无需直接用户提示即可执行任务
-- **风险评估** —— 在执行前评估行动风险
-- **策略执行** —— 将可配置策略应用于行动
-- **通知管理** —— 优先处理和批量通知
-- **资源感知调度** —— 尊重系统资源限制
-
-## 架构
-
-```
-ProactiveDispatcher
-  ├── 策略引擎 —— 风险评估和策略检查
-  ├── 行动执行器 —— 任务执行
-  ├── 风险评估 —— 风险评分
-  └── 通知队列 —— 基于优先级的通知
-```
-
-## 核心组件
-
-### ProactiveDispatcher
-
-中央分派协调器：
-
-```rust
-// src/daemon/dispatcher/mod.rs
-pub struct Dispatcher {
-    config: DispatcherConfig,
-    policy_engine: PolicyEngine,
-    executor: ActionExecutor,
-}
-
-impl Dispatcher {
-    pub async fn dispatch(
-        &self,
-        action: ProposedAction,
-    ) -> Result<ActionResult>;
-    
-    pub async fn evaluate_risk(
-        &self,
-        action: &ProposedAction,
-    ) -> RiskLevel;
-    
-    pub async fn queue_notification(
-        &self,
-        notification: Notification,
-    ) -> Result<()>;
-}
-```
-
-### PolicyEngine
-
-根据策略评估行动：
-
-```rust
-// src/daemon/dispatcher/policy.rs
-pub struct PolicyEngine {
-    policies: Vec<Policy>,
-}
-
-impl PolicyEngine {
-    pub fn check(
-        &self,
-        action: &ProposedAction,
-    ) -> PolicyResult;
-}
-
-pub enum PolicyResult {
-    Allow,
-    Deny { reason: String },
-    RequireApproval { approver: Role },
-}
-```
-
-### ProposedAction
-
-提交分派的行动：
-
-```rust
-// src/daemon/dispatcher/mod.rs
-pub struct ProposedAction {
-    pub id: ActionId,
-    pub action_type: ActionType,
-    pub payload: serde_json::Value,
-    pub proposed_by: AgentId,
-    pub urgency: Urgency,
-}
-
-pub enum ActionType {
-    NotifyUser,
-    ExecuteTool,
-    ScheduleTask,
-    DelegateToAgent,
-}
-```
-
-### 风险等级
-
-```rust
-pub enum RiskLevel {
-    Safe,      // 无风险，立即执行
-    Low,       // 轻微风险，记录并执行
-    Medium,    // 中等风险，通知用户
-    High,      // 重大风险，需要审批
-    Critical,  // 严重风险，除非紧急情况否则拒绝
-}
-```
-
-### 通知优先级
-
-```rust
-pub enum NotificationPriority {
-    Background,  // 无立即通知
-    Normal,      // 标准通知
-    Urgent,      // 立即通知
-    Emergency,   // 中断用户
-}
-```
-
-## 行动流程
-
-```
-ProposedAction
-     │
-     ▼
-PolicyEngine.check()
-     │
-     ├──▶ 拒绝 → 记录 + 通知（如果需要）
-     │
-     ├──▶ 需要审批 → 排队等待审批
-     │
-     └──▶ 允许 → 风险评估
-                          │
-                          ├──▶ 安全 → 立即执行
-                          │
-                          └──▶ 有风险 → 通知用户 + 执行
-```
-
-## 分派器模式
-
-```rust
-pub enum DispatcherMode {
-    Passive,    // 仅对显式请求做出反应
-    Assistive,  // 建议行动，等待审批
-    Proactive,  // 自主执行低风险行动
-    Autonomous, // 执行所有允许的行动
-}
-```
-
-## 配置
-
-```toml
-[daemon.dispatcher]
-mode = "assistive"
-max_concurrent_actions = 5
-notification_batch_interval = 300  # 秒
-
-[daemon.dispatcher.risk]
-default_level = "medium"
-auto_execute_below = "low"
-require_approval_above = "high"
-```
-
-## 代码位置
-
-- `src/daemon/dispatcher/mod.rs` —— 分派器和类型
-- `src/daemon/dispatcher/policy.rs` —— 策略引擎
-- `src/daemon/mod.rs` —— 守护进程模块入口
-
-## 另请参阅
-
-- [世界模型](./worldmodel) —— 上下文推断和行动预测
-- [任务分派器](./dispatcher) —— 任务调度 DAG（不同组件）
-- [守护进程](../concepts/daemon) —— 后台服务管理
-- [安全](../security/overview) —— 策略和权限系统
+主动调度支持：
+- **Cron 计划** —— cron 表达式 / 间隔 / 一次性 / 链式触发（`on_success` / `on_failure`）
+- **Heartbeat 探针** —— 周期性 L1 探针 + 主动 wake，由 LLM 判官决定
+- **Runtimes 能力 ledger** —— `src/runtimes/` 通过 Probe → Bootstrap → Register 三阶段管理外部工具（python / node / uv / ffmpeg / yt-dlp ...），持久化到 `~/.aleph/runtimes/ledger.json`
+- **失败告警 / 投递管道** —— `DeliveryEngine` 把执行结果推送到 webhook / 通知
+- **事件总线广播** —— `CronTaskChanged` / `HeartbeatTaskChanged` 推送面板（取代轮询）
 
 ---
 
-## 26.7.x 补充
+## Cron（`src/tasks/cron/`）
 
-### Heartbeat / Cron 实化
+```
+src/tasks/cron/
+├── mod.rs            # 模块入口；导出 CronService / CronJob / ScheduleKind 等
+├── config.rs         # CronJob / CronJobView / ScheduleKind / JobStateV2 / CronConfig
+├── store.rs          # JSON 原子持久化
+├── executor.rs       # 实际执行（执行任务，调用 harness）
+├── history.rs        # 运行历史
+├── alert.rs          # FailureAlertConfig / FailureAlert 投递
+├── chain.rs          # on_success / on_failure 触发（带 cycle detection）
+├── template.rs       # Prompt template 渲染（变量替换）
+├── stagger.rs        # Hash-based stagger（多个 cron 错峰）
+├── carryover.rs      # 跨 daemon 重启的 carryover
+├── webhook_target.rs # Webhook 投递目标
+└── service/          # ServiceState / ops / timer / concurrency / catchup
+    ├── mod.rs
+    ├── ops.rs
+    ├── timer.rs
+    ├── concurrency.rs
+    └── catchup.rs
+```
 
-26.7.x：历史 stub RPC（`heartbeat.*_stub` / `cron.*_stub`）已被**实化**。完整 `heartbeat.*` / `cron.*` RPC 由 [守护进程](/docs/zh/concepts/daemon) 驱动。
+`ScheduleKind` 支持：
+- `Cron { expression }` —— 5/6 字段 cron 表达式
+- `Interval { every_secs }` —— 周期性
+- `At { timestamp }` —— 一次性（执行后自动停用）
 
-### 主动唤醒
+链式触发由 `chain.rs` 在 `on_success` / `on_failure` 上注册后续 job；cycle detection 阻止自循环。
 
-`heartbeat.wake` —— 主动唤醒触发。`Guardian Judge` LLM 判官决定是否需要主动唤醒（**payload 隐藏密钥**）。
+执行完成后 `DeliveryEngine` 把结果以 `DeliveryTarget::Webhook | DeliveryTarget::Notification | ...` 投递；`FailureAlertConfig` 控制失败告警的频率 / 渠道。
 
-### 主动决策
+### 启动期注册
 
-- Day-boundary 日志轮转
-- `ALEPH-BOOT` marker
-- 睡眠抑制剂在 stderr 静默
+完整 RPC 由 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_cron_handlers` 在启动期装配，替换 `cron.*_stub`：
 
-### 详见
+| RPC | 作用 |
+|---|---|
+| `cron.list` | 列出所有 cron jobs |
+| `cron.get` | 取出单条 |
+| `cron.create` | 新建（带 `CronConfig.validate()`） |
+| `cron.update` | 更新 |
+| `cron.delete` | 删除 |
+| `cron.status` | 当前执行状态 |
+| `cron.run` | 立即触发一次 |
+| `cron.runs` | 运行历史 |
+| `cron.toggle` | 启用 / 暂停 |
 
-- [守护进程](/docs/zh/concepts/daemon)
-- [Cron 作业](/docs/zh/automation/cron-jobs)
-- [Heartbeat](/docs/zh/automation/heartbeat)
+每个成功的写入还会发布 `GatewayEventFrame::CronJobChanged` 事件到 `gateway::event_bus`，面板订阅后能即时刷新（取代 polling）。`carryover::bootstrap_global_carryover_sweeper()` 在首次构造时（`OnceLock` 守卫）全局 spawn 一次 carry-over sweeper。
+
+---
+
+## Heartbeat（`src/tasks/heartbeat/`）
+
+```
+src/tasks/heartbeat/
+├── mod.rs            # 模块入口；导出 HeartbeatService / HeartbeatTask
+├── config.rs         # HeartbeatConfig / HeartbeatTask / HeartbeatTaskView
+├── store.rs          # 持久化
+├── executor.rs       # 执行探针
+├── probe.rs          # L1 探针
+├── dedup.rs          # 去重（避免重复触发）
+├── wake.rs           # WakeQueue
+├── history.rs        # 探针历史
+└── service/          # HeartbeatServiceState / ops / timer
+    ├── mod.rs
+    ├── ops.rs
+    └── timer.rs
+```
+
+`HeartbeatService` 维护 `state` + `wake_queue` + 可选 `event_bus`。`wake_queue` 是外部主动 wake 触发器（例如守护进程检测到事件，希望触发立即探针）。
+
+完整 RPC 由 `register_heartbeat_handlers` 装配：
+
+| RPC | 作用 |
+|---|---|
+| `heartbeat.list` | 列出所有探针 |
+| `heartbeat.get` | 取出单条 |
+| `heartbeat.create` | 新建 |
+| `heartbeat.update` | 更新 |
+| `heartbeat.delete` | 删除 |
+| `heartbeat.toggle` | 启用 / 暂停 |
+| `heartbeat.wake` | 主动 wake 触发（Guardian Judge LLM 判官决定是否需要主动唤醒，**payload 隐藏密钥**） |
+| `heartbeat.runs` | 探针历史 |
+
+写入同样发布 `HeartbeatTaskChanged` 事件到 `gateway::event_bus`。
+
+### Guardian Judge
+
+Heartbeat 探针的 LLM 判官：
+- 26.7.21+：**payload 隐藏密钥**——敏感凭据不出现在判官 prompt 中
+- Heartbeat 探针**拒绝使用危险工具与确认门控工具**
+
+---
+
+## Runtimes 能力 Ledger（`src/runtimes/`）
+
+```rust
+// src/runtimes/mod.rs
+pub mod bootstrap;
+mod  capability;
+pub mod ensure;
+pub mod ledger;
+pub mod os;
+pub mod post_install;
+pub mod probe;
+pub mod specs;
+
+pub use bootstrap::{dependencies, has_spec, install, BootstrapError, BootstrapResult};
+pub use capability::{format_entries_for_prompt, RuntimeCapability};
+pub use ensure::ensure_capability;
+pub use ledger::{CapabilityEntry, CapabilityLedger, CapabilitySource, CapabilityStatus};
+pub use os::TargetOs;
+pub use post_install::PostInstallError;
+pub use probe::ProbeResult;
+pub use specs::{
+    find_spec, select_install, supported_on_current_os,
+    InstallStrategy, OsInstall, PostInstallAction, RuntimeSpec, SPECS,
+};
+
+pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
+```
+
+`CapabilityLedger` 取代旧的 `RuntimeRegistry`，仅追踪每个能力的状态（`Missing | Probing | Bootstrapping | Ready | Stale`），从不下载或安装——下载 / 安装由 `Bootstrapper` 完成，检测由 `Prober` 完成。持久化到 `~/.aleph/runtimes/ledger.json`。
+
+三阶段流程：
+1. **Probe** —— 检测系统 PATH + Aleph 管理的二进制
+2. **Bootstrap** —— 通过 shell 脚本安装缺失工具
+3. **Ledger** —— 把状态写入 `ledger.json`
+
+`ensure_capability(name, &ledger)` → `Result<bin_path>` 是 `exec` 层用于 PATH 注入的统一入口。
+
+---
+
+## Components（`src/components/`）
+
+`src/components/` 仅剩最小骨架：`mod.rs` + `types/`。当前以**复合类型**（任务、计划、事件）的形式存在，是 cron / heartbeat / 任务流水线之间共享的**复合组件命名空间**。具体模块（如 `ComponentSpec` / `ComponentState`）按需扩展——不要假设旧的 `src/components/` 子目录列表。
+
+---
+
+## 共享基础设施（`src/tasks/shared/`）
+
+| 模块 | 职责 |
+|---|---|
+| `clock.rs` | `Clock` trait + `SystemClock`：可注入时钟，测试用 |
+| `schedule.rs` | 纯调度计算（next_run_at 等） |
+| `delivery.rs` | `DeliveryEngine` + `DeliveryTarget` + `DeliveryPayload`：跨服务投递 |
+| `reaper.rs` | 孤儿 / 卡死 job 回收 |
+
+---
+
+## 与历史"daemon::dispatcher"的差异
+
+- **没有 `ProposedAction` / `PolicyEngine` / `DispatcherMode`**——风险评估、策略执行由执行引擎的 `PermissionLayer` + `ContextRuleLayer` + `SmartFilter` 统一处理
+- **没有 `src/daemon/` 目录**——cron / heartbeat 直接位于 `src/tasks/`
+- **没有独立的通知队列 / 调度 DAG**——通知通过 `DeliveryEngine` 与 gateway `event_bus` 走总线
+- **没有 `ActionExecutor` 子组件**——执行通过 `execution_engine::RunRequest` 复用现有 harness
+
+## 另请参阅
+
+- [守护进程概念](/docs/zh/concepts/daemon) —— 守护服务管理
+- [Cron 作业](/docs/zh/automation/cron-jobs) —— Cron 完整配置
+- [Heartbeat](/docs/zh/automation/heartbeat) —— Heartbeat 完整配置
+- [Runtimes](/docs/zh/architecture/runtimes) —— 能力 ledger 与 bootstrap
+- [事件总线](/docs/zh/architecture/event-bus) —— `CronTaskChanged` / `HeartbeatTaskChanged` 推送

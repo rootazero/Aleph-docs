@@ -108,16 +108,18 @@ Each `ProtocolAdapter` implements two methods:
 
 ## Supported Providers
 
-Aleph ships with **28 presets** covering major vendors and aliases. Each preset auto-configures `base_url`, `protocol`, and `color`.
+Aleph ships with a broad preset catalog (`PROFILES` in `src/providers/presets/registry.rs`) covering major vendors, regional providers, and aliases. Each preset auto-configures `base_url`, `protocol`, and `color`; aliases share a single preset so they cannot drift.
 
 ### Primary Protocols (Native Adapters)
 
 | Provider | Protocol | Default Model | Base URL |
 |----------|----------|---------------|----------|
-| **openai** | `openai` | `gpt-4o` | `api.openai.com/v1` |
-| **claude** | `anthropic` | `claude-sonnet-4-5-20250514` | `api.anthropic.com` |
-| **gemini** | `gemini` | `gemini-2.5-flash` | `generativelanguage.googleapis.com` |
-| **chatgpt** | `codex` | `gpt-5.4` | `chatgpt.com` |
+| **openai** | `openai` | `gpt-5.6` | `api.openai.com/v1` |
+| **claude** | `anthropic` | `claude-sonnet-5` | `api.anthropic.com` |
+| **gemini** | `gemini` | `gemini-3.1-pro-preview` | `generativelanguage.googleapis.com` |
+| **chatgpt** | `codex` | `gpt-5.6` | `chatgpt.com` |
+| **amazon-bedrock** / `bedrock` | `anthropic` | `anthropic.claude-sonnet-5` | `bedrock-runtime.us-east-1.amazonaws.com` |
+| **vertex-anthropic** | `anthropic` | `claude-sonnet-5` | `us-east5-aiplatform.googleapis.com/v1` |
 
 ### OpenAI-Compatible Providers
 
@@ -125,27 +127,50 @@ These use the `openai` protocol adapter with vendor-specific `base_url`:
 
 | Provider | Base URL | Default Model | Specialty |
 |----------|----------|---------------|-----------|
-| **deepseek** | `api.deepseek.com` | `deepseek-chat` | Cost-effective coding models |
-| **moonshot** / **kimi** | `api.moonshot.ai/v1` | `kimi-k2-0905-preview` | Chinese language models |
-| **kimi-for-coding** / **kimi-coding** | `api.kimi.com/coding/v1` | `Kimi-K2.6` | Anthropic-compatible IDE/agent endpoint |
-| **doubao** / **volcengine** / **ark** | `ark.cn-beijing.volces.com/api/v3` | `doubao-1.5-pro-256k` | ByteDance models |
+| **deepseek** | `api.deepseek.com` | `deepseek-v4-flash` | Cost-effective coding models |
+| **moonshot** / **kimi** | `api.moonshot.cn/anthropic` | `kimi-k2.6` | Chinese language models (Anthropic-compatible) |
+| **moonshot-openai** / **kimi-openai** | `api.moonshot.ai/v1` | `kimi-k2.6` | Moonshot / Kimi via OpenAI endpoint |
+| **moonshot-cn** / **kimi-cn** | `api.moonshot.cn/v1` | `kimi-k2.6` | China-region Moonshot OpenAI endpoint |
+| **kimi-for-coding** / **kimi-coding** | `api.kimi.com/coding/v1` | `kimi-for-coding` | Anthropic-compatible IDE/agent endpoint |
+| **doubao** / **volcengine** / **ark** | `ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-8-251228` | ByteDance models |
 | **siliconflow** | `api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3` | Chinese AI cloud platform |
-| **zhipu** / **glm** | `open.bigmodel.cn/api/paas/v4` | `GLM-5` | Chinese AI research lab |
-| **minimax** | `api.minimax.io/v1` | `MiniMax-M2.5` | Chinese multimodal AI |
+| **zhipu** / **glm** | `open.bigmodel.cn/api/paas/v4` | `GLM-5.2` | Chinese AI research lab |
+| **qwen** | `dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-max-2026-01-23` | Alibaba Qwen |
+| **hunyuan** | `api.hunyuan.cloud.tencent.com/v1` | `hunyuan-pro` | Tencent Hunyuan |
+| **baichuan** | `api.baichuan-ai.com/v1` | `Baichuan4` | Baichuan Inc. |
+| **spark** | `spark-api-open.xf-yun.com/v1` | *(none)* | iFlytek Spark |
+| **stepfun** | `api.stepfun.com/v1` | *(none)* | StepFun |
 | **t8star** | `api.t8star.cn/v1` | *(none)* | Regional provider |
 | **groq** | `api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | Ultra-fast inference |
-| **together** | `api.together.xyz/v1` | *(none)* | Open-source model hosting |
-| **perplexity** | `api.perplexity.ai` | *(none)* | Search-augmented LLMs |
-| **mistral** | `api.mistral.ai/v1` | *(none)* | European AI leader |
-| **cohere** | `api.cohere.ai/v1` | *(none)* | Enterprise focus |
-| **fireworks** | `api.fireworks.ai/inference/v1` | *(none)* | Fast API |
+| **together** | `api.together.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | Open-source model hosting |
+| **perplexity** | `api.perplexity.ai` | `sonar` | Search-augmented LLMs |
+| **mistral** | `api.mistral.ai/v1` | `mistral-large-latest` | European AI leader |
+| **cohere** | `api.cohere.ai/compatibility/v1` | *(none)* | Enterprise focus |
+| **fireworks** | `api.fireworks.ai/inference/v1` | `accounts/fireworks/models/llama-v3p3-70b-instruct` | Fast API |
 | **anyscale** | `api.endpoints.anyscale.com/v1` | *(none)* | Ray ecosystem |
 | **replicate** | `api.replicate.com/v1` | *(none)* | OSS model hosting |
-| **openrouter** | `openrouter.ai/api` | `openai/gpt-4o` | Multi-model router (Responses API) |
+| **openrouter** | `openrouter.ai/api` | `openai/gpt-5.6` | Multi-model router (Responses API) |
 | **lepton** | `api.lepton.ai/api/v1` | *(none)* | Model deployment |
-| **hyperbolic** | `api.hyperbolic.xyz/v1` | *(none)* | GPU marketplace |
+| **hyperbolic** | `api.hyperbolic.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct` | GPU marketplace |
+| **xai** / **grok** | `api.x.ai/v1` | `grok-4.3` | xAI Grok |
+| **cerebras** | `api.cerebras.ai/v1` | *(none)* | Cerebras Inference |
+| **novita** | `api.novita.ai/v3/openai` | *(none)* | GPU cloud |
+| **chutes** | `api.chutes.ai/v1` | *(none)* | GPU inference |
+| **nous** | `inference.nousresearch.com/v1` | *(none)* | Nous Research |
+| **deepinfra** | `api.deepinfra.com/v1/openai` | *(none)* | Serverless inference |
+| **huggingface** | `router.huggingface.co/v1` | *(none)* | HF router |
+| **gmi** | `api.gmi-serving.com/v1` | *(none)* | GMI Cloud |
+| **inflection** | `api.inflection.ai/v1` | `inflection_3_pi` | Inflection AI |
+| **zai** | `api.z.ai/api/paas/v4` | *(none)* | Z.ai (GLM mirror) |
+| **litellm** | *(proxy)* | *(none)* | LiteLLM proxy |
+| **lmstudio** | `localhost:1234/v1` | *(none)* | Local LM Studio |
+| **cloudflare-ai** / **workers-ai** | `api.cloudflare.com/client/v4/accounts/{id}/ai/v1` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Cloudflare Workers AI |
 
-**Note:** `kimi-for-coding` uses the `anthropic` protocol (not `openai`), designed for IDE/agent tool-use scenarios like Claude Code and Cline. For general chat, use the `moonshot` / `kimi` preset.
+**Notes:**
+- `kimi-for-coding` uses the `anthropic` protocol (not `openai`), designed for IDE/agent tool-use scenarios like Claude Code and Cline. For general chat, use the `moonshot` / `kimi` preset (which now defaults to the Anthropic-compatible endpoint).
+- `minimax` is registered separately as an Anthropic-compatible endpoint at `https://api.minimaxi.com/anthropic` with default model `MiniMax-M3`; older `api.minimax.io` OpenAI-shaped endpoints were retired.
+- `cohere`'s `/compatibility/v1` path is the OpenAI-compatible surface; the bare `/v1` is Cohere's native API and 404s under the OpenAI protocol adapter.
+- `openrouter` defaults to `openai/gpt-5.6` (the Responses API path). Its full catalog is best discovered via `model_catalog::discovery` rather than a hand-kept list.
 
 ## Provider Configuration
 
@@ -154,7 +179,7 @@ Each provider is configured via `ProviderConfig` in `config.toml`:
 ```toml
 [providers.claude]
 protocol = "anthropic"
-models = ["claude-sonnet-4-5-20250514"]
+models = ["claude-sonnet-5"]
 api_key = "sk-ant-..."
 max_tokens = 8192
 temperature = 0.7
@@ -230,7 +255,7 @@ For known providers, presets fill in defaults automatically:
 ```toml
 [providers.deepseek]
 # No need to specify protocol or base_url — preset handles it
-models = ["deepseek-chat"]
+models = ["deepseek-v4-flash"]
 api_key = "sk-..."
 enabled = true
 ```

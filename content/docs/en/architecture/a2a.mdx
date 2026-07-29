@@ -1,121 +1,150 @@
 ---
 title: "A2A Protocol"
-description: "Agent-to-Agent protocol adapter for inter-agent communication and sub-agent spawning."
+description: "A2A protocol adapter: AgentCard / Task / Message domain, port traits, A2AService sub-agent delegation, CardRegistry / SmartRouter / LlmMatcher."
 ---
 
-The `a2a` module provides the Agent-to-Agent (A2A) protocol adapter, enabling Aleph agents to communicate with each other and spawn sub-agents for collaborative task execution.
+The `a2a` module is the [Agent-to-Agent (A2A)](https://github.com/anthropics/a2a) protocol adapter. It both lets Aleph talk to external A2A agents and routes internal sub-agent delegations to external implementations.
+
+> The historical "domain / port / service / adapter" five-bucket split still applies, but `service/` is no longer home to `sub_agent` alone: it now also carries `card_builder` / `card_refresh` / `card_registry` / `llm_matcher` / `notification` / `smart_router`. The sub-agent delegation lives at the crate root in `src/a2a/sub_agent.rs`.
 
 ## Overview
 
-A2A is a protocol for inter-agent communication that allows:
-- **Sub-agent spawning** — Create child agents for parallel task execution
-- **Agent-to-agent messaging** — Send messages between agents in the same system
-- **Task delegation** — Delegate sub-tasks to specialized agents
-- **Result aggregation** — Collect and merge results from multiple agents
+A2A enables:
+- **Agent Card discovery** — `card_registry` caches `AgentCard`s; `card_refresh` runs periodic refresh + health monitoring
+- **LLM smart routing** — `llm_matcher` + `smart_router` map natural-language task descriptions to the best-matching A2A agent
+- **Sub-agent delegation** — `A2ASubAgent` (`src/a2a/sub_agent.rs`) re-attaches A2A sub-agents to Aleph's memory / runtime
+- **A2A protocol messages** — `domain/message.rs::A2AMessage` (text / file / data Parts), `A2ATask` (multi-turn task with state machine), `TaskState` transitions
+- **Client / server** — `adapter/client/` and `adapter/server/` are A2A JSON-RPC endpoints
 
 ## Architecture
 
 ```
-A2A Adapter
-  ├── Domain — Core A2A types and messages
-  ├── Port — Protocol interface definitions
-  ├── Service — Business logic for agent coordination
-  ├── Adapter — Concrete protocol implementations
-  ├── Config — A2A configuration
-  └── Sub-agent — Sub-agent lifecycle management
+src/a2a/
+├── mod.rs              # entry; re-exports five submodules
+├── config.rs           # A2A configuration
+├── sub_agent.rs        # A2ASubAgent / DelegationOutcome: sub-agent delegation chain
+├── tests.rs            # module tests
+├── domain/             # core A2A types
+│   ├── mod.rs
+│   ├── agent_card.rs   # AgentCard / AgentProvider / AgentInterface / TransportProtocol / AgentSkill / AgentExtension
+│   ├── message.rs      # A2ARole / A2AMessage / Part (text | file | data) / FileContent / Artifact
+│   ├── task.rs         # TaskState (state machine) / TaskStatus / A2ATask / ListTasksParams / ListTasksResult
+│   ├── events.rs       # A2A events
+│   ├── security.rs     # security-related domain types
+│   └── error.rs        # A2A errors
+├── port/               # protocol interfaces (traits)
+│   ├── mod.rs
+│   ├── agent_resolver.rs
+│   ├── authenticator.rs
+│   ├── message_handler.rs
+│   ├── streaming.rs
+│   └── task_manager.rs
+├── service/            # business logic / adapter layer
+│   ├── mod.rs
+│   ├── card_builder.rs        # AgentCard construction
+│   ├── card_refresh.rs        # periodic refresh + spawn_card_refresh / spawn_health_monitor / refresh_all_cards
+│   ├── card_registry.rs       # CardRegistry: cache + lookup
+│   ├── llm_matcher.rs         # SemanticLlmMatcher: LLM-based semantic matching
+│   ├── notification.rs        # NotificationService / PushNotificationConfig
+│   └── smart_router.rs        # SmartRouter / LlmMatcher / RoutingDecision / RoutingMethod
+└── adapter/            # protocol implementations
+    ├── mod.rs
+    ├── auth/           # A2A auth adapters
+    ├── client/         # A2A client: JSON-RPC over HTTP / stdio
+    └── server/         # A2A server: exposes Aleph as an A2A agent
 ```
 
-## Core Components
-
-### Domain
-
-Core types for A2A messaging:
+## Domain types (`src/a2a/domain/`)
 
 ```rust
-// src/a2a/domain/mod.rs
-pub struct AgentMessage {
-    pub from: AgentId,
-    pub to: AgentId,
-    pub payload: MessagePayload,
-}
+// agent_card.rs
+pub struct AgentCard { /* name / description / url / version / capabilities / skills / provider / interfaces / security / extensions */ }
+pub struct AgentProvider { pub organization: String, pub url: String }
+pub struct AgentInterface { /* TransportProtocol + URL */ }
+pub enum TransportProtocol { Grpc, HttpJson, WebSocket, /* … */ }
+pub struct AgentSkill { /* id / name / description / tags / examples / input_modes / output_modes */ }
+pub struct AgentExtension { /* uri / required / params */ }
 
-pub enum MessagePayload {
-    TaskRequest { task: TaskSpec },
-    TaskResponse { result: TaskResult },
-    StatusUpdate { state: AgentState },
-}
+// message.rs
+pub enum A2ARole { User, Agent, System }
+pub struct A2AMessage { pub role: A2ARole, pub parts: Vec<Part>, pub metadata: Option<JsonValue> }
+pub enum Part { Text { text: String, metadata: Option<JsonValue> }, File(FileContent), Data(JsonValue) }
+pub struct FileContent { pub name: Option<String>, pub mime_type: Option<String>, pub uri: String, pub bytes: Option<Vec<u8>> }
+pub struct Artifact { pub name: Option<String>, pub parts: Vec<Part> }
+
+// task.rs
+pub enum TaskState { Submitted, Working, InputRequired, Completed, Canceled, Failed, Unknown }
+impl TaskState { pub fn can_transition_to(&self, target: &Self) -> bool }
+pub struct TaskStatus { pub state: TaskState, pub message: Option<A2AMessage> }
+pub struct A2ATask { /* id / context_id / status / artifacts / history / metadata */ }
+pub fn new(id: impl Into<String>, context_id: impl Into<String>) -> Self;
+pub struct ListTasksParams { /* session_id / context_id / status / page_size / page_token */ }
+pub struct ListTasksResult { /* tasks / next_page_token */ }
 ```
 
-### Service
-
-Orchestrates inter-agent communication:
+## Port interfaces (`src/a2a/port/`)
 
 ```rust
-// src/a2a/service/mod.rs
-pub struct A2AService {
-    adapter: Box<dyn A2AAdapter>,
-}
+// One trait per file, implemented by both client and server adapters in adapter/
 
-impl A2AService {
-    pub async fn spawn_sub_agent(
-        &self,
-        spec: AgentSpec,
-    ) -> Result<AgentId>;
-    
-    pub async fn send_message(
-        &self,
-        msg: AgentMessage,
-    ) -> Result<()>;
-    
-    pub async fn collect_results(
-        &self,
-        task_id: TaskId,
-    ) -> Result<Vec<TaskResult>>;
-}
+// agent_resolver.rs   — resolve AgentCard / agent_id into a callable endpoint
+// authenticator.rs    — A2A auth scheme
+// message_handler.rs  — inbound A2AMessage handling
+// streaming.rs        — streaming responses (subscribe)
+// task_manager.rs     — task persistence / state advancement
 ```
 
-### Sub-Agent
+Each trait is implemented by `adapter::client` (remote A2A agents) and `adapter::server` (Aleph exposed as an A2A agent).
 
-Manages sub-agent lifecycle:
+## Service layer (`src/a2a/service/`)
 
 ```rust
-// src/a2a/sub_agent/mod.rs
-pub struct SubAgentManager {
-    active: HashMap<AgentId, SubAgentHandle>,
+pub use card_builder::CardBuilder;
+pub use card_refresh::{refresh_all_cards, spawn_card_refresh, spawn_health_monitor};
+pub use card_registry::CardRegistry;
+pub use llm_matcher::SemanticLlmMatcher;
+pub use notification::{NotificationService, PushNotificationConfig};
+pub use smart_router::{LlmMatcher, RoutingDecision, RoutingMethod, SmartRouter};
+```
+
+`SmartRouter` aggregates `LlmMatcher` and `CardRegistry`, mapping a user's natural-language task to the best A2A agent:
+
+- **`LlmMatcher::route(task_description)` → `RoutingDecision`** — LLM-scored
+- **`CardRegistry::lookup(decision)`** — resolve to an `AgentCard` + endpoint
+- **`SmartRouter::route_and_invoke`** — end-to-end: score → pick card → delegate
+
+`spawn_card_refresh` + `spawn_health_monitor` keep `CardRegistry` fresh in the background; `refresh_all_cards` is the one-shot full refresh.
+
+## Sub-agent delegation (`src/a2a/sub_agent.rs`)
+
+```rust
+pub struct A2ASubAgent { /* smart_router + client_pool */ }
+pub struct DelegationOutcome { /* success / tokens / artifacts */ }
+
+impl A2ASubAgent {
+    pub fn new(smart_router: Arc<SmartRouter>, client_pool: Arc<A2AClientPool>) -> Self;
+    pub fn with_raw_memory_writer(self, writer: Arc<dyn RawMemoryStore>) -> Self;
+    pub fn with_capture_registry(self, registry: Arc<MemoryExtensionRegistry>) -> Self;
 }
-
-impl SubAgentManager {
-    pub async fn spawn(
-        &mut self,
-        spec: AgentSpec,
-    ) -> Result<AgentId>;
-    
-    pub async fn terminate(
-        &mut self,
-        id: AgentId,
-    ) -> Result<()>;
-}
 ```
 
-## Message Flow
+`A2ASubAgent` re-attaches A2A sub-agents to Aleph:
+- `with_raw_memory_writer` — write delegation results into Aleph's raw memory (`src/memory/store/`)
+- `with_capture_registry` — register memory-extension capture so cross-agent outcomes are visible to the memory system
+- **Closed within the delegation chain** — A2A subagents can be re-authorized (the `with_*` builders are exactly the re-attachment channels)
+
+## Adapter layer (`src/a2a/adapter/`)
 
 ```
-Parent Agent                    A2A Service                    Sub-Agent
-     │                              │                              │
-     │── spawn(spec) ──────────────▶│                              │
-     │                              │── create ───────────────────▶│
-     │                              │◀─ AgentId ───────────────────│
-     │◀─ AgentId ───────────────────│                              │
-     │                              │                              │
-     │── send(task) ───────────────▶│── forward ──────────────────▶│
-     │                              │                              │
-     │                              │◀─ result ────────────────────│
-     │◀─ TaskResult ────────────────│                              │
+adapter/
+├── auth/      # A2A auth adapters (Bearer / API key / OAuth)
+├── client/    # A2A client implementation: JSON-RPC over HTTP / stdio
+└── server/    # A2A server implementation: projects Aleph as an externally discoverable A2A agent
 ```
+
+The client side maps A2A JSON-RPC calls into Aleph's `A2AMessage` / `A2ATask` domain types; the server side projects Aleph's agent registry into `AgentCard` + handlers.
 
 ## Configuration
-
-A2A is configured through `config.toml`:
 
 ```toml
 [a2a]
@@ -124,39 +153,14 @@ max_sub_agents = 10
 sub_agent_timeout = 300  # seconds
 ```
 
-## Code Location
+## Sub-agent tree RPC
 
-- `src/a2a/mod.rs` — Module entry point
-- `src/a2a/domain/` — Core types and messages
-- `src/a2a/service/` — Business logic
-- `src/a2a/adapter/` — Protocol implementations
-- `src/a2a/sub_agent/` — Sub-agent lifecycle
-- `src/a2a/config.rs` — Configuration
+`subagent.tree` returns an agent's subagent tree (node identity + live events + tree RPC). `Interrupt` now **truly cancels fan-out** — no longer demoted to enqueue; long-running detached members no longer leak.
 
 ## See Also
 
-- [Orchestrator](./orchestrator) — Parent agent orchestration
+- [Orchestrator](./orchestrator) — Parent-agent orchestration
 - [Teams](./teams) — Multi-agent team management
 - [ACP](./acp) — Agent Client Protocol for external tools
-
----
-
-## 26.7.x Addendum
-
-### Interrupt Truly Cancels
-
-`Interrupt` now **truly cancels fan-out**, not demoted to queue. Long-running detached members no longer leak.
-
-### Subagent Authorization Restored
-
-Closed within the delegation chain — A2A subagents can be re-authorized.
-
-### `subagent.tree` RPC
-
-Returns an agent's subagent tree (node identity + live events + tree RPC).
-
-### See Also
-
 - [A2A Concept](/docs/en/concepts/a2a-protocol) — full concept
-- [Teams](/docs/en/architecture/teams) — team coordination
 - [Gateway RPC `subagent.tree`](/docs/en/gateway/methods/agents)

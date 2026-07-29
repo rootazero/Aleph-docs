@@ -1,56 +1,164 @@
 ---
 title: "Executor"
-description: "Tool execution engine with 3 handler sources, layered middleware, and timeout management."
+description: "Tool execution engine based on the ToolRegistry trait, exposed to the Harness Think→Act loop via RegistryToolAdapter."
 ---
 
 # Executor
 
-The Executor is the tool execution engine. It receives tool decisions from the Thinker (via the Dispatcher) and routes them to the appropriate handler.
+The Executor is the tool execution engine. It receives tool decisions from the gateway execution engine (`src/gateway/execution_engine/`) and routes them to the correct handler; the unified `BuiltinToolRegistry` in `src/executor/` is the production implementation.
 
-**Location**: `src/tools/`
+**Location**: `src/executor/`
 
 ---
 
-## Execution Flow
+## Relationship to the Harness
 
 ```
 Thinker Decision (tool_use)
      │
      ▼
-Dispatcher
+Harness loop (harness::agent::loop_graph / harness::agent::think)
+     │
+     ▼
+ToolService (scoped tool stack: src/tools/scoped/builder.rs)
+     │   Adapter: src/tools/adapters/registry_adapter
+     │   Exposes Arc<dyn ToolService> as a LoopTool
      │
      ▼
 Executor
      │
-     ├───▶ Builtin Tool (AlephTool trait)
-     │       Direct Rust execution
+     ├─ BuiltinToolRegistry  (src/executor/builtin_registry/)
+     │     Surfaces Arc<ToolRegistry> to the tool stack
      │
-     ├───▶ MCP Tool (Model Context Protocol)
-     │       JSON-RPC to external process
-     │
-     └───▶ Extension Tool (WASM / Node.js)
-             Plugin runtime execution
+     └─ ToolRegistry trait   (src/executor/tool_registry.rs)
+           Resolves a name to a UnifiedTool, executes the call
 ```
 
-Exec-class tools (`code_exec`, `bash_exec`) route through an additional **Sandbox layer** (`src/sandbox/`) between the tool and process execution. The sandbox owns per-session workspace provisioning, capability enforcement, and OS-level seatbelt isolation via `OsSandboxDriver`.
+Exec-class tools (`code_exec`, `bash_exec`) route through an additional **Sandbox layer** (`src/sandbox/`). The sandbox owns per-session workspace provisioning, capability enforcement, and OS-level seatbelt isolation (macOS sandbox-exec / Windows job-object / Linux cgroups-v2 / seccomp).
 
 ---
 
-## ToolService Façade
-
-Consumers depend on `Arc<dyn ToolService>` exclusively:
+## The `ToolRegistry` trait (`src/executor/tool_registry.rs`)
 
 ```rust
-pub trait ToolService: Send + Sync + 'static {
-    async fn execute(&self, name: &str, input: Value) -> Result<ToolOutput, ToolError>;
-    async fn list(&self) -> Vec<ToolDefinition>;
-    async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+pub trait ToolRegistry: Send + Sync {
+    fn get_tool(&self, name: &str) -> Option<&UnifiedTool>;
+
+    fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + '_>>;
+
+    // Optional per-run shared handles (default None):
+
+    /// Shared workspace handle: written by the execution engine after workspace
+    /// resolution, read by tools like `memory_search`.
+    fn workspace_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
+
+    /// Shared per-agent SmartRecallConfig map: Two-Phase Smart Recall for `memory_search`.
+    fn smart_recall_config_handle(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<HashMap<String, SmartRecallConfig>>>> { None }
+
+    /// Shared SessionContext: agent management tools bind agent switches to
+    /// the correct conversation.
+    fn session_context_handle(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<SessionContext>>> { None }
+
+    /// Shared ToolContextHandle: workspace-scoped output paths.
+    fn tool_context_handle(&self) -> Option<crate::tools::ToolContextHandle> { None }
+
+    /// Shared session-key handle: `memory_search` `scope=current_session` filter.
+    fn session_key_handle(&self) -> Option<Arc<tokio::sync::RwLock<String>>> { None }
 }
 ```
 
+The production implementor is `BuiltinToolRegistry` (`src/executor/builtin_registry/registry/`). `src/tools/adapters/registry_adapter::RegistryToolAdapter` wraps any `ToolRegistry` implementor as a `LoopTool`, and the gateway's `ScopedToolService` exposes it to the harness. The handle accessors let the execution engine hand workspace- and session-scoped context to tools without threading it through every call signature.
+
 ---
 
-## Middleware Stack
+## `BuiltinToolRegistry` (`src/executor/builtin_registry/`)
+
+```rust
+impl ToolRegistry for BuiltinToolRegistry {
+    fn get_tool(&self, name: &str) -> Option<&UnifiedTool> { /* … */ }
+    fn execute_tool(&self, name: &str, args: Value) -> BoxFuture<'_, Result<Value>> { /* … */ }
+    // workspace_handle / tool_context_handle / session_key_handle return real Arcs
+}
+
+pub struct BuiltinToolConfig {
+    pub gateway_context: Option<Arc<GatewayContext>>,
+    pub tool_catalog: Option<Arc<ToolCatalog>>,
+    /* other dependencies */
+}
+
+impl BuiltinToolRegistry {
+    pub async fn new() -> Result<Arc<Self>>;
+    pub async fn with_config(config: BuiltinToolConfig) -> Result<Arc<Self>>;
+}
+```
+
+Public types (`src/executor/builtin_registry/definitions.rs` + `groups.rs`):
+
+| Type | Purpose |
+|---|---|
+| `BUILTIN_TOOL_DEFINITIONS` | All builtin tools' JSON Schemas / argument definitions (single source) |
+| `TOOL_CATEGORIES` | Tools grouped by function (Settings UI) |
+| `BuiltinToolConfig` | Optional dependencies for constructing a registry (gateway context, tool catalog, …) |
+| `get_builtin_tool_names()` | List every registered name |
+| `create_tool_boxed()` | Type-erased tool factory |
+
+Tests (`tests/gateway_feature_gate.rs::BuiltinToolRegistry::test_resolve_plugin_handler_*`) verify that plugin tools resolve through the `plugin:<plugin_id>:<name>` direct fast path and stay in sync via `ExtensionManager::sync_runtime_snapshots`.
+
+---
+
+## Tool metadata source
+
+Every tool in the registry is a `UnifiedTool` (`src/tool_metadata/types/unified/`):
+
+```rust
+pub struct UnifiedTool {
+    pub id: String,                          // "builtin:search" | "mcp:fs:read_file" | "plugin:diagnostics:ping" | …
+    pub name: String,                        // command name (no namespace prefix)
+    pub source: ToolSource,                  // Builtin | Native | Mcp { server } | Skill { id } | Plugin { .. } | Custom { .. }
+    pub routing_regex: Option<String>,       // reverses into a RoutingRuleConfig
+    pub routing_strip_prefix: bool,          // strip prefix after slash-command match
+    pub routing_system_prompt: Option<String>,
+    pub routing_capabilities: Vec<String>,   // skill allowed-tools whitelist
+    pub routing_intent_type: Option<String>,
+    pub routing_context_format: Option<String>,
+    pub aliases: Vec<String>,                // fuzzy matching + slash-command parsing
+    pub visible_channels: Vec<ChannelType>,
+    pub sort_order: u32,
+    pub is_active: bool,
+    pub is_builtin: bool,
+    /* … */
+}
+```
+
+`ToolCatalog::get_builtin_routing_rules` (`src/tool_metadata/registry/query.rs`) reverses `UnifiedTool.routing_regex` into `RoutingRuleConfig` — single source of truth, so the config module never hardcodes command rules.
+
+---
+
+## Public result types (`src/executor/types.rs`)
+
+```rust
+pub struct ExecutionResult { content, tool_calls, task_results, execution_time_ms, success, error }
+pub struct ToolCallRecord { tool_name, parameters, result, success, execution_time_ms }
+pub struct TaskExecutionResult { task_id, description, success, output, error, execution_time_ms }
+pub struct ExecutionContext { app_context, window_title, session_id, stream }
+pub enum ExecutorError { ExecutionFailed, ToolError, TaskFailed { task_id, error }, Timeout, Cancelled }
+```
+
+`ExecutionResult.task_results` carries per-task outcomes for multi-task plans (`TaskExecutionResult`) — it's a data structure, not an independent scheduler. `TerminateReason::DiminishingReturns` in `src/orchestrator/summary_format.rs` is a **stop-reason label** the loop emits when output plateaus; the hard-stop detector was deleted under R10, and the loop is bounded by `max_iterations`, the tool-loop verifier, and the model's own stop instead.
+
+---
+
+## Middleware stack
+
+Every tool call passes through the standard middleware stack in `src/tools/scoped/`:
 
 ```
 ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → CoreDispatch
@@ -62,62 +170,13 @@ ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → Cor
 | `PermissionLayer` | Permission checks (`SmartFilter`) |
 | `ContextRuleLayer` | Context-based rules |
 | `TimeoutLayer` | Timeout enforcement |
-| `CoreDispatch` | Innermost layer holding the `ToolRegistry` with `BuiltinHandler`, `McpHandler`, and `ExtensionHandler` |
+| `CoreDispatch` | Innermost layer holding the `ToolRegistry` |
 
-`CoreDispatch` holds an `ArcSwap`-backed `ToolRegistry` of three handler sources:
-- `BuiltinHandler`
-- `McpHandler`
-- `ExtensionHandler`
+The slash fast path (`execute_slash_command_fast_path`), `tools.invoke`, and the background-continuation bypass are **all** forced through the `src/tools/scoped/` approval gate — this is the 26.7.15+ fix that makes the approval dialog see the actual command.
 
 ---
 
-## Core Dispatch
-
-Tool authors implement `AlephTool` — the façade adapts them via `BuiltinHandler`. No author-side API change.
-
-Session-event tracing: callers bundle `ToolService` dispatch + `SessionService` event emission via `crate::session::invoke_with_session_trace(tool_svc, session_svc, ...)`.
-
----
-
-## AlephTool Trait
-
-### Static Dispatch (Compile-time)
-
-```rust
-pub trait AlephTool: Clone + Send + Sync + 'static {
-    /// Tool name (used in LLM tool_use)
-    const NAME: &'static str;
-
-    /// Tool description for LLM
-    const DESCRIPTION: &'static str;
-
-    /// Argument type (auto JSON Schema via schemars)
-    type Args: Serialize + DeserializeOwned + JsonSchema + Send;
-
-    /// Return type
-    type Output: Serialize + Send;
-
-    /// Execute the tool
-    async fn call(&self, args: Self::Args) -> Result<Self::Output>;
-}
-```
-
-### Dynamic Dispatch (Runtime)
-
-```rust
-pub trait AlephToolDyn: Send + Sync {
-    fn name(&self) -> &str;
-    fn definition(&self) -> ToolDefinition;
-    fn call(&self, args: Value) -> BoxFuture<'_, Result<Value>>;
-}
-
-// Blanket impl: Any AlephTool is also AlephToolDyn
-impl<T: AlephTool> AlephToolDyn for T { // Blanket implementation }
-```
-
----
-
-## Exec-Class Tools & Sandbox
+## Exec-class tools & sandbox
 
 - `code_exec`, `bash_exec` route through the Sandbox layer
 - `Sandbox` trait → `WorkspaceSandbox` → `OsSandboxDriver`
@@ -127,25 +186,7 @@ impl<T: AlephTool> AlephToolDyn for T { // Blanket implementation }
 
 ---
 
-## See Also
-
-- [Tool Architecture](./tools) — Tool development guide
-- Sandbox — Execution isolation
-- MCP — Model Context Protocol
-
----
-
-## 26.7.x Addendum
-
-### Action-Aware Approval
-
-26.7.15+ the execution approval gate is **action-aware** — the human sees the actual command and the grant fingerprint **keys on it**.
-
-### Slash Fast-Path Bypass Closed
-
-The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the `src/tools/scoped/` approval gate.
-
-### Three-Tier Execution Permissions
+## Three-tier execution permissions
 
 | Tier | Behavior |
 |------|----------|
@@ -153,12 +194,19 @@ The slash fast-path, `tools.invoke`, and the background-continuation bypass are 
 | `auto` | Idempotent tools auto-allow; destructive tools still need approval |
 | `full` | All auto-allow (besides the hard security filter) |
 
-### Process-Isolation Kernel
+---
 
-Sandbox restricted-token / job-object / AppContainer are issued in-place at spawn (R1 process-isolation carve-out).
+## Process-isolation kernel
 
-### See Also
+Sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn (R1 process-isolation carve-out).
 
+---
+
+## See Also
+
+- [Tool Architecture](../tools) — Tool development guide
+- [Sandbox](./sandbox) — Execution isolation
+- MCP — Model Context Protocol
 - [Execution Engine](/docs/en/concepts/execution-engine)
 - [Execution Approval](/docs/en/security/exec-approval)
 - [Architectural Redlines R7 / R10](/docs/en/philosophy/redlines)
