@@ -3,7 +3,7 @@ title: "Methods Reference"
 description: "Overview of all Gateway RPC method namespaces"
 ---
 
-The Aleph Gateway exposes its functionality through namespaced JSON-RPC 2.0 methods. Each namespace groups related operations, and every method follows the same request/response conventions.
+The Aleph Gateway exposes its functionality through namespaced JSON-RPC 2.0 methods. Each namespace groups related operations, and every method follows the same request/response conventions. The namespace registry lives in [`src/gateway/handlers/mod.rs`](../../../reference/GATEWAY.md) and `src/bin/aleph-server/commands/start/builder/handlers/` on the boot path.
 
 ## Request Format
 
@@ -18,9 +18,9 @@ All RPC requests use the JSON-RPC 2.0 envelope:
 }
 ```
 
-- `id` can be a string, number, or null (null for notifications).
-- `method` follows the `namespace.action` naming convention.
-- `params` is an optional JSON object specific to each method.
+- `id` can be a string, number, or `null` (`null` for notifications)
+- `method` follows the `namespace.action` naming convention
+- `params` is an optional JSON object specific to each method
 
 ## Response Format
 
@@ -65,340 +65,196 @@ All RPC requests use the JSON-RPC 2.0 envelope:
 
 ## Method Namespaces
 
-### agent.*
+The table below groups namespaces by topic. Per-method signatures and examples live on each sub-page.
 
-Core agent execution and control. Start runs, stream responses, check status, and manage conversation history.
-
-| Method | Description |
-|--------|-------------|
-| [`agent.run`](/docs/en/gateway/methods/agent#agentrun) | Start an agent run with a message |
-| [`agent.cancel`](/docs/en/gateway/methods/agent#agentcancel) | Cancel a running agent |
-| [`agent.status`](/docs/en/gateway/methods/agent#agentstatus) | Get the status of a run |
-| [`agent.history`](/docs/en/gateway/methods/agent#agenthistory) | Get conversation history |
-| [`agent.clear`](/docs/en/gateway/methods/agent#agentclear) | Clear session history |
-
-[Full reference -->](/docs/en/gateway/methods/agent)
-
-### session.*
-
-Session lifecycle management. Create, list, inspect, export, and delete conversation sessions.
-
-| Method | Description |
-|--------|-------------|
-| [`session.get`](/docs/en/gateway/methods/session#sessionget) | Get session details |
-| [`session.list`](/docs/en/gateway/methods/session#sessionlist) | List all sessions |
-| [`session.history`](/docs/en/gateway/methods/session#sessionhistory) | Get message history |
-| [`session.compact`](/docs/en/gateway/methods/session#sessioncompact) | Compress session context |
-| [`session.delete`](/docs/en/gateway/methods/session#sessiondelete) | Delete a session |
-| [`session.export`](/docs/en/gateway/methods/session#sessionexport) | Export session data |
-
-[Full reference -->](/docs/en/gateway/methods/session)
-
-### config.*
-
-Runtime configuration management. Read, patch, replace, and reload configuration without restarting the server.
-
-| Method | Description |
-|--------|-------------|
-| [`config.get`](/docs/en/gateway/methods/config#configget) | Get current configuration |
-| [`config.patch`](/docs/en/gateway/methods/config#configpatch) | Apply a partial update |
-| [`config.apply`](/docs/en/gateway/methods/config#configapply) | Replace full configuration |
-| [`config.reload`](/docs/en/gateway/methods/config#configreload) | Reload from config file |
-| [`config.validate`](/docs/en/gateway/methods/config#configvalidate) | Validate a config object |
-
-[Full reference -->](/docs/en/gateway/methods/config)
-
-### exec.*
-
-Command execution approval system. Request, resolve, and manage approval policies for shell commands.
-
-| Method | Description |
-|--------|-------------|
-| [`exec.approval.request`](/docs/en/gateway/methods/exec#execapprovalrequest) | Request execution approval |
-| [`exec.approval.resolve`](/docs/en/gateway/methods/exec#execapprovalresolve) | Resolve a pending approval |
-| [`exec.approvals.get`](/docs/en/gateway/methods/exec#execapprovalsget) | Get approval configuration |
-| [`exec.approvals.set`](/docs/en/gateway/methods/exec#execapprovalsset) | Update approval configuration |
-| [`exec.approvals.pending`](/docs/en/gateway/methods/exec#execapprovalspending) | List pending approvals |
-
-[Full reference -->](/docs/en/gateway/methods/exec)
-
-### wizard.*
-
-Multi-step configuration wizards. Start guided setup flows, answer steps, and track wizard progress.
-
-| Method | Description |
-|--------|-------------|
-| [`wizard.start`](/docs/en/gateway/methods/wizard#wizardstart) | Start a wizard session |
-| [`wizard.answer`](/docs/en/gateway/methods/wizard#wizardanswer) | Answer current step |
-| [`wizard.next`](/docs/en/gateway/methods/wizard#wizardnext) | Advance to next step |
-| [`wizard.cancel`](/docs/en/gateway/methods/wizard#wizardcancel) | Cancel wizard |
-| [`wizard.status`](/docs/en/gateway/methods/wizard#wizardstatus) | Check wizard status |
-
-[Full reference -->](/docs/en/gateway/methods/wizard)
-
-### cron.*
-
-Scheduled job management. Create, list, trigger, pause, and resume cron jobs that execute agent prompts on a schedule.
-
-| Method | Description |
-|--------|-------------|
-| [`cron.create`](/docs/en/gateway/methods/cron#croncreate) | Create a scheduled job |
-| [`cron.list`](/docs/en/gateway/methods/cron#cronlist) | List all jobs |
-| [`cron.get`](/docs/en/gateway/methods/cron#cronget) | Get job details |
-| [`cron.delete`](/docs/en/gateway/methods/cron#crondelete) | Delete a job |
-| [`cron.trigger`](/docs/en/gateway/methods/cron#crontrigger) | Manually trigger a job |
-| [`cron.pause`](/docs/en/gateway/methods/cron#cronpause) | Pause a job |
-| [`cron.resume`](/docs/en/gateway/methods/cron#cronresume) | Resume a paused job |
-
-[Full reference -->](/docs/en/gateway/methods/cron)
-
-### events.*
-
-Event subscription and streaming. Subscribe to real-time events using glob patterns.
-
-| Method | Description |
-|--------|-------------|
-| [`events.subscribe`](/docs/en/gateway/methods/events#eventssubscribe) | Subscribe to event topics |
-| [`events.unsubscribe`](/docs/en/gateway/methods/events#eventsunsubscribe) | Unsubscribe from topics |
-| [`events.list`](/docs/en/gateway/methods/events#eventslist) | List active subscriptions |
-
-[Full reference -->](/docs/en/gateway/methods/events)
-
-### browser.*
-
-Browser automation via Chrome DevTools Protocol. Navigate pages, interact with elements, take screenshots, and extract content.
-
-| Method | Description |
-|--------|-------------|
-| [`browser.navigate`](/docs/en/gateway/methods/browser#browsernavigate) | Navigate to a URL |
-| [`browser.click`](/docs/en/gateway/methods/browser#browserclick) | Click an element |
-| [`browser.type`](/docs/en/gateway/methods/browser#browsertype) | Type text into an element |
-| [`browser.screenshot`](/docs/en/gateway/methods/browser#browserscreenshot) | Capture a screenshot |
-| [`browser.evaluate`](/docs/en/gateway/methods/browser#browserevaluate) | Run JavaScript |
-| [`browser.snapshot`](/docs/en/gateway/methods/browser#browsersnapshot) | Get ARIA accessibility snapshot |
-
-[Full reference -->](/docs/en/gateway/methods/browser)
-
-## Additional Namespaces
-
-These namespaces provide access to extended functionality. Methods marked with `*` are wired at runtime; stubs/placeholders return errors until their subsystem is initialized.
-
-### Core Infrastructure
+### Agent Execution
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `auth.*` | `connect`, `pairing.approve`, `pairing.reject`, `pairing.list`, `devices.list`, `devices.revoke`, `auth.show_token`, `auth.reset_token`, `auth.list_sessions`, `auth.revoke_session` | Authentication and device management |
-| `agents.*` | `list`, `get`, `create`, `update`, `delete`, `set_default`, `files.list`, `files.get`, `files.set`, `files.delete`, `tools_schema`, `bindings`, `teams` | Agent CRUD and file management |
-| `sessions.*` | `list`, `history`, `reset`, `delete`, `new`, `set_topic`, `patch`, `preview`, `compaction.list`, `compaction.restore`, `compaction.branch` | Session lifecycle (plural namespace) |
-| `session.*` | `create`, `usage`, `compact` | Session operations (singular namespace) |
-| `channels.*` | `list`, `status`, `set_agent` | Channel management |
-| `channel.*` | `start`, `stop`, `pairing_data`, `send`, `create`, `delete` | Single channel operations |
+| `agent.*` | `run` / `status` / `cancel` / `list` | Agent execution control (see [agent.*](./agent)) |
+| `chat.*` | `send` / `abort` / `history` / `clear` / `rewind` / `context_estimate` | Chat interface (`chat.send` shares the execution adapter with `agent.run`) |
+| `run.*` | (stream.* events under `events.*`) | Run-lifecycle events (`run.accepted`, ...) |
 
 ### Configuration
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `config.*` | `reload`, `get`, `validate`, `path`, `get_tool_permissions`, `update_tool_permissions` | Runtime configuration |
-| `providers.*` | `list`, `get`, `create`, `update`, `delete`, `setDefault`, `test`, `needsSetup`, `oauthLogin`, `oauthLogout`, `oauthStatus` | AI provider management |
-| `agent_config.*` | `get`, `update`, `get_file_ops`, `update_file_ops`, `get_code_exec`, `update_code_exec`, `get_tool_permissions`, `update_tool_permissions` | Per-agent configuration |
-| `general_config.*` | `get`, `update` | General settings |
-| `browser_config.*` | `get`, `update` | Browser automation settings |
-| `behavior_config.*` | `get`, `update` | Agent behavior settings |
-| `generation_config.*` | `get`, `update` | Generation settings |
-| `execution_config.*` | `get`, `update` | Execution settings |
-| `memory_config.*` | `get`, `update` | Memory system settings |
-| `mcp_config.*` | `list`, `get`, `create`, `update`, `delete` | MCP server configuration |
-| `rerank_config.*` | `get`, `update`, `test` | Reranker configuration |
-| `search_config.*` | `get`, `update`, `test`, `deleteBackend` | Search backend configuration |
-| `security_config.*` | `get`, `update`, `list_devices`, `revoke_device` | Security settings |
-| `routing_rules.*` | `list`, `get`, `create`, `update`, `delete`, `move` | Task routing rules |
+| `config.*` | `schema` / `get` / `patch` / `reload` / `path` / `validate` / `get_full_config` / `reload_with_subsystems` / `get_tool_permissions` / `update_tool_permissions` | Runtime config (see [config.*](./config)) |
+| `behavior_config.*` | `get` / `update` | Agent behaviour settings |
+| `browser_config.*` | `get` / `update` | Browser automation settings |
+| `execution_config.*` | `get` / `update` | Execution settings |
+| `fetch_config.*` | `get` / `update` / `test` | Web fetch settings |
+| `general_config.*` | `get` / `update` | General settings |
+| `generation_config.*` | `get` / `update` | Generation settings |
+| `memory_config.*` | `get` / `update` | Memory system settings |
+| `rerank_config.*` | `get` / `update` / `test` | Reranker configuration |
+| `route_config.*` | `get` / `update` | Routing settings |
+| `routing_rules.*` | `list` / `get` / `create` / `update` / `delete` / `move` | Task routing rules |
+| `search_config.*` | `get` / `update` / `test` / `deleteBackend` | Search backend configuration |
+| `security_config.*` | `get` / `update` / `list_devices` / `revoke_device` | Security settings |
 
-### Memory & Knowledge
-
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `memory.*` | `search`, `stats`, `delete`, `clear`, `listFacts`, `clearFacts`, `appList`, `compress`, `reembed`, `reembed.cancel`, `retrieve_with_trace` | Memory system |
-| `graph.*` | `query`, `neighbors`, `node_detail`, `search` | Knowledge graph |
-
-### Skills, Plugins & Tools
+### Identity
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `skills.*` | `status`, `update`, `install_dep`, `remove`, `install` | Skill System v2 management |
-| `extensions.*` | `catalog`, `installed`, `disclosure`, `configure`, `install`, `toggle`, `uninstall`, `sources.list`, `sources.refresh` | Unified [Extensions Store](/docs/en/concepts/extensions-store) façade over skill/plugin/MCP |
-| `plugin.*` | `list`, `install`, `installFromZip`, `uninstall`, `enable`, `disable`, `load`, `unload`, `reload`, `callTool`, `executeCommand` | Plugin lifecycle (canonical) |
-| `plugins.*` | `list`, `install`, `installFromZip`, `uninstall`, `enable`, `disable`, `load`, `unload`, `callTool`, `executeCommand` | Plugin lifecycle (legacy) |
-| `plugin.marketplace.*` | `list`, `add`, `update`, `remove`, `install` | Plugin marketplace |
-| `tools.*` | `catalog`, `effective` | Tool visibility |
-| `commands.*` | `list`, `execute` | Command discovery and execution |
-
-### Agent Execution & Chat
-
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `agent.*` | `run`, `status`, `cancel`, `respondToInput`, `list` | Agent execution control |
-| `chat.*` | `send`, `abort`, `history`, `clear` | Chat interface |
-| `run.*` | `wait`, `queue_message` | Run lifecycle (from `runs.rs`) |
-
-### Multi-Agent & Teams
-
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `group_chat.*` | `start`, `continue`, `mention`, `end`, `list`, `history` | Multi-agent group chat session primitive |
-| `teams.*` | `create`, `get`, `list`, `rename`, `disband`, `delete`, `chat.send`, `chat.thread`, `chat.history`, `create_task`, `update_task`, `list_tasks`, `task.*`, `snapshot.*`, `workflow.*`, `acp_member.*`, `usage` | Team management, group-chat thread, kanban tasks, snapshots & workflow |
-| `arena.*` | `create`, `query`, `settle` | Multi-agent arena |
-| `clawhub.*` | `search`, `browse`, `detail`, `install` | ClawHub skill registry (no longer a first-class store source; reachable as Store Agent long-tail) |
+| `identity.*` | `get` / `set` / `clear` / `list` | Identity / soul file management (see [identity.*](./identity)) |
 
 ### Scheduling & Services
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `cron.*` | `list`, `get`, `create`, `update`, `delete`, `status`, `run`, `runs`, `toggle` | Scheduled jobs |
-| `heartbeat.*` | `list`, `get`, `create`, `update`, `delete`, `toggle`, `wake`, `runs` | Heartbeat probes |
-| `services.*` | `start`, `stop`, `list`, `status` | Background services |
+| `cron.*` | `list` / `get` / `create` / `update` / `delete` / `status` / `run` / `runs` / `toggle` | Scheduled jobs (see [cron.*](./cron)) |
+| `heartbeat.*` | `list` / `get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` | Heartbeat probe tasks |
+| `services.*` | `start` / `stop` / `list` / `status` | Background services (see [services.*](./services)) |
+| `daemon.*` | `status` / `shutdown` / `logs` | Gateway daemon control (see [daemon.*](./daemon)) |
+| `logs.*` | `getLevel` / `setLevel` / `getDirectory` | Log management (see [logs.*](./logs)) |
 
-### System & Observability
+### Events
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `system.*` | `info` | System metrics |
-| `health` | `health` | Health check |
-| `version` | `version` | Server version |
-| `echo` | `echo` | Echo test |
-| `logs.*` | `getLevel`, `setLevel`, `getDirectory` | Log management |
-| `daemon.*` | `status`, `shutdown`, `logs` | Daemon control |
-| `trace.*` | `list`, `get` | Trace replay |
+| `events.*` | `subscribe` / `unsubscribe` / `list` | Topic subscriptions (see [events.*](./events)) |
+| `event` | (notification) | Delivered event frame `{topic, data, timestamp}` |
+| `trace.*` | `list` / `get` / `by_runs` | Trace replay (requires state.db; otherwise `SERVICE_UNAVAILABLE`) |
 | `activity.*` | `stats` | Activity statistics |
 
-### Identity & Guests
+### Memory & Knowledge
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `identity.*` | `get`, `set`, `clear`, `list` | Identity/soul management |
-| `guests.*` | `createInvitation`, `listPending`, `revokeInvitation`, `listSessions`, `terminateSession`, `getActivityLogs` | Guest session management |
+| `memory.*` | `search` / `delete` / `clear` / `listFacts` / `clearFacts` / `stats` / `compress` / `reembed` / `reembed.cancel` / `retrieve_with_trace` / `appList` / `list_corrections` / `trace` | Memory system |
+| `graph.*` | `query` / `node_detail` / `search` / `update_note` / `rename_note` / `delete_note` | Knowledge graph |
 
-### Workspace & Runtimes
-
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `workspace.*` | `create`, `list`, `get`, `update`, `archive` | Workspace isolation |
-| `runtimes.*` | `list`, `refresh`, `install` | Runtime capability management |
-
-### Generation & Providers
+### Agents, Files, Tools
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `generation_providers.*` | `list`, `get`, `create`, `update`, `delete`, `setDefault`, `test`, `voices` | Media generation providers |
-| `embedding_providers.*` | `list`, `get`, `add`, `update`, `remove`, `setActive`, `test`, `presets` | Embedding providers |
+| `agents.*` | `list` / `get` / `create` / `update` / `delete` / `set_default` / `files.list` / `files.get` / `files.set` / `files.delete` / `tools_schema` / `teams` / `bindings` | Agent CRUD and file management |
+| `tools.*` | `catalog` / `effective` / `invoke` / `cancel_call` / `in_flight` | Tool visibility and invocation |
+| `commands.*` | `list` / `execute` | Command discovery and execution |
 
-### MCP & ACP
-
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `mcp.*` | `list_pending_approvals`, `respond_approval`, `cancel_approval` | MCP approval handling |
-| `acp.*` | `list`, `get`, `create`, `update`, `delete`, `test`, `set_enabled`, `presets`, `presets_meta` | ACP harness config |
-
-### Schema & Introspection
+### Skills, Plugins, Extensions
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `schema.*` | `list`, `get`, `protocol`, `openapi` | Schema introspection |
-| `config.schema` | `config.schema` | Config schema |
+| `skills.*` | `status` / `update` / `install_dep` / `remove` / `install` | Skill management |
+| `bundled.sync` | — | Bundled-skill sync |
+| `plugin.*` | `list` / `install` / `installFromZip` / `uninstall` / `update` / `enable` / `disable` / `load` / `unload` / `reload` / `callTool` / `executeCommand` | Plugin lifecycle (canonical namespace) |
+| `plugins.*` | `list` / `install` / `installFromZip` / `uninstall` / `enable` / `disable` / `load` / `unload` / `callTool` / `executeCommand` | Plugin lifecycle (legacy namespace, kept for compatibility) |
+| `plugin.marketplace.*` | `list` / `add` / `update` / `remove` / `install` | Plugin marketplace |
+| `extensions.*` | `catalog` / `installed` / `toggle` / `uninstall` / `disclosure` / `configure` / `install` | Unified Extensions Store facade |
 
-### Discord Panel
+### Providers / Generation / Embedding
 
 | Namespace | Methods | Description |
 |-----------|---------|-------------|
-| `discord.*` | `validate_token`, `save_config`, `list_guilds`, `list_channels`, `audit_permissions`, `update_allowlists` | Discord control panel |
+| `providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `needsSetup` / `healthcheck` / `modelsRefresh` / `catalog` / `oauthLogin` / `oauthLogout` / `oauthStatus` | AI provider management |
+| `generation_providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `voices` / `list_presets` | Media generation providers |
+| `embedding_providers.*` | `list` / `get` / `add` / `update` / `remove` / `setActive` / `test` / `presets` | Embedding providers |
+
+### MCP / ACP
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `mcp.*` | `list_pending_approvals` / `respond_approval` / `cancel_approval` | MCP approval handling |
+| `mcp_config.*` | `list` / `get` / `create` / `update` / `delete` / `migrate_unified_to_actor` | MCP server configuration |
+| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown` | ACP harness configuration |
+
+### Channels / Sessions
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `channel.*` | `start` / `stop` / `pairing_data` / `send` / `create` / `delete` / `list` / `status` / `health` / `dead_letters` / `redrive_dead_letters` | Per-channel operations |
+| `channels.*` | `list` / `status` / `set_agent` | Channel listing and status |
+| `sessions.*` | `list` / `history` / `reset` / `delete` / `new` / `set_topic` / `patch` / `preview` / `compaction.list` / `compaction.restore` / `compaction.branch` | Session lifecycle (plural namespace) |
+| `session.*` | `usage` / `compact` / `truncate` | Session operations (singular namespace, partially requires SessionStore) |
+
+### Teams / Group Chat / Subagent
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `teams.*` | `create` / `get` / `list` / `rename` / `disband` / `delete` / `chat.send` / `chat.cancel` / `chat.thread` / `chat.history` / `create_task` / `update_task` / `list_tasks` / `task.trace` / `snapshot.*` / `workflow.*` / `acp_member.*` / `usage` | Team management |
+| `group_chat.*` | `start` / `continue` / `mention` / `end` / `list` / `history` | Multi-agent group chat |
+| `subagent.tree` | — | Subagent tree snapshot |
+| `a2a_delegate` / `a2a_*` | — | A2A subagent tools |
+
+### Runtimes / Workspace / Projects
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `runtimes.*` | `list` / `refresh` / `install` | Runtime capability management |
+| `workspace.*` | `create` / `list` / `get` / `update` / `archive` | Workspace isolation |
+| `projects.*` | `list` / `add` / `create_blank` / `remove` / `touch` / `get` | Project catalogue |
+| `agents.bindings` | — | agent ↔ channel bindings |
+
+### Wizard / Hooks
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `wizard.*` | `start` / `next` / `answer` / `cancel` / `status` | Multi-step configuration wizard (no corresponding CLI subcommand) |
+| `hooks.*` | `list` / `registry` / `add` / `remove` / `reload` / `events` | `~/.aleph/hooks.json` admin |
+
+### Gateway-Side / System
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `health` | — | Health check |
+| `echo` | — | Echo test |
+| `version` | — | Server version |
+| `system.info` | — | System metrics (CPU, memory, disk, uptime) |
+| `request.state` | — | Per-request state read/write |
+| `gateway.identity.get` | — | Gateway-side instance identity |
+| `gateway.metrics.lanes` | — | LaneManager semaphore gauges |
+| `gateway.metrics.run_concurrency` | — | AgentRunManager concurrency gauges |
+| `gateway.credentials` | — | Gateway credential info |
+| `gateway.ticket.*` / `gateway.token.*` / `gateway.devices.*` | — | Pairing and credential admin |
+| `pty.*` | `spawn` / `input` / `resize` / `close` / `list` | Embedded interactive terminal |
+
+### Other
+
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `auth.*` / `pairing.*` / `devices.*` | `connect` / `approve` / `reject` / `list` / `revoke` / `show_token` / `reset_token` / `list_sessions` / `revoke_session` | Authentication and device management |
+| `secrets.*` | `list` / `set` / `delete` / `verify` / `providers` | Vault management |
+| `exec_approvals.*` | `request` / `resolve` / `pending` | Exec approval |
+| `clarification.*` | `resolve` / `pending` | `ask_user` clarification |
+| `fs.*` | `home_dir` / `list_dir` / `create_dir` / `read_file` / `allowed_roots` | Sandboxed fs operations |
+| `insights.tools` | — | Memory tool introspection (requires MemoryBackend) |
+| `dreaming.run_now` | — | Eager-trigger dreaming |
+
+## Placeholders & Status Codes
+
+`HandlerRegistry::new()` in `src/gateway/handlers/mod.rs` pre-registers a set of methods so `METHOD_NOT_FOUND` is deterministic:
+
+- **Ready immediately** — `health` / `echo` / `version` / `system.info` / `request.state` / `config.schema` / `logs.getLevel` / `logs.setLevel` / `logs.getDirectory` / `services.*` / `pty.*` / `plugins.*` / `plugin.*` / `hooks.*` / `mcp.list_pending_approvals` / `mcp.respond_approval` / `mcp.cancel_approval` / `skills.*` / `bundled.sync` / `daemon.logs`
+- **Stub until boot overrides** — `cron.*` / `heartbeat.*` / `chat.send` / `chat.abort` / `chat.history` / `chat.clear` / `session.usage` / `session.compact` / `session.truncate` / `workspace.*` / `channels.set_agent` / `agents.bindings` / `groups_*` / `daemon.status` / `daemon.shutdown` / `teams.*` / `agents.*` / `runtimes.*` / `tools.*` / `insights.tools` / `gateway.identity.get` / `gateway.metrics.*` / `gateway.credentials` / `trace.*` / `wizard.*`
+- **Not registered (METHOD_NOT_FOUND until injected)** — `identity.get` / `identity.set` / `identity.clear` / `identity.list` (must go through `register_identity_handlers`); `graph.*` (must go through `register_graph_handlers`)
+
+Stubs are overridden by the corresponding `register_*_handlers` call on the boot path (`src/bin/aleph-server/commands/start/builder/handlers/`) before the first request is served.
 
 ## Common Patterns
 
 ### Pagination
 
-Methods that return lists accept optional `limit` and `offset` parameters:
+Methods that return lists accept optional `limit` / `offset` (exact semantics vary per method; see each sub-page):
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "session.list",
-  "params": {
-    "limit": 20,
-    "offset": 0
-  }
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "cron.list", "params": { "limit": 20, "offset": 0 } }
 ```
 
-### Filtering
+### Streaming Events
 
-List methods support an optional `filter` parameter for narrowing results:
+`agent.run` and `chat.send` emit events on the `stream.*` and `agent.*` topics. Subscribe first:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.list",
-  "params": {
-    "filter": {
-      "enabled": true,
-      "agent_id": "main"
-    }
-  }
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*"] } }
+{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Hello" } }
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "content": "Hi!" } } }
 ```
 
-### Streaming Methods
-
-Methods like `agent.run` trigger streaming events. Subscribe to `stream.*` topics to receive real-time data:
-
-```json
-// 1. Subscribe to stream events
-{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "patterns": ["stream.*"] } }
-
-// 2. Start an agent run
-{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "message": "Hello" } }
-
-// 3. Receive stream events (no id = notification)
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.chunk", "data": { "text": "Hi!" } } }
-```
+See [events.*](./events).
 
 ## See Also
 
-- [Protocol](/docs/en/gateway/protocol) -- JSON-RPC 2.0 transport details
-- [Authentication](/docs/en/gateway/auth) -- Token management and device pairing
-
----
-
-## 26.7.x Addendum
-
-### Full RPC Count
-
-26.7.x the gateway exposes **~265 JSON-RPC methods**, grouped by topic (see individual pages):
-
-| Topic | Count | Topic |
-|------|-------|------|
-| Core (health/echo/version/system.info/request.state) | 5 | Streaming events |
-| Config (config.*) | ~12 | providers / embedding / generation / rerank / search |
-| Logs (logs.*) | 3 | Service start/stop (services.*) |
-| Daemon (daemon.*) | 3 | Hooks (hooks.*) |
-| Gateway credentials (gateway.ticket/token/devices/credentials/identity/metrics) | ~10 | Wizard flow (wizard.*) |
-| Memory (memory.*) | ~15 | Skills (skills.*) |
-| MCP (mcp.* + mcp_config.*) | ~12 | Plugins/Extensions (plugin.* + plugins.* + extensions.*) |
-| Heartbeat / Cron | ~18 | Channels (channel.* + channels.* + channel.pairing.*) |
-| Workspace / Projects | ~10 | Tools (tools.*) |
-| Teams (teams.* + teams.chat.*) | ~25 | Subagent (subagent.tree) |
-| Chat / Session (chat.* + session.* + sessions.*) | ~20 | Graph (graph.*) |
-| Group chat | 5 | Activities (activity.stats / insights.tools) |
-| Agents (agents.* + agent.*) | ~20 | Clusters / Runtimes |
-| Dreams / Dreaming | 2 | Acp (acp.*) |
-| Clawhub | 4 | Trace (trace.*) |
-| Events | 1 | Index / Health / Echo / Version / System.Info / Request.State |
-| Service / Daemon | ~6 | Total ~265 |
-
-### See Also
-
-Each subpage is mapped against the real method list in `src/gateway/handlers/mod.rs` `register_handler!` and `src/bin/aleph-server/commands/start/builder/handlers/*.rs`.
-
-### Note
-
-Given the RPC table's size and ongoing growth, **there is no per-method wiki page**; this index + topic files + auto-generated Rust doc is currently the most authoritative source.
+- [Protocol](../protocol) — JSON-RPC 2.0 transport details
+- [Authentication](../auth) — Token management and device pairing

@@ -3,229 +3,105 @@ title: "workspace.*"
 description: "工作空间管理 RPC 方法"
 ---
 
-工作空间方法管理项目工作空间——隔离的环境，包含特定任务或项目的文件、配置和上下文。
+`workspace.*` 是对 `AgentEnvStore`(SQLite 后端)的运行时接口。五个核心方法在 `register_workspace_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:6-88`)中连接;频道绑定面在同一个模块,因为绑定/解绑接缝与 `agent_switch` 内建工具共享。
+
+存储模型是**每个 agent 一个工作空间,每个 agent 多个频道**。工作空间是逻辑隔离边界——它承载 agent 的 profile、项目根和绑定表;它**不**拥有文件目录(工作目录在运行时从 `sessions.set_project_root` 绑定)。
 
 ## 方法
 
-### workspace.list
-
-列出所有工作空间。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "workspace.list",
-  "params": {}
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "workspaces": [
-      {
-        "id": "ws-1",
-        "name": "My Project",
-        "path": "/home/user/projects/my-project",
-        "created_at": "2024-01-15T10:30:00Z",
-        "active": true
-      }
-    ]
-  }
-}
-```
-
 ### workspace.create
 
-创建新工作空间。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "workspace.create",
-  "params": {
-    "name": "New Project",
-    "path": "/home/user/projects/new-project"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "workspace": {
-      "id": "ws-2",
-      "name": "New Project",
-      "path": "/home/user/projects/new-project",
-      "created_at": "2024-01-15T10:30:00Z",
-      "active": false
-    }
-  }
-}
-```
-
-**参数：**
+创建新工作空间。`name` 和 `icon` 通过后续 `workspace.update` 持久化,因为底层 `create` 路径不接受它们。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `name` | string | 是 | 工作空间显示名称 |
-| `path` | string | 是 | 工作空间的目录路径 |
+|------|------|------|------|
+| `id` | string | 是 | 工作空间 id(URL 安全的 slug) |
+| `name` | string | 是 | 人类可读的显示名 |
+| `description` | string | 否 | 自由文本描述 |
+| `icon` | string | 否 | emoji 或图标标识符 |
+
+**响应:** `{ "ok": true, "workspace": { ...WorkspaceRecord... } }`。Panel 的"新项目"表单使用此接口,然后立即调用 `channels.set_agent` 绑定第一个频道。
+
+### workspace.list
+
+列出每个工作空间。**请求:** 无参数。
+
+**响应:** `{ "workspaces": [ ...WorkspaceRecord... ] }`。
 
 ### workspace.get
 
-获取特定工作空间的详细信息。
+按 id 获取单个工作空间。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "workspace.get",
-  "params": {
-    "workspace_id": "ws-1"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 工作空间 id |
 
-### workspace.activate
+**响应:** `{ "workspace": { ...WorkspaceRecord... } }` 或 `RESOURCE_NOT_FOUND: Workspace '<id>' not found`。
 
-激活工作空间（将其设置为当前活动工作空间）。
+### workspace.update
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "workspace.activate",
-  "params": {
-    "workspace_id": "ws-1"
-  }
-}
-```
+增量修改工作空间元数据。只触碰 `params` 中出现的字段。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "activated": true
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 工作空间 id |
+| `name` | string | 否 | 新名称 |
+| `description` | string | 否 | 新描述 |
+| `icon` | string | 否 | 新图标 |
 
-### workspace.delete
+**响应:** `{ "ok": true, "workspace": { ...更新后 WorkspaceRecord... } }` 或未命中时 `RESOURCE_NOT_FOUND`。
 
-删除工作空间。
+### workspace.archive
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "workspace.delete",
-  "params": {
-    "workspace_id": "ws-2"
-  }
-}
-```
+软删除工作空间(行被移除;底层目录(若有)**不**被删除)。id 保持保留——之后可以重新创建新行。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "deleted": true
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 工作空间 id |
 
-:::warning
-删除工作空间仅移除工作空间元数据。底层目录**不会**被删除。
-:::
+**响应:** 成功归档时 `{ "ok": true }`;未命中时 `RESOURCE_NOT_FOUND: Workspace '<id>' not found`。
 
-### workspace.files
+## 频道 agent 绑定
 
-列出工作空间中的文件。
+这两个方法在同一个模块,因为它们共享 `gateway::agent_binding` 接缝与 `agent_switch` 内建工具——两个面获得相同的 ghost 验证、无操作检测和 `Bound` / `Unbound` 事件。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "workspace.files",
-  "params": {
-    "workspace_id": "ws-1",
-    "path": "/"
-  }
-}
-```
+### channels.set_agent
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "files": [
-      {
-        "name": "src",
-        "type": "directory",
-        "path": "/src"
-      },
-      {
-        "name": "README.md",
-        "type": "file",
-        "path": "/README.md",
-        "size": 1024
-      }
-    ]
-  }
-}
-```
+将 agent 绑定到频道或解绑。两个面共享同一处理器。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `channel_id` | string | 是 | 频道 id |
+| `agent_id` | string | 否 | agent id;`null` / 缺失则解绑 |
+
+**响应(绑定):** 新绑定时 `{ "ok", "previous_agent" | null, "no_op": false }`;无操作重绑定时 `{ "ok", "previous_agent", "no_op": true }`。
+
+**响应(解绑):** `{ "ok", "previous_agent" | null }`。
+
+当 `agent_id` 在 live `AgentRegistry` 中不存在时返回 `INVALID_PARAMS`。`agent_registry: None` 的最小化服务器跳过验证(之前的宽松行为,仅为最小化服务器引导保留)。
+
+同一个面在 `workspace.set_agent` 路径上也可到达(没有线缆别名——两个方法共享同一实现)。新代码优先使用 `channels.set_agent`。
+
+### agents.bindings
+
+获取每个 agent 绑定的所有频道,按频道 id 排序。多对一感知:绑定到多个频道的 agent 出现一次,所有频道都在数组中。
+
+**请求:** 无参数。
+
+**响应:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`。之前的一对一映射有损,新形态落地时已被替换。
+
+## 不作为 RPC 存在的方法
+
+之前版本中描述但**未在当前 alpeh-server 上注册**的方法:
+
+| 方法 | 不作为 RPC 存在的原因 |
+|------|---------------------|
+| `workspace.activate` | 运行时没有"活动工作空间"概念——代理循环每轮从会话的 `project_root`(通过 `sessions.set_project_root` 设置)读取,"活动"开关会冗余。 |
+| `workspace.files` | 工作空间存储是 `AgentEnvStore` 行,不是目录列表。使用 `fs.list_dir`(限定到项目根)或 agent 自己的工具面。 |
+| `workspace.delete` | 运行时只暴露 `archive`;归档后行被保留。 |
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### `workspace.*` 完整 RPC
-
-- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
-
-### `projects.*` 完整 RPC
-
-- `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get`
-
-### `agents.bindings` / `channels.set_agent`
-
-agent ↔ channel 绑定——`channels.set_agent` 现在**必须**指定真实存在的 agent（之前接受不存在的 agent）。
-
-### 文件操作路径安全
-
-26.7.15+：
-
-- 符号链接安全的删除/移动
-- glob/deny 复检
-- 冲突去重
-- 逐路径锁
-- 加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）
-- `apply_patch` 前向游标诚实地失败
-
-### Cluster `file.write` 无 TOCTOU
-
-26.7.21+。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [工作空间](/docs/zh/concepts/workspace)——工作空间模型的上下文
+- [channels.*](/docs/zh/gateway/methods/channels)——绑定面的频道侧

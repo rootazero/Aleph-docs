@@ -3,402 +3,176 @@ title: "mcp.*"
 description: "MCP 服务器管理 RPC 方法"
 ---
 
-MCP（模型上下文协议）方法管理外部 MCP 服务器——添加、更新、删除、启动、停止和查询通过 MCP 协议公开工具、资源和提示的服务器的能力。
+`mcp.*` 是 MCP 插件宿主的运行时接口。处理模块位于 `src/gateway/handlers/mcp.rs`,九个核心方法通过 `register_mcp_handlers` 在 `McpManagerActor` 启动后连接。在模拟模式(没有 MCP actor)中,命名空间不存在,任何 `mcp.*` 调用返回 `Method not found`。三个审批方法在 `HandlerRegistry::new()` 中以 stub 形式直接注册——它们当前只记录日志并返回成功。
 
-:::note
-`mcp.*` 是统一 `extensions.*` 门面背后的按类型后端之一。对于日常用户，MCP 服务器、插件和技能统一为一个概念——**扩展**（类型为 `Mcp`）。要按功能类别浏览和安装扩展，请参阅 [extensions.* 方法](/docs/zh/gateway/methods/extensions) 和 [扩展商店](/docs/zh/concepts/extensions-store)。下方的 `mcp.*` 方法仍是 MCP 插件宿主的底层控制面。
-:::
+`mcp_config.*` 是 MCP 服务器的设置页 CRUD 接口;它与运行时方法并列注册,仅在 MCP manager 存在时连接。
 
 ## 方法
 
 ### mcp.list
 
-列出所有配置的 MCP 服务器及其状态。
+列出所有已配置的 MCP 服务器及其实时状态(id、name、transport、status、healthy、tools/resources/prompts 计数)。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "mcp.list",
-  "params": {}
-}
-```
+**请求:** 无参数。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "servers": [
-      {
-        "id": "filesystem",
-        "name": "File System",
-        "transport": "stdio",
-        "status": "running",
-        "healthy": true,
-        "tools_count": 5,
-        "resources_count": 0,
-        "prompts_count": 0
-      }
-    ]
-  }
-}
-```
+**响应:** `{ "servers": [ ...ServerInfo... ] }`。每个 `ServerInfo` 包含来自 MCP actor 的实时 `pid`、`uptime_seconds` 和 `restart_count`。
 
 ### mcp.add
 
-添加新的 MCP 服务器配置。
+新增 MCP 服务器配置。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "mcp.add",
-  "params": {
-    "config": {
-      "id": "filesystem",
-      "name": "File System",
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem", "/home/user"],
-      "requires_runtime": "node"
-    }
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `config` | object | 是 | 完整的 `McpManagerConfig` 行——参见 [Config 字段](#config-字段) |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "ok": true
-  }
-}
-```
-
-**配置字段：**
-
-| 字段 | 类型 | 必填 | 说明 |
-|-------|------|----------|-------------|
-| `id` | string | 是 | 唯一服务器标识符 |
-| `name` | string | 是 | 显示名称 |
-| `transport` | string | 是 | `"stdio"` 或 `"http"` |
-| `command` | string | 否 | 要运行的命令（用于 stdio） |
-| `args` | string[] | 否 | 命令参数 |
-| `url` | string | 否 | HTTP URL（用于 http 传输） |
-| `env` | object | 否 | 环境变量 |
-| `requires_runtime` | string | 否 | 运行时要求（如 `"node"`） |
+**响应:** 成功时 `{ "ok": true }`;否则返回 `INTERNAL_ERROR` 和 actor 的错误信息。
 
 ### mcp.update
 
-更新现有的 MCP 服务器配置（使用 upsert 语义）。
+更新已存在的 MCP 服务器(upsert 语义)。先删除旧的,再加新的;失败时若有旧配置则回滚。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "mcp.update",
-  "params": {
-    "config": {
-      "id": "filesystem",
-      "name": "File System Updated",
-      "args": ["@modelcontextprotocol/server-filesystem", "/home/user", "/tmp"]
-    }
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `config` | object | 是 | 新的 `McpManagerConfig` 行 |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "ok": true
-  }
-}
-```
+**响应:** 成功时 `{ "ok": true }`。
 
 ### mcp.delete
 
 删除 MCP 服务器配置。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "mcp.delete",
-  "params": {
-    "id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 服务器 id |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "ok": true
-  }
-}
-```
+**响应:** `{ "ok": true }`。
 
 ### mcp.status
 
-获取特定 MCP 服务器的详细状态。
+获取单个 MCP 服务器的详细状态,包括实时 `pid`、`uptime_seconds` 和 `restart_count`。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "mcp.status",
-  "params": {
-    "id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 服务器 id |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "id": "filesystem",
-    "name": "File System",
-    "transport": "stdio",
-    "status": "running",
-    "pid": 12345,
-    "uptime_seconds": 3600,
-    "restart_count": 0
-  }
-}
-```
+**响应:** 完整的 `ServerStatus` 对象,或 `RESOURCE_NOT_FOUND`(`-32004`)。
+
+### mcp.logs
+
+获取一个服务器的最近日志。MCP actor **不**保留日志缓冲;此处理函数返回空列表加 `implemented: false`,让客户端能区分"无日志"与"实现缺失"。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 服务器 id |
+| `max_lines` | number | 否 | 默认为 100 |
+
+**响应:** `{ "logs": [], "implemented": false }`。
 
 ### mcp.start
 
 启动已停止的 MCP 服务器。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "mcp.start",
-  "params": {
-    "id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 服务器 id |
+
+**响应:** `{ "ok": true }`。
 
 ### mcp.stop
 
-停止正在运行的 MCP 服务器。
+停止运行中的 MCP 服务器。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "mcp.stop",
-  "params": {
-    "id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 服务器 id |
+
+**响应:** `{ "ok": true }`。
 
 ### mcp.restart
 
-重启 MCP 服务器。
+停止再启动 MCP 服务器。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 8,
-  "method": "mcp.restart",
-  "params": {
-    "id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 服务器 id |
+
+**响应:** `{ "ok": true }`。
 
 ### mcp.tools
 
-列出所有健康的 MCP 服务器公开的所有工具（聚合视图）。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 9,
-  "method": "mcp.tools",
-  "params": {}
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 9,
-  "result": {
-    "tools": [
-      {
-        "name": "read_file",
-        "description": "Read contents of a file",
-        "server": "filesystem"
-      }
-    ]
-  }
-}
-```
+列出所有健康 MCP 服务器对外公布的工具(聚合视图)。**请求:** 无参数。**响应:** `{ "tools": [ ...Tool... ] }`。每行包含 `name`、`description`、`server`。
 
 ### mcp.resources
 
-列出所有健康的 MCP 服务器公开的所有资源。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 10,
-  "method": "mcp.resources",
-  "params": {}
-}
-```
+列出所有健康 MCP 服务器对外公布的资源。**响应:** `{ "resources": [ ...Resource... ] }`。
 
 ### mcp.prompts
 
-列出所有健康的 MCP 服务器公开的所有提示。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 11,
-  "method": "mcp.prompts",
-  "params": {}
-}
-```
+列出所有健康 MCP 服务器对外公布的 prompts。**响应:** `{ "prompts": [ ...Prompt... ] }`。
 
 ### mcp.list_pending_approvals
 
-列出所有待处理的 MCP 审批请求，等待用户响应。
+列出所有等待用户响应的审批请求。Stub 实现;返回空数组,因为审批处理函数尚未接入。在 `HandlerRegistry::new()` 中直接注册,因此无论 MCP actor 是否启动,始终存在。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 12,
-  "method": "mcp.list_pending_approvals",
-  "params": {}
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 12,
-  "result": []
-}
-```
-
-:::note
-此方法当前返回空数组，因为审批处理程序集成待完成。
-:::
+**响应:** `{ "result": [] }`。
 
 ### mcp.respond_approval
 
-提交用户对 MCP 审批请求的响应。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 13,
-  "method": "mcp.respond_approval",
-  "params": {
-    "request_id": "req-123",
-    "approved": true,
-    "reason": "Looks safe"
-  }
-}
-```
-
-**参数：**
+提交用户对审批请求的响应。Stub 实现;只记录日志并返回成功。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `request_id` | string | 是 | 审批请求 ID |
-| `approved` | boolean | 是 | 是否批准 |
-| `reason` | string | 否 | 决策的可选原因 |
+|------|------|------|------|
+| `request_id` | string | 是 | 审批请求 id |
+| `approved` | boolean | 是 | 用户是否批准 |
+| `reason` | string | 否 | 自由文本原因 |
+
+**响应:** `{ "success": true }`。
 
 ### mcp.cancel_approval
 
-取消待处理的 MCP 审批请求。
+取消待处理的审批请求。Stub 实现;只记录日志并返回成功。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 14,
-  "method": "mcp.cancel_approval",
-  "params": {
-    "request_id": "req-123"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `request_id` | string | 是 | 审批请求 id |
+
+**响应:** `{ "success": true }`。
+
+## Config 字段
+
+`mcp.add` 和 `mcp.update` 接受完整的 `McpManagerConfig` 行:
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 唯一服务器 id |
+| `name` | string | 是 | 显示名 |
+| `transport` | string | 是 | `stdio` / `http` / `sse`(默认 `stdio`) |
+| `command` | string | 仅 stdio | stdio 传输要运行的命令 |
+| `args` | string[] | 否 | stdio 命令的参数 |
+| `url` | string | http / sse | 端点 URL |
+| `env` | object | 否 | stdio 进程的环境变量 |
+| `requires_runtime` | string | 否 | `node` / `python` / `bun` 等 |
+| `auto_start` | boolean | 否 | 默认 `true` |
+| `timeout_seconds` | number | 否 | 单请求超时 |
+| `tool_filter` | object | 否 | 对外公布工具的可选 allow/deny 过滤 |
+
+actor 会对一个 `McpStdio` 安装的 `command` 在磁盘上缺失做静默 no-op(自 26.6.23 起)。
+
+## `mcp_config.*`(设置页 CRUD)
+
+`mcp_config.*` 是设置页的配套。它在 `register_mcp_config_handlers` 中与运行时方法一同注册。
+
+| 方法 | 用途 |
+|------|------|
+| `mcp_config.list` | 列出 MCP 服务器配置行(持久化形态,非实时状态) |
+| `mcp_config.get` | 按 id 获取单个配置行 |
+| `mcp_config.create` | 新增配置行,API 密钥入 vault |
+| `mcp_config.update` | 更新配置行 |
+| `mcp_config.delete` | 删除配置行 |
+
+设置页通过 `mcp_config.*` 编辑;运行时的 `mcp.*` 接口反映最终的实时状态。
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [extensions.* 方法](/docs/zh/gateway/methods/extensions)——统一扩展门面（`Skill` / `Plugin` / `Mcp`）
-- [扩展商店](/docs/zh/concepts/extensions-store)——按类别浏览和安装扩展
-- [架构：网关](/docs/zh/architecture/gateway)——网关架构
-
----
-
-## 26.7.x 补充
-
-### `mcp.*` 完整 RPC
-
-- `mcp.cancel_approval` / `mcp.respond_approval` —— Discord 交互式审批按钮
-- `mcp_list_*` —— 按需发现 MCP 资源/提示
-- `mcp.read_approval` —— 读取审批状态
-
-### `mcp_config.*` 完整 RPC
-
-- `mcp_config.create` / `delete` / `get` / `list` / `update`
-
-### `McpResourceIndexLayer` 已回退
-
-26.7.17+ 收敛：eager 资源/提示索引层被回退，改用**按需发现**。
-
-### 协议版本协商 + 能力广播
-
-26.6.29+：
-
-- 广播 sampling 能力
-- 协商协议版本
-- `max_failures` 接线
-- `post_install` 字段
-
-### `cat`-guard read-steer
-
-按需发现 + 读路径 steer——模型不再 `cat` 整个文件。
-
-### MCP 最长前缀匹配
-
-26.7.18+ 资源最长前缀解析。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [扩展商店](/docs/zh/concepts/extensions-store)——`extensions.*` 是 `mcp.*` / `plugin.*` / `skills.*` 的统一门面

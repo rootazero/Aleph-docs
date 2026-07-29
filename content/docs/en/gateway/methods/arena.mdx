@@ -3,9 +3,13 @@ title: "arena.*"
 description: "Evaluation and benchmarking RPC methods"
 ---
 
-Arena methods manage the evaluation arena — a system for benchmarking AI models, comparing outputs, and running evaluation tasks against test datasets.
+The `arena.*` namespace is **not registered** on any current `aleph-server` build. The source tree has no `arena` handler module, no `registry.register("arena.*", ...)` calls, and no `src/arena/` module — the runtime returns `Method not found` (code `-32601`) for every `arena.*` method.
+
+The 26.7.x changelog has no entries for this namespace, and the original evaluation-arena concept (`src/arena/`, arena benchmark tasks, arena leaderboard) is not in the current build.
 
 ## Methods
+
+The methods below are **never** reachable on a running `aleph-server`. They are retained here only to document the previous design.
 
 ### arena.list
 
@@ -13,166 +17,36 @@ List available evaluation tasks and benchmarks.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "arena.list",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "arena.list", "params": {} }
 ```
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "benchmarks": [
-      {
-        "id": "coding-bench",
-        "name": "Coding Benchmark",
-        "description": "Tests code generation and debugging",
-        "tasks_count": 50
-      }
-    ]
-  }
-}
-```
+**Response:** `Method not found` (`-32601`).
 
 ### arena.run
 
 Run an evaluation benchmark.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "arena.run",
-  "params": {
-    "benchmark_id": "coding-bench",
-    "model": "claude-sonnet-4-20250514",
-    "parallel": 4
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "run_id": "arena-run-1",
-    "status": "running",
-    "progress": {
-      "completed": 0,
-      "total": 50
-    }
-  }
-}
-```
-
-**Parameters:**
-
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `benchmark_id` | string | Yes | Benchmark to run |
-| `model` | string | Yes* | Model to evaluate (if benchmark supports model selection) |
-| `parallel` | number | No | Number of parallel tasks |
+| `benchmark_id` | string | yes | Benchmark to run |
+| `model` | string | conditional | Model to evaluate (when the benchmark supports model selection) |
+| `parallel` | number | no | Number of parallel tasks |
+
+**Response:** `Method not found` (`-32601`).
 
 ### arena.status
 
-Get status of a running evaluation.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "arena.status",
-  "params": {
-    "run_id": "arena-run-1"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "run_id": "arena-run-1",
-    "status": "completed",
-    "progress": {
-      "completed": 50,
-      "total": 50
-    },
-    "results": {
-      "accuracy": 0.92,
-      "avg_latency_ms": 1200
-    }
-  }
-}
-```
+Get the status of a running evaluation by `run_id`. **Response:** `Method not found`.
 
 ### arena.results
 
-Get detailed results of a completed evaluation.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "arena.results",
-  "params": {
-    "run_id": "arena-run-1"
-  }
-}
-```
+Get the detailed results of a completed evaluation by `run_id`. **Response:** `Method not found`.
 
 ### arena.compare
 
-Compare results across multiple model runs.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "arena.compare",
-  "params": {
-    "run_ids": ["arena-run-1", "arena-run-2"]
-  }
-}
-```
+Compare results across multiple model runs. Takes a `run_ids` array. **Response:** `Method not found`.
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### `dreaming.run_now` / `dreaming.list_insights`
-
-Dreaming-daemon-related — manually trigger the daily synthesis note / list the recent dream-run history.
-
-### `insights.tools`
-
-26.7.x: list tool insights (sorted by activity / success rate).
-
-### `activity.stats`
-
-Activity stats — aggregated by agent / session / tool.
-
-### Cluster Fleet Feed
-
-26.7.15+: the Panel cluster view is wired to a live feed, with node identity persisting on the connect verdict.
-
-### Real Multi-Session
-
-26.7.7+: the run gate moved from a per-agent lock to a per-session `SessionRunRegistry`. `gateway.metrics.run_concurrency` / `gateway.metrics.lanes` give the run slot counts.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [GATEWAY reference](/docs/en/gateway) -- Gateway protocol overview

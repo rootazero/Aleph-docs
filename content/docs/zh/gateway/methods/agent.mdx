@@ -3,13 +3,22 @@ title: "agent.*"
 description: "代理执行和控制 RPC 方法"
 ---
 
-代理方法控制核心 AI 执行循环。使用这些方法启动代理运行、流式传输响应、检查执行状态、检索对话历史和清除会话。
+代理方法控制 Aleph 核心 AI 执行循环（Think→Act 工具链）。`agent.*` 是面板和外部集成直接调用的入口；面向聊天的客户端通常使用 [`chat.*`](./chat) 系列，二者在底座复用同一执行适配器。
 
 ## 方法
 
+| 方法 | 说明 |
+|--------|-------------|
+| [`agent.run`](#agentrun) | 启动一次 run（异步，立即返回 `run_id`） |
+| [`agent.status`](#agentstatus) | 按 `run_id` 轮询 run 状态 |
+| [`agent.cancel`](#agentcancel) | 取消一个进行中的 run |
+| [`agent.list`](#agentlist) | 列出路由器中已注册的代理 |
+
+> 历史别名 `agent.history` / `agent.clear` / `agent.respondToInput` / `agent.events` 等不是 RPC；会话读取请用 `chat.history` / `chat.clear`，事件订阅请用 [`events.*`](./events)。
+
 ### agent.run
 
-使用用户消息启动代理运行。代理将通过 Think→Act 循环（编排器 → 工具链 → 思考器）处理消息，并通过事件流回响应。
+启动一次代理 run，立即返回 `run_id`；实际响应通过事件流投递（`stream.*` 与 `agent.*` 主题）。
 
 **请求：**
 ```json
@@ -18,10 +27,9 @@ description: "代理执行和控制 RPC 方法"
   "id": 1,
   "method": "agent.run",
   "params": {
-    "message": "Summarize today's news",
+    "input": "Summarize today's news",
     "session_key": "agent:main:main",
-    "thinking": "medium",
-    "model": null
+    "thinking": "medium"
   }
 }
 ```
@@ -33,62 +41,8 @@ description: "代理执行和控制 RPC 方法"
   "id": 1,
   "result": {
     "run_id": "run-uuid-123",
-    "status": "running",
-    "session_key": "agent:main:main"
-  }
-}
-```
-
-运行启动时立即返回响应。实际输出以流式事件的形式传递——订阅 `stream.*` 和 `agent.*` 主题以接收它们。
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `message` | string | 是 | 要处理的用户消息 |
-| `session_key` | string | 否 | 上下文的会话键。默认：`"agent:main:main"` |
-| `thinking` | string | 否 | 思考级别：`"off"`、`"minimal"`、`"low"`、`"medium"`、`"high"`、`"xhigh"`。默认：`"medium"` |
-| `model` | string | 否 | 为此运行覆盖模型（如 `"claude-sonnet-4-20250514"`） |
-
-**流式事件：**
-
-调用 `agent.run` 后，将发出以下事件（如果已订阅）：
-
-| 主题 | 说明 |
-|-------|-------------|
-| `agent.started` | 运行已排队并启动 |
-| `stream.start` | 流式输出开始 |
-| `stream.chunk` | 代理响应的文本块 |
-| `stream.tool_start` | 代理正在调用工具 |
-| `stream.tool_end` | 工具执行完成 |
-| `stream.end` | 流式输出完成 |
-| `agent.completed` | 运行成功完成 |
-| `agent.error` | 运行遇到错误 |
-
-### agent.cancel
-
-取消正在运行的代理。代理将在下一个安全检查点停止并返回部分响应。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "agent.cancel",
-  "params": {
-    "run_id": "run-uuid-123"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "cancelled": true,
-    "run_id": "run-uuid-123"
+    "session_key": "agent:main:main",
+    "accepted_at": "2026-03-15T10:00:00Z"
   }
 }
 ```
@@ -97,21 +51,39 @@ description: "代理执行和控制 RPC 方法"
 
 | 参数 | 类型 | 必填 | 说明 |
 |-----------|------|----------|-------------|
-| `run_id` | string | 是 | `agent.run` 返回的运行 ID |
+| `input` | string | 是 | 用户输入；不可为空 |
+| `session_key` | string | 否 | 会话键，自动派生 |
+| `channel` | string | 否 | 通道标识（如 `"cli:term1"`） |
+| `peer_id` | string | 否 | 按 peer 隔离会话时使用 |
+| `stream` | boolean | 否 | 是否流式事件，默认 `true` |
+| `thinking` | string | 否 | 推理深度：`off` / `minimal` / `low` / `medium` / `high` / `xhigh`（默认 `minimal`） |
+| `attachments` | object[] | 否 | 文件附件（`name` / `mime_type` / base64 `data`） |
+| `agent_id` | string | 否 | 显式目标代理，跳过通道绑定 |
+| `project_root` | string | 否 | 项目根目录，覆盖默认工作区 |
+| `model_override` | object | 否 | 临时模型覆盖（见 [`model_override`](./chat#chat-send)） |
+| `exec_tier` | string | 否 | 执行等级，首次会话时由 composer 决定 |
+| `mode` | string | 否 | 会话模式：`chat` / `work` / `code` |
+| `voice_input` | boolean | 否 | 标记本轮为语音转写输入 |
+
+**响应字段：**
+
+| 字段 | 说明 |
+|--------|-------------|
+| `run_id` | 唯一 run 标识，配合 `agent.status` / `agent.cancel` 使用 |
+| `session_key` | 解析后的会话键 |
+| `accepted_at` | RFC3339 UTC 时间戳 |
 
 ### agent.status
 
-获取代理运行的当前状态。适用于不使用事件订阅的基于轮询的客户端。
+按 `run_id` 查询当前 run 的运行态。
 
 **请求：**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
+  "id": 2,
   "method": "agent.status",
-  "params": {
-    "run_id": "run-uuid-123"
-  }
+  "params": { "run_id": "run-uuid-123" }
 }
 ```
 
@@ -119,181 +91,131 @@ description: "代理执行和控制 RPC 方法"
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
+  "id": 2,
   "result": {
     "run_id": "run-uuid-123",
-    "status": "completed",
-    "started_at": 1706400000000,
-    "completed_at": 1706400005000,
-    "iterations": 3,
-    "tokens_used": 1247,
-    "tools_called": ["shell:exec", "file:read"]
+    "session_key": "agent:main:main",
+    "status": "running",
+    "elapsed_ms": 1247
   }
 }
 ```
 
-**参数：**
+`status` 取值为 `running` / `completed` / `failed` / `cancelled`。未找到 `run_id` 时返回 `-32602 Invalid params`。
 
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `run_id` | string | 是 | 要查询的运行 ID |
+### agent.cancel
 
-**状态值：**
-
-| 状态 | 说明 |
-|--------|-------------|
-| `pending` | 已排队，尚未启动 |
-| `running` | 正在执行 |
-| `completed` | 成功完成 |
-| `cancelled` | 被用户取消 |
-| `failed` | 遇到错误 |
-
-### agent.respondToInput
-
-向等待人工输入的代理发送响应（人工参与循环）。当代理暂停执行等待用户批准或附加信息时使用。
+取消一个进行中的 run。取消令牌传递到执行适配器；run 在下一个安全检查点停止并释放资源。
 
 **请求：**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 4,
-  "method": "agent.respondToInput",
-  "params": {
-    "run_id": "run-uuid-123",
-    "response": "Yes, proceed with the deletion"
-  }
+  "id": 3,
+  "method": "agent.cancel",
+  "params": { "run_id": "run-uuid-123" }
 }
 ```
 
 **响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "accepted": true,
-    "run_id": "run-uuid-123"
-  }
-}
+{ "jsonrpc": "2.0", "id": 3, "result": { "run_id": "run-uuid-123", "cancelled": true } }
 ```
 
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `run_id` | string | 是 | 等待输入的运行 ID |
-| `response` | string | 是 | 用户的响应文本 |
+`cancelled` 表示取消请求已被接受；run 真正停止前的过渡态由 `agent.status` 返回。
 
 ### agent.list
 
-列出系统中配置的所有可用代理。
+列出路由器中已注册的全部代理（来自 `AgentRouter`），并返回当前默认代理。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "agent.list",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 4, "method": "agent.list" }
 ```
 
 **响应：**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 5,
+  "id": 4,
   "result": {
     "agents": [
-      {
-        "id": "main",
-        "name": "Main Agent",
-        "description": "General-purpose assistant",
-        "model": "claude-sonnet-4-20250514",
-        "enabled": true
-      },
-      {
-        "id": "coder",
-        "name": "Code Assistant",
-        "description": "Specialized for programming tasks",
-        "model": "gpt-4o",
-        "enabled": true
-      }
+      { "id": "main", "name": "Main", "enabled": true, "is_default": true }
     ],
-    "total": 2
+    "default": "main"
   }
 }
 ```
 
-**参数：**
+每个条目字段：`id` / `name` / `enabled` / `is_default`（按 `AgentRouter::list_agents` 实际返回）。
 
-无。
+## 流式事件
+
+`agent.run` 启动后，事件总线以 WebSocket 通知形式投递运行状态变更（具体主题由 `GatewayEventFrame::topic_name()` 输出）：
+
+| 主题 | 说明 |
+|-------|-------------|
+| `run.accepted` | run 已入队并启动 |
+| `agent.reasoning` | 思考阶段输出 |
+| `agent.reasoning.block` | 推理块（双过程认知） |
+| `agent.tool.start` | 工具调用开始 |
+| `agent.tool.update` | 工具进度更新 |
+| `agent.tool.end` | 工具调用结束 |
+| `agent.trace` | 执行轨迹事件 |
+| `agent.response.chunk` | 响应文本块 |
+| `agent.context.gauge` | 上下文窗口使用率 |
+| `agent.run.complete` | run 成功完成 |
+| `agent.run.error` | run 出错 |
+| `agent.run.retrying` | 失败重试 |
+| `agent.ask.user` | `ask_user` 触发澄清 |
+| `agent.clarification.ended` | 澄清回合结束 |
+| `agent.uncertainty` | 模型不确定性信号 |
+| `agent.model.resolved` | 模型选择已解析 |
+
+非流式事件同样沿同一总线：
+
+| 主题 | 说明 |
+|-------|-------------|
+| `session.updated` / `session.lifecycle.changed` | 会话变更 |
+| `running.set.changed` | 活跃 run 集合变化 |
+| `channel.message` / `channel.typing` / `channel.status` / `channel.error` | 通道事件 |
+| `config.changed` | 配置变更 |
+| `approval.requested` / `approval.resolved` / `approval.expired` | 审批请求 |
+| `cron.job.changed` / `heartbeat.task.changed` | 调度任务变更 |
+| `team.changed` | 团队变更 |
+| `acp.sessions.changed` | ACP 会话变更 |
+| `gateway.token.rotated` / `gateway.device.revoked` | 网关凭据事件 |
+| `surface.notify` / `surface.approval` | 面板通知 |
+| `runtimes.install.progress` | 运行时安装进度 |
 
 ## 会话键格式
 
-代理方法接受一个 `session_key` 参数，该参数决定上下文隔离。有关 WebSocket 传输详细信息，请参阅[协议](/docs/zh/gateway/protocol)页面。
+代理方法接受 `session_key` 参数决定上下文隔离。详见[协议](../protocol)页面。
 
 | 格式 | 示例 | 说明 |
 |--------|---------|-------------|
-| Main | `agent:main:main` | 共享跨频道会话 |
-| DM | `agent:main:telegram:dm:user123` | 每个用户直接消息 |
+| Main | `agent:main:main` | 跨通道共享会话 |
+| DM | `agent:main:telegram:dm:user123` | 每用户直接消息 |
 | Group | `agent:main:discord:group:guild-id` | 群组/频道聊天 |
-| Task | `agent:main:cron:daily-summary` | 定时任务或 webhook 任务 |
-| Ephemeral | `agent:main:ephemeral:uuid` | 临时的，不持久化 |
+| Task | `agent:main:cron:daily-summary` | 计划任务或 webhook 任务 |
+| Ephemeral | `agent:main:ephemeral:uuid` | 临时会话，不持久化 |
 
 ## 思考级别
 
-`thinking` 参数控制代理在响应前执行多少推理。
+`thinking` 参数控制代理响应前的推理深度。
 
-| 级别 | 令牌预算 | 用例 |
-|-------|-------------|----------|
-| `off` | 0 | 快速、直接的回答 |
-| `minimal` | 1,024 | 简单查询 |
-| `low` | 2,048 | 标准对话 |
-| `medium` | 4,096 | 复杂任务（默认） |
-| `high` | 8,192 | 多步推理 |
-| `xhigh` | 16,384 | 深度分析 |
+| 级别 | 用例 |
+|-------|---------|
+| `off` | 快速直接回答 |
+| `minimal` | 简单查询（默认） |
+| `low` | 标准对话 |
+| `medium` | 复杂任务 |
+| `high` | 多步推理 |
+| `xhigh` | 深度分析 |
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [events.*](/docs/zh/gateway/methods/events)——订阅代理事件
-- [session.*](/docs/zh/gateway/methods/session)——会话管理
-
----
-
-## 26.7.x 补充
-
-### `agent.run` / `agent.status` / `agent.cancel` / `agent.list`
-
-26.7.x：基础 agent RPC。`chat.send` / `chat.abort` / `chat.history` / `chat.clear` 是更现代的入口。
-
-### `chat.*` 优先
-
-26.7.x 优先使用 `chat.*` 而非 `agent.*`：
-
-- `chat.send` —— 发送消息（带 `session_mode` 字段）
-- `chat.abort` —— 中止运行
-- `chat.history` —— 历史
-- `chat.clear` —— 清空
-- `chat.context_estimate` —— 上下文窗口估算
-- `chat.rewind` —— 回滚到之前的 turn
-
-### `session.*` / `sessions.*`
-
-- `session.usage` —— 用量 + 成本（核心定价）
-- `session.compact` —— `/compact` 等价
-- `session.truncate` —— `truncate_to_fit` 底
-- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
-
-### `agents.*`
-
-- `agents.list` / `agents.get` / `agents.create` / `agents.update` / `agents.delete` / `agents.set_default`
-- `agents.files.list` / `get` / `set` / `delete`
-- `agents.tools_schema` —— 工具 schema
-- `agents.teams` —— 列出 agent 的团队
-- `agents.bindings` —— agent ↔ channel 绑定
-
-### `subagent.tree`
-
-26.7.x：返回子代理树（节点身份 + 实时事件 + 树 RPC）。
+- [方法参考](./index)——所有方法命名空间
+- [events.*](./events)——订阅代理事件
+- [chat.*](./chat)——聊天接口（`chat.send` / `chat.abort` 等）
+- [session.*](./session)——会话管理

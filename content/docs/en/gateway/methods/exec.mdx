@@ -1,233 +1,49 @@
 ---
 title: "exec.*"
-description: "Execution RPC methods"
+description: "Execution approval RPC methods"
 ---
 
-Command execution approval system with three-tier security.
+`exec.*` is the approval surface for runtime exec-tier gating. The runtime ships **two real JSON-RPC methods** (`exec.approval.resolve`, `exec.approvals.pending`); the rest of the approval UX — `exec.approval.request`, the approval card, the Ask / Auto / Full switch — lives in the **agent loop** and is reached through `chat.send` or `agent.run`, not over this namespace.
 
-:::warning
-This page documents the intended API. The `exec.*` methods (`exec.approval.request`, `exec.approval.resolve`, `exec.approvals.get`, `exec.approvals.set`, `exec.approvals.pending`) are defined in the source handler (`src/gateway/handlers/exec_approvals.rs`) but are **not currently wired** in the runtime handler registration. They reflect the design target but are not yet exposed via JSON-RPC. See [Methods Reference](/docs/en/gateway/methods) for the accurate method listing.
-:::
-
-## Security Levels
-
-| Level | Description |
-|-------|-------------|
-| `deny` | Block all commands |
-| `allowlist` | Only approved patterns |
-| `full` | Allow everything |
+The 26.7.15+ Ask/Auto/Full exec-tier gate fires from `src/tools/scoped/` (the action-aware approval card and the bypass of the slash fast-path, `tools.invoke`, and background continuations). The wiring details live in `docs/superpowers/specs/2026-05-21-gateway-robustness-kit-design.md`; this page only documents the RPC surface.
 
 ## Methods
 
-### exec.approval.request
-
-Request approval for a command execution.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "exec.approval.request",
-  "params": {
-    "command": "rm -rf /tmp/cache",
-    "cwd": "/home/user",
-    "agent_id": "main",
-    "session_key": "agent:main:main",
-    "timeout_ms": 120000
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "id": "approval-uuid",
-    "approved": true,
-    "decision": "allow_once",
-    "timeout": false
-  }
-}
-```
-
 ### exec.approval.resolve
 
-Resolve a pending approval request.
+Resolve a pending approval with a decision. The resolved approval is a one-shot grant (`allow_once`) or a longer-lived scope (`allow_session`, `allowlist`).
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "exec.approval.resolve",
-  "params": {
-    "id": "approval-uuid",
-    "decision": "allow_once",
-    "resolved_by": "user@terminal"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Approval id (carried on the `AskUser` / approval frame) |
+| `decision` | string | yes | `allow_once` / `allow_session` / `allowlist` / `deny` |
+| `resolved_by` | string | no | Display name of the operator resolving the card |
+| `reason` | string | no | Free-text reason, relayed verbatim to the model on `deny` so the next turn can re-plan on the actual objection. Ignored on `allow_*`. |
 
-**Decision Types:**
-
-| Decision | Description |
-|----------|-------------|
-| `allow_once` | Allow this execution only |
-| `allow_session` | Allow for current session |
-| `allowlist` | Add to permanent allowlist |
-| `deny` | Deny execution |
-
-### exec.approvals.get
-
-Get the current approval configuration.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "exec.approvals.get"
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "config": {
-      "version": 1,
-      "security": "allowlist",
-      "allowlist": [
-        "git *",
-        "npm install",
-        "cargo build"
-      ],
-      "denylist": [
-        "rm -rf /"
-      ]
-    },
-    "hash": "sha256:abc123..."
-  }
-}
-```
-
-### exec.approvals.set
-
-Update approval configuration with optimistic locking.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "exec.approvals.set",
-  "params": {
-    "config": {
-      "version": 1,
-      "security": "allowlist",
-      "allowlist": [
-        "git *",
-        "npm *",
-        "cargo *"
-      ]
-    },
-    "base_hash": "sha256:abc123..."
-  }
-}
-```
+**Response:** `{ "ok": true }` when the approval id was found and resolved; otherwise `INVALID_PARAMS` with `Approval not found or already resolved: <id>`.
 
 ### exec.approvals.pending
 
-List pending approval requests.
+List every approval still awaiting a decision. Read-only; the card and the tool both consume from the same in-memory map.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "exec.approvals.pending"
-}
-```
+**Response:** `{ "pending": [ ...PendingApproval... ] }`.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "pending": [
-      {
-        "id": "uuid-1",
-        "command": "sudo apt update",
-        "cwd": "/home/user",
-        "agent_id": "main",
-        "session_key": "agent:main:main",
-        "created_at": "2024-01-15T10:30:00Z"
-      }
-    ]
-  }
-}
-```
+Each `PendingApproval` carries the tool call, the grant scopes the operator can pick, and the original agent session key, so a Panel reload can re-render any in-flight card.
 
-## Allowlist Patterns
+## Methods that are **not** RPC
 
-Patterns support glob-style matching:
+The following methods are described in older versions of this page but are **not** registered on the current `aleph-server`:
 
-| Pattern | Matches |
-|---------|---------|
-| `git *` | Any git command |
-| `npm install` | Exact match |
-| `cargo build --*` | cargo build with any flags |
-| `ls -la /tmp/*` | ls in /tmp subdirectories |
+| Method | Why it is not an RPC |
+|--------|---------------------|
+| `exec.approval.request` | The model never calls this — the action-aware gate in `src/tools/scoped/` raises the approval card on the event bus when the declared metadata flips. |
+| `exec.approvals.get` | There is no "approval config" to read — grants are in-memory only (once / session), no disk shape. |
+| `exec.approvals.set` | Same reason. There is no config to write. |
 
-## IPC Integration
+If a client wants to drive the flow programmatically, the only legal entry points are `exec.approval.resolve` (to answer a card) and `exec.approvals.pending` (to enumerate open cards).
 
-For CLI integration, Aleph supports Unix socket IPC:
+## See Also
 
-```
-/tmp/aleph-exec-{user}.sock
-```
-
-The IPC protocol uses HMAC-SHA256 for authentication:
-
-1. Client sends challenge request
-2. Server responds with nonce
-3. Client signs with shared secret
-4. Server verifies and proceeds
-
----
-
-## 26.7.x Addendum
-
-### `tools.*` Full RPC
-
-- `tools.catalog` — tool catalog (with name + description)
-- `tools.effective` — the tool surface effective for the current session
-- `tools.invoke` — tool invocation
-- `tools.cancel_call` — cancel an in-flight call
-- `tools.in_flight` — list in-flight tool calls
-
-### `tools.search` (Progressive Tool Disclosure)
-
-26.7.7+ `tool_search` meta-tool — BM25 ranker lookup in the catalog.
-
-### Resource-Claim Three-State
-
-`Shared` / `Exclusive{Global}` / `Exclusive{Paths}` — Act stage partitions by claim and dispatches intra-group concurrently.
-
-### Cross-Batch Dedup
-
-`Memo / Cross-batch Dedup` — a duplicate `(name, args)` reuses the first result.
-
-### Action-Aware Approval
-
-26.7.15+ approval gate at the single choke point `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
-
-### Fail-Closed
-
-Unknown tools **fail closed** under the `ask` tier.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [chat.*](/docs/en/gateway/methods/chat) -- The transport that the model uses
+- [clarification.*](#) -- The `ask_user` sister surface (same exec-tier gate family)

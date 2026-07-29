@@ -1,232 +1,191 @@
 ---
-title: "Memory Methods"
-description: "Gateway builtin tools for memory operations."
+title: "memory.*"
+description: "Memory pipeline RPC methods"
 ---
 
-Gateway builtin tools for interacting with Aleph's memory system.
+`memory.*` (and its companion `dreaming.*` / `insights.tools`) is the read / observability surface over the layered memory pipeline:
 
----
+- **Layer 1** — `raw_memories` (raw conversation records; one row per user + assistant turn)
+- **Layer 2** — `notes_index` (compiled knowledge notes; the canonical notes-based model since the 26.6.x refactor)
+- **Layer 3** — `notes_graph_cache` (Louvain communities, similarity edges, graph-health insights)
 
-## memory_search
+Writes stay LLM/tool-driven; the RPC surface is intentionally read-only over Layer 1 + Layer 2, with a handful of bulk-clear endpoints that fail closed (the old "fake success on no-op" shape was deleted — see [Bulk clears](#bulk-clears) below).
 
-Search the knowledge base for relevant facts.
+Twelve methods are wired in `register_memory_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/memory.rs:28-268`). The handler functions live in `src/gateway/handlers/memory.rs`; the `dreaming.run_now` / `dreaming.list_insights` / `insights.tools` companions are registered directly in `HandlerRegistry::new()`.
 
-```
-<builtin_tool>memory_search</builtin_tool>
-<parameter name="query">What database did we decide on?</parameter>
-<parameter name="limit">5</parameter>
-```
+## Methods
 
-**Parameters:**
-- `query` (required) — Search query
-- `limit` (optional) — Max results, default 5
-- `agent_id` (optional) — Target agent namespace
-- `mode` (optional) — `context` | `tools` | `hybrid`, default `hybrid`
+### memory.search
 
-**Returns:** Ranked list of `MemoryFact` with scores.
+Search raw memories (Layer 1). Substring match against `content`; empty `query` returns recent rows in reverse-chronological order. **This is the only raw-memory entry point** — the previous note-search branch was removed because it duplicated `graph.search` and led to wrong `delete_raw_memory` targets in the Panel.
 
----
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | no | Substring filter; omitted = browse |
+| `agent_id` | string | no | Workspace isolation (defaults to `routing::DEFAULT_AGENT_ID`) |
+| `window_title` | string | no | (Reserved; not surfaced by the current model) |
+| `limit` | number | no | Defaults to 20 |
+| `offset` | number | no | Defaults to 0 (pager sizing) |
 
-## memory_reflect
+**Response:** `{ "memories": [ ...MemoryEntry... ], "total" }`. Each `MemoryEntry` carries `id`, `agent_id`, `window_title` (empty), `user_input` (the raw content), `ai_output` (empty), `session_id?`, `timestamp` (created_at, epoch seconds). `total` is the count under the same `(agent_id, query)` filter — not the store-wide total, so a filter-aware pager does not show phantom pages.
 
-**Spec 2.** Synthesise a coherent answer from memory instead of returning raw facts.
+### memory.delete
 
-```
-<builtin_tool>memory_reflect</builtin_tool>
-<parameter name="query">Summarise what we know about the user's project requirements</parameter>
-<parameter name="depth">comprehensive</parameter>
-```
+Delete a single raw-memory row by id. Layer-1 rows have no foreign keys, so a single-row delete is safe; Layer-2 knowledge notes are unaffected.
 
-**Parameters:**
-- `query` (required) — Question to answer
-- `depth` (optional) — `brief` | `standard` | `comprehensive`, default `standard`
-- `agent_id` (optional) — Target agent namespace
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Raw-memory id |
 
-**Returns:** Synthesised answer with cited sources.
+**Response:** `{ "ok": true }` on success; `INTERNAL_ERROR: No raw memory found with id '<id>'` on a miss.
 
----
+### memory.stats
 
-## session_search
+One scope for every count. `scope: "global"` (omitted `agent_id`) returns the raw + note counts only; graph counts are `null` because notes are per-agent and the unscoped view cannot honestly say "zero nodes".
 
-**Spec B.** Search across session transcripts.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | no | Scope every count to one agent |
 
-```
-<builtin_tool>session_search</builtin_tool>
-<parameter name="query">When did we discuss authentication?</parameter>
-<parameter name="limit">5</parameter>
-```
+**Response:** `{ "totalMemories", "totalFacts", "validFacts", "totalGraphNodes" | null, "totalGraphEdges" | null, "scope": "agent"|"global" }`. `totalFacts` and `validFacts` are equal in the current notes-based model (notes have no invalidated state).
 
-**Parameters:**
-- `query` (required) — Search query
-- `limit` (optional) — Max sessions to return, default 5
-- `summarise` (optional) — `true` | `false`, default `true`
+### memory.compress
 
-**Returns:** Matching sessions + AI-generated summary (if `summarise=true`).
+Trigger a compression cycle. Requires a live `CompressionService` (no service ⇒ no handler).
 
----
+**Request:** no params.
 
-## remember
+**Response:** `{ "memoriesProcessed", "factsExtracted", "factsInvalidated", "durationMs" }`.
 
-**Spec A.** Pin a fact to curated hot memory.
+### memory.listFacts
 
-```
-<builtin_tool>remember</builtin_tool>
-<parameter name="content">User prefers dark mode in all applications</parameter>
-<parameter name="priority">8</parameter>
-```
+List compiled knowledge notes (Layer 2). Paginated, scoped to one agent.
 
-**Parameters:**
-- `content` (required) — Fact to remember
-- `priority` (optional) — 1-10, higher = more important, default 5
-- `category` (optional) — e.g. `preference`, `fact`, `warning`
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+| `limit` | number | no | Defaults to 50 |
+| `offset` | number | no | Defaults to 0 |
+| `include_invalid` | boolean | no | Defaults to `false` (no-op: notes have no invalidated state) |
 
-**Returns:** Confirmation with fact ID.
+**Response:** `{ "facts": [ ...FactEntry... ], "total" }`. Each `FactEntry` carries `id` (path), `agent_id`, `content` (filename), `fact_type` (category), `created_at`, `updated_at`, `category`, `path`, `tags`, `link_count`.
 
-**Note:** Curated memory is a **frozen snapshot**. Changes require explicit re-curation.
+### memory.appList
 
----
+List windows that have associated memories. The notes-based model has no per-window grouping, so this is always an empty list — kept for backward compatibility with older clients.
 
-## forget
+**Request:** no params.
 
-Remove a fact from memory.
-
-```
-<builtin_tool>forget</builtin_tool>
-<parameter name="query">The user's old email address</parameter>
-```
-
-**Parameters:**
-- `query` (required) — Description of fact to remove
-- `confirm` (optional) — `true` | `false`, default `false`
-
-**Returns:** List of candidate facts + confirmation prompt (if `confirm=false`).
-
----
-
-## memory_status
-
-Check memory system health and statistics.
-
-```
-<builtin_tool>memory_status</builtin_tool>
-```
-
-**Returns:**
-- Total notes count
-- Raw memory count (unprocessed)
-- Index health (FTS + vector)
-- Last dream run timestamp
-- Curated memory count
-
----
-
-## Observability & Governance (`memory.*` / `dreaming.*`)
-
-The methods below are **RPC methods** (not builtin chat tools). They expose read-only
-observability into the memory pipeline plus dream-daemon control. Writes stay
-LLM/tool-driven — these surface state, they do not mutate facts.
-
-### memory.retrieve_with_trace
-
-Run the real `NoteFactRetrieval` scoring pipeline and return results **plus** per-stage
-telemetry, so you can debug why a fact did or didn't surface.
-
-**Parameters:**
-- `query` (required) — Search query
-- `limit` (optional) — Max results
-- `agent_id` (optional) — Target agent namespace
-
-**Returns:** Ranked results plus a `trace` array of stages, each
-`{ stage, count, elapsed_ms, scores }`. Stages follow the pipeline order:
-query → candidate pool → BM25 + vector scores → RRF fusion → cutoff → ranked.
+**Response:** `{ "windows": [] }`.
 
 ### memory.list_corrections
 
-List the correction → distillation lifecycle (read-only). Surfaces how user corrections
-flow into distilled memory.
+List user corrections (`aleph://correction/...` raw rows) and their distillation status. Read-only — distillation stays LLM-driven.
 
-**Parameters:**
-- `agent_id` (optional) — Target agent namespace
-- `limit` (optional) — Max entries
+The `distilled` flag is read from the `FeedbackDistill` watermark, **not** from `is_processed`. `is_processed` belongs to the `CompressionService` drain and is set within seconds of the correction landing; using it would render every row "distilled" before the dream stage actually consumed it.
 
-**Returns:** List of correction records with their distillation state.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+| `limit` | number | no | Defaults to 50 |
+| `include_distilled` | boolean | no | Defaults to `true` |
 
-### dreaming.list_insights
+**Response:** `{ "corrections": [ ...{id, content, severity, suggested_rule?, status: "distilled"|"pending", created_at}... ] }`.
 
-List recent daily synthesis insights produced by the dream daemon, plus dream-run history.
+### memory.trace
 
-**Parameters:**
-- `limit` (optional) — Max insights / runs to return
+Walk a memory claim down to ground-truth evidence. Read-only; thin I/O wrapper over `MemoryTraceTool::call_impl`.
 
-**Returns:** Recent synthesis notes + dream-run history entries.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+| `target` | string | yes | The entity / note / profile-section to walk |
+| `kind` | string | yes | One of the `TraceKind` variants (`note` / `raw` / `profile`) |
+| `max_results` | number | no | Cap the returned evidence |
+
+**Response:** the full `MemoryTraceTool` result serialised as JSON (evidence chain by row).
+
+### memory.reembed
+
+Start a background reembed migration (rebuild note vectors with the current embedder). Requires a live embedding provider; without one the handler returns the "missing embedding provider" error stub. Only one reembed runs at a time — a second `memory.reembed` returns `-32001: Reembed already in progress` until the first one finishes.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_dim` | number | no | Defaults to the current embedder's dimension |
+
+**Response:** `{ "status": "started", "task_id": "reembed-<unix_ms>" }`. Progress is published on the `memory.reembed.progress` topic; completion on `memory.reembed.completed`.
+
+### memory.reembed.cancel
+
+Cancel a running reembed.
+
+**Response:** `{ "status": "cancelled" }` on success; `-32001: No reembed task is running` when no reembed is in flight.
+
+### memory.retrieve_with_trace
+
+Run the real `NoteFactRetrieval` scoring pipeline and return results plus per-stage telemetry, so a debug panel can see why a fact did or did not surface.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | yes | Search query |
+| `limit` | number | no | Max results |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+
+**Response:** ranked results + a `trace` array of stages, each `{ stage, count, elapsed_ms, scores }`. Pipeline stages in order: `query → candidate pool → BM25 + vector scores → RRF fusion → cutoff → ranked`.
 
 ### dreaming.run_now
 
-Trigger a dream cycle immediately instead of waiting for the scheduled run.
+Force-trigger a single dream cycle on the globally-registered daemon, bypassing the scheduler's window / idle / already-ran-today checks. Reserved for E2E test harnesses.
 
-**Returns:** Confirmation with the triggered dream-run identifier.
+**Request:** no params.
 
-> These four live in the `memory.*` and `dreaming.*` RPC namespaces, alongside the
-> existing `memory.search` / `store` / `delete` / `clear` / `stats` / `compress`
-> methods — distinct from the builtin chat tools documented above.
+**Response:** `{ "ok": true, "report": { ...DreamReport... } }` on success; `INTERNAL_ERROR: DreamDaemon is not initialised` when memory is disabled or simulated mode (the unit-test process never has a daemon either, so this surfaces in test harnesses).
 
----
+### dreaming.list_insights
 
-## Method Comparison
+Read-only listing of dream insights: recent daily digests, weekly synthesis notes (category = `synthesis`), and dream-run audit trail with the SkillOpt evolution-gate verdict parsed from the stored JSON.
 
-| Method | Use When | Returns |
-|---|---|---|
-| `memory_search` | Need specific facts | Ranked facts |
-| `memory_reflect` | Need synthesis / answer | Coherent answer + sources |
-| `session_search` | Looking for past conversations | Sessions + summary |
-| `remember` | Critical fact must not be missed | Confirmation |
-| `forget` | Remove outdated information | Confirmation |
-| `memory_status` | Debug memory issues | Statistics |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+| `limit` | number | no | Defaults to 30 |
 
----
+**Response:** `{ "daily": [ ...{date, content, source_memory_count, created_at}... ], "synthesis": [ ...{path, title, tags, updated_at}... ], "runs": [ ...{id, pipeline_type, started_at, finished_at, duration_ms, synthesis_count, errors?, evolution?}... ] }`.
 
-## Error Handling
+### insights.tools
 
-All memory methods return structured errors:
+Per-tool usage introspection over `ToolInvocation` raw rows. Read-only; consumed by the Panel's "tool insights" view.
 
-| Error | Meaning |
-|---|---|
-| `MemoryNotFound` | No matching facts/sessions |
-| `IndexCorrupted` | SQLite index needs rebuild |
-| `QuotaExceeded` | Token budget exhausted |
-| `LockTimeout` | Cross-process contention (Spec C) |
+**Request:** no params (the panel fetches its own `agent_id` window).
 
----
+**Response:** ranked list of tools by activity / success rate.
+
+## Bulk clears
+
+The two old "fakes that always returned `{ "deletedCount": 0 }`" are **gone** — both now fail closed:
+
+| Method | New behaviour |
+|--------|--------------|
+| `memory.clear` | `INTERNAL_ERROR: Bulk memory clearing is not supported in the notes-based memory model.` |
+| `memory.clearFacts` | `INTERNAL_ERROR: Bulk note clearing is not supported; manage knowledge notes via the note_manage tool.` |
+
+`memory.delete` is the only legal per-row delete. Bulk deletes go through `note_manage` (Layer 2) or never run (Layer 1).
+
+## Built-in chat tools (companion surface)
+
+The Panel's "Memory" tab and the LLM reach a parallel surface through **builtin chat tools** — they are dispatched by `tools.invoke` / `chat.send` rather than over `memory.*`. They are listed here for reference but the JSON-RPC surface does not call them directly.
+
+| Tool | Purpose |
+|------|---------|
+| `memory_search` | Search the knowledge base for relevant facts (Layer 2) |
+| `memory_reflect` | Synthesise a coherent answer from memory instead of returning raw facts |
+| `session_search` | Search across session transcripts |
+| `remember` | Pin a fact to curated hot memory |
+| `forget` | Remove a fact from memory |
+| `memory_status` | Health + statistics for the memory system |
 
 ## See Also
 
-- [Memory System](../../concepts/memory) — Overview
-- [Memory Architecture](../../architecture/memory) — Implementation
-- [Memory Evolution](../../architecture/memory-evolution) — Spec history
-
----
-
-## 26.7.x Addendum
-
-### `memory.*` Full RPC
-
-- `memory.search` / `memory.delete` / `memory.clear` / `memory.stats` / `memory.compress`
-- `memory.listFacts` / `memory.clearFacts` / `memory.list_corrections` / `memory.trace`
-- `memory.appList`
-- `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace`
-
-### Vault Panel Refactor (26.7.27+)
-
-Card view, batch-action bar, deep links, evidence chain, cross-agent selection, provenance, batch export.
-
-### Real Cost and Token Accounting
-
-26.7.15+ Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort.
-
-### Note Layer
-
-`note_graph_query` tool (bidirectional BFS path, typed relation edges, wikilink supersession, crash-safe index, CJK trigram full-text search).
-
-### SkillOpt Self-Evolution
-
-26.7.x: skill evolution is constrained by the SkillOpt discipline.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Memory system](/docs/en/concepts/memory) -- Layer 1/2/3 model
+- [Dreaming daemon](#) -- The `dreaming.*` scheduler

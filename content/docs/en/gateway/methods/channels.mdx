@@ -3,222 +3,200 @@ title: "channels.*"
 description: "Communication channel management RPC methods"
 ---
 
-Channel methods manage communication channels — connections to external messaging platforms and notification services (Discord, Slack, email, etc.).
+`channels.*` is the runtime surface over the `ChannelRegistry`. Methods are registered in two passes:
+
+- `register_channel_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/session.rs:202-303`) — the core lifecycle methods (`channels.list/status`, `channel.start/stop/pairing_data/send/create/delete/health`, `channels.dead_letters`, `channels.redrive_dead_letters`, `channels.set_agent`).
+- `start/mod.rs:2431-2466` — the channel-pairing methods (`channel.pairing.list/approve/reject/approved/revoke`).
+- The Discord Control-Plane panel methods (`discord.validate_token`, `discord.list_guilds`, `discord.list_channels`, `discord.audit_permissions`) are registered next to the other channel handlers.
+
+The same registry backs all of these. Configured-but-not-yet-instantiated channels (e.g. a Telegram channel that exists in `~/.aleph/config.toml` but is missing `bot_token`) show up as `pending_config` in `channels.list`.
 
 ## Methods
 
 ### channels.list
 
-List all configured channels.
+List every registered channel plus the configured-but-not-instantiated set. Also surfaces the durable outbound-delivery queue depth (R8) so an operator can spot a backlog.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "channels.list",
-  "params": {}
-}
-```
+**Request:** no params.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "channels": [
-      {
-        "id": "discord-main",
-        "name": "Discord Main",
-        "type": "discord",
-        "status": "connected",
-        "guild_id": "123456789"
-      },
-      {
-        "id": "slack-alerts",
-        "name": "Slack Alerts",
-        "type": "slack",
-        "status": "disconnected"
-      }
-    ]
-  }
-}
-```
+**Response:** `{ "channels": [ ...ChannelInfoResponse... ], "summary": { "total", "connected", "connecting", "pairing", "disconnected", "error", "disabled" }, "delivery_queue" | null }`. Each `ChannelInfoResponse` carries `id`, `name`, `channel_type`, `status`, and a `capabilities` block (`attachments`, `images`, `audio`, `video`, `reactions`, `replies`, `editing`, `deletion`, `typing_indicator`, `read_receipts`, `rich_text`, `max_message_length`, `max_attachment_size`). `pending_config` channels carry empty capabilities.
 
 ### channels.status
 
-Get status of a specific channel.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "channels.status",
-  "params": {
-    "channel_id": "discord-main"
-  }
-}
-```
-
-### channels.add
-
-Add a new channel configuration.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "channels.add",
-  "params": {
-    "id": "discord-second",
-    "name": "Discord Secondary",
-    "type": "discord",
-    "config": {
-      "token": "bot-token-here",
-      "guild_id": "987654321"
-    }
-  }
-}
-```
-
-**Parameters:**
+Live status of a single channel (overrides the stored status with the live `ChannelStatus`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `id` | string | Yes | Unique channel identifier |
-| `name` | string | Yes | Display name |
-| `type` | string | Yes | Channel type: `"discord"`, `"slack"`, `"email"`, `"webhook"` |
-| `config` | object | Yes | Type-specific configuration |
+| `channel_id` | string | yes | Channel id |
 
-### channels.update
+**Response:** the `ChannelInfoResponse` for that channel. `INVALID_PARAMS: Channel not found: <id>` when unknown.
 
-Update a channel configuration.
+### channel.start
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "channels.update",
-  "params": {
-    "channel_id": "discord-main",
-    "config": {
-      "token": "new-bot-token"
-    }
-  }
-}
-```
+Start a channel. Re-reads the channel's config from `~/.aleph/config.toml` (so a Panel save takes effect without a server restart) and re-injects vault-resolved secrets into the config before constructing the channel. Telegram channels have their `ToolCatalog` re-attached so slash commands are registered.
 
-### channels.delete
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | yes | Channel id |
 
-Delete a channel configuration.
+**Response:** `{ "channel_id", "status": "started" }`.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "channels.delete",
-  "params": {
-    "channel_id": "slack-alerts"
-  }
-}
-```
+### channel.stop
 
-### channels.connect
+Stop a channel.
 
-Connect a disconnected channel.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | yes | Channel id |
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "channels.connect",
-  "params": {
-    "channel_id": "slack-alerts"
-  }
-}
-```
+**Response:** `{ "channel_id", "status": "stopped" }`.
 
-### channels.disconnect
+### channel.create
 
-Disconnect a connected channel.
+Create a new channel instance, persist its config (with secrets stripped to the vault), register, and auto-start. If the config is incomplete (e.g. missing `bot_token`) the request still succeeds with `status: "pending_config"` so the user can fill in the missing fields via the Panel.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "channels.disconnect",
-  "params": {
-    "channel_id": "discord-main"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Unique channel id |
+| `type` | string | yes | `telegram` / `discord` / `slack` / `imessage` (BlueBubbles) / … |
+| `config` | object | yes | Type-specific config; secret fields (`bot_token`, `app_token`, `app_secret`, `access_token`, …) are stored in the vault (`channel:<id>:<field>`) and stripped from the persisted config |
 
-### channels.send
+**Response:** `{ "id", "type", "status" }` with `status: "started" | "created_but_start_failed" | "pending_config"`.
+
+### channel.delete
+
+Stop a channel (if running) and remove it from both the registry and the persisted config.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Channel id |
+
+**Response:** `{ "id", "status": "deleted" }`. Refuses to delete a channel that exists in neither the registry nor the config.
+
+### channel.send
 
 Send a message through a channel.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 8,
-  "method": "channels.send",
-  "params": {
-    "channel_id": "discord-main",
-    "message": "Hello from Aleph!",
-    "target": "general"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | yes | Channel id |
+| `to` | string | yes | Conversation id (channel-specific target: chat id, channel id, user id, …) |
+| `text` | string | yes | Message body (non-empty) |
 
-## Channel Types
+**Response:** `{ "channel_id", "message_id", "timestamp", "sent": true }`.
 
-| Type | Description | Config Required |
-|------|-------------|----------------|
-| `discord` | Discord bot integration | `token`, `guild_id` |
-| `slack` | Slack bot/app integration | `token`, `channel` |
-| `email` | Email notifications | `smtp_host`, `from_address` |
-| `webhook` | Generic HTTP webhooks | `url`, `headers` |
+### channel.pairing_data
+
+Fetch the pairing data (QR code, code, or deep link) for a channel that supports it.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | yes | Channel id |
+
+**Response:** the channel's pairing payload (shape is channel-defined).
+
+### channel.health
+
+Read the channel-health monitor for one channel (or every channel, summarised).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | no | Omitted ⇒ every channel's health + a fleet summary |
+
+**Response (one channel):** the `ChannelHealthResponse` for that channel (`id`, `channel_type`, `status`, `health_status` (`healthy` / `stale` / `degraded`), `last_event_at`, `failure_count`, `status_reason?`).
+
+**Response (all):** `{ "channels": [ ...ChannelHealthResponse... ], "summary": { "total", "healthy", "stale", "degraded" } }`.
+
+### channels.dead_letters
+
+Detail-on-demand companion to the `dead_lettered` count in `channels.list`. Lists the outbound deliveries that exhausted their retry budget.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | number | no | Defaults to 50, capped at 500 |
+
+**Response:** `{ "dead_letters": [ ...{channel, to, text_preview (≤ 200 chars), attachments, attempts, last_error, created_at, died_at, age_secs}... ], "count" }`. `{ "dead_letters": [], "count": 0, "store": false }` when no durable delivery store is attached.
+
+### channels.redrive_dead_letters
+
+Recovery half of the dead-letter trail. Moves dead-lettered deliveries back into the live outbound queue for another delivery pass once the transport is healthy. Safe by construction — every dead letter was a duplicate-safe transient failure.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel` | string | no | Restrict the redrive to one transport |
+
+**Response:** `{ "redriven": N }` on success. `{ "redriven": 0, "store": false }` when no durable store is attached.
+
+### channels.set_agent
+
+Bind or unbind an agent to a channel. Delegates to the shared binding seam (`gateway::agent_binding`) — the same implementation behind the `agent_switch` tool — so both surfaces share ghost validation, no-op detection, and `Bound` / `Unbound` events. **Must specify an existing agent** (the previous lenient behaviour was removed: 26.7.15+).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | yes | Channel id |
+| `agent_id` | string | no | Agent id; `null` / absent unbinds |
+
+**Response (bind):** `{ "ok", "previous_agent" | null, "no_op": false }` on a fresh bind; `{ "ok", "previous_agent", "no_op": true }` on a no-op rebind.
+
+**Response (unbind):** `{ "ok", "previous_agent" | null }`.
+
+`INVALID_PARAMS` when the `agent_id` does not exist in the live `AgentRegistry`. A minimal server with `agent_registry: None` skips the validation.
+
+### agents.bindings
+
+Get every channel bound to each agent, sorted by channel id. The previous one-channel-per-agent map was lossy; the current response shape is `{ "bindings": { "<agent_id>": [ "<channel>", … ] } }` and surfaces every channel bound to an agent.
+
+**Request:** no params.
+
+**Response:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`.
+
+## Channel pairing
+
+Channels that support unknown-sender approval (Telegram, iMessage BlueBubbles) keep a per-channel pairing store. The same store backs the inbound router's auto-approve and the Panel's manual UI; the RPCs below are the manual UI.
+
+| Method | Parameters | Description |
+|--------|------------|------|
+| `channel.pairing.list` | `channel?` | `{ "requests": [ ...PairingRequest... ], "count" }`; optional `channel` filter. Each `PairingRequest` carries `channel`, `sender_id`, `code`, `created_at`. |
+| `channel.pairing.approve` | `channel` (required), `code` (required) | `{ "approved": true, "request": PairingRequest }` |
+| `channel.pairing.reject` | `channel` (required), `code` (required) | `{ "rejected": true, "channel", "code" }` |
+| `channel.pairing.approved` | `channel` (required) | `{ "channel", "approved": [ ...sender_id... ], "count" }` |
+| `channel.pairing.revoke` | `channel` (required), `sender_id` (required) | `{ "revoked": true, "channel", "sender_id" }` |
+
+## Discord Control-Plane panel
+
+Four methods are registered for the Discord Control-Plane panel inside the Discord modal flow:
+
+| Method | Description |
+|--------|-------------|
+| `discord.validate_token` | Validate a Discord bot token (no persistence) |
+| `discord.list_guilds` | List the guilds the bot is in |
+| `discord.list_channels` | List the channels of a guild |
+| `discord.audit_permissions` | Audit a guild's permission set against the operator's intent |
+
+These methods require a live `ChannelRegistry` and are always present; they do not depend on a connected channel state.
+
+## Channel type → secret field map
+
+`channel.create` accepts the secret fields named below. Each is stored under `channel:<id>:<field>` in the vault and **stripped from the persisted config**.
+
+| Channel family | Secret fields |
+|----------------|--------------|
+| `telegram` | `bot_token` |
+| `discord` | `bot_token` |
+| `slack` | `bot_token`, `app_token` |
+| `feishu` | `app_secret` |
+| `msteams` | `app_password` |
+| `matrix` | `access_token` |
+| `xmpp` / `irc` / `email` | `password` |
+| `nostr` | `private_key` |
+| `webhook` | `secret` |
+| `whatsapp` | `session_data` |
+| `qq` | `client_secret` |
+
+A configured field is also surfaced as `has_<field>: true` on `channels.list` (and on the Settings page) — the editable input always starts empty, and a save with an empty value means "keep the existing vault value".
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### Full RPC Set
-
-26.7.x channel RPC:
-
-- `channel.create` / `delete` / `list` / `start` / `stop` / `status` / `health` / `send`
-- `channel.pairing_data` — pairing context
-- `channel.dead_letters` — dead-letter list
-- `channel.redrive_dead_letters` — re-drive
-- `channels.set_agent` — bind channel to a specific agent (**must** specify an existing agent)
-- `channels.list` / `channels.status`
-- `channel.pairing.approve` / `approved` / `list` / `reject` / `revoke`
-
-### Telegram Parallel-Layer Cleanup
-
-26.7.21 shed ~2.6k lines of dead code (an uncompiled webhook server, an unconstructed session manager, a dead draft API, duplicated status reactions). Access / pairing / allowlist **single-sourced on the router**.
-
-### Discord Parallel-Layer Cleanup
-
-26.7.21 removed duplicated nested-config / account-pool / resolver layers.
-
-### iMessage
-
-26.7.x: BlueBubbles channel full lifecycle (`channel.create` / `start` etc. support iMessage). Inbound add-tapbacks surface to the model as context.
-
-### Cross-Channel Reachability
-
-26.7.x: configured channels are now truly reachable and addressable — previously some configurations never took effect.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Channel routes](/docs/en/gateway/channels) -- Inbound routing + access policy
+- [Bus errors & delivery queue](/docs/en/gateway/delivery) -- The durable outbound queue

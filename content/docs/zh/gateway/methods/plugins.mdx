@@ -3,249 +3,188 @@ title: "plugins.*"
 description: "插件管理 RPC 方法"
 ---
 
-插件方法管理插件系统——加载、卸载、列出和配置扩展 Aleph 功能的插件。插件可以添加工具、处理程序、事件监听器和自定义行为。
+`plugins.*` 和规范的单数 `plugin.*` 命名空间是运行时插件宿主的两个面。两者都在 `HandlerRegistry::new()`(`src/gateway/handlers/mod.rs:287-310`)中注册,因此无论 MCP manager 是否启动都存在。
 
-> **扩展统一概念的一部分。** 这些 `plugins.*` 方法是统一的 `extensions.*` 门面背后的按类型后端之一。对于日常用户而言，插件、技能和 MCP 服务器都作为**扩展**通过扩展商店浏览和安装。参见 [extensions.* 方法](/docs/zh/gateway/methods/extensions) 和 [概念：扩展商店](/docs/zh/concepts/extensions-store)。
+- `plugins.*` 是**遗留**命名空间,为向后兼容旧客户端保留。
+- `plugin.*` 是**规范**的单数命名空间;`plugin.install` 在服务端对来源分类(市场 / git URL / 本地路径 / `.zip`)并相应路由。
 
-## 方法
+日常使用中,推荐统一的 `extensions.*` 门面。`plugins.*` / `plugin.*` 是底层的插件后端(`extensions` 目录中 kind `Plugin`)。
+
+## `plugins.*` 方法(遗留)
 
 ### plugins.list
 
 列出所有已加载的插件及其状态。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "plugins.list",
-  "params": {}
-}
-```
+**请求:** 无参数。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "plugins": [
-      {
-        "id": "filesystem",
-        "name": "File System Plugin",
-        "version": "1.0.0",
-        "enabled": true,
-        "tools": ["read_file", "write_file", "list_dir"],
-        "handlers": ["file_change_event"]
-      }
-    ]
-  }
-}
-```
+**响应:** `{ "plugins": [ ...PluginInfo... ] }`。每行包含 `name`、`version`、`description`、`enabled`、`path`、能力计数(`skills_count`、`commands_count`、`agents_count`、`hooks_count`、`mcp_servers_count`)和状态字符串 `status`(`loaded` / `disabled` / `overridden` / `error`,失败时附 `error` 字段)。
 
-### plugins.status
+### plugins.install
 
-获取特定插件的详细状态。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "plugins.status",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "id": "filesystem",
-    "name": "File System Plugin",
-    "version": "1.0.0",
-    "enabled": true,
-    "loaded_at": "2024-01-15T10:30:00Z",
-    "tools_count": 3,
-    "handlers_count": 1
-  }
-}
-```
-
-### plugins.load
-
-从路径或插件 ID 加载插件。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "plugins.load",
-  "params": {
-    "path": "~/.aleph/plugins/custom_plugin"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "loaded": true,
-    "plugin_id": "custom_plugin"
-  }
-}
-```
-
-**参数：**
+从 Git URL 安装插件。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `path` | string | 是* | 插件目录或文件的路径 |
-| `plugin_id` | string | 是* | 插件标识符（path 的替代方案） |
+|------|------|------|------|
+| `url` | string | 是 | Git URL(`https://`、`git@` 或 `git://`);仓库名取路径最后一段,作为磁盘上的插件目录名 |
 
-*需要 `path` 或 `plugin_id` 之一。
+**响应:** 成功时 `{ "plugin": { ...PluginInfo... } }`;URL 派生出不安全目录名、目标已存在或验证失败时返回 `INVALID_PARAMS`;`git2::Repository::clone` 失败时返回 `INTERNAL_ERROR`。
+
+### plugins.installFromZip
+
+从 base64 编码的 zip 归档安装一个或多个插件。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `data` | string | 是 | base64 编码的 zip 字节 |
+
+**响应:** `{ "installedNames": [] }`(处理函数不枚举解压出的名字,使用 `plugins.list` 刷新)。
 
 ### plugins.unload
 
-按 ID 卸载插件。
+卸载已加载的插件并删除其目录。**先**在运行时下线,再删除目录,这样 `services.stop` 或临时 MCP 服务器在关闭时仍能运行。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "plugins.unload",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 插件 id(必须是单个普通路径组件——不允许 `..`、`/`) |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "unloaded": true
-  }
-}
-```
+**响应:** `{ "ok": true }`。
 
-### plugins.reload
+### plugins.load
 
-重新加载插件（卸载然后加载）。
+从目录解析清单并加载插件到运行时(Node.js / WASM)。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "plugins.reload",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `path` | string | 是 | 包含 `aleph.plugin.json` 或带 `aleph` 字段的 `package.json` 的插件目录路径 |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "reloaded": true
-  }
-}
-```
+**响应:** `{ "pluginId": "<id>", "name": "<name>", "kind": "Mcp|Wasm|Static" }`。
+
+### plugins.unload
+
+`plugins.load` 的反操作:从运行时注销插件。工具和钩子可能仍出现在注册表中;使用 `plugins.unload` 删除目录。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `pluginId` | string | 是 | 插件 id |
+
+**响应:** `{ "ok": true }`。
 
 ### plugins.enable
 
-启用先前禁用的插件。
+移除 `.disabled` 标记文件,使插件在下次扫描时被重新发现。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "plugins.enable",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 插件 id |
+
+**响应:** `{ "ok": true }`。
 
 ### plugins.disable
 
-禁用插件而不卸载它。
+创建 `.disabled` 标记文件并下线运行时(服务 + 临时 MCP 服务器)。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "plugins.disable",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 插件 id |
 
-## 插件结构
+**响应:** `{ "ok": true }`。
 
-插件从 `~/.aleph/plugins/` 加载，通常包含：
+### plugins.callTool
 
-```
-my_plugin/
-  plugin.toml       # 插件清单
-  src/
-    lib.rs          # 插件入口点
-  skills/           # 可选捆绑技能
-```
+调用由已加载插件注册的工具。
 
-**plugin.toml 示例：**
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `pluginId` | string | 是 | 注册该工具的插件 |
+| `handler` | string | 是 | 处理函数名 |
+| `args` | object | 否 | 传给处理函数的 JSON 参数 |
 
-```toml
-[plugin]
-id = "my_plugin"
-name = "My Plugin"
-version = "1.0.0"
-description = "Does something useful"
+**响应:** 成功时 `{ "result": <插件自定义 JSON> }`;若未找到 `-32001: Command not found` 或命令属于其他插件,同样返回 `-32001`。
 
-[plugin.tools]
-provides = ["my_tool"]
+### plugins.executeCommand
 
-[plugin.events]
-listens = ["session.start"]
-```
+执行由插件注册的斜杠命令。处理函数在插件的 `commands/` 目录中查找命令(以 `SkillRegistration` 形式存储,`skill_type = Command`)。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `pluginId` | string | 是 | 注册该命令的插件 |
+| `commandName` | string | 是 | 命令名(不带前导斜杠) |
+| `args` | object | 否 | 传给处理函数的 JSON 参数 |
+
+**响应:** 序列化为 JSON 的 `DirectCommandResult`(`content`、`data`、`success`)。
+
+## `plugin.*` 方法(规范单数)
+
+### plugin.list
+
+与 `plugins.list` 相同。**响应:** `{ "plugins": [ ...PluginInfo... ] }`。
+
+### plugin.install
+
+统一安装入口。服务端对 `source` 分类,分派到市场安装器(裸名)或 git-clone 安装器(URL / 路径 / `git@…`)。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `source` | string | 是 | 裸名 → 市场;含有 `/`、`.` 或 `:` → git |
+| `url` | string | 回退 | 旧式别名,两者都给定时以 `source` 为准 |
+| `scope` | string | 否 | `user`(默认) / `project` / `local` |
+
+**响应:** 市场路径返回 `{ "ok": true, "name", "scope", "installed_at" }`;git 路径返回与 `plugins.install` 相同的形态。
+
+### plugin.update
+
+原地升级已安装的插件。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 插件名 |
+| `marketplace` | string | 否 | 消歧使用哪个市场 |
+| `scope` | string | 否 | `user`(默认) / `project` / `local` |
+| `force` | boolean | 否 | 即使版本未变也重装 |
+
+**响应:** `{ "ok", "name", "scope", "updated", "from"(旧版本),"to"(新版本 | null) }`;若已是最新则返回 `{ "ok", "name", "scope", "updated": false, "version" }`。
+
+### plugin.uninstall
+
+与 `plugins.uninstall` 同形(旧式复数形式也可用)。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 插件 id |
+
+**响应:** `{ "ok": true }`。
+
+### plugin.enable / plugin.disable
+
+与 `plugins.enable` / `plugins.disable` 同形。**响应:** `{ "ok": true }`。
+
+### plugin.load / plugin.unload / plugin.reload
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `plugin.load` | `path` | 解析并加载目录中的插件;返回 `{ "pluginId", "name", "kind" }` |
+| `plugin.unload` | `pluginId` | 卸载运行时插件;返回 `{ "ok": true }` |
+| `plugin.reload` | `pluginId` | 热重载:重新解析清单,重新注册能力;返回 `{ "ok": true, "pluginId" }` |
+
+### plugin.callTool / plugin.executeCommand
+
+与 `plugins.callTool` / `plugins.executeCommand` 同形(`pluginId`、`handler` / `commandName`、`args`)。
+
+### plugin.marketplace.*
+
+市场源管理。四个方法都注册。
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `plugin.marketplace.list` | 无 | 列出已注册市场(内置 + 用户) |
+| `plugin.marketplace.add` | `source`(必填),`name`(可选) | 添加 `local` 或 `github` 市场;持久化到 `[plugin_marketplaces]` |
+| `plugin.marketplace.update` | `name`(可选) | 刷新一个或所有市场的索引缓存 |
+| `plugin.marketplace.remove` | `name`(必填) | 移除一个市场并持久化 |
+| `plugin.marketplace.install` | `name`(必填),`marketplace`(可选),`scope`(可选) | 从具名市场安装一个插件 |
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [架构：插件](/docs/zh/architecture/plugins)——插件系统架构
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC 集
-
-- `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall`
-- `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload`
-- `plugins.callTool` / `plugins.executeCommand`
-
-### `plugin.*` 规范名空间
-
-26.7.21+ 引入 `plugin.*` 规范名空间——`plugins.*` 保留向后兼容。详见 [扩展](/docs/zh/gateway/methods/extensions)。
-
-### 失败开放 → 失败关闭
-
-26.7.21+ 强化：插件失败默认行为改为**失败关闭**。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [扩展商店](/docs/zh/concepts/extensions-store)——统一的 `extensions.*` 门面
+- [extensions.*](/docs/zh/gateway/methods/extensions)——同一后端的包装器

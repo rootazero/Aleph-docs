@@ -3,200 +3,208 @@ title: "providers.*"
 description: "AI model provider configuration RPC methods"
 ---
 
-Provider methods manage AI model provider configurations — LLM, embedding, and reranking service endpoints, API keys, and model mappings.
+`providers.*` is the LLM provider CRUD surface. Twelve methods are registered via `register_config_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:260-404`) once the live `Config` is loaded. The `create` / `update` / `delete` / `setDefault` paths have two registrations each — a base handler plus a `_hot` variant — but the registry only ever exposes the hot variant; the `multi_registry` decides which is wired at boot, and a `None` registry falls back to the config-only path. The OAuth methods are registered separately through `register_oauth_handlers` next to the OAuth state cell.
 
-## Namespaces
+The companion sub-namespaces (`embedding_providers.*`, `generation_providers.*`, `rerank_config.*`, `runtimes.*`, `moa.*`, `routing_rules.*`, `voice.*`, `browser_config.*`, `fetch_config.*`, `search_config.*`, `memory_config.*`, `general_config.*`, `behavior_config.*`, `execution_config.*`, `route_config.*`, `generation_config.*`, `security_config.*`, `acp.*`) are also wired by the same `register_config_handlers` call. They follow the same vault-backed config pattern; only `acp.*` is conditional on a built `AcpAdapterManager`.
 
-Provider configuration is split across three namespaces:
+## Methods
 
-| Namespace | Purpose |
+### providers.list
+
+List every configured LLM provider. API keys are never returned; only their presence is reported.
+
+**Request:** no params.
+
+**Response:** `{ "providers": [ ...ProviderInfo... ] }`. Each row carries `name`, `enabled`, `model`, `models`, `provider_type`, `base_url`, `color`, `timeout_seconds`, `max_tokens`, `context_window`, `temperature`, `has_api_key`, `is_default`, `verified`.
+
+### providers.get
+
+Fetch a single provider by name.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Provider name |
+
+**Response:** `{ "provider": { ...ProviderInfo... } }` or `INVALID_PARAMS` with `Provider not found: <name>`. API key is never returned.
+
+### providers.create
+
+Create a new provider. The API key, when supplied, is written to the vault (`ai:<name>`) and stripped from the in-memory config so it never lands on disk.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Provider id (must be unique) |
+| `config` | object | yes | `ProviderConfigJson` — see [Config Fields](#config-fields) |
+
+**Response:** `{ "ok": true }` on success. `INVALID_PARAMS` if the provider already exists. With a live `MultiProviderRegistry` (`provider_hot`), the new provider is hot-registered so it is immediately usable as the default and as an auto-derived failover fallback.
+
+### providers.update
+
+Patch an existing provider. Same `ProviderConfigJson` shape as `create`; fields present in the patch overwrite their existing value, others stay.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Provider name |
+| `config` | object | yes | `ProviderConfigJson` patch |
+
+**Response:** `{ "ok": true }` on success. Re-running `providers.test` against the updated name is the only way to flip `verified` back to `true`. With a live registry, the new `ProviderConfig` is hot-built and re-registered so protocol / base_url / model changes take effect on the next prompt.
+
+### providers.delete
+
+Delete a provider. The API key is removed from the vault and the entry is scrubbed from the failover chain so deletion does not leave a dangling reference. With a live registry, the entry is also removed from the dialable set.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Provider name |
+
+**Response:** `{ "ok": true }` on success. `INVALID_PARAMS` when the name is unknown or the provider is the current default.
+
+### providers.test
+
+Probe a single provider's connection. On success, `verified` is set to `true` and the failover circuit breaker is reset (so a rotated credential is tried immediately instead of staying shut out for the rest of the 10-minute cooldown).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | no | Persists `verified=true` on success. If absent, the probe runs read-only. |
+| `config` | object | yes | `ProviderConfigJson` to probe (the inline `api_key`, if any, takes precedence; otherwise the vault key is resolved) |
+
+**Response:** `{ "success", "error" | null, "latency_ms" | null }` — see [TestResult](#testresult-shape).
+
+### providers.setDefault
+
+Promote a provider to default. The new default must already be `verified`. With a live registry, the swap is hot: the new provider is built, registered, and used as the default on the next prompt; the failover breaker is reset for the same reason as `providers.test`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Provider name (the alias `codex` resolves to `chatgpt`) |
+
+**Response:** `{ "ok": true }` on success. `INVALID_PARAMS` when the name is unknown or the provider has not passed `providers.test`.
+
+### providers.needsSetup
+
+Quick first-run check used by the Panel to decide whether to show the wizard.
+
+**Response:** `{ "needs_setup", "provider_count", "has_verified" }`. `needs_setup` is `true` iff no provider is both enabled and verified.
+
+### providers.catalog
+
+Chat-window model picker. Joins the built-in chat presets with per-user credential state and per-model metadata. When `view` is omitted, returns only the `verified`+`enabled` rows; `available` returns every credentialed row, `all` returns every chat-capable row.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `view` | string | no | `configured` (default) / `available` / `all` |
+
+**Response:** `{ "items": [ ...CatalogEntryView... ] }`. Each row carries `id`, `display_name`, `default_model`, `base_url`, `protocol`, `color`, `homepage`, `notes`, `signup_url`, `fallback_models`, `default_aux_model`, `aliases`, `modalities`, `models`, `has_api_key`, `verified`, `enabled`, `is_default`, `capabilities` (optional), `cost` (optional), `endpoint` (`local`/`cloud`), `lifecycle` (`active`/`preview`/`deprecated`), `requires_explicit_model`.
+
+When MoA presets are configured, a synthetic `id: "moa"` row is appended with the preset names as its `models`. Selecting a MoA preset via `model_override` activates advisory fan-out for the session.
+
+### providers.healthcheck
+
+Concurrent read-only liveness sweep over every configured provider. Disabled providers are reported as `skipped` rather than probed; per-provider failures are reported as rows, not as an RPC error.
+
+**Request:** no params.
+
+**Response:** `{ "providers": [ ...ProviderHealthRow... ] }` sorted by name. Each row carries `name`, `enabled`, `ok`, `skipped`, `latency_ms` (optional), `error` (optional).
+
+### providers.modelsRefresh
+
+On-demand discovery: ask each configured provider for its live `/models` list. Per-provider failures are returned as rows, not as an RPC error. The operator-facing counterpart of the `list_models` tool's `refresh` argument.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | no | Restrict the sweep to one id |
+
+**Response:** `{ "providers": [ ...DiscoveryRow... ] }` sorted by provider name. Each row carries `provider`, `ok`, `fetched_at` (optional), `models` (optional), `error` (optional).
+
+### providers.oauthLogin
+
+Start a browser-based OAuth login (Codex / ChatGPT). Stores the full token blob (`access_token` + `refresh_token` + expiry) in the vault as `ai:<provider>:oauth`; the access token is also mirrored under `ai:<provider>` so existing provider code keeps working.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | yes | `codex` or `chatgpt` |
+
+**Response:** `{ "connected": true, "provider", "expires_in_seconds" | null }` on success. `INVALID_PARAMS` for any other provider name.
+
+### providers.oauthLogout
+
+Clear the OAuth state. Deletes both `ai:<provider>` and `ai:<provider>:oauth` from the vault and clears the in-memory cache.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | yes | `codex` or `chatgpt` |
+
+**Response:** `{ "ok": true }`.
+
+### providers.oauthStatus
+
+Read the current OAuth state. If the cached token is expired, attempts a refresh in-band (best-effort) and reports `connected: false` with a `re-login` hint if the refresh fails.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | yes | `codex` or `chatgpt` |
+
+**Response:** `{ "connected", "provider", "expires_in_seconds" | null, "error" | null }`.
+
+## Config Fields
+
+`ProviderConfigJson` (`providers.create` / `providers.update` / `providers.test`):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `protocol` | string | preset | Override the protocol (e.g. `openai`, `anthropic`) |
+| `enabled` | bool | `true` | Whether the provider participates in failover |
+| `models` | string[] | `[]` | Models to expose (alias `model` accepted for back-compat) |
+| `api_key` | string | `null` | Optional inline key. Persisted to vault, stripped from disk. |
+| `base_url` | string | preset | Endpoint base URL |
+| `color` | string | `#808080` | UI accent |
+| `timeout_seconds` | number | `300` | Per-request timeout |
+| `max_tokens` | number | `null` | Output cap |
+| `context_window` | number | `null` | Operator-declared window; falls back to the capability catalog when absent |
+| `temperature` | number | `null` | Default temperature |
+| `top_p` | number | `null` | Top-p sampling |
+| `top_k` | number | `null` | Top-k sampling |
+
+`models` is normalised server-side — `model` (singular) is accepted as a legacy alias and merged into the multi-model list.
+
+## TestResult shape
+
+`providers.test` and `providers.healthcheck` return rows with the same fields:
+
+```json
+{
+  "success": true,
+  "error": null,
+  "latency_ms": 245
+}
+```
+
+`providers.healthcheck` always reports `skipped: true` and `ok: false` for disabled providers instead of probing them.
+
+## Companion namespaces
+
+`register_config_handlers` also wires (in the same boot pass):
+
+| Namespace | Methods |
 |-----------|---------|
-| `generation_providers.*` | LLM/text generation models (Claude, GPT, etc.) |
-| `embedding_providers.*` | Embedding/vectorization models |
-| `rerank_providers.*` | Reranking models for search results |
+| `embedding_providers.*` | `list` / `get` / `add` / `update` / `remove` / `setActive` / `test` / `presets` |
+| `generation_providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `voices` / `list_presets` |
+| `rerank_config.*` | `get` / `update` / `test` |
+| `runtimes.*` | `list` / `refresh` / `install` |
+| `moa.*` | `listPresets` / `savePreset` / `deletePreset` / `setDefault` / `setSaveTraces` |
+| `routing_rules.*` | `list` / `get` / `create` / `update` / `delete` / `move` |
+| `voice.*` | `transcribe` / `stream.start` / `stream.audio` / `stream.stop` / `format` / `record_start` / `record_stop` / `synthesize` |
+| `browser_config.*` | `get` / `update` |
+| `fetch_config.*` | `get` / `update` / `test` |
+| `search_config.*` | `get` / `update` / `test` / `deleteBackend` |
+| `memory_config.*` | `get` / `update` / `retrieve_with_trace` |
+| `general_config.*` / `behavior_config.*` / `execution_config.*` / `route_config.*` / `generation_config.*` / `security_config.*` | `get` / `update` |
+| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown` (only if an `AcpAdapterManager` was built) |
 
-## generation_providers.*
-
-### generation_providers.list
-
-List all configured generation providers.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "generation_providers.list",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "providers": [
-      {
-        "id": "anthropic",
-        "name": "Anthropic Claude",
-        "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"],
-        "default_model": "claude-sonnet-4-20250514",
-        "enabled": true
-      }
-    ]
-  }
-}
-```
-
-### generation_providers.add
-
-Add a new generation provider.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "generation_providers.add",
-  "params": {
-    "id": "openai",
-    "name": "OpenAI",
-    "api_key": "sk-...",
-    "base_url": "https://api.openai.com/v1",
-    "models": ["gpt-4o", "gpt-4o-mini"],
-    "default_model": "gpt-4o"
-  }
-}
-```
-
-### generation_providers.update
-
-Update an existing generation provider.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "generation_providers.update",
-  "params": {
-    "id": "openai",
-    "default_model": "gpt-4o-mini"
-  }
-}
-```
-
-### generation_providers.delete
-
-Delete a generation provider.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "generation_providers.delete",
-  "params": {
-    "id": "openai"
-  }
-}
-```
-
-### generation_providers.status
-
-Get provider status and health.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "generation_providers.status",
-  "params": {
-    "id": "anthropic"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "id": "anthropic",
-    "healthy": true,
-    "latency_ms": 245,
-    "rate_limit_remaining": 4999
-  }
-}
-```
-
-## embedding_providers.*
-
-Embedding providers follow the same pattern as generation providers:
-
-- `embedding_providers.list`
-- `embedding_providers.add`
-- `embedding_providers.update`
-- `embedding_providers.delete`
-- `embedding_providers.status`
-
-## rerank_providers.*
-
-Reranking providers follow the same pattern:
-
-- `rerank_providers.list`
-- `rerank_providers.add`
-- `rerank_providers.update`
-- `rerank_providers.delete`
-- `rerank_providers.status`
-
-## Provider Configuration File
-
-Providers are configured in `~/.aleph/config.toml`:
-
-```toml
-[generation_providers.anthropic]
-api_key = "sk-ant-..."
-default_model = "claude-sonnet-4-20250514"
-
-[embedding_providers.openai]
-api_key = "sk-..."
-model = "text-embedding-3-small"
-```
+Each sub-namespace follows the same vault-backed pattern (API keys and secrets live in `ai:<name>` / `embed:<id>` / `gen:<id>` / `web_fetch:<backend>` / `search:<backend>`, never in the persisted config).
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [Getting Started: Configuration](/docs/en/getting-started/configuration) -- Provider setup
-
----
-
-## 26.7.x Addendum
-
-### Full RPC Set
-
-- `providers.catalog` / `providers.create` / `providers.delete` / `providers.get` / `providers.list` / `providers.healthcheck` / `providers.test` / `providers.update`
-- `embedding_providers.add` / `get` / `list` / `presets` / `remove` / `test` / `update`
-- `generation_providers.create` / `delete` / `get` / `list` / `list_presets` / `test` / `update` / `voices`
-- `rerank_config.get` / `test` / `update`
-- `runtimes.install` / `runtimes.list` / `runtimes.refresh`
-
-### VESR Dynamic Model Routing
-
-26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (k-NN over sqlite-vec).
-
-### Provider Failover Refactor
-
-26.7.21+ major: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
-
-### Single-Source Pricing
-
-`session.usage` is computed in-core from a single price table; the shell no longer carries a duplicate.
-
-### Real Cost and Token Accounting
-
-26.7.15+: `session.usage` now carries a real spend ledger (previously partly fabricated).
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Configuration](/docs/en/getting-started/configuration) -- `~/.aleph/config.toml` layout
+- [Models & providers](/docs/en/concepts/models) -- Routing across the catalog

@@ -3,22 +3,25 @@ title: "daemon.*"
 description: "守护进程控制和生命周期 RPC 方法"
 ---
 
-守护进程方法控制 Aleph 后台守护进程——启动、停止、重启和查询托管网关并管理所有子系统的守护进程。
+`daemon.*` 暴露 Aleph 守护进程（`aleph-server` 进程内嵌网关）的控制面。所有处理器位于 `src/gateway/handlers/daemon_control.rs`；`daemon.logs` 在 `HandlerRegistry::new()` 阶段直接注册（不需要运行时状态），`daemon.status` / `daemon.shutdown` 在网关启动时由 boot 路径覆盖。
 
 ## 方法
 
+| 方法 | 说明 |
+|--------|-------------|
+| [`daemon.status`](#daemonstatus) | 守护进程运行状态 |
+| [`daemon.shutdown`](#daemonshutdown) | 优雅关闭网关 |
+| [`daemon.logs`](#daemonlogs) | 按级别 / 行数读取最近日志 |
+
+> `daemon.start` / `daemon.stop` / `daemon.restart` / `daemon.reload` 不是 RPC；守护进程的生命周期由宿主管辖（`aleph-server daemon`、`aleph-server service` 等 CLI 子命令，或 `systemd` / `launchd` 等服务管理器）。
+
 ### daemon.status
 
-获取当前守护进程状态。
+读取守护进程运行信息（uptime、版本、平台）。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "daemon.status",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "daemon.status" }
 ```
 
 **响应：**
@@ -27,59 +30,41 @@ description: "守护进程控制和生命周期 RPC 方法"
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "status": "running",
-    "pid": 12345,
-    "version": "0.1.0",
-    "started_at": "2024-01-15T10:00:00Z",
-    "uptime_seconds": 1800,
-    "components": {
-      "gateway": "healthy",
-      "memory": "healthy",
-      "mcp": "healthy"
-    }
+    "running": true,
+    "uptime_secs": 1800,
+    "version": "<build-version>",
+    "platform": "linux-x86_64"
   }
 }
 ```
 
-### daemon.start
+`uptime_secs` 来自进程启动时刻的 `Instant`；`version` 来自构建时环境变量 `ALEPH_VERSION`。
 
-如果守护进程未运行，则启动它。
+### daemon.shutdown
+
+触发优雅关闭：先发送响应，100 ms 后由 spawned 任务调用 `std::process::exit(0)`，进程退出码由 `aleph-server` 的 SIGTERM 处理器接管。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "daemon.start",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 2, "method": "daemon.shutdown" }
 ```
 
 **响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "started": true,
-    "pid": 12346
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "result": { "status": "shutting_down" } }
 ```
 
-### daemon.stop
+### daemon.logs
 
-优雅地停止守护进程。
+读取最近日志（按文件名匹配 `aleph-*.log.*`，取 mtime 最新者）。可选按级别过滤（按行内是否包含 ` ERROR ` / `[ERROR]` 等 token 的整词匹配，避免 `WARN` 误命中 `ERROR`）。
 
 **请求：**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 3,
-  "method": "daemon.stop",
-  "params": {
-    "force": false
-  }
+  "method": "daemon.logs",
+  "params": { "lines": 50, "level": "error" }
 }
 ```
 
@@ -89,95 +74,31 @@ description: "守护进程控制和生命周期 RPC 方法"
   "jsonrpc": "2.0",
   "id": 3,
   "result": {
-    "stopped": true
+    "logs": ["2026-03-15T10:30:00Z ERROR gateway: connection refused", "..."],
+    "file": "/home/user/.aleph/logs/aleph-server.log.2026-03-15"
   }
 }
 ```
+
+当目录下没有任何 `aleph-*.log.*` 文件时返回 `{ "logs": [], "file": null, "total_lines": 0 }`。
 
 **参数：**
 
 | 参数 | 类型 | 必填 | 说明 |
 |-----------|------|----------|-------------|
-| `force` | boolean | 否 | 强制停止而不优雅关闭 |
-
-### daemon.restart
-
-重启守护进程。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "daemon.restart",
-  "params": {
-    "force": false
-  }
-}
-```
-
-### daemon.reload
-
-不重启重新加载守护进程配置。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "daemon.reload",
-  "params": {}
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "reloaded": true,
-    "config_valid": true
-  }
-}
-```
+| `lines` | number | 否 | 返回尾部行数，默认 50 |
+| `level` | string | 否 | 按级别过滤：`error` / `warn` / `info` / `debug` / `trace` |
 
 ## CLI 等效命令
 
-这些 RPC 方法镜像 CLI 命令：
-
-```bash
-aleph-server start    # 启动守护进程
-aleph-server stop     # 停止守护进程
-aleph-server restart  # 重启守护进程
-aleph-server status   # 检查状态
-```
+| 用途 | CLI |
+|--------|---------|
+| 启动守护进程 | `aleph-server start` |
+| 停止守护进程 | `aleph-server stop` |
+| 注册系统服务（launchd / systemd-user / Task Scheduler） | `aleph-server service install` |
+| 查看版本 / 平台 | `aleph-server version` |
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [入门：快速入门](/docs/zh/getting-started/quick-start)——守护进程设置
-
----
-
-## 26.7.x 补充
-
-### `daemon.logs` / `daemon.shutdown` / `daemon.status`
-
-26.7.x：守护进程管理 RPC。
-
-### `aleph-server service` 子命令
-
-26.7.1+：安装/启动/启用自启/卸载系统服务（launchd / systemd-user / Task Scheduler）。
-
-### Day-boundary 日志轮转
-
-26.7.24+：守护进程支持 day-boundary 日志轮转；启动时写 `ALEPH-BOOT` marker。睡眠抑制剂在 stderr 静默。
-
-### Heartbeat 拒绝危险工具
-
-26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。
-
-### Guardian Judge payload 隐藏密钥
-
-26.7.21+：Heartbeat 探针使用的 LLM 判官（`Guardian Judge`）其 payload 必须隐藏密钥。
+- [方法参考](./index)——所有方法命名空间
+- [logs.*](./logs)——`logs.getDirectory` / `logs.getLevel` / `logs.setLevel`

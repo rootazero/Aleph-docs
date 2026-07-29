@@ -3,26 +3,17 @@ title: "wizard.*"
 description: "设置向导 RPC 方法"
 ---
 
-引导式设置流程的配置向导。
+`wizard.*` 是配置向导的 JSON-RPC 接口。这五个方法在 `HandlerRegistry::new()` 中以 `service_unavailable` 占位符的形式注册,在服务器启动时(`src/bin/aleph-server/commands/start/mod.rs:655-660`)通过 `install_wizard_handlers` 替换为真实处理器。运行时工厂当前只提供 `onboarding` 流;任何其它 `wizard_type` 都会从 `start` 处理函数返回 `Unknown wizard type`。
 
-:::warning
-本页记录的是预期 API。`wizard.*` 方法（`wizard.start`、`wizard.answer`、`wizard.next`、`wizard.cancel`、`wizard.status`）在源处理程序（`src/gateway/handlers/wizard.rs`）中定义，但**当前未在运行时处理程序注册中接线**。它们反映的是设计目标，但尚未通过 JSON-RPC 公开。请参阅[方法参考](/docs/zh/gateway/methods)获取准确的方法列表。
-:::
-
-## 概述
-
-向导系统提供多步配置体验，包含：
-- 多种步骤类型（选择、文本、确认等）
-- 基于会话的状态管理
-- 支持多个并发向导
+向导状态本身是进程本地的——重启守护进程会丢弃进行中的会话。已经不再有等价的 CLI 子命令(`aleph wizard` 已被删除);Panel 通过这些 RPC 驱动流程。
 
 ## 方法
 
 ### wizard.start
 
-启动新的向导会话。
+启动新的向导会话。返回第一步。
 
-**请求：**
+**请求:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -35,56 +26,19 @@ description: "设置向导 RPC 方法"
 }
 ```
 
-**响应：**
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `wizard_type` | string | 是 | 当前已注册的只有 `onboarding`。 |
+| `initial_data` | object | 否 | 保留;运行时工厂会忽略。 |
+
+**响应:**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "session_id": "wizard-uuid",
-    "step": {
-      "id": "step-1",
-      "type": "note",
-      "title": "Welcome",
-      "message": "Welcome to Aleph setup!"
-    },
-    "status": "running"
-  }
-}
-```
-
-### wizard.answer
-
-回答当前步骤并获取下一步。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "wizard.answer",
-  "params": {
-    "session_id": "wizard-uuid",
-    "step_id": "step-2",
-    "value": "anthropic"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "done": false,
-    "step": {
-      "id": "step-3",
-      "type": "text",
-      "message": "Enter your API key:",
-      "placeholder": "sk-...",
-      "sensitive": true
-    },
+    "session_id": "<uuid>",
+    "step": { "id": "...", "type": "note|select|multi_select|text|confirm|progress", ... },
     "status": "running"
   }
 }
@@ -92,159 +46,65 @@ description: "设置向导 RPC 方法"
 
 ### wizard.next
 
-无需回答即可获取下一步（用于注释/介绍）。
+跳过非阻塞步骤(说明/介绍)而不传答案。如果传入了 `answer`,调用会被拒绝——请改用 `wizard.answer` 提交答案。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "wizard.next",
-  "params": {
-    "session_id": "wizard-uuid"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 是 | `wizard.start` 返回的会话 id |
+| `answer` | any | 否 | 保留;传入值会返回 `Invalid answer` 错误。 |
+
+**响应:** 下一步,或终结步骤(`status: done|error|cancelled`)。
+
+### wizard.answer
+
+回答某一步并推进到下一步。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 是 | `wizard.start` 返回的会话 id |
+| `step_id` | string | 是 | 当前正在回答的步骤 id |
+| `value` | any | 是 | 答案(`text` 步骤为 string,`select` 为 string,`multi_select` 为 string[],`confirm` 为 bool) |
+
+**响应:** 下一步,或终结步骤。
 
 ### wizard.cancel
 
-取消活动向导会话。
+取消一个进行中的向导会话。从管理器中移除该会话;`WizardSession` Arc 析构会关闭会话通道。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "wizard.cancel",
-  "params": {
-    "session_id": "wizard-uuid"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 是 | `wizard.start` 返回的会话 id |
 
-**响应：**
+**响应:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "cancelled": true
-  }
-}
+{ "result": { "cancelled": true } }
 ```
 
 ### wizard.status
 
-获取向导会话的状态。
+获取向导会话的当前状态。
 
-**请求：**
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 是 | `wizard.start` 返回的会话 id |
+
+**响应:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "wizard.status",
-  "params": {
-    "session_id": "wizard-uuid"
-  }
-}
+{ "result": { "status": "running|done|error|cancelled" } }
 ```
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "status": "running"
-  }
-}
-```
+会话 id 不存在时返回 `RESOURCE_NOT_FOUND`(`-32004`)。
 
-## 步骤类型
+## 接线
 
-| 类型 | 说明 | 值类型 |
-|------|-------------|------------|
-| `note` | 信息性消息 | 无 |
-| `select` | 单选 | String |
-| `multi_select` | 多选 | String[] |
-| `text` | 文本输入 | String |
-| `confirm` | 是/否问题 | Boolean |
-| `progress` | 进度指示器 | 无 |
+`wizard.*` 处于两个阶段之间:
 
-## 步骤结构
+- `HandlerRegistry::new()`——每个 `wizard.*` 方法绑定到占位符,返回 `SERVICE_UNAVAILABLE`(`-32002`),内容为 `"wizard manager not yet initialised"`。
+- `install_wizard_handlers`(在 `start_server` 中调用)——用 `src/gateway/handlers/wizard.rs` 中的真实处理器替换占位符。运行时工厂闭包到 `OnboardingFlow::new`;任何其它 `wizard_type` 会从 `start` 收到 `Unknown wizard type`。
 
-```json
-{
-  "id": "step-1",
-  "type": "select",
-  "title": "Provider Selection",
-  "message": "Which AI provider would you like to use?",
-  "options": [
-    {
-      "value": "anthropic",
-      "label": "Anthropic (Claude)",
-      "hint": "Recommended for coding"
-    },
-    {
-      "value": "openai",
-      "label": "OpenAI (GPT)",
-      "hint": "GPT-4o and o3 series"
-    }
-  ],
-  "initial_value": "anthropic",
-  "sensitive": false
-}
-```
+当前运行时的 11 步入门流:provider、credentials、primary model、secondary model、thinking level、session mode、exec tier、消息应用、网关 TLS、完成步骤。状态机由 `WizardSessionManager` 和 `WizardFlow` 特征驱动,代码位于 `src/gateway/handlers/wizard.rs` 和 `src/wizard/`。
 
-## 可用向导
+## 另请参阅
 
-| 类型 | 说明 |
-|------|-------------|
-| `onboarding` | 完整的 10 阶段设置 |
-| `quick-setup` | 最小化配置 |
-| `provider-setup` | 添加新提供商 |
-
-## 向导状态
-
-| 状态 | 说明 |
-|--------|-------------|
-| `running` | 向导处于活动状态 |
-| `done` | 成功完成 |
-| `cancelled` | 用户已取消 |
-| `error` | 发生错误 |
-
-## 入门流程阶段
-
-1. **欢迎** - 介绍
-2. **提供商选择** - 选择 AI 提供商
-3. **凭据** - 输入 API 密钥
-4. **主模型** - 选择主模型
-5. **辅助模型** - 可选故障转移
-6. **思考级别** - 配置 AI 深度
-7. **消息应用** - 可选集成
-8. **审查** - 配置摘要
-9. **完成** - 应用配置
-10. **完成** - 成功消息
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC 集
-
-- `wizard.start` / `wizard.status` / `wizard.cancel`
-
-### 11 阶段
-
-26.7.21+ 入门向导 11 阶段：欢迎、provider、凭据、主模型、辅助模型、思考级别、**会话模式（chat / work / code）**、**执行等级（ask / auto / full）**、消息应用、**网关 TLS**、完成。
-
-### 子命令
-
-- `aleph wizard` —— 完整 11 阶段
-- `aleph wizard --quick` —— 快速设置
-- `aleph wizard --provider` —— 添加 / 重配单个 provider
-- `aleph wizard --mode` —— 仅切换默认会话模式
-
-### Panel UI 触发
-
-`wizard.*` RPC 可由 Panel 端 UI 触发无需终端。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [配置](/docs/zh/getting-started/configuration)——配置来源

@@ -3,178 +3,98 @@ title: "graph.*"
 description: "知识图谱 RPC 方法"
 ---
 
-图谱方法管理知识图谱——一个实体、关系和观察的语义网络，代表从对话和文档中提取的结构化知识。
+`graph.*` 是网关对 agent 知识图谱(同一份 Panel 以 2D / 3D 星系渲染的数据)的读写接口。数据是核心 `MemoryBackend` 上的 `NoteStore` + `notes_graph_cache`,**不**是按调用的 LLM 合成——这里每个方法都是确定性读或直接索引器写。
+
+三个读方法(`graph.query`、`graph.search`、`graph.node_detail`)是无条件的。三个写方法(`graph.update_note`、`graph.rename_note`、`graph.delete_note`)需要 live `NoteIndexer`;在模拟模式下,写方法返回 `Method not found`。
+
+26.7.21 CHANGELOG 添加了**循环图治理层**(用于目标 / 审计 / 团队节点的 harness 持久存储);它位于 `teams.task.trace` + `governance.*` 事件主题之上,通过 `events.subscribe` 到达,**不**通过 `graph.*`。
 
 ## 方法
 
 ### graph.query
 
-使用自然语言或结构化查询查询知识图谱。
+读取一个 agent 的笔记索引——节点(带 Louvain 缓存的 community id)和边(带类型和置信度)。`GraphRecompute` 物化的相似性边会针对真实 wikilink 边去重。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "graph.query",
-  "params": {
-    "query": "What projects is Alice working on?",
-    "limit": 10
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `limit` | number | 否 | 默认为 100 |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "results": [
-      {
-        "entity": "Project Alpha",
-        "relation": "worked_on_by",
-        "target": "Alice",
-        "confidence": 0.95
-      }
-    ]
-  }
-}
-```
+**响应:** `GraphQueryResponse`: `{ "nodes": [ ...NoteNodeDto... ], "edges": [ ...NoteLinkDto... ], "total": <number> | null, "bridge_nodes": [ ...path... ], "surprising_edges": [ [from, to]... ] }`。`bridge_nodes` 和 `surprising_edges` 被过滤到响应中可见的节点/边;在第一次 `GraphRecompute` 之前为空。
 
-### graph.entities
+`NoteNodeDto` 包含 `id`(路径 `category/title`)、`name`(文件名)、`path`、`category`、`tags`、`link_count`、`community_id?`、`updated_at?`。`NoteLinkDto` 包含 `from`、`to`、`label?`、`kind`(普通正文 wikilink 为 `wikilink`,物化的相似性边为 `related_similarity`)、`confidence?`。
 
-列出知识图谱中的实体。
+### graph.search
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "graph.entities",
-  "params": {
-    "type": "person",
-    "limit": 50
-  }
-}
-```
+通过 `NoteStore` FTS 索引对笔记内容做全文搜索。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "entities": [
-      {
-        "id": "ent-1",
-        "name": "Alice",
-        "type": "person",
-        "observations": ["Software engineer", "Likes Rust"]
-      }
-    ]
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | FTS 查询字符串 |
+| `limit` | number | 否 | 默认为 20 |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
 
-### graph.add_entity
+**响应:** `{ "results": [ ...SearchResultDto... ] }`。每行包含 `id`、`name`、`category`、`match_field`(查询命中文件名为 `title`,否则为 `content`)、`agent_id`、`created_at`、`updated_at`、`tags`、`link_count`。
 
-向知识图谱添加新实体。
+### graph.node_detail
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "graph.add_entity",
-  "params": {
-    "name": "Project Beta",
-    "type": "project",
-    "observations": ["AI documentation tool", "Built with Rust"]
-  }
-}
-```
+获取一个节点的完整行、markdown 内容(从磁盘通过 `notes_dir()` 读取)、入站 backlinks,以及带完整生命周期溯源的出站链接。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "entity_id": "ent-2",
-    "added": true
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `node_id` | string | 是 | 笔记路径 `category/title` |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
 
-### graph.add_relation
+**响应:** `NoteDetailResponse`: `{ "node": { ...NoteNodeDto... }, "content", "backlinks": [ ...path... ], "outgoing": [ ...OutgoingLinkDto... ] }`。`outgoing` 包含 `to`(解析或原始)、`raw`、`relation?`、`label?`、`confidence`、`resolved_by?`、`status`(`active` / `dangling` / `tombstone`)。
 
-在两个实体之间添加关系。
+### graph.update_note
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "graph.add_relation",
-  "params": {
-    "from_entity": "Alice",
-    "relation": "works_on",
-    "to_entity": "Project Beta"
-  }
-}
-```
+逐字持久化单个笔记的编辑后 markdown——正文**逐字节**写入(不是有损的 `KnowledgeNote::to_markdown` 重建),所以手写的散文、标题、代码块都能保留。持久化之前会扫描输入内容中的数据外泄载荷(仅外泄范围,所以用户自己的安全研究笔记不会被拒)。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "relation_id": "rel-1",
-    "added": true
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `node_id` | string | 是 | 笔记路径 `category/title` |
+| `content` | string | 是 | 完整原始 markdown(frontmatter + 正文) |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
 
-### graph.delete_entity
+**响应:** `{ "node_id", "saved": true }`。`node_id` 不带 `category/` 前缀、category 或 `agent_id` 含路径穿越组件(`..`、`\`、`agent_id` 中的 `/`),或外泄扫描拒绝正文时,返回 `INVALID_PARAMS`。
 
-删除实体及其关系。
+### graph.rename_note
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "graph.delete_entity",
-  "params": {
-    "entity_id": "ent-2"
-  }
-}
-```
+重命名文件,重写每个入站 `[[old]]` wikilink,重新索引,反向填充。新路径从 `find_by_filename` 重新推导,所以客户端的过期 category 不会破坏重命名。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `node_id` | string | 是 | 当前笔记路径 `category/title` |
+| `new_title` | string | 是 | 新文件名(不带 `.md`);在服务端净化 |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+
+**响应:** `{ "node_id", "new_id", "renamed": true }`。`new_id` 是规范的 `category/new_title`(从文件系统重新推导,不只用客户端提供的 category)。路径穿越情形与 `graph.update_note` 相同。
+
+### graph.delete_note
+
+删除文件 + 索引。入站链接变成**墓碑**(源正文不动,所以重命名恢复路径得到保留)。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `node_id` | string | 是 | 笔记路径 `category/title` |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+
+**响应:** `{ "node_id", "deleted": true }`。路径穿越情形返回 `INVALID_PARAMS`。
+
+## 不作为 RPC 存在的方法
+
+之前版本中描述但**未在当前 alpeh-server 上注册**的方法:
+
+| 方法 | 不作为 RPC 存在的原因 |
+|------|---------------------|
+| `graph.entities` / `graph.add_entity` / `graph.add_relation` / `graph.delete_entity` | 没有独立的 `Entity` 表;图由 `notes_index`(`KnowledgeNote` + wikilink + 相似性边)构建。Panel 调用 `graph.query` 进行渲染,从未有过单实体插入路径。 |
+| `graph.neighbors` | 与 `graph.query` 的 `edges` 数组数据相同;Panel 在客户端迭代。 |
+
+`graph.neighbors` 在旧设计文档中偶尔被引用;在运行时它只是 `graph.query` 返回的 `edges` 的一个属性。
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [架构：知识图谱](/docs/zh/architecture/graph)——图谱系统架构
-
----
-
-## 26.7.x 补充
-
-### Loop-Graph 治理层
-
-26.7.21+：`loop_graph` 在 harness 之上叠加治理拓扑。
-
-### `graph.*` 完整 RPC
-
-- `graph.query` —— 图查询
-- `graph.search` —— 图搜索
-- `graph.node_detail` —— 节点详情
-- `graph.update_note` —— 更新笔记
-- `graph.rename_note` —— 重命名笔记
-- `graph.delete_note` —— 删除笔记
-
-### 治理事件
-
-胜利声明、目标结算、团队解散、watcher 触发——通过 `events.subscribe` 订阅 `governance.*` 主题。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [Memory](#)——Layer 1/2/3 模型以及笔记所在位置
+- [Knowledge graph(循环图层)](#)——26.7.21+ 治理层(基于事件,不是网关 RPC)

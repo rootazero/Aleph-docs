@@ -3,241 +3,341 @@ title: "teams.*"
 description: "Team and multi-agent orchestration RPC methods"
 ---
 
-Team methods manage multi-agent teams — a **leader** plus **members** that collaborate through a durable group-chat thread and a shared task board. On a team's first message the leader plans first ("Team Strata" strategic coordination); the plan is welded into every member's prompt, and members work under assigned Coord Tasks (`Pending -> InProgress -> WaitingReview -> Completed`).
+`teams.*` is the per-team CRUD + coordination surface. About thirty methods are wired across two registrations:
 
-> Related list endpoint: `agents.teams` returns the team list augmented with a small `members_preview` and `last_message` per team (used to render the sidebar's "Group Chats" history). For the live group-chat session primitive, see [`group_chat.*`](/docs/en/gateway/methods/group_chat).
+- `register_teams_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:207-552`) — store-only handlers, always registered when a `team_store` is constructed.
+- Two hand-wired methods inside `agent_init/mod.rs` — `teams.chat.send` and `teams.chat.cancel` — registered only when the team store is present, because they need the `GatewayContext` + execution path to drive a leader run and abort a fan-out tree.
 
-## CRUD
+A team's work thread is durable (`CoordTask` board + `team_messages`); live conversational bubbles (leader / member narrative) are streamed over `team.<id>.*` on the event bus and are not queryable as a `teams.*` RPC. On reload, the Panel shows the durable record (tasks + deliverables), not the live narrative.
 
-### teams.create
+## Methods
 
-Create a team from a leader, a set of members, and an optional auto-naming flag. A blank-named team gets LLM auto-naming on its first message when `auto_name` is set.
+### CRUD
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "teams.create",
-  "params": {
-    "leader": "main",
-    "members": ["reviewer", "tester", "documenter"],
-    "auto_name": true
-  }
-}
-```
+#### teams.create
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "team": {
-      "id": "team-1",
-      "name": "",
-      "leader": "main",
-      "members": ["reviewer", "tester", "documenter"]
-    }
-  }
-}
-```
-
-**Parameters:**
+Create a persistent team. The leader is auto-enrolled with `role="leader"`. `auto_name: true` arms the one-shot auto-naming flag so the first `teams.chat.send` replaces the provisional name with an LLM-generated topic.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `leader` | string | Yes | Agent id that plans and reviews member work |
-| `members` | string[] | Yes | Agent ids working under assigned Coord Tasks |
-| `auto_name` | boolean | No | Let the LLM name a blank team on first message |
+| `name` | string | yes | Team name (non-blank) |
+| `description` | string | no | Free-text description |
+| `leader_id` | string | yes | Agent id of the leader (plans + reviews member work) |
+| `members` | object[] | no | Each `{ "agent_id", "role" }` (default role: `member`). The leader is auto-enrolled; duplicates are skipped. |
+| `auto_name` | boolean | no | `true` arms first-message auto-naming |
 
-### teams.get
+**Response:** `{ "team_id", "name", "leader_id" }`.
 
-Get a single team's details (leader, members, name).
+#### teams.get
 
-### teams.list
+Fetch a team's full record (team, members, and tasks).
 
-List all configured teams.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
 
-### teams.rename
+**Response:** `{ "team": { ...Team... }, "members": [ ...TeamMember... ], "tasks": [ ...CoordTask... ] }`.
 
-Rename a team.
+#### teams.list
 
-### teams.disband
+List all teams. **Response:** `{ "teams": [ ...TeamSummary... ] }`.
 
-Disband a team — tears down its working state while preserving history.
+#### teams.rename
 
-### teams.delete
+Rename a team. The Panel sidebar inline-edit drives this.
 
-Delete a team configuration.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `name` | string | yes | New name (non-blank) |
 
-## Chat
+**Response:** `{ "ok": true }` on success; `RESOURCE_NOT_FOUND` (`-32004`) on unknown id.
 
-The team work-thread is a durable, per-team group-chat thread. Its history powers the attribution-bubble replay in the group-chat window.
+#### teams.disband
 
-### teams.chat.send
+Mark a team as disbanded (working state torn down, history preserved). Fires a `team.changed` event so the group-chat sidebar and the teams tab both refresh.
 
-Send a message into the team's group-chat thread. Routed to the leader on first message for planning, and to members per their Coord Tasks.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "teams.chat.send",
-  "params": {
-    "team_id": "team-1",
-    "text": "Review this pull request for security issues",
-    "mention": "@all"
-  }
-}
-```
+**Response:** `{ "success": true }`.
 
-### teams.chat.thread
+#### teams.delete
 
-Fetch the team's durable group-chat thread metadata.
+Permanently delete a team with cascade cleanup. The full variant (`handle_delete`) cascades through five subordinate stores (tasks / artifacts / events / messages / snapshots). The basic variant (`handle_delete_basic`) is used when the subordinate stores are not configured. Only one is wired at runtime, depending on which stores exist.
 
-### teams.chat.history
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
 
-Replay the message history for a team's thread (drives attribution bubbles).
+**Response:** `{ "success": true }`.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "teams.chat.history",
-  "params": {
-    "team_id": "team-1"
-  }
-}
-```
+#### agents.teams
 
-## Tasks / Kanban
+List all teams an agent belongs to (as leader or member). When the live `AgentManager` + `MessageStore` are supplied, each team summary is enriched with `members_preview` (up to 4 members with name + emoji) and `last_message` / `last_message_at` (most recent transcript entry, truncated to 60 chars).
 
-Members work under Coord Tasks (`Pending -> InProgress -> WaitingReview -> Completed`). The leader accepts or rejects deliverables; on a member task submit, a synthetic re-dispatch routes the task back to the leader for review.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Agent id |
 
-### teams.create_task
+**Response:** `{ "teams": [ ...TeamSummary with members_preview + last_message + last_message_at... ] }`.
 
-Create a Coord Task for a member.
+### Chat
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "teams.create_task",
-  "params": {
-    "team_id": "team-1",
-    "assignee": "reviewer",
-    "title": "Audit auth module for injection",
-    "description": "Check all query construction paths."
-  }
-}
-```
+The team work thread is durable (tasks + artifacts), but live conversation bubbles are streamed live. After reload, the Panel shows the durable record.
 
-### teams.update_task
+#### teams.chat.send
 
-Update a task's status, assignee, or fields.
+Start (or continue) the team work thread. Stores the user message into the shared transcript, then fans out by `@mention` (no `@` → leader fallback) via the `GroupChatBroadcaster`. The fan-out tree is registered as a tracker node first, so the `run_id` returned is immediately cancellable.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "teams.update_task",
-  "params": {
-    "team_id": "team-1",
-    "task_id": "task-7",
-    "status": "InProgress"
-  }
-}
-```
+On the very first message, if the team was created with `auto_name: true`, the topic LLM fires in the background to replace the provisional name.
 
-| Method | Description |
-|--------|-------------|
-| `teams.create_task` | Create a Coord Task for a member |
-| `teams.update_task` | Update a task's status/assignee/fields |
-| `teams.list_tasks` | List tasks on a team's board |
-| `teams.add_task_comment` | Add a comment to a task |
-| `teams.list_task_comments` | List comments on a task |
-| `teams.list_task_events` | List a task's lifecycle events |
-| `teams.list_task_runs` | List execution runs for a task |
-| `teams.list_templates` | List available task templates |
-| `teams.task.pause` | Pause a running task |
-| `teams.task.resume` | Resume a paused task |
-| `teams.task.retry` | Retry a failed task |
-| `teams.task.skip` | Skip a task |
-| `teams.task.trace` | Fetch a task's execution trace |
-| `teams.task.journal.get` | Get a task's journal entry |
-| `teams.task.journal.list` | List a task's journal entries |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `message` | string | yes | User message (non-empty) |
 
-## Snapshots
+**Response:** `{ "run_id": "<uuid>" }`. Use this `run_id` with `teams.chat.cancel` to stop the fan-out.
 
-| Method | Description |
-|--------|-------------|
-| `teams.snapshot.create` | Create a snapshot of team state |
-| `teams.snapshot.get` | Get a single snapshot |
-| `teams.snapshot.list` | List snapshots for a team |
-| `teams.snapshot.restore` | Restore team state from a snapshot |
-| `teams.snapshot.delete` | Delete a snapshot |
+#### teams.chat.cancel
 
-## Workflow
+Stop an in-flight `teams.chat.send` fan-out tree. The tree-level token is poisoned first, then every still-running member run is cancelled through the engine's per-run `CancellationToken`. A `run_id` that is unknown or already settled returns `RESOURCE_NOT_FOUND`.
 
-| Method | Description |
-|--------|-------------|
-| `teams.workflow.export_canvas` | Export the team workflow canvas |
-| `teams.workflow.import_canvas` | Import a workflow canvas |
-| `teams.workflow.approve_step` | Approve a workflow step |
-| `teams.workflow.reject_step` | Reject a workflow step |
-| `teams.workflow.retry_step` | Retry a workflow step |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `run_id` | string | yes | The `run_id` returned by `teams.chat.send` |
 
-## ACP members
+**Response:** `{ "run_id", "cancelled": true, "members_running", "members_signalled" }`.
 
-| Method | Description |
-|--------|-------------|
-| `teams.acp_member.add` | Add an ACP (external agent-client-protocol) member |
-| `teams.acp_member.list` | List ACP members on a team |
-| `teams.acp_member.remove` | Remove an ACP member |
+#### teams.chat.history
 
-## Usage
+Replay the team's durable group-chat transcript as attribution bubbles. Drops directed inbox traffic (notifier digests, router hints, discovery pings) — only conversation rows (`MessageType::Message`) and the broadcaster's in-chat notices are surfaced. Returns the newest 200 chat-visible rows.
 
-### teams.usage
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
 
-Report usage (tokens, cost) for a team.
+**Response:** `{ "items": [ ...{from_agent, content, msg_type, kind: "user"|"agent"|"system", created_at}... ] }` sorted oldest first.
+
+#### teams.chat.thread
+
+Hydrate a team's durable work thread: `CoordTask`s and their submitted artifacts merged chronologically. The live conversational bubbles are intentionally NOT included — they are streamed over `team.<id>.*` while the run is live.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+
+**Response:** `{ "items": [ ...{kind: "task"|"artifact", agent_id, title, content, timestamp, artifact_id?}... ] }` sorted by `timestamp`.
+
+### Tasks / Kanban
+
+The board state machine is `Pending → InProgress → WaitingReview → Completed` (with `Blocked` / `Failed` / `Cancelled` / `Skipped` / `Paused` / `Unsatisfiable` for the panel-drawn paths).
+
+#### teams.create_task
+
+Create a `CoordTask` on the team's board. When `owner` is supplied, the task is stamped with `metadata.managed_by = "dispatcher"` so the autonomous dispatcher claims it; without that stamp, `select_schedulable` filters the task out and the kanban silently never advances.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `subject` | string | yes | Non-blank task subject |
+| `description` | string | no | Free-text description |
+| `owner` | string | no | Agent id; triggers `managed_by=dispatcher` |
+| `priority` | string | no | `low` / `normal` / `high` / `critical` (unknown id rejected with `INVALID_PARAMS`) |
+| `blocked_by` | string[] | no | Other task ids this task is blocked by |
+| `metadata` | object | no | Per-task metadata (kept verbatim) |
+
+**Response:** `{ "task": { ...CoordTask... } }`.
+
+#### teams.update_task
+
+Patch a task. `metadata` is a **shallow merge patch** (the previous metadata is read and merged), so a `metadata.managed_by=...` write from a Panel user never wipes the dispatcher's other control keys.
+
+`status` accepts `pending` / `in_progress` / `completed` / `failed` / `cancelled`. `blocked` is derived, not stored — sending `status="blocked"` is rejected with `INTERNAL_ERROR`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+| `status` | string | no | New status (see above) |
+| `owner` | string | no | New owner agent id |
+| `result` | string | no | Free-text task result (cleared on retry / reset) |
+| `metadata` | object | no | Shallow merge patch |
+
+**Response:** `{ "task": { ...updated CoordTask... } }`.
+
+#### teams.list_tasks
+
+List a team's tasks, optionally filtered.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `status` | string | no | One of: `pending` / `blocked` / `in_progress` / `waiting_review` / `completed` / `failed` / `cancelled` / `skipped` / `paused` / `unsatisfiable` (full 10-variant vocabulary; unknown strings are an explicit error) |
+| `owner` | string | no | Filter by owner agent id |
+
+**Response:** `{ "tasks": [ ...CoordTask... ] }`.
+
+#### teams.list_task_runs
+
+Per-attempt execution history for a task, oldest first.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+
+**Response:** `{ "runs": [ ...CoordTaskRun... ] }`.
+
+#### teams.add_task_comment / teams.list_task_comments
+
+Free-text per-task handoff notes. Used by members to leave context and by panel users to annotate state.
+
+`add_task_comment`:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+| `author` | string | yes | Non-blank author |
+| `body` | string | yes | Non-blank body |
+
+**Response:** `{ "comment": { ...CoordTaskComment... } }`.
+
+`list_task_comments`:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+
+**Response:** `{ "comments": [ ...CoordTaskComment... ] }` (oldest first).
+
+#### teams.list_task_events
+
+Read the team's event log filtered to a single task.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+
+**Response:** `{ "events": [ ...EventLogStore::Event... ] }` (oldest first, payload `task_id` matches).
+
+#### teams.task.trace
+
+Unified audit timeline for a single task: `task` + `runs` + `comments` + `events` + `artifacts` + `journal` in one round-trip. Missing optional stores (event_store / artifact_store) degrade to empty arrays. The Panel's "Replay" drawer fires this on open.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+
+**Response:** `{ "task", "runs": [...], "comments": [...], "events": [...], "artifacts": [...], "journal": CoordTaskJournal | null }`.
+
+#### teams.task.journal.get / teams.task.journal.list
+
+Per-task exit journal read surface (the write side is the `task_exit_journal` builtin tool). The exit journal is the durable record a member writes when its run completes.
+
+| Method | Parameters | Description |
+|--------|------|------------|------|
+| `teams.task.journal.get` | `task_id` | `{ "journal": CoordTaskJournal | null }` |
+| `teams.task.journal.list` | `team_id` | `{ "journals": [ ...CoordTaskJournal... ] }` (newest first) |
+
+#### teams.task.pause / resume / retry / skip
+
+Admin-context task controls (any state; reviewer-context tasks use `teams.workflow.{approve,reject,retry}_step` instead).
+
+- `teams.task.pause` — only valid from `pending` / `blocked` / `unsatisfiable`. Stamps `paused_from` so resume can restore the right state. The dispatcher does not claim paused tasks.
+- `teams.task.resume` — only valid from `paused`. Restores the origin status (`waiting_review` for review-parked tasks, otherwise `pending`) and clears the stamp.
+- `teams.task.retry` — re-arms the automatic retry budget and clears `result`. Releases any leftover lock (with the actual lock holder, not `""`).
+- `teams.task.skip` — admin skip, equivalent to the reviewer skip but without needing a finished run.
+
+Each takes `task_id`. Responses: `{ "status": "paused" | "pending" | "skipped" }` (resume returns the restored status).
+
+### Workflow
+
+#### teams.workflow.approve_step / reject_step / retry_step
+
+Reviewer-context workflow step review. The latest run is stamped with the verdict; the task is then transitioned to `Completed` / `Failed`. A `comment` (when non-blank) is also appended as a task comment authored by `review:<kind>` (or the explicit `reviewer_id`).
+
+`reviewer_kind` must be one of `user` / `lead_agent` / `auto`.
+
+| Method | Parameters | Description |
+|--------|------|------------|------|
+| `teams.workflow.approve_step` | `task_id`, `reviewer_kind`, `reviewer_id?`, `comment?` | `{ "status": "completed" }` |
+| `teams.workflow.reject_step` | `task_id`, `reviewer_kind`, `reviewer_id?`, `comment?` | `{ "status": "failed" }` (the comment is also stored as the task `result` so the next planner can read it) |
+| `teams.workflow.retry_step` | `task_id` | `{ "status": "pending" }` (re-arms the retry budget and releases the leftover lock with its actual holder) |
+
+#### teams.workflow.export_canvas / import_canvas
+
+Workflow canvas as Obsidian JSON Canvas 1.0. The Panel's canvas engine accepts the same wire shape, so the "Workflow" tab is wired straight to this.
+
+`export_canvas`:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `status` | string | no | Same 10-variant vocabulary as `teams.list_tasks` (full 10 variants, unknown id is `INVALID_PARAMS`) |
+| `owner` | string | no | Filter by owner |
+
+**Response:** `{ "team_id", "canvas": { ...CanvasDocument... }, "node_count", "edge_count" }`.
+
+`import_canvas`:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `canvas` | object | yes | JSON Canvas document (`aleph_protocol::canvas_format::Document`) |
+| `dry_run` | boolean | no | Project without writing |
+
+**Response (dry_run):** `{ "team_id", "planned", "tasks": [ ...{subject, description, blocked_by, metadata}... ] }`.
+
+**Response (live):** `{ "team_id", "created", "tasks": [ ...{id, subject}... ] }`. Edges become `blocked_by`; the algorithm does a topological pass, deferring blockers still in this batch and rewriting canvas-node ids to live task ids.
+
+### ACP members
+
+External coding-CLI sessions (Claude Code, Codex, etc.) attached as first-class team members. The dispatcher routes tasks owned by an ACP member through the ACP adapter pool instead of the in-process agent registry.
+
+| Method | Parameters | Description |
+|--------|------|------------|------|
+| `teams.acp_member.add` | `team_id`, `harness_id`, `cwd`, `session_name?`, `role` (default `acp-worker`) | Idempotent on (team, harness, cwd, name); returns `{ "member": { ...NewTeamMember::for_acp_session... } }` |
+| `teams.acp_member.remove` | `team_id`, `agent_id` | Removes the ACP-backed row. The underlying ACP session in the pool is **not** killed (other teams may still reference it). Refuses non-ACP rows. |
+| `teams.acp_member.list` | `team_id` | `{ "members": [ ...ACP members only... ] }` (filters `kind == TeamMemberKind::AcpSession`) |
+
+### Usage
+
+#### teams.usage
+
+Per-team provider token aggregation, derived from `task_traces` `ProviderUsage` events (the gateway execution engine already writes these). MoA advisor spend is rolled into a dedicated `moa_advisors` bucket since their synthetic ids are not in any team's member list. Cost is intentionally **not** computed here — tokens are factual, cost is rate-card policy.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team_id` | string | yes | Team id |
+| `since` | number | no | Lower bound, epoch seconds (default: all time) |
+| `until` | number | no | Upper bound, epoch seconds (default: all time) |
+
+**Response:** `{ "team_id", "since", "until", "member_count", "total": { "call_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens", "cache_hit_ratio" }, "per_agent": [ ...AgentUsageTotal... ], "moa_advisors": { ... } | null }`.
+
+#### teams.list_templates
+
+List available team templates (built-in + user). Materialization itself is via the `team_from_template` builtin tool, so the heavy deps are not double-plumbed through the gateway.
+
+**Request:** no params.
+
+**Response:** `{ "templates": [ ...{name, description, default_goal, leader_id, leader_role, member_count, task_count}... ] }`.
+
+### Snapshots
+
+Mirrors the `team_snapshot` builtin tool so panels and external callers can hit the snapshot store without going through tool-invoke. All five handlers share the same backing functions, so behaviour, dry-run defaults, and edge-restoration semantics are identical to the tool.
+
+| Method | Parameters | Description |
+|--------|------|------------|------|
+| `teams.snapshot.create` | `team_id`, `tag?`, `note?` | `{ ...capture result... }` |
+| `teams.snapshot.list` | `team_id?` | `{ "snapshots": [ ...SnapshotMeta... ] }` (newest first) |
+| `teams.snapshot.get` | `snapshot_id` | `{ "meta", "payload" }` or `RESOURCE_NOT_FOUND` |
+| `teams.snapshot.restore` | `snapshot_id`, `apply: false` (default dry-run) | `{ ...SnapshotDiff... }` (diff in both modes; `apply=true` also restores dependency edges) |
+| `teams.snapshot.delete` | `snapshot_id` | `{ "snapshot_id", "existed": <bool> }` (idempotent) |
+
+The snapshot handlers are only registered when the `SqliteSnapshotStore` was constructed at boot; otherwise their RPCs are absent.
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [group_chat.*](/docs/en/gateway/methods/group_chat) -- Group-chat session primitive
-- [Architecture: Teams](/docs/en/architecture/teams) -- Team orchestration architecture
-
----
-
-## 26.7.x Addendum
-
-### Full RPC Set
-
-- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
-- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
-- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
-- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
-- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
-- `teams.task.trace`
-- `agents.teams` — list the agent's teams
-
-### Grounding Evidence Gate
-
-26.7.21+: `task_review` approvals can require grounding.
-
-### Teams Kanban Deep Refactor
-
-26.7.24+: drag-and-drop, shared lifecycle/column sources, richer cards, operator-tunable broadcast storm-prevention guards.
-
-### Team Node Fused with Graph
-
-26.7.21+: graph fuses with multi-agent system — `team` node kind, live-joined teams in graph status, team pair targets, victory-claim watchers on team disband.
-
-### Built-in `loop-auditor`
-
-26.7.21+: audit / supervision templates default to independent-context evidence.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Architecture: Teams](/docs/en/architecture/teams) -- Team orchestration model
+- [group_chat.*](/docs/en/gateway/methods/group_chat) -- The lower-level group-chat session primitive

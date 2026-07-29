@@ -3,229 +3,105 @@ title: "workspace.*"
 description: "Workspace management RPC methods"
 ---
 
-Workspace methods manage project workspaces — isolated environments that contain files, configurations, and context for specific tasks or projects.
+`workspace.*` is the runtime surface over the `AgentEnvStore` (SQLite-backed). Five core methods are wired in `register_workspace_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:6-88`); the channel-binding surface lives in the same module, since the bind / unbind seam is shared with the `agent_switch` builtin tool.
+
+The store model is **one workspace per agent, many channels per agent**. A workspace is a logical isolation boundary — it carries the agent's profile, project root, and binding table; it does **not** own a file directory (the working directory is bound at run time from `sessions.set_project_root`).
 
 ## Methods
 
-### workspace.list
-
-List all workspaces.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "workspace.list",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "workspaces": [
-      {
-        "id": "ws-1",
-        "name": "My Project",
-        "path": "/home/user/projects/my-project",
-        "created_at": "2024-01-15T10:30:00Z",
-        "active": true
-      }
-    ]
-  }
-}
-```
-
 ### workspace.create
 
-Create a new workspace.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "workspace.create",
-  "params": {
-    "name": "New Project",
-    "path": "/home/user/projects/new-project"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "workspace": {
-      "id": "ws-2",
-      "name": "New Project",
-      "path": "/home/user/projects/new-project",
-      "created_at": "2024-01-15T10:30:00Z",
-      "active": false
-    }
-  }
-}
-```
-
-**Parameters:**
+Create a new workspace. `name` and `icon` are persisted via a follow-up `workspace.update` because the underlying `create` path does not accept them.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `name` | string | Yes | Workspace display name |
-| `path` | string | Yes | Directory path for the workspace |
+| `id` | string | yes | Workspace id (URL-safe slug) |
+| `name` | string | yes | Human-readable display name |
+| `description` | string | no | Free-text description |
+| `icon` | string | no | Emoji or icon identifier |
+
+**Response:** `{ "ok": true, "workspace": { ...WorkspaceRecord... } }`. The Panel's "New project" form uses this and then immediately calls `channels.set_agent` to bind the first channel.
+
+### workspace.list
+
+List every workspace. **Request:** no params.
+
+**Response:** `{ "workspaces": [ ...WorkspaceRecord... ] }`.
 
 ### workspace.get
 
-Get details of a specific workspace.
+Fetch a single workspace by id.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "workspace.get",
-  "params": {
-    "workspace_id": "ws-1"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Workspace id |
 
-### workspace.activate
+**Response:** `{ "workspace": { ...WorkspaceRecord... } }` or `RESOURCE_NOT_FOUND: Workspace '<id>' not found`.
 
-Activate a workspace (sets it as the current active workspace).
+### workspace.update
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "workspace.activate",
-  "params": {
-    "workspace_id": "ws-1"
-  }
-}
-```
+Patch a workspace's metadata. Only the fields present in `params` are touched.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "activated": true
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Workspace id |
+| `name` | string | no | New name |
+| `description` | string | no | New description |
+| `icon` | string | no | New icon |
 
-### workspace.delete
+**Response:** `{ "ok": true, "workspace": { ...updated WorkspaceRecord... } }` or `RESOURCE_NOT_FOUND` on a miss.
 
-Delete a workspace.
+### workspace.archive
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "workspace.delete",
-  "params": {
-    "workspace_id": "ws-2"
-  }
-}
-```
+Soft-delete a workspace (the row is removed; the underlying directory, if any, is **not**). The id remains reserved — recreate with a new row.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "deleted": true
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Workspace id |
 
-:::warning
-Deleting a workspace removes only the workspace metadata. The underlying directory is **not** deleted.
-:::
+**Response:** `{ "ok": true }` on a successful archive; `RESOURCE_NOT_FOUND: Workspace '<id>' not found` on a miss.
 
-### workspace.files
+## Channel agent binding
 
-List files in the workspace.
+These two methods live in the same module because they share the `gateway::agent_binding` seam with the `agent_switch` builtin tool — both surfaces get the same ghost-validation, no-op detection, and `Bound` / `Unbound` events.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "workspace.files",
-  "params": {
-    "workspace_id": "ws-1",
-    "path": "/"
-  }
-}
-```
+### channels.set_agent
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "files": [
-      {
-        "name": "src",
-        "type": "directory",
-        "path": "/src"
-      },
-      {
-        "name": "README.md",
-        "type": "file",
-        "path": "/README.md",
-        "size": 1024
-      }
-    ]
-  }
-}
-```
+Bind or unbind an agent to a channel. The two surfaces share the same handler.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel_id` | string | yes | Channel id |
+| `agent_id` | string | no | Agent id; `null` / absent unbinds |
+
+**Response (bind):** `{ "ok", "previous_agent" | null, "no_op": false }` on a fresh bind; `{ "ok", "previous_agent", "no_op": true }` on a no-op rebind.
+
+**Response (unbind):** `{ "ok", "previous_agent" | null }`.
+
+`INVALID_PARAMS` when the `agent_id` does not exist in the live `AgentRegistry`. A minimal server with `agent_registry: None` skips the validation (the prior lenient behaviour, kept only for minimal-server boot).
+
+The same surface is reachable at the legacy `workspace.set_agent` path (no wire alias — both methods share the implementation). Prefer `channels.set_agent` for new code.
+
+### agents.bindings
+
+Get every channel bound to each agent, sorted by channel id. Many-to-one aware: an agent bound to multiple channels appears once with all of them in the array.
+
+**Request:** no params.
+
+**Response:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`. The previous one-channel-per-agent map was lossy and was replaced when the new shape landed.
+
+## Methods that are **not** RPC
+
+The following methods are described in earlier versions of this page but are **not** registered on the current `aleph-server`:
+
+| Method | Why it is not an RPC |
+|--------|---------------------|
+| `workspace.activate` | There is no "active workspace" concept at runtime — the agent loop reads the session's `project_root` (set via `sessions.set_project_root`) on every turn, so an "active" switch would be redundant. |
+| `workspace.files` | Workspace storage is an `AgentEnvStore` row, not a directory listing. Use `fs.list_dir` (scoped to the project root) or the agent's own tool surface. |
+| `workspace.delete` | The runtime exposes only `archive`; the row is reserved after archive. |
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### `workspace.*` Full RPC
-
-- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
-
-### `projects.*` Full RPC
-
-- `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get`
-
-### `agents.bindings` / `channels.set_agent`
-
-agent ↔ channel binding — `channels.set_agent` now **must** specify an existing agent (previously it accepted non-existent ones).
-
-### File-Op Path Safety
-
-26.7.15+:
-
-- Symlink-safe delete/move
-- Glob/deny re-checks
-- Collision de-dup
-- Per-path locks
-- Hardened path deny gate (`%APPDATA%` expansion, system/proc guards)
-- `apply_patch` forward cursor that fails honestly
-
-### Cluster `file.write` No TOCTOU
-
-26.7.21+.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Workspaces](/docs/en/concepts/workspace) -- Workspace model in context
+- [channels.*](/docs/en/gateway/methods/channels) -- The channel side of the binding surface

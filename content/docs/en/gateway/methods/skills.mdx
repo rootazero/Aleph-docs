@@ -1,251 +1,94 @@
 ---
 title: "skills.*"
-description: "Skill System v2 management RPC methods"
+description: "Skill System v2 RPC methods"
 ---
 
-Skill methods manage the Skill System v2 — a unified framework for skill discovery, registration, and lifecycle management. Skills add tools, prompts, and capabilities to agents.
+`skills.*` is the runtime surface over the in-process `SkillSystem` (the unified SkillSystem v2 registry). Six methods are wired in `HandlerRegistry::new()` — five real, one plumbing — and the runtime is lazily initialised on the first call. `bundled.sync` is the explicit refresh trigger for bundled content (skills, plugins); it is registered in the same place.
 
-> **Note:** `skills.*` is one of the per-kind backends behind the unified `extensions.*` façade. For everyday users, Skills, Plugins, and MCP servers are unified under one **Extension** concept, browsed and installed via the [Extensions Store](/docs/en/concepts/extensions-store). The `skills.*` methods below remain the low-level skill backend; see [extensions.*](/docs/en/gateway/methods/extensions) for the umbrella RPC.
+The `markdown_skills.*` family is **not** registered as JSON-RPC. `skills.install` is the runtime install path; it accepts a git URL / local path / zip, security-scans the bundle, and registers each tool through the shared `AlephToolServer`.
 
 ## Methods
 
 ### skills.status
 
-Return the full status of all registered skills, including their enabled state, scope, and dependencies.
+Return every registered skill — its enabled state, scope, source path, and per-skill dependency list.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "skills.status",
-  "params": {}
-}
-```
+**Request:** no params.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "skills": [
-      {
-        "id": "builtin:shell",
-        "name": "Shell Execution",
-        "enabled": true,
-        "scope": "tool",
-        "version": "1.0.0",
-        "dependencies": []
-      },
-      {
-        "id": "user:web_search",
-        "name": "Web Search",
-        "enabled": true,
-        "scope": "tool",
-        "version": "2.1.0",
-        "dependencies": ["builtin:http"]
-      }
-    ]
-  }
-}
-```
+**Response:** `{ "skills": [ ...SkillStatus... ] }`. Each row carries `id`, `name`, `enabled`, `scope` (`system` / `tool` / `standalone` / `disabled`), `version`, `dependencies`, plus any per-skill metadata the system surfaces.
 
 ### skills.update
 
-Update a skill's configuration (enabled state and/or prompt scope).
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "skills.update",
-  "params": {
-    "skill_id": "user:web_search",
-    "enabled": false,
-    "scope": "disabled"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "skill": {
-      "id": "user:web_search",
-      "name": "Web Search",
-      "enabled": false,
-      "scope": "disabled",
-      "version": "2.1.0"
-    }
-  }
-}
-```
-
-**Parameters:**
+Update a skill's enabled state and/or prompt scope. Unknown `scope` values are rejected with `INVALID_PARAMS`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `skill_id` | string | Yes | Skill ID to update |
-| `enabled` | boolean | No | Enable or disable the skill |
-| `scope` | string | No | Prompt scope: `"system"`, `"tool"`, `"standalone"`, `"disabled"` |
+| `skill_id` | string | yes | Skill id (`<source>:<name>`) |
+| `enabled` | boolean | no | `true` / `false` |
+| `scope` | string | no | `system` / `tool` / `standalone` / `disabled` |
 
-**Scope Values:**
-
-| Scope | Description |
-|-------|-------------|
-| `system` | Injected into system prompt |
-| `tool` | Available as callable tool |
-| `standalone` | Used independently of agents |
-| `disabled` | Not loaded |
+**Response:** `{ "skill": { ...updated SkillStatus... } }` on success; `INTERNAL_ERROR` if the skill cannot be found after the update.
 
 ### skills.install_dep
 
-Install a dependency for a skill (e.g., a system package required by the skill).
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "skills.install_dep",
-  "params": {
-    "skill_id": "user:web_search",
-    "spec_id": "curl"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "result": "installed",
-    "skill": {
-      "id": "user:web_search",
-      "name": "Web Search",
-      "enabled": true
-    }
-  }
-}
-```
-
-**Parameters:**
+Install a skill's dependency (a system package or similar — the dependency descriptor is skill-defined).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `skill_id` | string | Yes | Skill ID |
-| `spec_id` | string | No | Dependency specification ID (e.g., package name) |
+| `skill_id` | string | yes | Skill id |
+| `spec_id` | string | no | Dependency spec id (defaults are skill-defined) |
+
+**Response:** `{ "result", "skill" | null }`. `result` is the dependency's own `Result` string.
 
 ### skills.remove
 
-Remove a skill from the system.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "skills.remove",
-  "params": {
-    "skill_id": "user:web_search"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "ok": true
-  }
-}
-```
-
-**Parameters:**
+Remove a skill from the registry. Idempotent: an unknown `skill_id` returns `{ "ok": false }` (not a JSON-RPC error) so the Settings page can render an idempotent delete UX.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `skill_id` | string | Yes | Skill ID to remove |
+| `skill_id` | string | yes | Skill id |
+
+**Response:** `{ "ok": <bool> }`.
 
 ### skills.install
 
-Install a skill from a markdown skill file or directory.
+Install a skill bundle from a Git URL, a local path, or a `.zip` archive. The source is detected server-side by URL/path suffix; the bundle is security-scanned (`scan_skill_directory` / `install_allowed` at `TrustLevel::Community`) and only loaded when the scan passes — a reverse-shell payload alongside a valid `SKILL.md` is rejected and the directory is removed.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "skills.install",
-  "params": {
-    "path": "~/.aleph/skills/custom_skill.md"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "installed": true,
-    "skill_id": "user:custom_skill"
-  }
-}
-```
-
-**Parameters:**
+The AgentRevision revision counter is bumped on every successful install so the agent loop's `MarkdownSkillRefreshSource` can detect changes cheaply.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | Yes | Path to the skill file or directory |
+| `url` | string | yes | Git URL (`https://…`, `git@…`, or `.git` suffix), local path, or `https://…/*.zip` |
+| `flatten` | boolean | no | Git-only; clone into a hidden cache and copy the contents flat into `~/.aleph/skills/` |
 
-## Skill Directories
+**Response:** `{ "skills": [ ...MarkdownSkillInfo... ], "count": N }`. `MarkdownSkillInfo` carries `name`, `description`, `source_path`, `sandbox_mode` (`host` / `docker` / `virtualfs`), `requires_bins`.
 
-Skills are loaded from the following directories (in order):
+### bundled.sync
 
-1. `~/.aleph/skills/` — User-installed skills
-2. `./skills/` — Project-local skills
-3. Built-in skills bundled with Aleph
+Explicitly refresh bundled content (skills, plugins, or both) from the external repos. Reserved for explicit triggers (CLI / LLM tool / Hub button); the startup path never auto-pulls. The default kind is `all`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `kind` | string | no | `skills` / `plugins` / `all` (default) |
+
+**Response:** `{ "ok": true, "skills", "plugins" }` — counts of newly-extracted rows per kind.
+
+## Skill directories
+
+The runtime loads skills from, in order of precedence:
+
+1. `~/.aleph/skills/` — user-installed skills
+2. `./skills/` — project-local skills
+3. Bundled skills shipped with Aleph
+
+The bundled set is extracted by `bundled.sync` into the user directory, so the agent loop sees a unified view across all three layers.
+
+## Plugin-bundled skills
+
+Since 26.7.17, skills that are installed via a plugin are folded into the skill index and surface in `skill_read`. The two namespaces share a single ToolCatalog registry, so the same skill id resolves to a tool whether the agent loop discovered it from a plugin's `commands/` markdown or from a top-level `~/.aleph/skills/` install.
 
 ## See Also
 
-- [Concepts: Skills](/docs/en/concepts/skills) -- How the Skill System v2 works
-- [Concepts: Extensions Store](/docs/en/concepts/extensions-store) -- The unified Extension concept (Skill / Plugin / MCP)
-- [extensions.*](/docs/en/gateway/methods/extensions) -- Unified façade routing to the per-kind backends
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### `skills.*` Full RPC
-
-- `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install`
-- `markdown_skills.handle_install`
-
-### `bundled.sync`
-
-26.7.x: sync bundled content with disk — avoid stale bundled content.
-
-### Markdown Skill Authoring Guide
-
-26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM.
-
-### Trigger-Word Enhancement
-
-26.7.x: BM25 ranker + edit-distance backstop.
-
-### Plugin-Bundled Skills
-
-26.7.17+: installed-plugin skills are folded into the skill index and `skill_read`.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Skills](/docs/en/concepts/skills) -- How the Skill System v2 works
+- [Extensions Store](/docs/en/concepts/extensions-store) -- The unified `extensions.*` façade (kind `Skill`)

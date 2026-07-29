@@ -1,139 +1,116 @@
 ---
 title: "heartbeat.*"
-description: "Health checking and heartbeat RPC methods"
+description: "Heartbeat task RPC methods"
 ---
 
-Heartbeat methods manage health checks and heartbeat signals for monitoring system health, connectivity, and component status.
+`heartbeat.*` is the lifecycle surface for the daemon-side heartbeat scheduler. All eight methods are registered through `register_heartbeat_handlers` once a `SharedHeartbeatService` is constructed at server boot (`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:142-196`); if the service is not constructed (e.g. simulated mode without a scheduler), the JSON-RPC methods are absent and calls return `Method not found`.
+
+Each method has two variants in source — a real handler backed by `HeartbeatService` and a `_stub` that returns a fixed empty response. Only the real handlers are wired at boot.
 
 ## Methods
 
-### heartbeat.ping
+### heartbeat.list
 
-Simple ping/pong health check.
+List every heartbeat task.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "heartbeat.ping",
-  "params": {}
-}
-```
+**Request:** no params.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "pong": true,
-    "timestamp": "2024-01-15T10:30:00Z"
-  }
-}
-```
+**Response:** `{ "tasks": [ ...HeartbeatTaskView... ] }`. Each task carries `id`, `name`, `agent_id`, `enabled`, `interval_ms`, the `probe` (`tool_name` / `tool_params` / `trigger_condition`), and the scheduler state (`next_due_ms`, `last_probe_at_ms`, `last_probe_result`, `consecutive_errors`, `last_error`).
 
-### heartbeat.status
+### heartbeat.get
 
-Get detailed heartbeat status of all components.
+Fetch a single task by id.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "heartbeat.status",
-  "params": {}
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | The task id returned by `heartbeat.create` |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "healthy": true,
-    "components": [
-      {
-        "name": "gateway",
-        "status": "healthy",
-        "last_beat": "2024-01-15T10:30:00Z",
-        "latency_ms": 5
-      },
-      {
-        "name": "memory",
-        "status": "healthy",
-        "last_beat": "2024-01-15T10:29:58Z",
-        "latency_ms": 12
-      }
-    ]
-  }
-}
-```
+**Response:** `{ "task": { ...HeartbeatTaskView... } }` or an `INTERNAL_ERROR` with `Task not found: <task_id>`.
 
-### heartbeat.check
+### heartbeat.create
 
-Check health of a specific component.
+Create a new task. Accepts either `interval_ms` (number) or `interval` (string like `"5m"` / `"1h"` / `"30s"` / raw ms).
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "heartbeat.check",
-  "params": {
-    "component": "mcp"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Human-readable task name |
+| `agent_id` | string | no | Defaults to `"main"` |
+| `interval_ms` | number | conditional | Period in milliseconds. Mutually exclusive with `interval`. |
+| `interval` | string | conditional | Period with suffix (`s` / `m` / `h`) or raw ms. |
+| `probe.tool_name` | string | yes | The tool the heartbeat will call on each tick |
+| `probe.tool_params` | object | no | JSON arguments forwarded to the tool |
+| `probe.trigger_condition` | string | no | `Always` (default when omitted) or any of the structured trigger conditions deserialised by `TriggerCondition` |
+| `enabled` | boolean | no | Defaults to `true` |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "component": "mcp",
-    "healthy": true,
-    "last_beat": "2024-01-15T10:30:00Z"
-  }
-}
-```
+`tool_name` may also be passed at the top level instead of nested in `probe`; both shapes are accepted.
 
-## Health States
+**Response:** `{ "task": { ...HeartbeatTaskView... } }` (the freshly created task).
 
-| State | Description |
-|-------|-------------|
-| `healthy` | Component is functioning normally |
-| `degraded` | Component is slow or partially failing |
-| `unhealthy` | Component has failed |
-| `unknown` | No heartbeat received recently |
+### heartbeat.update
+
+Patch a task. Only the fields present in `params` are touched.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+| `name` | string | no | New human-readable name |
+| `agent_id` | string | no | New agent id |
+| `interval_ms` | number | no | New period in milliseconds |
+| `interval` | string | no | New period with suffix / raw ms |
+| `enabled` | boolean | no | New enabled state |
+| `probe` | object | no | Full replacement `ProbeConfig` (`tool_name` / `tool_params` / `trigger_condition`) |
+
+**Response:** `{ "task": { ...HeartbeatTaskView... } }` (the updated task).
+
+### heartbeat.delete
+
+Delete a task. Idempotent on the in-memory scheduler; the underlying run history is preserved in the SQLite store.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+
+**Response:** `{ "deleted": "<task_id>" }`.
+
+### heartbeat.toggle
+
+Enable or disable a task. If `enabled` is supplied, the task is forced to that state; otherwise the existing enabled flag is flipped.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+| `enabled` | boolean | no | If present, set this exact value; otherwise toggle the current state |
+
+**Response:** `{ "task_id": "<task_id>", "enabled": <bool> }`.
+
+### heartbeat.wake
+
+Enqueue a manual wake. The wake is queued with `WakePriority::UserAction`; the scheduler dequeues it on the next tick. An unknown `task_id` returns `INTERNAL_ERROR`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+| `reason` | string | no | Free-text reason; surfaced on the run record |
+
+**Response:** `{ "triggered": "<task_id>", "status": "queued", "reason": "<reason>" | null }`.
+
+### heartbeat.runs
+
+Return the execution history for a task, oldest first, from the SQLite `heartbeat_runs` table.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id |
+| `limit` | number | no | Max rows; defaults to 20 |
+
+**Response:** `{ "task_id": "<task_id>", "runs": [ ...RunRecord... ] }`. Each run carries `id`, `trigger_source`, `l1_status` / `l2_status`, `started_at` / `ended_at`, `l1_duration_ms` / `l2_duration_ms`, `error`, `delivery_status`, `created_at`.
+
+## Wiring
+
+`register_heartbeat_handlers` is called inside `register_agents_handlers` only when `agent_result.heartbeat_service.is_some()`. A bare `aleph-server` boot that does not construct the service will not expose this namespace. There is no fallback to the placeholder stubs at runtime.
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### Realized (stubs → real)
-
-26.7.x: the historical stub RPCs (`heartbeat.*_stub`) have been **realized**. Full implementation:
-
-- `heartbeat.list` / `heartbeat.get` / `heartbeat.create` / `heartbeat.update` / `heartbeat.delete` / `heartbeat.toggle`
-- `heartbeat.wake` — proactive wake
-- `heartbeat.runs` — run history
-
-### Daemon-Side Driver
-
-Driven by the [Daemon](/docs/en/concepts/daemon). `Guardian Judge` decides to wake.
-
-### Refuses Dangerous Tools
-
-26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
-
-### Payload Masks Secrets
-
-`Guardian Judge` payload must mask secrets.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Daemons](/docs/en/concepts/daemon) -- The heartbeat daemon driver
+- [Guardian Judge](#) -- Background judge that drives L2 escalation; also wired to refuse dangerous or confirmation-gated probe tools.

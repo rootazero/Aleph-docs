@@ -3,24 +3,15 @@ title: "wizard.*"
 description: "Setup wizard RPC methods"
 ---
 
-Configuration wizard for guided setup flows.
+`wizard.*` is the JSON-RPC surface for the configuration wizard. The five methods are registered as `service_unavailable` placeholders inside `HandlerRegistry::new()` and replaced with the real handlers by `install_wizard_handlers` once `WizardSessionManager` is built at server boot (`src/bin/aleph-server/commands/start/mod.rs:655-660`). The runtime factory ships only the `onboarding` flow; any other `wizard_type` returns `Unknown wizard type` from the `start` handler.
 
-:::warning
-This page documents the intended API. The `wizard.*` methods (`wizard.start`, `wizard.answer`, `wizard.next`, `wizard.cancel`, `wizard.status`) are defined in the source handler (`src/gateway/handlers/wizard.rs`) but are **not currently wired** in the runtime handler registration. They reflect the design target but are not yet exposed via JSON-RPC. See [Methods Reference](/docs/en/gateway/methods) for the accurate method listing.
-:::
-
-## Overview
-
-The wizard system provides a multi-step configuration experience with:
-- Multiple step types (select, text, confirm, etc.)
-- Session-based state management
-- Support for multiple concurrent wizards
+The wizard state itself is process-local — restarting the daemon drops in-flight sessions. There is no CLI subcommand equivalent any more (`aleph wizard` was removed); the Panel drives these RPCs.
 
 ## Methods
 
 ### wizard.start
 
-Start a new wizard session.
+Start a new wizard session. Returns the first step.
 
 **Request:**
 ```json
@@ -35,56 +26,19 @@ Start a new wizard session.
 }
 ```
 
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `wizard_type` | string | yes | `onboarding` is the only flow currently registered. |
+| `initial_data` | object | no | Reserved; ignored by the runtime factory. |
+
 **Response:**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "session_id": "wizard-uuid",
-    "step": {
-      "id": "step-1",
-      "type": "note",
-      "title": "Welcome",
-      "message": "Welcome to Aleph setup!"
-    },
-    "status": "running"
-  }
-}
-```
-
-### wizard.answer
-
-Answer the current step and get the next one.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "wizard.answer",
-  "params": {
-    "session_id": "wizard-uuid",
-    "step_id": "step-2",
-    "value": "anthropic"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "done": false,
-    "step": {
-      "id": "step-3",
-      "type": "text",
-      "message": "Enter your API key:",
-      "placeholder": "sk-...",
-      "sensitive": true
-    },
+    "session_id": "<uuid>",
+    "step": { "id": "...", "type": "note|select|multi_select|text|confirm|progress", ... },
     "status": "running"
   }
 }
@@ -92,159 +46,65 @@ Answer the current step and get the next one.
 
 ### wizard.next
 
-Get the next step without answering (for notes/intros).
+Skip a non-blocking step (notes / intros) without an answer. If `answer` is supplied, the call is rejected — submit the answer with `wizard.answer` instead.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "wizard.next",
-  "params": {
-    "session_id": "wizard-uuid"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The session id from `wizard.start` |
+| `answer` | any | no | Reserved; supplying a value returns an `Invalid answer` error. |
+
+**Response:** the next step, or the terminal step (`status: done|error|cancelled`).
+
+### wizard.answer
+
+Answer a step and advance to the next one.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The session id from `wizard.start` |
+| `step_id` | string | yes | The id of the current step being answered |
+| `value` | any | yes | The answer (string for `text`, string for `select`, array of strings for `multi_select`, bool for `confirm`) |
+
+**Response:** the next step, or the terminal step.
 
 ### wizard.cancel
 
-Cancel an active wizard session.
+Cancel an in-flight wizard session. Removes the session from the manager; the `WizardSession` Arc drop closes the session channels.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "wizard.cancel",
-  "params": {
-    "session_id": "wizard-uuid"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The session id from `wizard.start` |
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "cancelled": true
-  }
-}
+{ "result": { "cancelled": true } }
 ```
 
 ### wizard.status
 
-Get the status of a wizard session.
+Get the current status of a wizard session.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "wizard.status",
-  "params": {
-    "session_id": "wizard-uuid"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The session id from `wizard.start` |
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "status": "running"
-  }
-}
+{ "result": { "status": "running|done|error|cancelled" } }
 ```
 
-## Step Types
+A `RESOURCE_NOT_FOUND` (`-32004`) is returned when no session with that id is active.
 
-| Type | Description | Value Type |
-|------|-------------|------------|
-| `note` | Informational message | None |
-| `select` | Single selection | String |
-| `multi_select` | Multiple selection | String[] |
-| `text` | Text input | String |
-| `confirm` | Yes/No question | Boolean |
-| `progress` | Progress indicator | None |
+## Wiring
 
-## Step Structure
+`wizard.*` sits between the phase-1 registry and the boot-time install:
 
-```json
-{
-  "id": "step-1",
-  "type": "select",
-  "title": "Provider Selection",
-  "message": "Which AI provider would you like to use?",
-  "options": [
-    {
-      "value": "anthropic",
-      "label": "Anthropic (Claude)",
-      "hint": "Recommended for coding"
-    },
-    {
-      "value": "openai",
-      "label": "OpenAI (GPT)",
-      "hint": "GPT-4o and o3 series"
-    }
-  ],
-  "initial_value": "anthropic",
-  "sensitive": false
-}
-```
+- `HandlerRegistry::new()` — every `wizard.*` method is bound to a placeholder that returns `SERVICE_UNAVAILABLE` (`-32002`) with `"wizard manager not yet initialised"`.
+- `install_wizard_handlers` (called from `start_server`) — replaces the placeholders with the real handlers from `src/gateway/handlers/wizard.rs`. The runtime factory closes over `OnboardingFlow::new`; any other `wizard_type` produces `Unknown wizard type` from `start`.
 
-## Available Wizards
+The 11-step onboarding flow in the current runtime covers: provider, credentials, primary model, secondary model, thinking level, session mode, exec tier, messaging apps, gateway TLS, and the final completion step. It is driven by the `WizardSessionManager` and `WizardFlow` trait, both in `src/gateway/handlers/wizard.rs` and `src/wizard/`.
 
-| Type | Description |
-|------|-------------|
-| `onboarding` | Full 10-stage setup |
-| `quick-setup` | Minimal configuration |
-| `provider-setup` | Add a new provider |
+## See Also
 
-## Wizard Status
-
-| Status | Description |
-|--------|-------------|
-| `running` | Wizard is active |
-| `done` | Completed successfully |
-| `cancelled` | User cancelled |
-| `error` | An error occurred |
-
-## Onboarding Flow Stages
-
-1. **Welcome** - Introduction
-2. **Provider Selection** - Choose AI provider
-3. **Credentials** - Enter API key
-4. **Primary Model** - Select main model
-5. **Secondary Model** - Optional failover
-6. **Thinking Level** - Configure AI depth
-7. **Messaging Apps** - Optional integrations
-8. **Review** - Configuration summary
-9. **Finalize** - Apply configuration
-10. **Complete** - Success message
-
----
-
-## 26.7.x Addendum
-
-### Full RPC Set
-
-- `wizard.start` / `wizard.status` / `wizard.cancel`
-
-### 11 Stages
-
-26.7.21+ onboarding is 11 stages: welcome, provider, credentials, primary model, secondary model, thinking level, **session mode (chat / work / code)**, **exec tier (ask / auto / full)**, messaging apps, **gateway TLS**, done.
-
-### Subcommands
-
-- `aleph wizard` — full 11 stages
-- `aleph wizard --quick` — quick setup
-- `aleph wizard --provider` — add / reconfigure a single provider
-- `aleph wizard --mode` — switch the default session mode only
-
-### Panel UI Trigger
-
-The `wizard.*` RPC can be triggered from the Panel UI without a terminal.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Configuration](/docs/en/getting-started/configuration) -- Post-wizard configuration sources

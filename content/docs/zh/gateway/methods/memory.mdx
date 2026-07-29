@@ -1,231 +1,191 @@
 ---
-title: "Memory 方法"
-description: "用于记忆操作的内置网关工具。"
+title: "memory.*"
+description: "记忆流水线 RPC 方法"
 ---
 
-用于与 Aleph 记忆系统交互的内置网关工具。
+`memory.*`(以及伴随的 `dreaming.*` / `insights.tools`)是分层记忆流水线的读 / 可观测性面:
 
----
+- **第 1 层**——`raw_memories`(原始对话记录;每个 user + assistant 轮次一行)
+- **第 2 层**——`notes_index`(编译的知识笔记;自 26.6.x 重构以来的基于笔记的规范模型)
+- **第 3 层**——`notes_graph_cache`(Louvain 社区、相似性边、图健康洞察)
 
-## memory_search
+写入仍由 LLM / 工具驱动;RPC 面刻意只读第 1 层 + 第 2 层,加上少量会**失败关闭**的批量清除端点(老的"无操作伪造成功"形态已被删除——见 [批量清除](#批量清除))。
 
-搜索知识库以获取相关事实。
+十二个方法在 `register_memory_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/memory.rs:28-268`)中连接。处理函数位于 `src/gateway/handlers/memory.rs`;`dreaming.run_now` / `dreaming.list_insights` / `insights.tools` 伴随方法直接在 `HandlerRegistry::new()` 中注册。
 
-```
-<builtin_tool>memory_search</builtin_tool>
-<parameter name="query">What database did we decide on?</parameter>
-<parameter name="limit">5</parameter>
-```
+## 方法
 
-**参数：**
-- `query`（必填）— 搜索查询
-- `limit`（可选）— 最大结果数，默认 5
-- `agent_id`（可选）— 目标代理命名空间
-- `mode`（可选）— `context` | `tools` | `hybrid`，默认 `hybrid`
+### memory.search
 
-**返回：** 带分数的 `MemoryFact` 排名列表。
+搜索原始记忆(第 1 层)。`content` 的子串匹配;空 `query` 按时间倒序返回最近行。**这是唯一的原始记忆入口**——之前基于笔记搜索的分支被删除,因为它重复了 `graph.search`,并导致 Panel 中 `delete_raw_memory` 用了错误的笔记路径。
 
----
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 否 | 子串过滤;省略 = 浏览 |
+| `agent_id` | string | 否 | 工作区隔离(默认为 `routing::DEFAULT_AGENT_ID`) |
+| `window_title` | string | 否 | (保留;当前模型不暴露) |
+| `limit` | number | 否 | 默认为 20 |
+| `offset` | number | 否 | 默认为 0(分页器尺寸) |
 
-## memory_reflect
+**响应:** `{ "memories": [ ...MemoryEntry... ], "total" }`。每个 `MemoryEntry` 包含 `id`、`agent_id`、`window_title`(空)、`user_input`(原始内容)、`ai_output`(空)、`session_id?`、`timestamp`(created_at,epoch 秒)。`total` 是相同 `(agent_id, query)` 过滤下的计数——不是整库总数,所以感知过滤的分页器不会出现"幻影页"。
 
-**规范 2。** 从记忆中综合出连贯的答案，而不是返回原始事实。
+### memory.delete
 
-```
-<builtin_tool>memory_reflect</builtin_tool>
-<parameter name="query">Summarise what we know about the user's project requirements</parameter>
-<parameter name="depth">comprehensive</parameter>
-```
+按 id 删除单个原始记忆行。第 1 层行没有外键,所以单行删除是安全的;第 2 层知识笔记不受影响。
 
-**参数：**
-- `query`（必填）— 要回答的问题
-- `depth`（可选）— `brief` | `standard` | `comprehensive`，默认 `standard`
-- `agent_id`（可选）— 目标代理命名空间
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 原始记忆 id |
 
-**返回：** 带引用来源的综合答案。
+**响应:** 成功时 `{ "ok": true }`;未命中返回 `INTERNAL_ERROR: No raw memory found with id '<id>'`。
 
----
+### memory.stats
 
-## session_search
+每个计数共享同一作用域。省略 `agent_id`(`scope: "global"`)只返回原始 + 笔记计数;图计数是 `null`,因为笔记是按 agent 隔离的,无作用域视图不能诚实地给出"零节点"。
 
-**规范 B。** 跨会话记录搜索。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 否 | 将每个计数限定到一个 agent |
 
-```
-<builtin_tool>session_search</builtin_tool>
-<parameter name="query">When did we discuss authentication?</parameter>
-<parameter name="limit">5</parameter>
-```
+**响应:** `{ "totalMemories", "totalFacts", "validFacts", "totalGraphNodes" | null, "totalGraphEdges" | null, "scope": "agent"|"global" }`。在当前基于笔记的模型中,`totalFacts` 和 `validFacts` 相等(笔记没有失效状态)。
 
-**参数：**
-- `query`（必填）— 搜索查询
-- `limit`（可选）— 返回的最大会话数，默认 5
-- `summarise`（可选）— `true` | `false`，默认 `true`
+### memory.compress
 
-**返回：** 匹配的会话 + AI 生成的摘要（如果 `summarise=true`）。
+触发一次压缩周期。需要 live `CompressionService`(无服务则无处理器)。
 
----
+**请求:** 无参数。
 
-## remember
+**响应:** `{ "memoriesProcessed", "factsExtracted", "factsInvalidated", "durationMs" }`。
 
-**规范 A。** 将事实固定到精选热记忆中。
+### memory.listFacts
 
-```
-<builtin_tool>remember</builtin_tool>
-<parameter name="content">User prefers dark mode in all applications</parameter>
-<parameter name="priority">8</parameter>
-```
+列出编译的知识笔记(第 2 层)。分页,限定到一个 agent。
 
-**参数：**
-- `content`（必填）— 要记住的事实
-- `priority`（可选）— 1-10，越高 = 越重要，默认 5
-- `category`（可选）— 如 `preference`、`fact`、`warning`
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+| `limit` | number | 否 | 默认为 50 |
+| `offset` | number | 否 | 默认为 0 |
+| `include_invalid` | boolean | 否 | 默认为 `false`(无操作:笔记没有失效状态) |
 
-**返回：** 带事实 ID 的确认。
+**响应:** `{ "facts": [ ...FactEntry... ], "total" }`。每个 `FactEntry` 包含 `id`(路径)、`agent_id`、`content`(文件名)、`fact_type`(类别)、`created_at`、`updated_at`、`category`、`path`、`tags`、`link_count`。
 
-**注意：** 精选记忆是一个**冻结快照**。更改需要显式重新策划。
+### memory.appList
 
----
+列出有相关记忆的窗口。基于笔记的模型没有按窗口分组,因此此接口始终为空列表——为与旧客户端兼容而保留。
 
-## forget
+**请求:** 无参数。
 
-从记忆中删除事实。
-
-```
-<builtin_tool>forget</builtin_tool>
-<parameter name="query">The user's old email address</parameter>
-```
-
-**参数：**
-- `query`（必填）— 要删除的事实的描述
-- `confirm`（可选）— `true` | `false`，默认 `false`
-
-**返回：** 候选事实列表 + 确认提示（如果 `confirm=false`）。
-
----
-
-## memory_status
-
-检查记忆系统健康和统计信息。
-
-```
-<builtin_tool>memory_status</builtin_tool>
-```
-
-**返回：**
-- 总笔记数
-- 原始记忆数（未处理）
-- 索引健康（FTS + 向量）
-- 上次 dream 运行时间戳
-- 精选记忆数
-
----
-
-## 可观测性与治理（`memory.*` / `dreaming.*`）
-
-下列方法是 **RPC 方法**（而非内置聊天工具）。它们对记忆流水线暴露只读的
-可观测性，并提供梦境守护进程控制。写入仍由 LLM/工具驱动——这些方法
-呈现状态，不会变更事实。
-
-### memory.retrieve_with_trace
-
-运行真实的 `NoteFactRetrieval` 评分流水线，返回结果**以及**每个阶段的
-遥测数据，以便调试某条事实为何浮现或未浮现。
-
-**参数：**
-- `query`（必填）— 搜索查询
-- `limit`（可选）— 最大结果数
-- `agent_id`（可选）— 目标代理命名空间
-
-**返回：** 排名结果加上一个 `trace` 阶段数组，每项为
-`{ stage, count, elapsed_ms, scores }`。各阶段按流水线顺序排列：
-query → candidate pool → BM25 + vector scores → RRF fusion → cutoff → ranked。
+**响应:** `{ "windows": [] }`。
 
 ### memory.list_corrections
 
-列出纠正记录 → 蒸馏的生命周期（只读）。呈现用户纠正如何流入蒸馏记忆。
+列出用户纠正(`aleph://correction/...` 原始行)及其蒸馏状态。只读——蒸馏仍由 LLM 驱动。
 
-**参数：**
-- `agent_id`（可选）— 目标代理命名空间
-- `limit`（可选）— 最大条目数
+`distilled` 标志从 `FeedbackDistill` 水位线读取,**不**从 `is_processed` 读取。`is_processed` 属于 `CompressionService` 排出器,在纠正落地后几秒内被设置;使用它会在梦境阶段真正消费之前就把每行渲染为"已蒸馏"。
 
-**返回：** 纠正记录列表及其蒸馏状态。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+| `limit` | number | 否 | 默认为 50 |
+| `include_distilled` | boolean | 否 | 默认为 `true` |
 
-### dreaming.list_insights
+**响应:** `{ "corrections": [ ...{id, content, severity, suggested_rule?, status: "distilled"|"pending", created_at}... ] }`。
 
-列出梦境守护进程产生的近期每日综合洞察，以及 dream 运行历史。
+### memory.trace
 
-**参数：**
-- `limit`（可选）— 返回的最大洞察/运行数
+将记忆声明一路回溯到 ground-truth 证据。只读;`MemoryTraceTool::call_impl` 的薄 I/O 包装。
 
-**返回：** 近期综合笔记 + dream 运行历史条目。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+| `target` | string | 是 | 要回溯的实体 / 笔记 / profile-section |
+| `kind` | string | 是 | `TraceKind` 变体之一(`note` / `raw` / `profile`) |
+| `max_results` | number | 否 | 限制返回的证据 |
+
+**响应:** `MemoryTraceTool` 的完整结果序列化为 JSON(按行的证据链)。
+
+### memory.reembed
+
+启动后台 reembed 迁移(用当前 embedder 重建笔记向量)。需要 live embedding provider;否则处理器返回"缺少 embedding provider"的错误 stub。一次只能运行一个 reembed——第二次 `memory.reembed` 返回 `-32001: Reembed already in progress`,直到第一个完成。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `target_dim` | number | 否 | 默认为当前 embedder 的维度 |
+
+**响应:** `{ "status": "started", "task_id": "reembed-<unix_ms>" }`。进度发布到 `memory.reembed.progress` 主题;完成时发布到 `memory.reembed.completed`。
+
+### memory.reembed.cancel
+
+取消运行中的 reembed。
+
+**响应:** 成功时 `{ "status": "cancelled" }`;当没有 reembed 在运行时返回 `-32001: No reembed task is running`。
+
+### memory.retrieve_with_trace
+
+运行真实的 `NoteFactRetrieval` 评分流水线,返回结果加上每阶段遥测,这样调试面板能看到某个事实为何浮现或未浮现。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 搜索查询 |
+| `limit` | number | 否 | 最大结果数 |
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+
+**响应:** 排名结果 + `trace` 阶段数组,每项 `{ stage, count, elapsed_ms, scores }`。流水线阶段顺序: `query → candidate pool → BM25 + vector scores → RRF fusion → cutoff → ranked`。
 
 ### dreaming.run_now
 
-立即触发一次梦境周期，而无需等待计划运行。
+强制触发全局注册守护进程上的一次梦境周期,绕过调度器的窗口 / 空闲 / 当日已运行检查。仅给 E2E 测试工具使用。
 
-**返回：** 带所触发 dream 运行标识符的确认。
+**请求:** 无参数。
 
-> 这四个方法位于 `memory.*` 和 `dreaming.*` RPC 命名空间中，与现有的
-> `memory.search` / `store` / `delete` / `clear` / `stats` / `compress`
-> 方法并列——区别于上文记录的内置聊天工具。
+**响应:** 成功时 `{ "ok": true, "report": { ...DreamReport... } }`;当记忆被禁用或处于模拟模式时返回 `INTERNAL_ERROR: DreamDaemon is not initialised`(单元测试进程也从未有守护进程,因此这在测试工具中浮现)。
 
----
+### dreaming.list_insights
 
-## 方法比较
+梦境洞察的只读列表:最近的每日摘要、周合成笔记(类别 = `synthesis`)以及梦境运行审计跟踪,带从存储 JSON 解析的 SkillOpt 进化门判定。
 
-| 方法 | 使用时机 | 返回 |
-|---|---|---|
-| `memory_search` | 需要特定事实 | 排名事实 |
-| `memory_reflect` | 需要综合/答案 | 连贯答案 + 来源 |
-| `session_search` | 寻找过去的对话 | 会话 + 摘要 |
-| `remember` | 关键事实不能被遗漏 | 确认 |
-| `forget` | 删除过时信息 | 确认 |
-| `memory_status` | 调试记忆问题 | 统计 |
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 否 | 默认为 `routing::DEFAULT_AGENT_ID` |
+| `limit` | number | 否 | 默认为 30 |
 
----
+**响应:** `{ "daily": [ ...{date, content, source_memory_count, created_at}... ], "synthesis": [ ...{path, title, tags, updated_at}... ], "runs": [ ...{id, pipeline_type, started_at, finished_at, duration_ms, synthesis_count, errors?, evolution?}... ] }`。
 
-## 错误处理
+### insights.tools
 
-所有记忆方法都返回结构化错误：
+`ToolInvocation` 原始行上的每工具使用可观测性。只读;由 Panel 的"工具洞察"视图消费。
 
-| 错误 | 含义 |
-|---|---|
-| `MemoryNotFound` | 没有匹配的事实/会话 |
-| `IndexCorrupted` | SQLite 索引需要重建 |
-| `QuotaExceeded` | 令牌预算已耗尽 |
-| `LockTimeout` | 跨进程争用（规范 C） |
+**请求:** 无参数(Panel 取自己的 `agent_id` 窗口)。
 
----
+**响应:** 按活动/成功率排序的工具列表。
+
+## 批量清除
+
+两个老的"始终返回 `{ "deletedCount": 0 }`"的伪造已经**消失**——两者现在都失败关闭:
+
+| 方法 | 新行为 |
+|------|--------|
+| `memory.clear` | `INTERNAL_ERROR: Bulk memory clearing is not supported in the notes-based memory model.` |
+| `memory.clearFacts` | `INTERNAL_ERROR: Bulk note clearing is not supported; manage knowledge notes via the note_manage tool.` |
+
+`memory.delete` 是唯一合法的逐行删除。批量删除走 `note_manage`(第 2 层)或永远不运行(第 1 层)。
+
+## 内建聊天工具(伴随面)
+
+Panel 的"Memory"标签和 LLM 通过**内建聊天工具**访问平行面——它们由 `tools.invoke` / `chat.send` 分发,而不是通过 `memory.*`。此处仅列出供参考,JSON-RPC 面并不直接调用它们。
+
+| 工具 | 用途 |
+|------|------|
+| `memory_search` | 在知识库中搜索相关事实(第 2 层) |
+| `memory_reflect` | 从记忆中合成连贯答案,而不是返回原始事实 |
+| `session_search` | 跨会话记录搜索 |
+| `remember` | 将事实固定到精选热记忆 |
+| `forget` | 从记忆中移除事实 |
+| `memory_status` | 记忆系统健康 + 统计 |
 
 ## 另请参阅
 
-- [记忆系统](../../concepts/memory) — 概述
-- [记忆架构](../../architecture/memory) — 实现
-- [记忆演进](../../architecture/memory-evolution) — 规范历史
-
----
-
-## 26.7.x 补充
-
-### `memory.*` 完整 RPC
-
-- `memory.search` / `memory.delete` / `memory.clear` / `memory.stats` / `memory.compress`
-- `memory.listFacts` / `memory.clearFacts` / `memory.list_corrections` / `memory.trace`
-- `memory.appList`
-- `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace`
-
-### Vault 面板重构（26.7.27+）
-
-卡片视图、批量操作栏、深链、证据链、跨代理选择、来源、批量导出。
-
-### 真实成本与 token 核算
-
-26.7.15+ Tier-3 硬化——代理范围召回信号、严重度门控的归档、成熟度队列。
-
-### 笔记层
-
-`note_graph_query` 工具（双向 BFS 路径、类型化关系边、wikilink supersession、抗崩溃索引、CJK trigram 全文搜索）。
-
-### SkillOpt 自我演化
-
-26.7.x：技能演化受 SkillOpt 纪律约束。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [记忆系统](/docs/zh/concepts/memory)——第 1/2/3 层模型
+- [梦境守护进程](#)——`dreaming.*` 调度器

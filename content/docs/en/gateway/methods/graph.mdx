@@ -3,178 +3,98 @@ title: "graph.*"
 description: "Knowledge graph RPC methods"
 ---
 
-Graph methods manage the knowledge graph — a semantic network of entities, relations, and observations that represents structured knowledge extracted from conversations and documents.
+`graph.*` is the gateway's read/write surface over the agent's knowledge graph (the same one the Panel renders as a 2D / 3D galaxy). The data is `NoteStore` + `notes_graph_cache` on the in-core `MemoryBackend`, **not** a per-call LLM synthesis — every method here is a deterministic read or a direct indexer write.
+
+The three read methods (`graph.query`, `graph.search`, `graph.node_detail`) are unconditional. The three write methods (`graph.update_note`, `graph.rename_note`, `graph.delete_note`) require a live `NoteIndexer`; in simulated mode the writes return `Method not found`.
+
+The 26.7.21 changelog added a **loop-graph governance layer** (the harness's persistent store for goal / audit / team nodes); that lives on top of `teams.task.trace` + the `governance.*` event topic and is reachable through `events.subscribe`, **not** through `graph.*`.
 
 ## Methods
 
 ### graph.query
 
-Query the knowledge graph using a natural language or structured query.
+Read the note index for an agent — nodes (with community id from the Louvain cache) and edges (with kind and confidence). Similarity edges materialized by `GraphRecompute` are deduped against real wikilink edges.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "graph.query",
-  "params": {
-    "query": "What projects is Alice working on?",
-    "limit": 10
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | number | no | Defaults to 100 |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "results": [
-      {
-        "entity": "Project Alpha",
-        "relation": "worked_on_by",
-        "target": "Alice",
-        "confidence": 0.95
-      }
-    ]
-  }
-}
-```
+**Response:** `GraphQueryResponse`: `{ "nodes": [ ...NoteNodeDto... ], "edges": [ ...NoteLinkDto... ], "total": <number> | null, "bridge_nodes": [ ...path... ], "surprising_edges": [ [from, to]... ] }`. `bridge_nodes` and `surprising_edges` are filtered to nodes / edges visible in the response; empty until the first `GraphRecompute` run.
 
-### graph.entities
+`NoteNodeDto` carries `id` (path `category/title`), `name` (filename), `path`, `category`, `tags`, `link_count`, `community_id?`, `updated_at?`. `NoteLinkDto` carries `from`, `to`, `label?`, `kind` (`wikilink` for plain body wikilinks, `related_similarity` for the materialized similarity edges), `confidence?`.
 
-List entities in the knowledge graph.
+### graph.search
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "graph.entities",
-  "params": {
-    "type": "person",
-    "limit": 50
-  }
-}
-```
+Full-text search over note content via the `NoteStore` FTS index.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "entities": [
-      {
-        "id": "ent-1",
-        "name": "Alice",
-        "type": "person",
-        "observations": ["Software engineer", "Likes Rust"]
-      }
-    ]
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | yes | FTS query string |
+| `limit` | number | no | Defaults to 20 |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
 
-### graph.add_entity
+**Response:** `{ "results": [ ...SearchResultDto... ] }`. Each row carries `id`, `name`, `category`, `match_field` (`title` when the query hit the filename, `content` otherwise), `agent_id`, `created_at`, `updated_at`, `tags`, `link_count`.
 
-Add a new entity to the knowledge graph.
+### graph.node_detail
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "graph.add_entity",
-  "params": {
-    "name": "Project Beta",
-    "type": "project",
-    "observations": ["AI documentation tool", "Built with Rust"]
-  }
-}
-```
+Fetch one node's full row, markdown content (read from disk via `notes_dir()`), incoming backlinks, and outgoing links with full lifecycle provenance.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "entity_id": "ent-2",
-    "added": true
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `node_id` | string | yes | Note path `category/title` |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
 
-### graph.add_relation
+**Response:** `NoteDetailResponse`: `{ "node": { ...NoteNodeDto... }, "content", "backlinks": [ ...path... ], "outgoing": [ ...OutgoingLinkDto... ] }`. `outgoing` carries `to` (resolved or raw), `raw`, `relation?`, `label?`, `confidence`, `resolved_by?`, `status` (`active` / `dangling` / `tombstone`).
 
-Add a relation between two entities.
+### graph.update_note
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "graph.add_relation",
-  "params": {
-    "from_entity": "Alice",
-    "relation": "works_on",
-    "to_entity": "Project Beta"
-  }
-}
-```
+Persist the edited markdown for a single note verbatim — the body is written byte-for-byte (not the lossy `KnowledgeNote::to_markdown` reconstruction), so hand-edited prose, headings, and code blocks survive. The incoming content is scanned for exfiltration payloads before persisting (exfiltration-only scope so a user's own security-research notes are not rejected).
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "relation_id": "rel-1",
-    "added": true
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `node_id` | string | yes | Note path `category/title` |
+| `content` | string | yes | Full raw markdown (frontmatter + body) |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
 
-### graph.delete_entity
+**Response:** `{ "node_id", "saved": true }`. `INVALID_PARAMS` on a node_id without `category/`, on a category or `agent_id` containing path-traversal components (`..`, `\`, `/` in agent_id), or when the exfiltration scan refuses the body.
 
-Delete an entity and its relations.
+### graph.rename_note
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "graph.delete_entity",
-  "params": {
-    "entity_id": "ent-2"
-  }
-}
-```
+Rename the file, rewrite every inbound `[[old]]` wikilink, re-index, and backfill. The new path is re-derived from `find_by_filename` so a stale client category does not break the rename.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `node_id` | string | yes | Current note path `category/title` |
+| `new_title` | string | yes | New filename (without `.md`); sanitized server-side |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+
+**Response:** `{ "node_id", "new_id", "renamed": true }`. `new_id` is the canonical `category/new_title` (re-derived from the file system, not just the client-supplied category). `INVALID_PARAMS` on the same path-traversal cases as `graph.update_note`.
+
+### graph.delete_note
+
+Remove the file + index. Inbound links become **tombstones** (the source bodies are untouched, so the rename-revival path is preserved).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `node_id` | string | yes | Note path `category/title` |
+| `agent_id` | string | no | Defaults to `routing::DEFAULT_AGENT_ID` |
+
+**Response:** `{ "node_id", "deleted": true }`. `INVALID_PARAMS` on path-traversal cases.
+
+## Methods that are **not** RPC
+
+The following methods are described in earlier versions of this page but are **not** registered on the current `aleph-server`:
+
+| Method | Why it is not an RPC |
+|--------|---------------------|
+| `graph.entities` / `graph.add_entity` / `graph.add_relation` / `graph.delete_entity` | There is no free-standing `Entity` table; the graph is built from the `notes_index` (`KnowledgeNote` + wikilinks + similarity edges). The Panel calls `graph.query` for a render and never had a single-entity insert path. |
+| `graph.neighbors` | Surfaces the same data as the `edges` of `graph.query`; the Panel iterates the edges client-side. |
+
+`graph.neighbors` is occasionally referenced in older design docs; in the runtime it is just a property of the `edges` array returned by `graph.query`.
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [Architecture: Knowledge Graph](/docs/en/architecture/graph) -- Graph system architecture
-
----
-
-## 26.7.x Addendum
-
-### Loop-Graph Governance Layer
-
-26.7.21+: `loop_graph` adds governance topology on top of the harness.
-
-### `graph.*` Full RPC
-
-- `graph.query` — graph query
-- `graph.search` — graph search
-- `graph.node_detail` — node detail
-- `graph.update_note` — update a note
-- `graph.rename_note` — rename a note
-- `graph.delete_note` — delete a note
-
-### Governance Events
-
-Victory claim, goal settled, team disbanded, watcher triggered — subscribe via `events.subscribe` on the `governance.*` topic.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Memory](#) -- The Layer-1/2/3 model and where notes live
+- [Knowledge graph (Loop-graph layer)](#) -- The 26.7.21+ governance layer (events-based, not gateway-RPC)

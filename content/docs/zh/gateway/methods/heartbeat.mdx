@@ -1,139 +1,116 @@
 ---
 title: "heartbeat.*"
-description: "健康检查和心跳 RPC 方法"
+description: "心跳任务 RPC 方法"
 ---
 
-心跳方法管理健康检查和心跳信号，用于监控系统健康、连接性和组件状态。
+`heartbeat.*` 是守护进程侧心跳调度器的生命周期接口。八个方法通过 `register_heartbeat_handlers` 在服务器启动(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:142-196`)构造了 `SharedHeartbeatService` 后注册;若服务未构造(例如没有调度器的模拟模式),JSON-RPC 方法不存在,调用返回 `Method not found`。
+
+源码中每个方法都有两个变体:一个由 `HeartbeatService` 支持的真实处理器,一个返回固定空响应的 `_stub`。启动时仅连接真实处理器。
 
 ## 方法
 
-### heartbeat.ping
+### heartbeat.list
 
-简单的 ping/pong 健康检查。
+列出所有心跳任务。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "heartbeat.ping",
-  "params": {}
-}
-```
+**请求:** 无参数。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "pong": true,
-    "timestamp": "2024-01-15T10:30:00Z"
-  }
-}
-```
+**响应:** `{ "tasks": [ ...HeartbeatTaskView... ] }`。每个任务包含 `id`、`name`、`agent_id`、`enabled`、`interval_ms`、`probe`(`tool_name` / `tool_params` / `trigger_condition`),以及调度器状态(`next_due_ms`、`last_probe_at_ms`、`last_probe_result`、`consecutive_errors`、`last_error`)。
 
-### heartbeat.status
+### heartbeat.get
 
-获取所有组件的详细心跳状态。
+按 id 获取单个任务。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "heartbeat.status",
-  "params": {}
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | `heartbeat.create` 返回的任务 id |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "healthy": true,
-    "components": [
-      {
-        "name": "gateway",
-        "status": "healthy",
-        "last_beat": "2024-01-15T10:30:00Z",
-        "latency_ms": 5
-      },
-      {
-        "name": "memory",
-        "status": "healthy",
-        "last_beat": "2024-01-15T10:29:58Z",
-        "latency_ms": 12
-      }
-    ]
-  }
-}
-```
+**响应:** `{ "task": { ...HeartbeatTaskView... } }`,或 `INTERNAL_ERROR: Task not found: <task_id>`。
 
-### heartbeat.check
+### heartbeat.create
 
-检查特定组件的健康状况。
+创建新任务。接受 `interval_ms`(数字)或 `interval`(字符串如 `"5m"` / `"1h"` / `"30s"` / 原始毫秒数)。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "heartbeat.check",
-  "params": {
-    "component": "mcp"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 人类可读的任务名称 |
+| `agent_id` | string | 否 | 默认为 `"main"` |
+| `interval_ms` | number | 条件 | 周期(毫秒)。与 `interval` 互斥。 |
+| `interval` | string | 条件 | 带后缀的周期(`s` / `m` / `h`)或原始毫秒 |
+| `probe.tool_name` | string | 是 | 心跳每次 tick 调用的工具 |
+| `probe.tool_params` | object | 否 | 传给工具的 JSON 参数 |
+| `probe.trigger_condition` | string | 否 | 缺省为 `Always`,或由 `TriggerCondition` 反序列化得到的任意结构化触发条件 |
+| `enabled` | boolean | 否 | 默认为 `true` |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "component": "mcp",
-    "healthy": true,
-    "last_beat": "2024-01-15T10:30:00Z"
-  }
-}
-```
+`tool_name` 也可置于顶层而不是 `probe` 内;两种写法都接受。
 
-## 健康状态
+**响应:** `{ "task": { ...HeartbeatTaskView... } }`(新创建的任务)。
 
-| 状态 | 说明 |
-|-------|-------------|
-| `healthy` | 组件正常运行 |
-| `degraded` | 组件运行缓慢或部分故障 |
-| `unhealthy` | 组件已故障 |
-| `unknown` | 最近未收到心跳 |
+### heartbeat.update
+
+增量更新任务。只触碰 `params` 中出现的字段。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+| `name` | string | 否 | 新的人类可读名称 |
+| `agent_id` | string | 否 | 新的 agent id |
+| `interval_ms` | number | 否 | 新周期(毫秒) |
+| `interval` | string | 否 | 带后缀的新周期 |
+| `enabled` | boolean | 否 | 新的启用状态 |
+| `probe` | object | 否 | 整 `ProbeConfig`(`tool_name` / `tool_params` / `trigger_condition`)替换 |
+
+**响应:** `{ "task": { ...HeartbeatTaskView... } }`(更新后的任务)。
+
+### heartbeat.delete
+
+删除任务。在内存调度器上是幂等的;运行历史保留在 SQLite 存储中。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+
+**响应:** `{ "deleted": "<task_id>" }`。
+
+### heartbeat.toggle
+
+启用或禁用任务。若提供 `enabled`,则强制设为该值;否则翻转当前启用标志。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+| `enabled` | boolean | 否 | 若提供,设为该确切值;否则切换当前状态 |
+
+**响应:** `{ "task_id": "<task_id>", "enabled": <bool> }`。
+
+### heartbeat.wake
+
+入队一次手动唤醒。以 `WakePriority::UserAction` 优先级入队;调度器在下一 tick 取出。未知 `task_id` 返回 `INTERNAL_ERROR`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+| `reason` | string | 否 | 自由文本原因;记录在运行条目上 |
+
+**响应:** `{ "triggered": "<task_id>", "status": "queued", "reason": "<reason>" | null }`。
+
+### heartbeat.runs
+
+返回任务的执行历史(从 SQLite `heartbeat_runs` 表中),按时间正序。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+| `limit` | number | 否 | 最大行数;默认 20 |
+
+**响应:** `{ "task_id": "<task_id>", "runs": [ ...RunRecord... ] }`。每个运行条目包含 `id`、`trigger_source`、`l1_status` / `l2_status`、`started_at` / `ended_at`、`l1_duration_ms` / `l2_duration_ms`、`error`、`delivery_status`、`created_at`。
+
+## 接线
+
+`register_heartbeat_handlers` 仅在 `agent_result.heartbeat_service.is_some()` 时才被调用(`register_agents_handlers` 内部)。未构造服务的最小化 `aleph-server` 启动不会暴露该命名空间。运行时不存在回退到占位符 stub 的兜底。
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### 实化（stubs → real）
-
-26.7.x：历史 stub RPC（`heartbeat.*_stub`）已被**实化**。完整实现：
-
-- `heartbeat.list` / `heartbeat.get` / `heartbeat.create` / `heartbeat.update` / `heartbeat.delete` / `heartbeat.toggle`
-- `heartbeat.wake` —— 主动唤醒
-- `heartbeat.runs` —— 运行历史
-
-### 守护进程端驱动
-
-由 [守护进程](/docs/zh/concepts/daemon) 驱动。`Guardian Judge` 决策唤醒。
-
-### 拒绝危险工具
-
-26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。
-
-### payload 隐藏密钥
-
-`Guardian Judge` payload 必须隐藏密钥。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [守护进程](/docs/zh/concepts/daemon)——心跳守护进程驱动
+- [Guardian Judge](#)——后台判断器,驱动 L2 升级;也接线为拒绝危险或确认门控的探针工具。

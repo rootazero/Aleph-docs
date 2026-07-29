@@ -3,22 +3,26 @@ title: "services.*"
 description: "内部服务管理 RPC 方法"
 ---
 
-服务方法管理 Aleph 的内部服务——处理特定子系统的后台进程，如索引、同步和维护任务。
+`services.*` 管理 Aleph 后台服务的生命周期。注册于 `HandlerRegistry::new()`（`src/gateway/handlers/mod.rs:329-332`），无外部依赖——不要求初始化即可调用。
 
 ## 方法
 
+| 方法 | 说明 |
+|--------|-------------|
+| [`services.list`](#serviceslist) | 列出全部已注册服务 |
+| [`services.start`](#servicesstart) | 启动一个服务 |
+| [`services.stop`](#servicesstop) | 停止一个服务 |
+| [`services.status`](#servicesstatus) | 读取单个服务的运行时状态 |
+
+> `services.restart` 不是 RPC；如需重启请先 `stop` 再 `start`。
+
 ### services.list
 
-列出所有内部服务及其状态。
+列出全部内部服务。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "services.list",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "services.list", "params": {} }
 ```
 
 **响应：**
@@ -28,19 +32,8 @@ description: "内部服务管理 RPC 方法"
   "id": 1,
   "result": {
     "services": [
-      {
-        "id": "indexer",
-        "name": "Document Indexer",
-        "status": "running",
-        "healthy": true,
-        "uptime_seconds": 3600
-      },
-      {
-        "id": "sync",
-        "name": "Sync Service",
-        "status": "stopped",
-        "healthy": false
-      }
+      { "id": "dreaming", "name": "Dreaming", "status": "running", "healthy": true },
+      { "id": "metrics", "name": "Metrics", "status": "running", "healthy": true }
     ]
   }
 }
@@ -48,18 +41,11 @@ description: "内部服务管理 RPC 方法"
 
 ### services.status
 
-获取特定服务的详细状态。
+读取单个服务的运行时状态（来自 `services::handle_status`）。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "services.status",
-  "params": {
-    "service_id": "indexer"
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "method": "services.status", "params": { "service_id": "dreaming" } }
 ```
 
 **响应：**
@@ -68,16 +54,16 @@ description: "内部服务管理 RPC 方法"
   "jsonrpc": "2.0",
   "id": 2,
   "result": {
-    "id": "indexer",
-    "name": "Document Indexer",
+    "id": "dreaming",
+    "name": "Dreaming",
     "status": "running",
-    "pid": 12345,
-    "uptime_seconds": 3600,
-    "last_run": "2024-01-15T10:30:00Z",
-    "next_run": "2024-01-15T11:30:00Z"
+    "healthy": true,
+    "uptime_seconds": 3600
   }
 }
 ```
+
+**参数：** `service_id`（必填）。
 
 ### services.start
 
@@ -85,71 +71,43 @@ description: "内部服务管理 RPC 方法"
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "services.start",
-  "params": {
-    "service_id": "sync"
-  }
-}
+{ "jsonrpc": "2.0", "id": 3, "method": "services.start", "params": { "service_id": "dreaming" } }
 ```
+
+**响应：**
+```json
+{ "jsonrpc": "2.0", "id": 3, "result": { "started": "dreaming" } }
+```
+
+**参数：** `service_id`（必填）。
 
 ### services.stop
 
-停止正在运行的服务。
+停止运行中的服务。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "services.stop",
-  "params": {
-    "service_id": "indexer"
-  }
-}
+{ "jsonrpc": "2.0", "id": 4, "method": "services.stop", "params": { "service_id": "dreaming" } }
 ```
 
-### services.restart
-
-重启服务。
-
-**请求：**
+**响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "services.restart",
-  "params": {
-    "service_id": "indexer"
-  }
-}
+{ "jsonrpc": "2.0", "id": 4, "result": { "stopped": "dreaming" } }
 ```
 
-## 服务状态
+**参数：** `service_id`（必填）。
+
+## 服务状态值
 
 | 状态 | 说明 |
 |-------|-------------|
-| `running` | 服务处于活动状态且健康 |
+| `running` | 服务正在运行 |
 | `stopped` | 服务已停止 |
-| `degraded` | 服务正在运行但不健康 |
-| `starting` | 服务正在初始化 |
-| `stopping` | 服务正在关闭 |
+| `starting` | 服务正在启动 |
+| `stopping` | 服务正在停止 |
+| `degraded` | 处于运行态但最近一次健康检查失败 |
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [架构：服务](/docs/zh/architecture/services)——服务架构
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC 集
-
-- `services.list` / `services.start` / `services.stop` / `services.status`
-
-### 守护进程
-
-`aleph-server service` 子命令——安装/启动/启用自启/卸载系统服务。
+- [方法参考](./index)——所有方法命名空间
+- [daemon.*](./daemon)——网关级守护进程控制

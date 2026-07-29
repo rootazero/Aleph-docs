@@ -1,251 +1,94 @@
 ---
 title: "skills.*"
-description: "技能系统 v2 管理 RPC 方法"
+description: "技能系统 v2 RPC 方法"
 ---
 
-技能方法管理技能系统 v2——一个统一的技能发现、注册和生命周期管理框架。技能为代理添加工具、提示和能力。
+`skills.*` 是对内存中 `SkillSystem`(统一的 SkillSystem v2 注册表)的运行时接口。六个方法在 `HandlerRegistry::new()` 中连接——五个真实、一个 plumbing——运行时在首次调用时延迟初始化。`bundled.sync` 是捆绑内容(技能、插件)的显式刷新触发,在同一位置注册。
 
-> **注意：** `skills.*` 是统一 `extensions.*` 门面背后按类型划分的后端之一。对于日常用户，技能、插件和 MCP 服务器统一在同一个**扩展**概念下，通过[扩展商店](/docs/zh/concepts/extensions-store)浏览和安装。下面的 `skills.*` 方法仍是底层的技能后端；伞形 RPC 参见 [extensions.*](/docs/zh/gateway/methods/extensions)。
+`markdown_skills.*` 家族**不**作为 JSON-RPC 注册。`skills.install` 是运行时安装路径:接受 git URL / 本地路径 / zip,安全扫描捆绑包,然后通过共享的 `AlephToolServer` 注册每个工具。
 
 ## 方法
 
 ### skills.status
 
-返回所有已注册技能的完整状态，包括其启用状态、范围和依赖项。
+返回每个已注册技能——其启用状态、范围、源路径、每技能依赖列表。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "skills.status",
-  "params": {}
-}
-```
+**请求:** 无参数。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "skills": [
-      {
-        "id": "builtin:shell",
-        "name": "Shell Execution",
-        "enabled": true,
-        "scope": "tool",
-        "version": "1.0.0",
-        "dependencies": []
-      },
-      {
-        "id": "user:web_search",
-        "name": "Web Search",
-        "enabled": true,
-        "scope": "tool",
-        "version": "2.1.0",
-        "dependencies": ["builtin:http"]
-      }
-    ]
-  }
-}
-```
+**响应:** `{ "skills": [ ...SkillStatus... ] }`。每行包含 `id`、`name`、`enabled`、`scope`(`system` / `tool` / `standalone` / `disabled`)、`version`、`dependencies`,以及系统呈现的每技能元数据。
 
 ### skills.update
 
-更新技能的配置（启用状态和/或提示范围）。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "skills.update",
-  "params": {
-    "skill_id": "user:web_search",
-    "enabled": false,
-    "scope": "disabled"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "skill": {
-      "id": "user:web_search",
-      "name": "Web Search",
-      "enabled": false,
-      "scope": "disabled",
-      "version": "2.1.0"
-    }
-  }
-}
-```
-
-**参数：**
+更新一个技能的启用状态和/或提示范围。未知的 `scope` 值会被 `INVALID_PARAMS` 拒绝。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `skill_id` | string | 是 | 要更新的技能 ID |
-| `enabled` | boolean | 否 | 启用或禁用技能 |
-| `scope` | string | 否 | 提示范围：`"system"`、`"tool"`、`"standalone"`、`"disabled"` |
+|------|------|------|------|
+| `skill_id` | string | 是 | 技能 id(`<source>:<name>`) |
+| `enabled` | boolean | 否 | `true` / `false` |
+| `scope` | string | 否 | `system` / `tool` / `standalone` / `disabled` |
 
-**范围值：**
-
-| 范围 | 说明 |
-|-------|-------------|
-| `system` | 注入到系统提示中 |
-| `tool` | 可作为可调用工具使用 |
-| `standalone` | 独立于代理使用 |
-| `disabled` | 未加载 |
+**响应:** 成功时 `{ "skill": { ...更新后 SkillStatus... } }`;更新后找不到技能时返回 `INTERNAL_ERROR`。
 
 ### skills.install_dep
 
-为技能安装依赖项（如技能所需的系统包）。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "skills.install_dep",
-  "params": {
-    "skill_id": "user:web_search",
-    "spec_id": "curl"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "result": "installed",
-    "skill": {
-      "id": "user:web_search",
-      "name": "Web Search",
-      "enabled": true
-    }
-  }
-}
-```
-
-**参数：**
+安装一个技能的依赖(系统包或类似——依赖描述由技能定义)。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `skill_id` | string | 是 | 技能 ID |
-| `spec_id` | string | 否 | 依赖规范 ID（如包名） |
+|------|------|------|------|
+| `skill_id` | string | 是 | 技能 id |
+| `spec_id` | string | 否 | 依赖 spec id(默认值由技能定义) |
+
+**响应:** `{ "result", "skill" | null }`。`result` 是依赖自身的 `Result` 字符串。
 
 ### skills.remove
 
-从系统中移除技能。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "skills.remove",
-  "params": {
-    "skill_id": "user:web_search"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "ok": true
-  }
-}
-```
-
-**参数：**
+从注册表中移除一个技能。幂等:未知的 `skill_id` 返回 `{ "ok": false }`(不是 JSON-RPC 错误),使设置页能呈现幂等的删除 UX。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `skill_id` | string | 是 | 要移除的技能 ID |
+|------|------|------|------|
+| `skill_id` | string | 是 | 技能 id |
+
+**响应:** `{ "ok": <bool> }`。
 
 ### skills.install
 
-从 markdown 技能文件或目录安装技能。
+从 Git URL、本地路径或 `.zip` 归档安装技能捆绑包。服务端按 URL / 路径后缀检测来源;扫描该捆绑包(`scan_skill_directory` / `install_allowed` 在 `TrustLevel::Community`)并仅在通过时加载——`SKILL.md` 旁边有反向 shell 载荷会被拒绝并删除目录。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "skills.install",
-  "params": {
-    "path": "~/.aleph/skills/custom_skill.md"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "installed": true,
-    "skill_id": "user:custom_skill"
-  }
-}
-```
-
-**参数：**
+每次成功安装都会增加 AgentRevision 计数器,让代理循环的 `MarkdownSkillRefreshSource` 能廉价地检测变更。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `path` | string | 是 | 技能文件或目录的路径 |
+|------|------|------|------|
+| `url` | string | 是 | Git URL(`https://…`、`git@…` 或 `.git` 后缀)、本地路径,或 `https://…/*.zip` |
+| `flatten` | boolean | 否 | 仅 Git;克隆到隐藏缓存并将其内容平铺复制到 `~/.aleph/skills/` |
+
+**响应:** `{ "skills": [ ...MarkdownSkillInfo... ], "count": N }`。`MarkdownSkillInfo` 包含 `name`、`description`、`source_path`、`sandbox_mode`(`host` / `docker` / `virtualfs`)、`requires_bins`。
+
+### bundled.sync
+
+显式刷新捆绑内容(技能、插件或两者)。保留给显式触发(CLI / LLM 工具 / Hub 按钮);启动路径从不自动拉取。默认 kind 为 `all`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `kind` | string | 否 | `skills` / `plugins` / `all`(默认) |
+
+**响应:** `{ "ok": true, "skills", "plugins" }`——每种类型新提取的行数。
 
 ## 技能目录
 
-技能从以下目录加载（按顺序）：
+运行时按以下优先级顺序加载技能:
 
-1. `~/.aleph/skills/` — 用户安装的技能
-2. `./skills/` — 项目本地技能
+1. `~/.aleph/skills/`——用户安装的技能
+2. `./skills/`——项目本地技能
 3. 与 Aleph 捆绑的内置技能
+
+捆绑集由 `bundled.sync` 解压到用户目录,因此代理循环看到的是三个层的统一视图。
+
+## 插件捆绑的技能
+
+自 26.7.17 起,通过插件安装的技能被合并到技能索引中,并在 `skill_read` 中可见。两个命名空间共享一个 ToolCatalog 注册表,因此同一技能 id 不管是代理循环从插件的 `commands/` markdown 中发现,还是从顶级 `~/.aleph/skills/` 安装解析,都解析为同一工具。
 
 ## 另请参阅
 
-- [概念：技能](/docs/zh/concepts/skills)——技能系统 v2 的工作原理
-- [概念：扩展商店](/docs/zh/concepts/extensions-store)——统一的扩展概念（技能 / 插件 / MCP）
-- [extensions.*](/docs/zh/gateway/methods/extensions)——路由到各类型后端的统一门面
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### `skills.*` 完整 RPC
-
-- `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install`
-- `markdown_skills.handle_install`
-
-### `bundled.sync`
-
-26.7.x：把内置内容与磁盘同步——避免陈旧的 bundled 内容。
-
-### Markdown 技能作者指南
-
-26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md`——技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写。
-
-### 触发词增强
-
-26.7.x：BM25 ranker + 编辑距离补底。
-
-### 插件捆绑技能
-
-26.7.17+：已安装插件的技能被折叠进技能索引与 `skill_read`。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [技能](/docs/zh/concepts/skills)——Skill System v2 的工作原理
+- [扩展商店](/docs/zh/concepts/extensions-store)——统一的 `extensions.*` 门面(kind `Skill`)

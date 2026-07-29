@@ -1,251 +1,190 @@
 ---
 title: "plugins.*"
-description: "Plugin management RPC methods"
+description: "Plugin host RPC methods"
 ---
 
-Plugin methods manage the plugin system — load, unload, list, and configure plugins that extend Aleph's capabilities. Plugins can add tools, handlers, event listeners, and custom behavior.
+`plugins.*` and the canonical `plugin.*` namespace are the two surfaces of the runtime plugin host. Both are registered in `HandlerRegistry::new()` (lines 287-310 of `src/gateway/handlers/mod.rs`), so they are always present regardless of whether the MCP manager is up.
 
-> **Part of the Extension umbrella.** These `plugins.*` methods are one of the per-kind backends behind the unified `extensions.*` façade. For everyday users, plugins, skills, and MCP servers are all browsed and installed as **Extensions** via the Extensions Store. See [extensions.* methods](/docs/en/gateway/methods/extensions) and [Concept: Extensions Store](/docs/en/concepts/extensions-store).
+- `plugins.*` is the **legacy** namespace — kept for backward compatibility with older clients.
+- `plugin.*` is the **canonical** singular namespace; `plugin.install` classifies its source server-side (marketplace / git URL / local path / `.zip`) and routes accordingly.
 
-## Methods
+For everyday users, the unified `extensions.*` façade is preferred. `plugins.*` / `plugin.*` are the underlying plugin backends (kind `Plugin` in the extensions catalog).
+
+## `plugins.*` Methods (legacy)
 
 ### plugins.list
 
-List all loaded plugins and their status.
+List every loaded plugin and its status.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "plugins.list",
-  "params": {}
-}
-```
+**Request:** no params.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "plugins": [
-      {
-        "id": "filesystem",
-        "name": "File System Plugin",
-        "version": "1.0.0",
-        "enabled": true,
-        "tools": ["read_file", "write_file", "list_dir"],
-        "handlers": ["file_change_event"]
-      }
-    ]
-  }
-}
-```
+**Response:** `{ "plugins": [ ...PluginInfo... ] }`. Each row carries `name`, `version`, `description`, `enabled`, `path`, capability counts (`skills_count`, `commands_count`, `agents_count`, `hooks_count`, `mcp_servers_count`), and a `status` of `loaded` / `disabled` / `overridden` / `error` (with an `error` field on failure).
 
-### plugins.status
+### plugins.install
 
-Get detailed status of a specific plugin.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "plugins.status",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "id": "filesystem",
-    "name": "File System Plugin",
-    "version": "1.0.0",
-    "enabled": true,
-    "loaded_at": "2024-01-15T10:30:00Z",
-    "tools_count": 3,
-    "handlers_count": 1
-  }
-}
-```
-
-### plugins.load
-
-Load a plugin from a path or plugin ID.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "plugins.load",
-  "params": {
-    "path": "~/.aleph/plugins/custom_plugin"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "loaded": true,
-    "plugin_id": "custom_plugin"
-  }
-}
-```
-
-**Parameters:**
+Install a plugin from a Git URL.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | Yes* | Path to plugin directory or file |
-| `plugin_id` | string | Yes* | Plugin identifier (alternative to path) |
+| `url` | string | yes | Git URL (`https://`, `git@`, or `git://`); the repo name is derived as the last path component and used as the on-disk plugin directory |
 
-*One of `path` or `plugin_id` is required.
+**Response:** `{ "plugin": { ...PluginInfo... } }` on success; `INVALID_PARAMS` when the URL yields an unsafe directory name, the destination exists, or validation fails; `INTERNAL_ERROR` on a `git2::Repository::clone` failure.
+
+### plugins.installFromZip
+
+Install one or more plugins from a base64-encoded zip archive.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `data` | string | yes | Base64-encoded zip bytes |
+
+**Response:** `{ "installedNames": [] }` (the handler does not enumerate extracted names; use `plugins.list` to refresh).
 
 ### plugins.unload
 
-Unload a plugin by ID.
+Unload a previously loaded plugin and remove its directory. The runtime is torn down BEFORE the directory is deleted so a `services.stop` or transient MCP server can still run on shutdown.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "plugins.unload",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Plugin id (must be a single normal path component — no `..`, no `/`) |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "unloaded": true
-  }
-}
-```
+**Response:** `{ "ok": true }`.
 
-### plugins.reload
+### plugins.load
 
-Reload a plugin (unload then load).
+Parse a manifest from a directory and load the plugin into the runtime (Node.js / WASM).
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "plugins.reload",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Path to the plugin directory containing `aleph.plugin.json` or `package.json` with an `aleph` field |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "reloaded": true
-  }
-}
-```
+**Response:** `{ "pluginId": "<id>", "name": "<name>", "kind": "Mcp|Wasm|Static" }`.
+
+### plugins.unload
+
+Reverse of `plugins.load`: unregisters the plugin from the runtime. Tools and hooks may still appear in the registry; use `plugins.unload` to remove the directory.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pluginId` | string | yes | Plugin id |
+
+**Response:** `{ "ok": true }`.
 
 ### plugins.enable
 
-Enable a previously disabled plugin.
+Remove the `.disabled` marker so the plugin is re-discovered on the next scan.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "plugins.enable",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Plugin id |
+
+**Response:** `{ "ok": true }`.
 
 ### plugins.disable
 
-Disable a plugin without unloading it.
+Create the `.disabled` marker and tear down the runtime (services + transient MCP servers).
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "plugins.disable",
-  "params": {
-    "plugin_id": "filesystem"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Plugin id |
 
-## Plugin Structure
+**Response:** `{ "ok": true }`.
 
-Plugins are loaded from `~/.aleph/plugins/` and typically contain:
+### plugins.callTool
 
-```
-my_plugin/
-  plugin.toml       # Plugin manifest
-  src/
-    lib.rs          # Plugin entry point
-  skills/           # Optional bundled skills
-```
+Invoke a tool that was registered by a loaded plugin.
 
-**plugin.toml example:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pluginId` | string | yes | Plugin that registered the tool |
+| `handler` | string | yes | Handler function name |
+| `args` | object | no | JSON arguments forwarded to the handler |
 
-```toml
-[plugin]
-id = "my_plugin"
-name = "My Plugin"
-version = "1.0.0"
-description = "Does something useful"
+**Response:** `{ "result": <plugin-defined JSON> }` on success; `-32001` (`Command not found`) if no plugin-registered command with `handler` exists, or the call belongs to a different plugin.
 
-[plugin.tools]
-provides = ["my_tool"]
+### plugins.executeCommand
 
-[plugin.events]
-listens = ["session.start"]
-```
+Execute a slash command that was registered by a plugin. The handler looks up the command in the plugin's `commands/` markdown (stored as a `SkillRegistration` with `skill_type = Command`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pluginId` | string | yes | Plugin that registered the command |
+| `commandName` | string | yes | Command name (no leading slash) |
+| `args` | object | no | JSON arguments forwarded to the handler |
+
+**Response:** the `DirectCommandResult` (`content`, `data`, `success`) serialised as JSON.
+
+## `plugin.*` Methods (canonical, singular)
+
+### plugin.list
+
+Same as `plugins.list`. **Response:** `{ "plugins": [ ...PluginInfo... ] }`.
+
+### plugin.install
+
+Unified install entry. Classifies `source` server-side and dispatches to the marketplace installer (bare name) or the git-clone installer (URL / path / `git@…`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source` | string | yes | Bare name → marketplace; anything with `/`, `.`, or `:` → git |
+| `url` | string | fallback | Legacy alias for `source`; `source` wins when both are present |
+| `scope` | string | no | `user` (default) / `project` / `local` |
+
+**Response:** marketplace path returns `{ "ok": true, "name", "scope", "installed_at" }`; git path returns the same shape as `plugins.install`.
+
+### plugin.update
+
+Upgrade an installed plugin in place.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Plugin name |
+| `marketplace` | string | no | Disambiguates which marketplace to use |
+| `scope` | string | no | `user` (default) / `project` / `local` |
+| `force` | boolean | no | Re-install even if the version is unchanged |
+
+**Response:** `{ "ok", "name", "scope", "updated", "from" (previous version), "to" (new version | null) }` or `{ "ok", "name", "scope", "updated": false, "version" }` when the latest is already installed.
+
+### plugin.uninstall
+
+Same shape as `plugins.uninstall` (legacy plural form is also available).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Plugin id |
+
+**Response:** `{ "ok": true }`.
+
+### plugin.enable / plugin.disable
+
+Same shapes as `plugins.enable` / `plugins.disable`. **Response:** `{ "ok": true }`.
+
+### plugin.load / plugin.unload / plugin.reload
+
+| Method | Parameter | Description |
+|--------|-----------|-------------|
+| `plugin.load` | `path` | Parse and load a plugin from a directory; returns `{ "pluginId", "name", "kind" }` |
+| `plugin.unload` | `pluginId` | Unload a runtime plugin; returns `{ "ok": true }` |
+| `plugin.reload` | `pluginId` | Hot-reload: re-parse manifest, re-register capabilities; returns `{ "ok": true, "pluginId" }` |
+
+### plugin.callTool / plugin.executeCommand
+
+Same shapes as `plugins.callTool` / `plugins.executeCommand` (`pluginId`, `handler` / `commandName`, `args`).
+
+### plugin.marketplace.*
+
+Marketplace source management. All four methods registered.
+
+| Method | Parameter | Description |
+|--------|-----------|-----------|---|
+| `plugin.marketplace.list` | none | List registered marketplaces (built-in + user) |
+| `plugin.marketplace.add` | `source` (required), `name` (optional) | Add a `local` or `github` marketplace; persists to `[plugin_marketplaces]` |
+| `plugin.marketplace.update` | `name` (optional) | Refresh the index cache for one or all marketplaces |
+| `plugin.marketplace.remove` | `name` (required) | Remove a marketplace and persist |
+| `plugin.marketplace.install` | `name` (required), `marketplace` (optional), `scope` (optional) | Install a plugin from a named marketplace |
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [Architecture: Plugins](/docs/en/architecture/plugins) -- Plugin system architecture
-
----
-
-## 26.7.x Addendum
-
-### Full RPC Set
-
-- `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall`
-- `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload`
-- `plugins.callTool` / `plugins.executeCommand`
-
-### `plugin.*` Canonical Namespace
-
-26.7.21+ introduces the canonical `plugin.*` namespace — `plugins.*` is kept for backward compatibility. See [Extensions](/docs/en/gateway/methods/extensions).
-
-### Fail-Open → Fail-Closed
-
-26.7.21+ hardening: plugin failure default behavior changes to **fail-closed**.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Extensions Store](/docs/en/concepts/extensions-store) -- The unified `extensions.*` façade
+- [extensions.*](/docs/en/gateway/methods/extensions) -- The wrapper for the same backends

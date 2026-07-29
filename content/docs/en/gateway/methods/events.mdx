@@ -3,68 +3,81 @@ title: "events.*"
 description: "Event subscription and streaming RPC methods"
 ---
 
-Event methods manage real-time event subscriptions over the WebSocket connection. Subscribe to topics using glob patterns to receive notifications about agent activity, streaming output, configuration changes, and more.
+`events.*` manages real-time event subscriptions over a WebSocket connection. All events flow through a single topic bus (`src/gateway/event_bus.rs`) and are filtered per connection by a `SubscriptionManager`.
+
+## Methods
+
+| Method | Description |
+|--------|-------------|
+| [`events.subscribe`](#eventssubscribe) | Add topic subscriptions (additive) |
+| [`events.unsubscribe`](#eventsunsubscribe) | Remove topic subscriptions |
+| [`events.list`](#eventslist) | List active subscriptions on this connection |
 
 ## Event Delivery
 
-Events are delivered as JSON-RPC notifications (no `id` field) on the WebSocket connection:
+Events are delivered as JSON-RPC notifications (no `id`) over WebSocket, serialised from `TopicEvent`:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-uuid-123",
-      "content": "Here is the response..."
-    },
+    "topic": "agent.run.complete",
+    "data": { "run_id": "run-uuid-123", "duration_ms": 5000 },
     "timestamp": 1706400000000
   }
 }
 ```
 
-Events are fire-and-forget: the server sends them without waiting for acknowledgement. If the client disconnects, events during the disconnection are lost.
-
-## Methods
+Events are fire-and-forget: the server pushes without waiting for acknowledgement; events that fire while a client is disconnected are lost. Topic names come from `GatewayEventFrame::topic_name()` — see [Event Topics](#event-topics).
 
 ### events.subscribe
 
-Subscribe to one or more event topics using glob patterns. Subscriptions are additive -- calling subscribe multiple times adds new patterns without removing existing ones.
+Subscribe to one or more topics. Subscriptions are **additive** — repeated calls append patterns without affecting existing ones.
 
-**Request:**
+**Request (patterns only):**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "method": "events.subscribe",
   "params": {
-    "patterns": ["stream.*", "agent.*"]
+    "topics": ["agent.run.*", "session.*"]
+  }
+}
+```
+
+**Request (with field filter):**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "events.subscribe",
+  "params": {
+    "topics": [
+      "agent.run.*",
+      { "topic": "tools.changed", "where": [{ "field": "scope", "equals": "extension" }] }
+    ]
   }
 }
 ```
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "subscribed": ["stream.*", "agent.*"],
-    "active_patterns": ["stream.*", "agent.*"]
-  }
-}
+{ "jsonrpc": "2.0", "id": 1, "result": { "subscribed": ["agent.run.*", "session.*"], "changed": 2 } }
 ```
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `patterns` | string[] | Yes | Array of glob patterns to subscribe to |
+| `topics` | array | Yes | Array of topic selectors; each is a string pattern or `{topic, where}` filter object |
+
+Each `where` predicate is `{ "field": "<json_path>", "equals": <value> }`; the event is delivered only when the payload field strictly equals the value. When no payload is available, predicates are skipped (the event is dropped, never blindly passed through).
 
 ### events.unsubscribe
 
-Remove one or more event subscriptions. Patterns must match exactly what was subscribed.
+Remove patterns by exact match. A pattern is removed only if it matches the subscribed form exactly.
 
 **Request:**
 ```json
@@ -72,247 +85,133 @@ Remove one or more event subscriptions. Patterns must match exactly what was sub
   "jsonrpc": "2.0",
   "id": 2,
   "method": "events.unsubscribe",
-  "params": {
-    "patterns": ["stream.*"]
-  }
+  "params": { "topics": ["agent.run.*"] }
 }
 ```
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "unsubscribed": ["stream.*"],
-    "active_patterns": ["agent.*"]
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "result": { "subscribed": ["session.*"], "changed": 1 } }
 ```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `patterns` | string[] | Yes | Array of patterns to unsubscribe from |
 
 ### events.list
 
-List all active event subscriptions for the current WebSocket connection.
+List every active pattern on this connection.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "events.list"
-}
+{ "jsonrpc": "2.0", "id": 3, "method": "events.list" }
 ```
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "patterns": ["agent.*"],
-    "total": 1
-  }
-}
+{ "jsonrpc": "2.0", "id": 3, "result": { "subscribed": ["session.*"] } }
 ```
-
-This method takes no parameters.
 
 ## Event Topics
 
-### Streaming Events (`stream.*`)
+Topics are grouped by namespace; a single `events.subscribe` call can subscribe to multiple groups via wildcards.
 
-Emitted during agent response generation.
+### Run / Agent Lifecycle (`run.*`, `agent.*`)
 
-| Topic | Description | Data Fields |
-|-------|-------------|-------------|
-| `stream.start` | Response streaming begins | `run_id` |
-| `stream.chunk` | Text chunk from the agent | `run_id`, `content` |
-| `stream.tool_start` | Agent is invoking a tool | `run_id`, `tool_name`, `args` |
-| `stream.tool_end` | Tool execution completed | `run_id`, `tool_name`, `result`, `duration_ms` |
-| `stream.thinking` | Reasoning step (CoT transparency) | `run_id`, `step_type`, `content` |
-| `stream.end` | Response streaming finished | `run_id` |
+| Topic | Description |
+|-------|-------------|
+| `run.accepted` | Run queued and started |
+| `agent.reasoning` | Reasoning-phase output |
+| `agent.reasoning.block` | Reasoning block (dual-process cognition) |
+| `agent.tool.start` | Tool call begins |
+| `agent.tool.update` | Tool progress update |
+| `agent.tool.end` | Tool call ends |
+| `agent.trace` | Execution-trace event |
+| `agent.response.chunk` | Response text chunk |
+| `agent.context.gauge` | Context-window utilisation |
+| `agent.run.complete` | Run completed successfully |
+| `agent.run.error` | Run failed |
+| `agent.run.retrying` | Failure-driven retry |
+| `agent.ask.user` | `ask_user` clarification request |
+| `agent.clarification.ended` | Clarification round resolved |
+| `agent.uncertainty` | Model uncertainty signal |
+| `agent.model.resolved` | Model selection resolved |
 
-**Example -- stream.chunk:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-uuid-123",
-      "content": "Based on my analysis, "
-    }
-  }
-}
-```
+### Session / Running Set
 
-**Example -- stream.tool_start:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.tool_start",
-    "data": {
-      "run_id": "run-uuid-123",
-      "tool_name": "shell:exec",
-      "args": { "command": "git log --oneline -5" }
-    }
-  }
-}
-```
+| Topic | Description |
+|-------|-------------|
+| `session.updated` | Session metadata update |
+| `session.lifecycle.changed` | Session lifecycle phase change |
+| `running.set.changed` | Active-run set change |
 
-### Agent Events (`agent.*`)
+### Channels
 
-Emitted for agent lifecycle changes.
+| Topic | Description |
+|-------|-------------|
+| `channel.message` | Inbound message |
+| `channel.typing` | Typing indicator |
+| `channel.status` | Channel runtime status |
+| `channel.error` | Channel error |
 
-| Topic | Description | Data Fields |
-|-------|-------------|-------------|
-| `agent.started` | Agent run has started | `run_id`, `session_key` |
-| `agent.completed` | Agent run finished | `run_id`, `session_key`, `tokens_used` |
-| `agent.error` | Agent run encountered an error | `run_id`, `error` |
-| `agent.cancelled` | Agent run was cancelled | `run_id` |
+### Config / Approvals
 
-**Example -- agent.completed:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "agent.completed",
-    "data": {
-      "run_id": "run-uuid-123",
-      "session_key": "agent:main:main",
-      "tokens_used": 1247,
-      "duration_ms": 5000
-    }
-  }
-}
-```
+| Topic | Description |
+|-------|-------------|
+| `config.changed` | Configuration change (file-watcher hot-reload or RPC) |
+| `approval.requested` / `approval.resolved` / `approval.expired` | Approval lifecycle |
 
-### Session Events (`session.*`)
+### Cron / Heartbeat
 
-Emitted when session state changes.
+| Topic | Description |
+|-------|-------------|
+| `cron.job.changed` | Cron job change (including `cron.run` triggers) |
+| `heartbeat.task.changed` | Heartbeat task change |
 
-| Topic | Description | Data Fields |
-|-------|-------------|-------------|
-| `session.created` | New session created | `session_key` |
-| `session.deleted` | Session was deleted | `session_key` |
-| `session.compacted` | Session was compacted | `session_key`, `tokens_before`, `tokens_after` |
+### Teams / ACP / Gateway Credentials
 
-### Config Events (`config.*`)
+| Topic | Description |
+|-------|-------------|
+| `team.changed` | Team composition or task change |
+| `acp.sessions.changed` | ACP session set change |
+| `gateway.token.rotated` | Gateway token rotation |
+| `gateway.device.revoked` | Device revocation |
 
-Emitted when configuration changes.
+### Surfaces / Runtimes
 
-| Topic | Description | Data Fields |
-|-------|-------------|-------------|
-| `config.changed` | Configuration was modified | `changed_keys`, `source` |
-| `config.reloaded` | Configuration reloaded from file | `source` |
-
-### Cron Events (`cron.*`)
-
-Emitted during scheduled job execution.
-
-| Topic | Description | Data Fields |
-|-------|-------------|-------------|
-| `cron.triggered` | Job was triggered | `job_id`, `run_id`, `trigger_source` |
-| `cron.completed` | Job run finished | `job_id`, `run_id`, `duration_ms` |
-| `cron.failed` | Job run failed | `job_id`, `run_id`, `error` |
-
-### Exec Events (`exec.*`)
-
-Emitted during command execution approval.
-
-| Topic | Description | Data Fields |
-|-------|-------------|-------------|
-| `exec.approval_requested` | Approval needed for a command | `id`, `command`, `risk_level` |
-| `exec.approval_resolved` | Approval decision made | `id`, `decision` |
+| Topic | Description |
+|-------|-------------|
+| `surface.notify` | Surface-level notification |
+| `surface.approval` | Surface approval request |
+| `runtimes.install.progress` | Runtime install progress (step / log / done / failed) |
 
 ## Glob Pattern Matching
 
-Event subscription patterns use glob-style matching:
+Subscription patterns use glob-style matching (`src/gateway/event_bus.rs::topic_matches`):
 
 | Pattern | Matches |
 |---------|---------|
-| `stream.*` | All streaming events: `stream.chunk`, `stream.start`, etc. |
-| `agent.*` | All agent lifecycle events |
-| `*` | All events |
-| `stream.chunk` | Exact match only |
-| `*.completed` | Any `completed` event: `agent.completed`, `cron.completed`, etc. |
+| `agent.run.*` | `agent.run.started`, `agent.run.complete`, etc. |
+| `agent.*` | Every event under the `agent.` prefix |
+| `*` | Every event |
+| `agent.run.complete` | Exact match only |
+| `*.complete` | Any event ending in `.complete` |
 
-Patterns are matched against the full topic string. The `*` wildcard matches any sequence of non-dot characters. Use `*` alone to subscribe to everything.
+`*` matches a single non-dot segment; patterns match against the full topic string.
 
 ## Typical Client Flow
 
-A typical client subscribes to events before starting agent interactions:
-
 ```json
-// 1. Subscribe to relevant events
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "events.subscribe",
-  "params": {
-    "patterns": ["stream.*", "agent.*", "exec.*"]
-  }
-}
+// 1. Subscribe to relevant topics
+{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*", "session.*"] } }
 
-// 2. Start an agent run
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "agent.run",
-  "params": {
-    "message": "Check disk usage and alert if over 80%"
-  }
-}
+// 2. Start a run
+{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Check disk usage" } }
 
-// 3. Receive stream events
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.started", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.start", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.tool_start", "data": { "run_id": "run-123", "tool_name": "shell:exec" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.tool_end", "data": { "run_id": "run-123", "tool_name": "shell:exec" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.chunk", "data": { "run_id": "run-123", "content": "Disk usage is at 45%..." } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.end", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.completed", "data": { "run_id": "run-123" } } }
+// 3. Receive events (no id = notification)
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "run.accepted", "data": { "run_id": "run-123" } } }
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "run_id": "run-123", "content": "Disk usage is at 45%..." } } }
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.run.complete", "data": { "run_id": "run-123", "duration_ms": 4200 } } }
 ```
 
 ## See Also
 
-- [Protocol](/docs/en/gateway/protocol) -- Event delivery format and WebSocket transport
-- [agent.*](/docs/en/gateway/methods/agent) -- Agent methods that emit events
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### Event Topics
-
-26.7.x event-bus topics:
-
-- `stream.*` — streaming (start/token/tool_call/done/end)
-- `agent.*` — agent state
-- `memory.*` — memory changes
-- `session.*` — session events
-- `team.*` — team events
-- `governance.*` — governance events (loop_graph)
-- `tool.*` — tool calls
-- `heartbeat.*` — heartbeat triggers
-- `cron.*` — cron triggers
-- `system.*` — system events
-
-### `events.subscribe` / `events.unsubscribe`
-
-Subscribe / unsubscribe patterns (an array of `patterns`).
-
-### WS Task-Leak Fixes
-
-26.7.21+: per-connection event-forward tasks no longer leak; `broadcast::RecvError::Lagged` recovers rather than dies permanently.
+- [Protocol](../protocol) -- Event delivery format and WebSocket transport
+- [agent.*](./agent) -- Agent methods that emit events
+- [Methods Reference](./index) -- All method namespaces

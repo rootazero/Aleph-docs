@@ -3,52 +3,43 @@ title: "cron.*"
 description: "计划任务管理 RPC 方法"
 ---
 
-Cron 方法管理按计划执行代理提示的计划任务。任务持久化在 SQLite 中，支持标准 cron 表达式，可以暂停、恢复或手动触发。
-
-## Cron 表达式格式
-
-```
-+-------------- 分钟 (0 - 59)
-| +------------ 小时 (0 - 23)
-| | +---------- 日期 (1 - 31)
-| | | +-------- 月份 (1 - 12)
-| | | | +------ 星期 (0 - 6, 周日 = 0)
-| | | | |
-* * * * *
-```
-
-**示例：**
-
-| 表达式 | 计划 |
-|------------|----------|
-| `0 9 * * *` | 每天早上 9:00 |
-| `*/15 * * * *` | 每 15 分钟 |
-| `0 0 * * 0` | 每周日午夜 |
-| `0 9 1 * *` | 每月第一天早上 9:00 |
-| `30 18 * * 1-5` | 工作日下午 6:30 |
+`cron.*` 管理按计划触发代理提示的任务。任务由 `CronService`（位于 `src/tasks/cron/`）持久化在 SQLite 中；状态机调度取代了历史上的窗口式调度器。
 
 ## 方法
 
-### cron.create
+| 方法 | 说明 |
+|--------|-------------|
+| [`cron.list`](#cronlist) | 列出全部任务 |
+| [`cron.get`](#cronget) | 获取单个任务详情 |
+| [`cron.create`](#croncreate) | 新建任务 |
+| [`cron.update`](#cronupdate) | 修改任务字段 |
+| [`cron.delete`](#crondelete) | 删除任务 |
+| [`cron.status`](#cronstatus) | 服务整体状态（运行标志 + 任务计数） |
+| [`cron.run`](#cronrun) | 立即触发一次任务（绕过计划） |
+| [`cron.runs`](#cronruns) | 读取任务的执行历史 |
+| [`cron.toggle`](#crontoggle) | 启用 / 禁用任务 |
 
-创建新的计划任务。
+> 历史别名 `cron.trigger` / `cron.pause` / `cron.resume` 已并入 `cron.run` 与 `cron.toggle`；未注册独立的 pause / resume RPC。
+
+## 计划类型（`schedule_kind`）
+
+`cron.create` 与 `cron.update` 通过 `schedule_kind` 的 tagged 枚举选择计划类型；同时支持旧的 `"schedule": "<expr>"` 字段作为 cron 的便捷回退。
+
+| 类型 | 字段 | 说明 |
+|------|--------|-------------|
+| `{ "kind": "cron", "expr": "...", "tz": "...", "stagger_ms": 0 }` | `expr`（必填） | 标准 5 字段 cron 表达式 |
+| `{ "kind": "every", "every_ms": 900000 }` | `every_ms` | 固定间隔（毫秒） |
+| `{ "kind": "at", "at": 1706468400000 }` | `at`（必填为未来时间戳） | 单次执行 |
+
+`at` 计划在创建时会拒绝过去时间戳（返回 `-32602 Invalid params`）。
+
+### cron.list
+
+列出全部已配置任务。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.create",
-  "params": {
-    "name": "Daily Summary",
-    "schedule": "0 18 * * *",
-    "agent_id": "main",
-    "prompt": "Summarize today's activities and upcoming tasks",
-    "enabled": true,
-    "timezone": "America/New_York",
-    "tags": ["productivity", "daily"]
-  }
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "cron.list", "params": { "limit": 50 } }
 ```
 
 **响应：**
@@ -57,84 +48,92 @@ Cron 方法管理按计划执行代理提示的计划任务。任务持久化在
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "job_id": "job-uuid-123",
-    "name": "Daily Summary",
-    "schedule": "0 18 * * *",
-    "agent_id": "main",
-    "enabled": true,
-    "next_run_at": 1706468400000,
-    "created_at": 1706400000000
+    "jobs": [
+      {
+        "id": "job-uuid-123",
+        "name": "Daily Summary",
+        "schedule_kind": { "kind": "cron", "expr": "0 18 * * *", "tz": "America/New_York" },
+        "agent_id": "main",
+        "enabled": true,
+        "next_run_at_ms": 1706468400000,
+        "last_run_at_ms": 1706382000000,
+        "tags": ["productivity"]
+      }
+    ]
   }
 }
 ```
 
-**参数：**
+**参数：** `limit`（number，可选，默认 50）。
 
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `name` | string | 是 | 人类可读的任务名称 |
-| `schedule` | string | 是 | Cron 表达式（5 字段标准格式） |
-| `agent_id` | string | 是 | 执行提示的代理 |
-| `prompt` | string | 是 | 发送给代理的消息 |
-| `enabled` | boolean | 否 | 任务是否处于活动状态。默认：`true` |
-| `timezone` | string | 否 | 用于计划评估的 IANA 时区 |
-| `tags` | string[] | 否 | 用于过滤和组织的标签 |
-| `max_retries` | number | 否 | 失败时的最大重试次数。默认：3 |
-| `priority` | number | 否 | 任务优先级 (1-10)。默认：5 |
-| `prompt_template` | string | 否 | 带有 `{{variables}}` 的动态提示模板 |
-| `context_vars` | object | 否 | 模板替换变量 |
-| `delivery` | object | 否 | 交付目标配置（见下文） |
+### cron.get
 
-### cron.list
-
-列出所有配置的 cron 任务。
+读取单个任务的完整视图。
 
 **请求：**
+```json
+{ "jsonrpc": "2.0", "id": 2, "method": "cron.get", "params": { "job_id": "job-uuid-123" } }
+```
+
+**响应：**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 2,
-  "method": "cron.list",
-  "params": {
-    "filter": {
+  "result": {
+    "job": {
+      "id": "job-uuid-123",
+      "name": "Daily Summary",
+      "agent_id": "main",
+      "prompt": "Summarize today's activities",
       "enabled": true,
-      "agent_id": "main"
+      "schedule_kind": { "kind": "cron", "expr": "0 18 * * *" },
+      "tags": ["productivity"],
+      "session_target": "ephemeral",
+      "timeout_ms": 600000,
+      "next_run_at_ms": 1706468400000,
+      "last_run_at_ms": 1706382000000
     }
   }
 }
 ```
 
+### cron.create
+
+创建任务。必填字段为 `name`；`agent_id` 默认 `"main"`；`prompt` 默认空串；`schedule_kind` 或回退字段 `"schedule"` 二者必须提供其一。
+
+**请求：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "cron.create",
+  "params": {
+    "name": "Daily Summary",
+    "schedule_kind": { "kind": "cron", "expr": "0 18 * * *", "tz": "America/New_York" },
+    "agent_id": "main",
+    "prompt": "Summarize today's activities",
+    "enabled": true,
+    "tags": ["productivity", "daily"],
+    "timezone": "America/New_York",
+    "timeout_ms": 600000,
+    "session_target": "ephemeral"
+  }
+}
+```
+
 **响应：**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 2,
+  "id": 3,
   "result": {
-    "jobs": [
-      {
-        "job_id": "job-uuid-123",
-        "name": "Daily Summary",
-        "schedule": "0 18 * * *",
-        "agent_id": "main",
-        "enabled": true,
-        "next_run_at": 1706468400000,
-        "last_run_at": 1706382000000,
-        "consecutive_failures": 0,
-        "tags": ["productivity", "daily"]
-      },
-      {
-        "job_id": "job-uuid-456",
-        "name": "Weekly Backup Check",
-        "schedule": "0 0 * * 0",
-        "agent_id": "main",
-        "enabled": true,
-        "next_run_at": 1706572800000,
-        "last_run_at": null,
-        "consecutive_failures": 0,
-        "tags": ["maintenance"]
-      }
-    ],
-    "total": 2
+    "job": {
+      "id": "job-uuid-123",
+      "name": "Daily Summary",
+      "enabled": true,
+      "schedule_kind": { "kind": "cron", "expr": "0 18 * * *", "tz": "America/New_York" }
+    }
   }
 }
 ```
@@ -143,64 +142,117 @@ Cron 方法管理按计划执行代理提示的计划任务。任务持久化在
 
 | 参数 | 类型 | 必填 | 说明 |
 |-----------|------|----------|-------------|
-| `filter` | object | 否 | 过滤条件 |
-| `filter.enabled` | boolean | 否 | 按启用/禁用状态过滤 |
-| `filter.agent_id` | string | 否 | 按代理过滤 |
-| `filter.tags` | string[] | 否 | 按标签过滤（匹配任意） |
+| `name` | string | 是 | 任务名称 |
+| `schedule_kind` | object | 是* | tagged 计划枚举（cron / every / at） |
+| `schedule` | string | 否 | `schedule_kind` 缺省时的便捷回退，仅作为 cron 表达式 |
+| `agent_id` | string | 否 | 默认 `"main"` |
+| `prompt` | string | 否 | 默认空串 |
+| `enabled` | boolean | 否 | 默认 `true` |
+| `tags` | string[] | 否 | 任务标签 |
+| `timezone` | string | 否 | IANA 时区，仅在 cron 计划时使用 |
+| `timeout_ms` | number | 否 | 正整数（毫秒），`null` 保留默认 |
+| `session_target` | object | 否 | 会话目标（main / ephemeral 等） |
 
-### cron.get
+### cron.update
 
-获取特定任务的详细信息，包括其运行历史。
+局部修改任务字段。`timeout_ms` 字段三态：缺省 = 不动、`null` = 清除、正整数 = 设置。负数 / 0 / 非整型会被拒绝。
 
 **请求：**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
-  "method": "cron.get",
+  "id": 4,
+  "method": "cron.update",
   "params": {
-    "job_id": "job-uuid-123"
+    "job_id": "job-uuid-123",
+    "enabled": false,
+    "prompt": "New prompt text",
+    "schedule_kind": { "kind": "every", "every_ms": 900000 },
+    "timeout_ms": 900000
   }
 }
 ```
 
 **响应：**
 ```json
+{ "jsonrpc": "2.0", "id": 4, "result": { "job": { "id": "job-uuid-123", "enabled": false } } }
+```
+
+### cron.delete
+
+删除任务。
+
+**请求：**
+```json
+{ "jsonrpc": "2.0", "id": 5, "method": "cron.delete", "params": { "job_id": "job-uuid-123" } }
+```
+
+**响应：**
+```json
+{ "jsonrpc": "2.0", "id": 5, "result": { "deleted": "job-uuid-123" } }
+```
+
+### cron.status
+
+服务整体状态（与单任务状态无关）。
+
+**响应：**
+```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
+  "id": 6,
   "result": {
-    "job_id": "job-uuid-123",
-    "name": "Daily Summary",
-    "schedule": "0 18 * * *",
-    "schedule_kind": "cron",
-    "agent_id": "main",
-    "prompt": "Summarize today's activities and upcoming tasks",
-    "enabled": true,
-    "timezone": "America/New_York",
-    "tags": ["productivity", "daily"],
-    "priority": 5,
-    "max_retries": 3,
-    "consecutive_failures": 0,
-    "next_run_at": 1706468400000,
-    "last_run_at": 1706382000000,
-    "created_at": 1706313600000,
-    "updated_at": 1706400000000,
-    "recent_runs": [
+    "running": true,
+    "job_count": 7,
+    "enabled_count": 5
+  }
+}
+```
+
+### cron.run
+
+立即触发任务执行（绕过计划）。内部委托 `CronService::run_job`：会校验任务已启用、未在运行中，且持久化下一次触发；持久化失败会被传播为错误（不会出现"成功响应但任务从未真正运行"的情况），并触发 `cron.job.changed` 事件。
+
+**请求：**
+```json
+{ "jsonrpc": "2.0", "id": 7, "method": "cron.run", "params": { "job_id": "job-uuid-123" } }
+```
+
+**响应：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "triggered": "job-uuid-123",
+    "status": "queued",
+    "next_run_at_ms": 1706400000000
+  }
+}
+```
+
+### cron.runs
+
+读取任务的执行历史（来自 SQLite 持久化层）。
+
+**请求：**
+```json
+{ "jsonrpc": "2.0", "id": 8, "method": "cron.runs", "params": { "job_id": "job-uuid-123", "limit": 20 } }
+```
+
+**响应：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "runs": [
       {
         "run_id": "run-uuid-001",
-        "status": "completed",
-        "started_at": 1706382000000,
-        "ended_at": 1706382015000,
+        "started_at_ms": 1706382000000,
+        "ended_at_ms": 1706382015000,
         "duration_ms": 15000,
-        "trigger_source": "schedule"
-      },
-      {
-        "run_id": "run-uuid-002",
         "status": "completed",
-        "started_at": 1706295600000,
-        "ended_at": 1706295612000,
-        "duration_ms": 12000,
         "trigger_source": "schedule"
       }
     ]
@@ -208,270 +260,39 @@ Cron 方法管理按计划执行代理提示的计划任务。任务持久化在
 }
 ```
 
-**参数：**
+**参数：** `job_id`（必填）、`limit`（可选，默认 20）。
 
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `job_id` | string | 是 | 要检索的任务 ID |
+### cron.toggle
 
-### cron.delete
-
-删除计划任务。任务的运行历史也会被删除。
+切换启用状态。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "cron.delete",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
+{ "jsonrpc": "2.0", "id": 9, "method": "cron.toggle", "params": { "job_id": "job-uuid-123" } }
 ```
 
 **响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "deleted": true,
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `job_id` | string | 是 | 要删除的任务 |
-
-### cron.status
-
-获取计划任务的当前状态，包括是否启用、上次运行时间和下次计划运行时间。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "cron.status",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "job_id": "job-uuid-123",
-    "enabled": true,
-    "last_run_at": 1706295612000,
-    "next_run_at": 1706572800000,
-    "consecutive_failures": 0,
-    "status": "healthy"
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `job_id` | string | 是 | 要查询的任务 ID |
-
-### cron.trigger
-
-手动立即触发任务的执行，绕过计划。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "cron.trigger",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "triggered": true,
-    "job_id": "job-uuid-123",
-    "run_id": "run-uuid-003",
-    "status": "queued",
-    "trigger_source": "manual"
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `job_id` | string | 是 | 要触发的任务 |
-
-### cron.pause
-
-暂停正在运行的任务。任务保持配置状态，但在下次计划时间不会执行。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "cron.pause",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "paused": true,
-    "job_id": "job-uuid-123",
-    "enabled": false
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `job_id` | string | 是 | 要暂停的任务 |
-
-### cron.resume
-
-恢复暂停的任务。下次运行将从当前时间计算。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "cron.resume",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "result": {
-    "resumed": true,
-    "job_id": "job-uuid-123",
-    "enabled": true,
-    "next_run_at": 1706468400000
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `job_id` | string | 是 | 要恢复的任务 |
-
-## 计划类型
-
-除了标准 cron 表达式外，Aleph 还支持其他计划种类：
-
-| 种类 | 说明 | 示例 |
-|------|-------------|---------|
-| `cron` | 标准 cron 表达式 | `"0 9 * * *"` |
-| `every` | 固定间隔（毫秒） | `900000` (15 分钟) |
-| `once` | 在特定时间戳一次性执行 | `1706468400000` |
-
-对于 `every` 和 `once` 计划，使用 `schedule_kind` 参数：
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.create",
-  "params": {
-    "name": "Heartbeat Check",
-    "schedule_kind": "every",
-    "every_ms": 900000,
-    "agent_id": "main",
-    "prompt": "Check system health"
-  }
-}
-```
-
-## 任务链
-
-任务可以被链接，以便一个任务完成后触发另一个任务：
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.create",
-  "params": {
-    "name": "Backup Database",
-    "schedule": "0 2 * * *",
-    "agent_id": "main",
-    "prompt": "Run database backup",
-    "next_job_id_on_success": "job-uuid-verify",
-    "next_job_id_on_failure": "job-uuid-alert"
-  }
-}
+{ "jsonrpc": "2.0", "id": 9, "result": { "job": { "id": "job-uuid-123", "enabled": true } } }
 ```
 
 ## 运行状态值
 
 | 状态 | 说明 |
 |--------|-------------|
-| `queued` | 任务已排队等待执行 |
+| `queued` | 已入队，等待执行 |
 | `running` | 正在执行 |
 | `completed` | 成功完成 |
 | `failed` | 执行失败 |
-| `retrying` | 失败，正在尝试重试 |
+| `retrying` | 失败，正在重试 |
+
+## 事件
+
+调度器在任务状态变化时通过总线发送 `cron.job.changed` 事件；面板订阅此主题以实时刷新。
 
 ## 另请参阅
 
-- [agent.*](/docs/zh/gateway/methods/agent)——代理执行（由 cron 触发）
-- [events.*](/docs/zh/gateway/methods/events)——订阅 cron 事件
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### 实化（stubs → real）
-
-26.7.x：历史 stub RPC（`cron.*_stub`）已被**实化**。完整实现：
-
-- `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status`
-- `cron.run` / `cron.runs` / `cron.toggle`
-
-### 守护进程端驱动
-
-由 [守护进程](/docs/zh/concepts/daemon) 驱动，包括 day-boundary 日志轮转、`ALEPH-BOOT` marker、Guardian Judge 主动唤醒决策。
-
-### 完整状态机
-
-调度引擎（`src/scheduler/cron.rs`）——窗口式调度已被替换为状态机调度。
+- [agent.*](./agent)——代理执行（由 cron 触发）
+- [events.*](./events)——订阅调度事件
+- [方法参考](./index)——所有方法命名空间
+- [heartbeat.*](./heartbeat)——心跳探测任务

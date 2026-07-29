@@ -1,155 +1,29 @@
 ---
-title: "run.*"
+title: "runs.*"
 description: "Run lifecycle and queue RPC methods"
 ---
 
-Run methods manage the lifecycle of active agent executions and support human-in-the-loop scenarios by queueing messages to running agents.
+There is **no `runs.*` JSON-RPC namespace** in the current `aleph-server` runtime. `registry.register("runs.*", ...)` is never called, no `runs` handler module exists, and the methods documented in the previous version of this page (`run.wait`, `run.queue_message`) are not part of the gateway protocol.
 
-## Methods
+The functionality the previous page implied — waiting for a run to settle, or pushing a message into a live run — is exposed under different names:
 
-### run.wait
+- **Run state**: `chat.send` / `chat.abort` / `agent.run` / `agent.cancel`. A subscriber to the `agent.*` topic on the event bus sees `agent.started`, `agent.completed`, `agent.error`, and the per-turn `stream.agent_trace` events.
+- **In-run steering**: incoming `Steer` messages on the originating channel (default) are injected into the live event log and consumed at the next turn boundary. The bus handles fan-out; there is no separate "queue" RPC.
+- **HITL approval** for a run: the `exec.approval.resolve` and `clarification.resolve` RPCs (one-card-per-prompt) are the only legal in-run interaction surface.
 
-Wait for a run to complete, fail, or be cancelled. Blocks until the run ends or the timeout expires.
+The previous version of this page described `run.wait` and `run.queue_message` as if they were real. They are not, and writing client code against them will return `Method not found` (`-32601`).
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "run.wait",
-  "params": {
-    "run_id": "run-uuid-123",
-    "timeout_ms": 30000
-  }
-}
-```
+## What exists
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "status": "completed",
-    "output": "Task completed successfully",
-    "input_tokens": 0,
-    "output_tokens": 150,
-    "duration_ms": 500
-  }
-}
-```
+The closest analogues on the wire:
 
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `run_id` | string | Yes | The run ID to wait for |
-| `timeout_ms` | number | No | Maximum wait time in milliseconds. Default: 30000, Max: 300000 |
-
-**Status Values:**
-
-| Status | Description |
-|--------|-------------|
-| `completed` | Run finished successfully |
-| `failed` | Run failed with an error |
-| `cancelled` | Run was cancelled by user |
-| `timeout` | Wait timed out before run completed |
-| `not_found` | Run ID not found |
-
-### run.queue_message
-
-Queue a message to an active run for human-in-the-loop scenarios. The message is delivered to the agent when it next requests input.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "run.queue_message",
-  "params": {
-    "run_id": "run-uuid-123",
-    "message": "Yes, proceed with the file deletion"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "success": true
-  }
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `run_id` | string | Yes | The run ID to send the message to |
-| `message` | string | Yes | The message content to queue |
-
-**Error Cases:**
-
-| Error | Description |
-|-------|-------------|
-| `Run not found` | The specified run_id does not exist |
-| `Input queue is full` | The run's input queue has reached capacity |
-| `Run has ended` | The run has already completed or been cancelled |
-
-## Use Cases
-
-### Synchronous Execution
-
-Use `run.wait` to block until an agent run completes, useful for scripting or when you need the final result before proceeding:
-
-```json
-// 1. Start a run
-{ "jsonrpc": "2.0", "id": 1, "method": "agent.run", "params": { "message": "Analyze this data" } }
-
-// 2. Wait for completion (blocks up to 30s)
-{ "jsonrpc": "2.0", "id": 2, "method": "run.wait", "params": { "run_id": "run-uuid-123" } }
-```
-
-### Human-in-the-Loop
-
-Use `run.queue_message` to respond to agent approval requests:
-
-```json
-// Agent sends approval request via event
-{ "topic": "approval.request", "data": { "run_id": "run-uuid-123", "message": "Approve rm -rf /tmp?" } }
-
-// User responds via queue_message
-{ "jsonrpc": "2.0", "id": 3, "method": "run.queue_message", "params": { "run_id": "run-uuid-123", "message": "yes" } }
-```
+- `agents.*` — the per-run lifecycle RPCs (start, status, cancel, abort) under `/docs/en/gateway/methods/agent`.
+- `subagent.tree` — snapshot the live background sub-agent tree (`{ "nodes": [...], "count": N }`).
+- `chat.send` — start a chat turn; the response carries a `run_id` you can correlate against the event bus.
 
 ## See Also
 
-- [agent.*](/docs/en/gateway/methods/agent) -- Start and control agent runs
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### `trace.*` Full RPC
-
-- `trace.list` / `trace.get` / `trace.by_runs` — trace events
-
-### `session.usage` / `session.compact` / `session.truncate`
-
-Session runtime RPC — see [session.mdx](/docs/en/gateway/methods/session).
-
-### `tools.in_flight`
-
-List currently-in-flight tool calls.
-
-### `activity.stats`
-
-Activity stats — aggregated by agent / session / tool.
-
-### Real Multi-Session
-
-26.7.7+: the run gate moved from a per-agent lock to a per-session `SessionRunRegistry`.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [agent.*](/docs/en/gateway/methods/agent) -- Run lifecycle (start / status / cancel / abort)
+- [chat.*](/docs/en/gateway/methods/chat) -- Chat turn transport and the `run_id` it returns
+- [events.subscribe](/docs/en/gateway/methods/events) -- Subscribe to `agent.*` / `stream.*` topics for live run state

@@ -3,200 +3,208 @@ title: "providers.*"
 description: "AI 模型提供商配置 RPC 方法"
 ---
 
-提供商方法管理 AI 模型提供商配置——LLM、嵌入和重排序服务端点、API 密钥和模型映射。
+`providers.*` 是 LLM 提供商 CRUD 接口。十二个方法在加载实时 `Config` 之后,通过 `register_config_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:260-404`)注册。`create` / `update` / `delete` / `setDefault` 各有两种注册(基础 + `_hot` 变体),但 registry 只暴露 hot 变体;`multi_registry` 决定启动时连接哪个,`None` 时回退到 config-only 路径。OAuth 方法通过 `register_oauth_handlers` 在 OAuth 状态 cell 旁边独立注册。
 
-## 命名空间
+伴随的子命名空间(`embedding_providers.*`、`generation_providers.*`、`rerank_config.*`、`runtimes.*`、`moa.*`、`routing_rules.*`、`voice.*`、`browser_config.*`、`fetch_config.*`、`search_config.*`、`memory_config.*`、`general_config.*`、`behavior_config.*`、`execution_config.*`、`route_config.*`、`generation_config.*`、`security_config.*`、`acp.*`)由同一个 `register_config_handlers` 调用一同连接。它们遵循相同的 vault-backed 配置模式;只有 `acp.*` 取决于是否构造了 `AcpAdapterManager`。
 
-提供商配置分为三个命名空间：
+## 方法
 
-| 命名空间 | 用途 |
-|-----------|---------|
-| `generation_providers.*` | LLM/文本生成模型（Claude、GPT 等） |
-| `embedding_providers.*` | 嵌入/向量化模型 |
-| `rerank_providers.*` | 搜索结果的重排序模型 |
+### providers.list
 
-## generation_providers.*
+列出所有已配置的 LLM 提供商。API 密钥永不返回,只报告其存在性。
 
-### generation_providers.list
+**请求:** 无参数。
 
-列出所有配置的生成提供商。
+**响应:** `{ "providers": [ ...ProviderInfo... ] }`。每行包含 `name`、`enabled`、`model`、`models`、`provider_type`、`base_url`、`color`、`timeout_seconds`、`max_tokens`、`context_window`、`temperature`、`has_api_key`、`is_default`、`verified`。
 
-**请求：**
+### providers.get
+
+按名称获取单个提供商。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 提供商名 |
+
+**响应:** `{ "provider": { ...ProviderInfo... } }` 或 `INVALID_PARAMS: Provider not found: <name>`。API 密钥永不返回。
+
+### providers.create
+
+创建新提供商。API 密钥(若提供)写入 vault(`ai:<name>`)并从内存配置中剔除,使它永不落盘。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 提供商 id(必须唯一) |
+| `config` | object | 是 | `ProviderConfigJson`——见 [Config 字段](#config-字段) |
+
+**响应:** 成功时 `{ "ok": true }`。提供商已存在时返回 `INVALID_PARAMS`。若存在 live `MultiProviderRegistry`(`provider_hot`),新提供商会被热注册,立即可用作默认和自动派生的故障转移回退。
+
+### providers.update
+
+更新已存在的提供商。与 `create` 相同的 `ProviderConfigJson` 形态;补丁中出现的字段覆盖现有值,其他保留。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 提供商名 |
+| `config` | object | 是 | `ProviderConfigJson` 补丁 |
+
+**响应:** 成功时 `{ "ok": true }`。将 `verified` 翻回 `true` 的唯一方法是再次对更新后的名称运行 `providers.test`。若存在 live registry,新的 `ProviderConfig` 会被热构建并重新注册,使得 protocol / base_url / model 变更在下一条 prompt 立即生效。
+
+### providers.delete
+
+删除提供商。API 密钥从 vault 中删除,条目从故障转移链中擦除,以避免悬空引用。若存在 live registry,也会从可拨叫集合中移除。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 提供商名 |
+
+**响应:** 成功时 `{ "ok": true }`。名称未知或为当前默认时返回 `INVALID_PARAMS`。
+
+### providers.test
+
+探测单个提供商的连接。成功时,`verified` 设为 `true` 并重置故障转移断路器(这样轮换后的凭据会立即被重试,而不是被 10 分钟的硬冷却拒之门外)。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 否 | 成功时持久化 `verified=true`;缺失则探测只读。 |
+| `config` | object | 是 | 要探测的 `ProviderConfigJson`(内联 `api_key` 优先,否则解析 vault 键) |
+
+**响应:** `{ "success", "error" | null, "latency_ms" | null }`——见 [TestResult 形态](#testresult-形态)。
+
+### providers.setDefault
+
+将提供商提升为默认。新的默认必须已经 `verified`。若存在 live registry,交换是热操作:构建新提供商,注册,下一次 prompt 使用之作为默认;出于与 `providers.test` 同样的原因,故障转移断路器也会被重置。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 提供商名(别名 `codex` 解析为 `chatgpt`) |
+
+**响应:** 成功时 `{ "ok": true }`。名称未知或未通过 `providers.test` 时返回 `INVALID_PARAMS`。
+
+### providers.needsSetup
+
+首次启动检查;Panel 用它决定是否显示向导。
+
+**响应:** `{ "needs_setup", "provider_count", "has_verified" }`。`needs_setup` 为 `true` 当且仅当没有同时启用且已验证的提供商。
+
+### providers.catalog
+
+聊天窗口的模型选择器。联合内建 chat 预设、每用户凭据状态、每模型元数据。省略 `view` 时只返回已验证且启用的行;`available` 返回所有有凭据的行;`all` 返回所有支持 chat 的行。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `view` | string | 否 | `configured`(默认)/ `available` / `all` |
+
+**响应:** `{ "items": [ ...CatalogEntryView... ] }`。每行包含 `id`、`display_name`、`default_model`、`base_url`、`protocol`、`color`、`homepage`、`notes`、`signup_url`、`fallback_models`、`default_aux_model`、`aliases`、`modalities`、`models`、`has_api_key`、`verified`、`enabled`、`is_default`、`capabilities`(可选)、`cost`(可选)、`endpoint`(`local`/`cloud`)、`lifecycle`(`active`/`preview`/`deprecated`)、`requires_explicit_model`。
+
+当 MoA 预设被配置时,会附加一个合成的 `id: "moa"` 行,`models` 字段为预设名列表。选择 MoA 预设后,会话激活 advisor fan-out。
+
+### providers.healthcheck
+
+对所有已配置提供商的并发只读存活探测。禁用的提供商以 `skipped: true` 报告而不探测;每提供商的失败以行形式返回,不是 RPC 错误。
+
+**请求:** 无参数。
+
+**响应:** `{ "providers": [ ...ProviderHealthRow... ] }` 按名称排序。每行包含 `name`、`enabled`、`ok`、`skipped`、`latency_ms`(可选)、`error`(可选)。
+
+### providers.modelsRefresh
+
+按需发现:向每个已配置提供商询问其当前的 `/models` 列表。算子侧与 `list_models` 工具的 `refresh` 参数互补;两者调用同一叶子。提供商级失败以行形式返回,不是 RPC 错误。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `provider` | string | 否 | 限定只扫描一个 id |
+
+**响应:** `{ "providers": [ ...DiscoveryRow... ] }` 按 provider 排序。每行包含 `provider`、`ok`、`fetched_at`(可选)、`models`(可选)、`error`(可选)。
+
+### providers.oauthLogin
+
+启动基于浏览器的 OAuth 登录(Codex / ChatGPT)。将完整 token blob(`access_token` + `refresh_token` + 过期时间)以 `ai:<provider>:oauth` 写入 vault;访问令牌同时镜像到 `ai:<provider>`,使现有提供商代码继续工作。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `provider` | string | 是 | `codex` 或 `chatgpt` |
+
+**响应:** 成功时 `{ "connected": true, "provider", "expires_in_seconds" | null }`。其它 provider 名返回 `INVALID_PARAMS`。
+
+### providers.oauthLogout
+
+清除 OAuth 状态。从 vault 删除 `ai:<provider>` 和 `ai:<provider>:oauth`,并清空内存缓存。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `provider` | string | 是 | `codex` 或 `chatgpt` |
+
+**响应:** `{ "ok": true }`。
+
+### providers.oauthStatus
+
+读取当前 OAuth 状态。若缓存的令牌已过期,尝试内联刷新(尽力而为);刷新失败则报告 `connected: false` 并提示重新登录。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `provider` | string | 是 | `codex` 或 `chatgpt` |
+
+**响应:** `{ "connected", "provider", "expires_in_seconds" | null, "error" | null }`。
+
+## Config 字段
+
+`ProviderConfigJson`(`providers.create` / `providers.update` / `providers.test`):
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `protocol` | string | 预设 | 覆盖协议(如 `openai`、`anthropic`) |
+| `enabled` | bool | `true` | 是否参与故障转移 |
+| `models` | string[] | `[]` | 暴露的模型列表(为向后兼容接受 `model` 单数别名) |
+| `api_key` | string | `null` | 可选内联密钥。持久化到 vault,从磁盘剔除。 |
+| `base_url` | string | 预设 | 端点 base URL |
+| `color` | string | `#808080` | UI 强调色 |
+| `timeout_seconds` | number | `300` | 单请求超时 |
+| `max_tokens` | number | `null` | 输出上限 |
+| `context_window` | number | `null` | 算子声明的窗口;缺失时回退到能力目录 |
+| `temperature` | number | `null` | 默认温度 |
+| `top_p` | number | `null` | Top-p 采样 |
+| `top_k` | number | `null` | Top-k 采样 |
+
+`models` 在服务端规范化——单数 `model` 被接受为旧式别名并合并到多模型列表。
+
+## TestResult 形态
+
+`providers.test` 和 `providers.healthcheck` 返回相同字段结构的行:
+
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "generation_providers.list",
-  "params": {}
+  "success": true,
+  "error": null,
+  "latency_ms": 245
 }
 ```
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "providers": [
-      {
-        "id": "anthropic",
-        "name": "Anthropic Claude",
-        "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"],
-        "default_model": "claude-sonnet-4-20250514",
-        "enabled": true
-      }
-    ]
-  }
-}
-```
+`providers.healthcheck` 对禁用的提供商始终报告 `skipped: true` 和 `ok: false`,不进行探测。
 
-### generation_providers.add
+## 伴随命名空间
 
-添加新的生成提供商。
+`register_config_handlers` 在同一个启动过程中也连接(并集):
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "generation_providers.add",
-  "params": {
-    "id": "openai",
-    "name": "OpenAI",
-    "api_key": "sk-...",
-    "base_url": "https://api.openai.com/v1",
-    "models": ["gpt-4o", "gpt-4o-mini"],
-    "default_model": "gpt-4o"
-  }
-}
-```
+| 命名空间 | 方法 |
+|------|------|
+| `embedding_providers.*` | `list` / `get` / `add` / `update` / `remove` / `setActive` / `test` / `presets` |
+| `generation_providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `voices` / `list_presets` |
+| `rerank_config.*` | `get` / `update` / `test` |
+| `runtimes.*` | `list` / `refresh` / `install` |
+| `moa.*` | `listPresets` / `savePreset` / `deletePreset` / `setDefault` / `setSaveTraces` |
+| `routing_rules.*` | `list` / `get` / `create` / `update` / `delete` / `move` |
+| `voice.*` | `transcribe` / `stream.start` / `stream.audio` / `stream.stop` / `format` / `record_start` / `record_stop` / `synthesize` |
+| `browser_config.*` | `get` / `update` |
+| `fetch_config.*` | `get` / `update` / `test` |
+| `search_config.*` | `get` / `update` / `test` / `deleteBackend` |
+| `memory_config.*` | `get` / `update` / `retrieve_with_trace` |
+| `general_config.*` / `behavior_config.*` / `execution_config.*` / `route_config.*` / `generation_config.*` / `security_config.*` | `get` / `update` |
+| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown`(仅在构造了 `AcpAdapterManager` 时) |
 
-### generation_providers.update
-
-更新现有的生成提供商。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "generation_providers.update",
-  "params": {
-    "id": "openai",
-    "default_model": "gpt-4o-mini"
-  }
-}
-```
-
-### generation_providers.delete
-
-删除生成提供商。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "generation_providers.delete",
-  "params": {
-    "id": "openai"
-  }
-}
-```
-
-### generation_providers.status
-
-获取提供商状态和健康。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "generation_providers.status",
-  "params": {
-    "id": "anthropic"
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "id": "anthropic",
-    "healthy": true,
-    "latency_ms": 245,
-    "rate_limit_remaining": 4999
-  }
-}
-```
-
-## embedding_providers.*
-
-嵌入提供商遵循与生成提供商相同的模式：
-
-- `embedding_providers.list`
-- `embedding_providers.add`
-- `embedding_providers.update`
-- `embedding_providers.delete`
-- `embedding_providers.status`
-
-## rerank_providers.*
-
-重排序提供商遵循相同的模式：
-
-- `rerank_providers.list`
-- `rerank_providers.add`
-- `rerank_providers.update`
-- `rerank_providers.delete`
-- `rerank_providers.status`
-
-## 提供商配置文件
-
-提供商在 `~/.aleph/config.toml` 中配置：
-
-```toml
-[generation_providers.anthropic]
-api_key = "sk-ant-..."
-default_model = "claude-sonnet-4-20250514"
-
-[embedding_providers.openai]
-api_key = "sk-..."
-model = "text-embedding-3-small"
-```
+每个子命名空间遵循相同的 vault-backed 模式(API 密钥和密钥值位于 `ai:<name>` / `embed:<id>` / `gen:<id>` / `web_fetch:<backend>` / `search:<backend>`,永远不会出现在持久化配置中)。
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [入门：配置](/docs/zh/getting-started/configuration)——提供商设置
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC 集
-
-- `providers.catalog` / `providers.create` / `providers.delete` / `providers.get` / `providers.list` / `providers.healthcheck` / `providers.test` / `providers.update`
-- `embedding_providers.add` / `get` / `list` / `presets` / `remove` / `test` / `update`
-- `generation_providers.create` / `delete` / `get` / `list` / `list_presets` / `test` / `update` / `voices`
-- `rerank_config.get` / `test` / `update`
-- `runtimes.install` / `runtimes.list` / `runtimes.refresh`
-
-### VESR 动态模型路由
-
-26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（k-NN over sqlite-vec）。
-
-### Provider Failover 重构
-
-26.7.21+ 重大：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
-
-### 单源价格表
-
-`session.usage` 在核心内用统一价格表计算成本。shell 不再持有重复价格表。
-
-### 真实成本与 token 核算
-
-26.7.15+：`session.usage` 现在携带真实花费账本（之前部分伪造）。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [配置](/docs/zh/getting-started/configuration)——`~/.aleph/config.toml` 布局
+- [模型与提供商](/docs/zh/concepts/models)——跨目录路由

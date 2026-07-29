@@ -3,390 +3,211 @@ title: "session.*"
 description: "Session management RPC methods"
 ---
 
-Session methods manage conversation sessions -- the persistent contexts that store message history, token counts, and identity metadata. Sessions are identified by structured session keys and backed by SQLite.
+The gateway exposes **two parallel session namespaces** — `sessions.*` (the live database-backed store) and `session.*` (singular; per-session runtime RPCs). Both are wired in `register_session_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/session.rs`) at server boot and live in `src/gateway/handlers/session/`.
 
-:::warning
-This page documents the intended API. The actual runtime-registered methods differ:
+The `sessions.*` surface targets the `SessionStore` (a SQLite-backed implementation in `src/gateway/session_store/`); the `session.*` surface targets per-session state plus the artifact store, where the per-call API differs from the CRUD surface.
 
-**Actual methods (plural `sessions.*`):**
-`sessions.list`, `sessions.history`, `sessions.reset`, `sessions.delete`, `sessions.new`, `sessions.set_topic`, `sessions.patch`, `sessions.preview`, `sessions.compaction.list`, `sessions.compaction.restore`, `sessions.compaction.branch`
+The runtime keeps an `events_retired` counter on every state-mutating call: `sessions.reset` / `sessions.delete` retire the canonical `session_events` log before the projection, so a deleted conversation cannot surface through replay, BM25 search, or the next boot's `ProjectionReconciler`.
 
-**Actual methods (singular `session.*`):**
-`session.create`, `session.usage`, `session.compact`
+## `sessions.*` (database store)
 
-The methods documented below (`session.get`, `session.list`, `session.history`, `session.compact`, `session.delete`, `session.export`) reflect the design target but may not all be wired in the current runtime. See [Methods Reference](/docs/en/gateway/methods) for the accurate method listing.
-:::
+### sessions.list
 
-## Methods
-
-### session.get
-
-Get detailed information about a specific session.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "session.get",
-  "params": {
-    "session_key": "agent:main:main"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "session_key": "agent:main:main",
-    "agent_id": "main",
-    "channel": "gateway",
-    "message_count": 42,
-    "token_count": 12840,
-    "created_at": 1706313600000,
-    "updated_at": 1706400000000,
-    "last_compaction": 1706356800000,
-    "identity": {
-      "role": "owner",
-      "identity_id": "owner",
-      "source_channel": "gateway"
-    }
-  }
-}
-```
-
-**Parameters:**
+List every session. Internal `task` and `ephemeral` sessions are filtered out so the sidebar never surfaces cron / heartbeat cruft.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `session_key` | string | Yes | The session key to look up |
+| `agent_id` | string | no | Filter by agent id |
 
-### session.list
+**Response:** `{ "sessions": [ ...SessionInfo... ], "count": N }`. Each row carries `key`, `agent_id`, `session_type`, `message_count`, `created_at` (RFC3339), `last_active_at` (RFC3339), `updated_at` (Unix epoch seconds — drives the Panel's sort), `topic` (resolved: `topic` → `identity_meta.custom.topic` → non-leaked `derived_title`), `status`, `state`, `label`, `input_tokens`, `output_tokens`, `model`, `model_provider`, `parent_session_key`, `compaction_count`, `channel` (origin: `telegram` / `discord` / `gui:chat` / `null`), `project_root`, `exec_tier` (per-session override or `null`), `mode` (per-session override or `null`).
 
-List all sessions, optionally filtered by agent, channel, or status.
+### sessions.history
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "session.list",
-  "params": {
-    "filter": {
-      "agent_id": "main",
-      "channel": "telegram"
-    },
-    "limit": 20,
-    "offset": 0
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "sessions": [
-      {
-        "session_key": "agent:main:telegram:dm:user123",
-        "agent_id": "main",
-        "channel": "telegram",
-        "message_count": 15,
-        "token_count": 4200,
-        "created_at": 1706313600000,
-        "updated_at": 1706399000000
-      },
-      {
-        "session_key": "agent:main:telegram:dm:user456",
-        "agent_id": "main",
-        "channel": "telegram",
-        "message_count": 8,
-        "token_count": 2100,
-        "created_at": 1706350000000,
-        "updated_at": 1706398000000
-      }
-    ],
-    "total": 2
-  }
-}
-```
-
-**Parameters:**
+Fetch the message history of a session.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `filter` | object | No | Filter criteria |
-| `filter.agent_id` | string | No | Filter by agent ID |
-| `filter.channel` | string | No | Filter by channel (e.g. `"telegram"`, `"discord"`, `"gateway"`) |
-| `limit` | number | No | Maximum results. Default: 50 |
-| `offset` | number | No | Skip this many results. Default: 0 |
+| `session_key` | string | yes | Canonical session key (e.g. `agent:main:main`) |
+| `limit` | number | no | Max messages (omit for the full history) |
 
-### session.history
+**Response:** `{ "session_key", "messages": [ ...HistoryMessage... ], "count": N }`. Each `HistoryMessage` is `{ role, content, timestamp, metadata? }`.
 
-Get the full message history for a session. This is similar to `agent.history` but returns the raw session data including metadata.
+### sessions.new
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "session.history",
-  "params": {
-    "session_key": "agent:main:main",
-    "limit": 100
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "session_key": "agent:main:main",
-    "messages": [
-      {
-        "role": "system",
-        "content": "[Compacted summary from 2024-01-27]...",
-        "timestamp": 1706356800000
-      },
-      {
-        "role": "user",
-        "content": "What did we discuss yesterday?",
-        "timestamp": 1706400000000
-      },
-      {
-        "role": "assistant",
-        "content": "Based on our conversation history...",
-        "timestamp": 1706400003000,
-        "tool_calls": []
-      }
-    ],
-    "total": 3,
-    "token_count": 890
-  }
-}
-```
-
-**Parameters:**
+Close the current session under an optional `topic` and create a new epoch of the same key.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `session_key` | string | Yes | Session to retrieve |
-| `limit` | number | No | Maximum messages. Default: 100 |
+| `session_key` | string | yes | Current session key |
+| `topic` | string | no | Stored on the closing session (max 100 chars, truncated on character boundary) |
+
+**Response:** `{ "old_session_key", "new_session_key", "topic" | null }`. Autonomous continuations keyed under the old epoch are terminated first, so a `sessions.new` always returns a clean slate.
+
+### sessions.reset
+
+Clear a session's message history. The `session_events` log is **retired before** the `messages` projection, so the conversation cannot be replayed by any later read path.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+
+**Response:** `{ "session_key", "reset", "events_retired" }`.
+
+### sessions.delete
+
+Delete a session and everything tied to it. The default `sessions.delete` is the macro-generated entry; a `*_with_capture` variant fires the `SessionEnd` extension hook and writes a `SessionEnd` raw memory row before the transcript is dropped (so `CompressionService` / `ProfileSynthesizer` can mine durable knowledge from the dying session). The captured tail then purges the session's artifacts and the event log.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+
+**Response:** `{ "session_key", "deleted", "events_retired" }`.
+
+### sessions.preview
+
+A bounded preview of a session's recent history with full metadata.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+| `limit` | number | no | Defaults to 10 |
+
+**Response:** `{ "session_key", "meta": { ...SessionMeta... }, "messages": [ ...{role, content, timestamp, metadata?}... ], "message_count": N }`. `meta` carries `key`, `agent_id`, `session_type`, `message_count`, `total_tokens`, `state`, `label`, `input_tokens`, `output_tokens`, `model`, `model_provider`, `parent_session_key`, `compaction_count`, `derived_title`, `last_message_preview`, `runtime_ms`, `estimated_cost_usd`, `checkpoints`, `created_at`, `last_active_at`.
+
+### sessions.patch
+
+Patch session metadata. Executes validation in-band: an `exec_tier` or `session_mode` id that the run loop cannot resolve is refused (`INVALID_PARAMS`) so a junk override cannot silently disarm the security control. `null` clears an override.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+| `label` | string | no | New label |
+| `status` | string | no | New status |
+| `model` | string | no | New model id |
+| `model_provider` | string | no | New provider name |
+| `metadata` | object | no | `identity_meta.custom` patch — `exec_tier` / `session_mode` validated here |
+
+**Response:** `{ "session_key", "updated" }`.
+
+### sessions.set_topic
+
+Set the session topic (the auto-naming target). Truncated to 100 chars on a character boundary.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+| `topic` | string | yes | New topic (≤ 100 chars) |
+
+**Response:** `{ "session_key", "updated": true }`.
+
+### sessions.set_project_root
+
+Pin a project working directory onto a session. `null` / absent clears the override (revert to the default `~/.aleph/workspaces/{agent_id}`). Path validation (absolute / exists / directory) happens at run time in `agent.run` — this RPC only records the preference, so a not-yet-existing folder can be remembered without failing the call.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+| `project_root` | string | no | Absolute path; `null` clears |
+
+**Response:** `{ "session_key", "project_root", "updated": true }`.
+
+### sessions.compaction.list
+
+List a session's compaction checkpoints.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+
+**Response:** `{ "session_key", "checkpoints": [ ...{checkpoint_id, created_at, message_count, retained_message_count}... ] }`.
+
+### sessions.compaction.restore
+
+Restore a session to a checkpoint.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+| `checkpoint_id` | string | yes | Checkpoint id |
+
+**Response:** `{ "session_key", "checkpoint_id", "message_count", "updated": true }`.
+
+### sessions.compaction.branch
+
+Branch a new session from a checkpoint.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Source session key |
+| `checkpoint_id` | string | yes | Checkpoint id |
+| `new_session_key` | string | yes | Target session key (must be different from the source) |
+
+**Response:** `{ "session_key", "checkpoint_id", "new_session_key", "message_count", "created": true }`.
+
+## `session.*` (per-session runtime)
+
+### session.create
+
+Create a new session and return the canonical key. A `name` parameter is accepted as a human-readable hint but does not name a stored entity (the new session key is generated as `session_<unix_ms>`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | no | Human-readable label |
+
+**Response:** `{ "session_key", "name" }`.
+
+### session.usage
+
+Get the token / message statistics for a session, with a real per-model USD cost computed from the in-core price table (the duplicate price table in the shell was deleted). The cost is `null` when the provider/model pair is unpriced.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_key` | string | yes | Canonical session key |
+
+**Response:** `{ "session_key", "tokens", "input_tokens", "output_tokens", "messages", "created_at" | null, "last_active_at" | null, "cost_usd" | null, "cost_status": "unknown" | "complete" | "partial_missing_price" }`.
 
 ### session.compact
 
-Trigger manual compaction of a session. Compaction extracts key facts from older messages, stores them in the memory system, and replaces the original messages with a summary. This reduces token count while preserving important context.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "session.compact",
-  "params": {
-    "session_key": "agent:main:main"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "session_key": "agent:main:main",
-    "compacted": true,
-    "messages_before": 120,
-    "messages_after": 15,
-    "tokens_before": 48000,
-    "tokens_after": 6200,
-    "facts_extracted": 8
-  }
-}
-```
-
-**Parameters:**
+Manually trigger a compaction. The `KeepLastN` strategy is hard-coded (`SESSION_COMPACT_KEEP_LAST_N`); the agent loop's automatic compaction uses the same strategy.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `session_key` | string | Yes | Session to compact |
+| `session_key` | string | yes | Canonical session key |
 
-### session.delete
+**Response:** `{ "message", "before_messages", "after_messages", "tokens_saved" }`. `tokens_saved` is a rough estimate (`deleted * 50`).
 
-Permanently delete a session and all its messages. This action cannot be undone.
+### session.truncate
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "session.delete",
-  "params": {
-    "session_key": "agent:main:telegram:dm:user123"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "deleted": true,
-    "session_key": "agent:main:telegram:dm:user123",
-    "messages_removed": 15
-  }
-}
-```
-
-**Parameters:**
+Truncate a session's history to the first `keep_count` messages, oldest-first. Drives the TUI `/undo` command's "drop the most recent user+assistant turn pair" path.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `session_key` | string | Yes | Session to delete |
+| `session_key` | string | yes | Canonical session key |
+| `keep_count` | number | yes | Number of leading messages to retain |
 
-### session.export
+**Response:** `{ "messages_removed", "tokens_removed_estimate" }`.
 
-Export a session as a portable JSON object. Useful for backups, migration, or sharing conversation logs.
+### session.export_html
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "session.export",
-  "params": {
-    "session_key": "agent:main:main",
-    "format": "json"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "session_key": "agent:main:main",
-    "format": "json",
-    "data": {
-      "session_key": "agent:main:main",
-      "agent_id": "main",
-      "messages": [ ... ],
-      "metadata": {
-        "created_at": 1706313600000,
-        "message_count": 42,
-        "token_count": 12840
-      },
-      "exported_at": 1706400000000
-    }
-  }
-}
-```
-
-**Parameters:**
+Export a session as a self-contained HTML document. The bytes are written through `ArtifactStore` (no second delivery mechanism), so the file is listed, capability-addressed, and evicted exactly like any other artifact of the session.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `session_key` | string | Yes | Session to export |
-| `format` | string | No | Export format: `"json"` (default) or `"markdown"` |
+| `session_key` | string | yes | Canonical session key |
 
-## Session Key Structure
+**Response:** `{ "url", "filename", "size" }`. The `url` is `/artifact/<cap>/<id>/<filename>`; the capability is scoped to the session so an operator cannot read another session's export.
 
-Sessions are identified by structured keys that encode routing information.
+## Artifacts (companion surface)
 
-| Variant | Format | Description |
-|---------|--------|-------------|
-| Main | `agent:{agent_id}:main` | Shared cross-channel session |
-| DirectMessage | `agent:{agent_id}:{channel}:dm:{user_id}` | Per-user isolated session |
-| Group | `agent:{agent_id}:{channel}:group:{group_id}` | Group/channel chat |
-| Task | `agent:{agent_id}:cron:{job_name}` | Automated task session |
-| Subagent | `subagent:agent:{agent_id}:{subagent_id}` | Sub-agent delegation |
-| Ephemeral | `agent:{agent_id}:ephemeral:{uuid}` | Temporary, not persisted |
+`artifacts.list` and `artifacts.read_text` are wired by `register_artifact_handlers` alongside `session.export_html`. They are not under `session.*` but are the natural read-only companions to the per-session runtime.
 
-## DM Scope Strategies
-
-The `dmScope` configuration controls how direct messages are routed to sessions:
-
-| Strategy | Behavior |
-|----------|----------|
-| `main` | All DMs share the main session |
-| `per_peer` | Each user gets an isolated session (default) |
-| `per_channel_peer` | Isolated per channel + user combination |
-
-## Storage Schema
-
-Sessions are stored in SQLite with the following structure:
-
-```sql
-CREATE TABLE sessions (
-    session_key  TEXT PRIMARY KEY,
-    messages     TEXT,          -- JSON array
-    created_at   INTEGER,
-    updated_at   INTEGER,
-    message_count INTEGER,
-    token_count  INTEGER
-);
-
-CREATE TABLE session_metadata (
-    session_key  TEXT PRIMARY KEY,
-    agent_id     TEXT,
-    channel      TEXT,
-    last_compaction INTEGER
-);
-```
+| Method | Parameters | Description |
+|--------|------|------------|------|
+| `artifacts.list` | `session_key` | List every artifact of a session, newest first. Each row carries `id`, `filename`, `mime_type`, `size`, `origin`, `run_id`, `created_at`, `url`. |
+| `artifacts.read_text` | `session_key`, `id` | Read a text-artifact preview (≤ 512 KB) with `content` + `truncated`. Refuses non-text MIME types with `INVALID_PARAMS` (so PNG returns cannot be confused for "binary-not-yet-rendered"). |
 
 ## See Also
 
-- [agent.*](/docs/en/gateway/methods/agent) -- Agent execution methods
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [Protocol](/docs/en/gateway/protocol) -- Session key routing details
-
----
-
-## 26.7.x Addendum
-
-### `session.*` Full RPC
-
-- `session.usage` — usage + cost (core-priced; the shell no longer carries a duplicate price table)
-- `session.compact` — `/compact` equivalent (available on every surface)
-- `session.truncate` — `truncate_to_fit` floor
-- `session.create` / `session.export_html`
-
-### `sessions.*` Full RPC
-
-- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
-
-### `chat.*` Preferred
-
-26.7.x prefer `chat.*` over `agent.*`:
-
-- `chat.send` — send a message (with `session_mode` field)
-- `chat.abort` — abort a run
-- `chat.history` — history
-- `chat.clear` — clear
-- `chat.context_estimate` — context-window estimate
-- `chat.rewind` — rewind to an earlier turn
-
-### SessionEvent System
-
-26.7.7+: `session_events` is the canonical log; `MessageProjector` materializes events into the `messages` table; a boot-time `ProjectionReconciler` back-fills transcripts.
-
-### Live-Hot-Reloadable Execution Caps
-
-26.7.7+: the `[execution]` run-cap section is now Live.
-
-### Real Cost and Token Accounting
-
-26.7.15+ Tier-3 hardening.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Session routes](/docs/en/gateway/session-routes) -- Session-key encoding (Main / DM / Group / Task / Subagent / Ephemeral)
+- [Events reference](/docs/en/gateway/events) -- `session.*` / `session_events` topics

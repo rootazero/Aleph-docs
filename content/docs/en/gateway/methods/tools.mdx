@@ -1,0 +1,103 @@
+---
+title: "tools.*"
+description: "Tool registry and invocation RPC methods"
+---
+
+`tools.*` is the runtime surface over the `ToolCatalog`. Five methods exist in total. Three (`tools.catalog`, `tools.effective`, `tools.invoke`) are registered in `HandlerRegistry::new()` as placeholders that return `SERVICE_UNAVAILABLE` until boot wires a real `ToolRegistry`. The remaining two (`tools.cancel_call`, `tools.in_flight`) are registered directly in `agent_init::tool_catalog_init` and only when the process-wide `InFlightToolCalls` registry was installed at boot. All five share the same backing `ToolCatalog` / `InFlightToolCalls` / `BuiltinToolRegistry`, so the panel and the agent loop see the same tool surface.
+
+For everyday use, prefer `chat.send` / `agent.run` — the agent loop dispatches the right tool from the same registry. The RPCs here are for E2E harnesses and operator tooling.
+
+## Methods
+
+### tools.catalog
+
+List every active tool grouped by source. Used by the Panel's "Tool Catalog" tab and by `aleph doctor`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source` | string | no | Exact id (`"mcp:github"`, `"native"`, …) or family prefix (`"mcp:*"`, `"plugin:*"`, `"skill:*"`) |
+
+**Response:** `ToolsListResult`: `{ "groups": [ ...ToolGroup... ], "total", "agent_id"? }`. Each `ToolGroup` carries `id` (`native` / `builtin` / `mcp:<server>` / `skill:<id>` / `plugin:<plugin_id>` / `custom`), `label`, and `tools: [ {name, description, source} ]`. `total` is the count after the source filter.
+
+BTreeMap ordering makes the output deterministic: `builtin`, `mcp:<a>`, `mcp:<b>`, `native`, `plugin:<id>`, `skill:<id>`, `custom`.
+
+### tools.effective
+
+List the tools available to a specific agent. The agent allowlist is applied **first**, then the optional `source` filter.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | no | Defaults to `main` |
+| `source` | string | no | Same exact / `prefix:*` filter as `tools.catalog` |
+
+**Response:** same `ToolsListResult` shape; `agent_id` is always populated.
+
+### tools.invoke
+
+Execute a single builtin tool directly, bypassing the LLM agent loop. The `ToolRegistry` carries the tool implementations. Two hard floors are applied before the registry is touched:
+
+1. **Dangerous-tool floor** — `security::dangerous_tools::is_denied_on_gateway_surface` refuses RCE / host-mutation / self-reconfiguration tools. The full `dangerous-tools` denylist is openclaw-parity.
+2. **Confirmation-gated floor** — tools that self-declare `requires_confirmation` (e.g. `vault_store`, `team_disband`) are refused. The gateway has no approval transport to raise a card.
+
+The floors are env-overridable with `ALEPH_GATEWAY_TOOLS_ALLOW`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tool_name` | string | yes | Canonical tool name (e.g. `memory_search`, `note_manage`) |
+| `arguments` | object | no | JSON arguments forwarded to the tool (schema depends on the tool) |
+| `agent_id` | string | no | When supplied, folded into `arguments.agent_id` unless already present |
+
+**Response (success):** `{ "ok": true, "tool_name", "result" }`.
+
+**Response (denied):** `INVALID_PARAMS` with the denial reason and the env-var override hint.
+
+When the registry is wired with the live `AgentRegistry` (production boot path), the request must also pass the agent's `is_tool_allowed` allowlist — `INVALID_PARAMS: tool '<name>' not allowed for agent '<id>'` if not.
+
+### tools.cancel_call
+
+Fire the harness-issued per-call `CancellationToken` against a specific `tool_call_id`. The `tokio::select!` arm in the tool adapter (and the subagent runtime) short-circuits the call and surfaces a cooperative-cancel error to the LLM on the next turn.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `call_id` | string | yes | LLM-issued `tool_call_id` of the in-flight call |
+
+**Response:** `{ "ok": true, "cancelled": true | false, "call_id" }`. `cancelled: false` when the `call_id` is not in the in-flight registry (already done or unknown id).
+
+### tools.in_flight
+
+Diagnostic listing of every currently-running tool call. Used by the Panel before issuing a targeted cancel.
+
+**Request:** no params.
+
+**Response:** `{ "calls": [ ...{call_id, tool_name, started_at_ms}... ], "count" }`.
+
+## Boot-time wiring
+
+| Method | When registered |
+|--------|-----------------|
+| `tools.catalog` | `HandlerRegistry::new()` — always present, placeholder error until boot wires the live registry |
+| `tools.effective` | Same — placeholder |
+| `tools.invoke` | `agent_init::tool_catalog_init` only when a real `BuiltinToolRegistry` exists; in simulated mode the placeholder remains |
+| `tools.cancel_call` | `agent_init::tool_catalog_init` only when the process-wide `InFlightToolCalls` registry was installed at boot |
+| `tools.in_flight` | Same as `tools.cancel_call` |
+
+## Source taxonomy
+
+Every `ToolSource` is bucketed into one of six source ids. The taxonomy is shared by the catalog, the effective view, and the visibility groups:
+
+| Source id | Source variant | Examples |
+|-----------|----------------|----------|
+| `native` | `ToolSource::Native` | Hard-coded builtin capabilities |
+| `builtin` | `ToolSource::Builtin` | `BUILTIN_TOOL_DEFINITIONS` loop entries |
+| `mcp:<server>` | `ToolSource::Mcp { server }` | Ex-`mcp.add`'d servers (e.g. `mcp:github`) |
+| `skill:<id>` | `ToolSource::Skill { id }` | `skill_read` etc. |
+| `plugin:<plugin_id>` | `ToolSource::Plugin { plugin_id }` | Plugin-registered tools |
+| `custom` | `ToolSource::Custom { .. }` | User-defined |
+
+The exact-id and `prefix:*` source filter (in `tools.catalog` / `tools.effective`) match this id. `mcp:*` returns every tool from every MCP server; `plugin:*` every tool from every loaded plugin.
+
+## See Also
+
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [Tools concept](/docs/en/concepts/tools) -- How the tool catalog is composed
+- [agent.*](/docs/en/gateway/methods/agent) -- Where most tool calls are dispatched by the LLM

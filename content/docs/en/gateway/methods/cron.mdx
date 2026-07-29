@@ -3,52 +3,43 @@ title: "cron.*"
 description: "Scheduled job management RPC methods"
 ---
 
-Cron methods manage scheduled jobs that execute agent prompts on a recurring basis. Jobs are persisted in SQLite, support standard cron expressions, and can be paused, resumed, or manually triggered.
-
-## Cron Expression Format
-
-```
-+-------------- minute (0 - 59)
-| +------------ hour (0 - 23)
-| | +---------- day of month (1 - 31)
-| | | +-------- month (1 - 12)
-| | | | +------ day of week (0 - 6, Sunday = 0)
-| | | | |
-* * * * *
-```
-
-**Examples:**
-
-| Expression | Schedule |
-|------------|----------|
-| `0 9 * * *` | Every day at 9:00 AM |
-| `*/15 * * * *` | Every 15 minutes |
-| `0 0 * * 0` | Every Sunday at midnight |
-| `0 9 1 * *` | First day of every month at 9:00 AM |
-| `30 18 * * 1-5` | Weekdays at 6:30 PM |
+`cron.*` manages jobs that trigger agent prompts on a schedule. Jobs are persisted by `CronService` (`src/tasks/cron/`) in SQLite; the state-machine scheduler replaced the historical window-based scheduler.
 
 ## Methods
 
-### cron.create
+| Method | Description |
+|--------|-------------|
+| [`cron.list`](#cronlist) | List every job |
+| [`cron.get`](#cronget) | Fetch one job's full view |
+| [`cron.create`](#croncreate) | Create a job |
+| [`cron.update`](#cronupdate) | Mutate job fields |
+| [`cron.delete`](#crondelete) | Delete a job |
+| [`cron.status`](#cronstatus) | Service-wide status (running flag + job count) |
+| [`cron.run`](#cronrun) | Trigger a job immediately (bypass schedule) |
+| [`cron.runs`](#cronruns) | Read execution history |
+| [`cron.toggle`](#crontoggle) | Enable / disable a job |
 
-Create a new scheduled job.
+> Historical aliases `cron.trigger` / `cron.pause` / `cron.resume` have been folded into `cron.run` and `cron.toggle`; no separate pause / resume RPCs are registered.
+
+## Schedule Kinds (`schedule_kind`)
+
+`cron.create` and `cron.update` accept `schedule_kind` as a tagged enum; the legacy `"schedule": "<expr>"` field is honoured as a fallback for cron expressions.
+
+| Kind | Fields | Description |
+|------|--------|-------------|
+| `{ "kind": "cron", "expr": "...", "tz": "...", "stagger_ms": 0 }` | `expr` (required) | Standard 5-field cron expression |
+| `{ "kind": "every", "every_ms": 900000 }` | `every_ms` | Fixed interval in milliseconds |
+| `{ "kind": "at", "at": 1706468400000 }` | `at` (required, future) | One-shot at the given epoch-ms |
+
+`at` jobs that point to a past timestamp are rejected at create time with `-32602 Invalid params`.
+
+### cron.list
+
+List every configured job.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.create",
-  "params": {
-    "name": "Daily Summary",
-    "schedule": "0 18 * * *",
-    "agent_id": "main",
-    "prompt": "Summarize today's activities and upcoming tasks",
-    "enabled": true,
-    "timezone": "America/New_York",
-    "tags": ["productivity", "daily"]
-  }
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "cron.list", "params": { "limit": 50 } }
 ```
 
 **Response:**
@@ -57,84 +48,92 @@ Create a new scheduled job.
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "job_id": "job-uuid-123",
-    "name": "Daily Summary",
-    "schedule": "0 18 * * *",
-    "agent_id": "main",
-    "enabled": true,
-    "next_run_at": 1706468400000,
-    "created_at": 1706400000000
+    "jobs": [
+      {
+        "id": "job-uuid-123",
+        "name": "Daily Summary",
+        "schedule_kind": { "kind": "cron", "expr": "0 18 * * *", "tz": "America/New_York" },
+        "agent_id": "main",
+        "enabled": true,
+        "next_run_at_ms": 1706468400000,
+        "last_run_at_ms": 1706382000000,
+        "tags": ["productivity"]
+      }
+    ]
   }
 }
 ```
 
-**Parameters:**
+**Parameter:** `limit` (number, optional; default 50).
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Human-readable job name |
-| `schedule` | string | Yes | Cron expression (5-field standard format) |
-| `agent_id` | string | Yes | Agent to execute the prompt |
-| `prompt` | string | Yes | The message to send to the agent |
-| `enabled` | boolean | No | Whether the job is active. Default: `true` |
-| `timezone` | string | No | IANA timezone for schedule evaluation |
-| `tags` | string[] | No | Tags for filtering and organization |
-| `max_retries` | number | No | Max retry attempts on failure. Default: 3 |
-| `priority` | number | No | Job priority (1-10). Default: 5 |
-| `prompt_template` | string | No | Template with `{{variables}}` for dynamic prompts |
-| `context_vars` | object | No | Variables for template substitution |
-| `delivery` | object | No | Delivery target configuration (see below) |
+### cron.get
 
-### cron.list
-
-List all configured cron jobs.
+Read the full view of one job.
 
 **Request:**
+```json
+{ "jsonrpc": "2.0", "id": 2, "method": "cron.get", "params": { "job_id": "job-uuid-123" } }
+```
+
+**Response:**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 2,
-  "method": "cron.list",
-  "params": {
-    "filter": {
+  "result": {
+    "job": {
+      "id": "job-uuid-123",
+      "name": "Daily Summary",
+      "agent_id": "main",
+      "prompt": "Summarize today's activities",
       "enabled": true,
-      "agent_id": "main"
+      "schedule_kind": { "kind": "cron", "expr": "0 18 * * *" },
+      "tags": ["productivity"],
+      "session_target": "ephemeral",
+      "timeout_ms": 600000,
+      "next_run_at_ms": 1706468400000,
+      "last_run_at_ms": 1706382000000
     }
   }
 }
 ```
 
+### cron.create
+
+Create a job. Required: `name`. Defaults: `agent_id="main"`, `prompt=""`. Provide either `schedule_kind` or the fallback `"schedule"` (cron expression only).
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "cron.create",
+  "params": {
+    "name": "Daily Summary",
+    "schedule_kind": { "kind": "cron", "expr": "0 18 * * *", "tz": "America/New_York" },
+    "agent_id": "main",
+    "prompt": "Summarize today's activities",
+    "enabled": true,
+    "tags": ["productivity", "daily"],
+    "timezone": "America/New_York",
+    "timeout_ms": 600000,
+    "session_target": "ephemeral"
+  }
+}
+```
+
 **Response:**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 2,
+  "id": 3,
   "result": {
-    "jobs": [
-      {
-        "job_id": "job-uuid-123",
-        "name": "Daily Summary",
-        "schedule": "0 18 * * *",
-        "agent_id": "main",
-        "enabled": true,
-        "next_run_at": 1706468400000,
-        "last_run_at": 1706382000000,
-        "consecutive_failures": 0,
-        "tags": ["productivity", "daily"]
-      },
-      {
-        "job_id": "job-uuid-456",
-        "name": "Weekly Backup Check",
-        "schedule": "0 0 * * 0",
-        "agent_id": "main",
-        "enabled": true,
-        "next_run_at": 1706572800000,
-        "last_run_at": null,
-        "consecutive_failures": 0,
-        "tags": ["maintenance"]
-      }
-    ],
-    "total": 2
+    "job": {
+      "id": "job-uuid-123",
+      "name": "Daily Summary",
+      "enabled": true,
+      "schedule_kind": { "kind": "cron", "expr": "0 18 * * *", "tz": "America/New_York" }
+    }
   }
 }
 ```
@@ -143,64 +142,117 @@ List all configured cron jobs.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `filter` | object | No | Filter criteria |
-| `filter.enabled` | boolean | No | Filter by enabled/disabled status |
-| `filter.agent_id` | string | No | Filter by agent |
-| `filter.tags` | string[] | No | Filter by tags (match any) |
+| `name` | string | Yes | Job name |
+| `schedule_kind` | object | Yes* | Tagged schedule enum (cron / every / at) |
+| `schedule` | string | No | Cron expression, used only when `schedule_kind` is absent |
+| `agent_id` | string | No | Default `"main"` |
+| `prompt` | string | No | Default empty string |
+| `enabled` | boolean | No | Default `true` |
+| `tags` | string[] | No | Job tags |
+| `timezone` | string | No | IANA timezone (cron schedules only) |
+| `timeout_ms` | number | No | Positive integer in ms; `null` keeps the default |
+| `session_target` | object | No | Session target (main / ephemeral / ...) |
 
-### cron.get
+### cron.update
 
-Get detailed information about a specific job, including its run history.
+Mutate job fields. `timeout_ms` is tri-state: absent = no-op, `null` = clear, positive integer = set. Negative / zero / non-integer values are rejected to avoid silent no-ops.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
-  "method": "cron.get",
+  "id": 4,
+  "method": "cron.update",
   "params": {
-    "job_id": "job-uuid-123"
+    "job_id": "job-uuid-123",
+    "enabled": false,
+    "prompt": "New prompt text",
+    "schedule_kind": { "kind": "every", "every_ms": 900000 },
+    "timeout_ms": 900000
   }
 }
 ```
 
 **Response:**
 ```json
+{ "jsonrpc": "2.0", "id": 4, "result": { "job": { "id": "job-uuid-123", "enabled": false } } }
+```
+
+### cron.delete
+
+Delete a job.
+
+**Request:**
+```json
+{ "jsonrpc": "2.0", "id": 5, "method": "cron.delete", "params": { "job_id": "job-uuid-123" } }
+```
+
+**Response:**
+```json
+{ "jsonrpc": "2.0", "id": 5, "result": { "deleted": "job-uuid-123" } }
+```
+
+### cron.status
+
+Service-wide status (not per-job).
+
+**Response:**
+```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
+  "id": 6,
   "result": {
-    "job_id": "job-uuid-123",
-    "name": "Daily Summary",
-    "schedule": "0 18 * * *",
-    "schedule_kind": "cron",
-    "agent_id": "main",
-    "prompt": "Summarize today's activities and upcoming tasks",
-    "enabled": true,
-    "timezone": "America/New_York",
-    "tags": ["productivity", "daily"],
-    "priority": 5,
-    "max_retries": 3,
-    "consecutive_failures": 0,
-    "next_run_at": 1706468400000,
-    "last_run_at": 1706382000000,
-    "created_at": 1706313600000,
-    "updated_at": 1706400000000,
-    "recent_runs": [
+    "running": true,
+    "job_count": 7,
+    "enabled_count": 5
+  }
+}
+```
+
+### cron.run
+
+Trigger a job immediately (bypass the schedule). Delegates to `CronService::run_job`, which validates (enabled + not already running), propagates a failed persist as an error rather than swallowing it (so a "success" reply always implies the job really ran), and emits a `cron.job.changed` event.
+
+**Request:**
+```json
+{ "jsonrpc": "2.0", "id": 7, "method": "cron.run", "params": { "job_id": "job-uuid-123" } }
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "triggered": "job-uuid-123",
+    "status": "queued",
+    "next_run_at_ms": 1706400000000
+  }
+}
+```
+
+### cron.runs
+
+Read the execution history (from the SQLite persistence layer).
+
+**Request:**
+```json
+{ "jsonrpc": "2.0", "id": 8, "method": "cron.runs", "params": { "job_id": "job-uuid-123", "limit": 20 } }
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "runs": [
       {
         "run_id": "run-uuid-001",
-        "status": "completed",
-        "started_at": 1706382000000,
-        "ended_at": 1706382015000,
+        "started_at_ms": 1706382000000,
+        "ended_at_ms": 1706382015000,
         "duration_ms": 15000,
-        "trigger_source": "schedule"
-      },
-      {
-        "run_id": "run-uuid-002",
         "status": "completed",
-        "started_at": 1706295600000,
-        "ended_at": 1706295612000,
-        "duration_ms": 12000,
         "trigger_source": "schedule"
       }
     ]
@@ -208,270 +260,39 @@ Get detailed information about a specific job, including its run history.
 }
 ```
 
-**Parameters:**
+**Parameters:** `job_id` (required), `limit` (optional, default 20).
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | Yes | Job ID to retrieve |
+### cron.toggle
 
-### cron.delete
-
-Delete a scheduled job. All run history for the job is also removed.
+Flip the enabled flag.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "cron.delete",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
+{ "jsonrpc": "2.0", "id": 9, "method": "cron.toggle", "params": { "job_id": "job-uuid-123" } }
 ```
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "deleted": true,
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | Yes | Job to delete |
-
-### cron.status
-
-Get the current status of a scheduled job, including whether it is enabled, last run time, and next scheduled run.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "cron.status",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "job_id": "job-uuid-123",
-    "enabled": true,
-    "last_run_at": 1706295612000,
-    "next_run_at": 1706572800000,
-    "consecutive_failures": 0,
-    "status": "healthy"
-  }
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | Yes | Job ID to query |
-
-### cron.trigger
-
-Manually trigger an immediate execution of a job, bypassing the schedule.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "cron.trigger",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "triggered": true,
-    "job_id": "job-uuid-123",
-    "run_id": "run-uuid-003",
-    "status": "queued",
-    "trigger_source": "manual"
-  }
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | Yes | Job to trigger |
-
-### cron.pause
-
-Pause a running job. The job remains configured but will not execute on its next scheduled time.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "cron.pause",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "paused": true,
-    "job_id": "job-uuid-123",
-    "enabled": false
-  }
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | Yes | Job to pause |
-
-### cron.resume
-
-Resume a paused job. The next run will be calculated from the current time.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "cron.resume",
-  "params": {
-    "job_id": "job-uuid-123"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "result": {
-    "resumed": true,
-    "job_id": "job-uuid-123",
-    "enabled": true,
-    "next_run_at": 1706468400000
-  }
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | Yes | Job to resume |
-
-## Schedule Types
-
-Beyond standard cron expressions, Aleph supports additional schedule kinds:
-
-| Kind | Description | Example |
-|------|-------------|---------|
-| `cron` | Standard cron expression | `"0 9 * * *"` |
-| `every` | Fixed interval in milliseconds | `900000` (15 min) |
-| `once` | One-time execution at a specific timestamp | `1706468400000` |
-
-For `every` and `once` schedules, use the `schedule_kind` parameter:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.create",
-  "params": {
-    "name": "Heartbeat Check",
-    "schedule_kind": "every",
-    "every_ms": 900000,
-    "agent_id": "main",
-    "prompt": "Check system health"
-  }
-}
-```
-
-## Job Chaining
-
-Jobs can be chained so that completion of one triggers another:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "cron.create",
-  "params": {
-    "name": "Backup Database",
-    "schedule": "0 2 * * *",
-    "agent_id": "main",
-    "prompt": "Run database backup",
-    "next_job_id_on_success": "job-uuid-verify",
-    "next_job_id_on_failure": "job-uuid-alert"
-  }
-}
+{ "jsonrpc": "2.0", "id": 9, "result": { "job": { "id": "job-uuid-123", "enabled": true } } }
 ```
 
 ## Run Status Values
 
 | Status | Description |
 |--------|-------------|
-| `queued` | Job is queued for execution |
+| `queued` | Queued for execution |
 | `running` | Currently executing |
 | `completed` | Finished successfully |
 | `failed` | Execution failed |
-| `retrying` | Failed, attempting retry |
+| `retrying` | Failed; retrying |
+
+## Events
+
+The scheduler emits a `cron.job.changed` event on the bus whenever a job's state changes; the panel subscribes to keep its view live.
 
 ## See Also
 
-- [agent.*](/docs/en/gateway/methods/agent) -- Agent execution (triggered by cron)
-- [events.*](/docs/en/gateway/methods/events) -- Subscribe to cron events
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### Realized (stubs → real)
-
-26.7.x: the historical stub RPCs (`cron.*_stub`) have been **realized**. Full implementation:
-
-- `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status`
-- `cron.run` / `cron.runs` / `cron.toggle`
-
-### Daemon-Side Driver
-
-Driven by the [Daemon](/docs/en/concepts/daemon), including day-boundary log rotation, `ALEPH-BOOT` marker, and `Guardian Judge` proactive-wake decisions.
-
-### Full State Machine
-
-The scheduling engine (`src/scheduler/cron.rs`) — window-based scheduling has been replaced by a state-machine scheduler.
+- [agent.*](./agent) -- Agent execution (triggered by cron)
+- [events.*](./events) -- Subscribe to scheduler events
+- [Methods Reference](./index) -- All method namespaces
+- [heartbeat.*](./heartbeat) -- Heartbeat probe tasks

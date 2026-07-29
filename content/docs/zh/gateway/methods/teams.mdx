@@ -3,241 +3,237 @@ title: "teams.*"
 description: "团队与多代理编排 RPC 方法"
 ---
 
-团队方法用于管理多代理团队——一个**队长**加若干**成员**，他们通过一条持久的群聊线程和一块共享任务板进行协作。在团队的第一条消息时，队长会先行规划（"团队战略协调"，Team Strata）；该规划被焊入每位成员的提示词，成员在分配的协调任务下工作（`Pending -> InProgress -> WaitingReview -> Completed`）。
+`teams.*` 是每团队的 CRUD + 协调面。大约三十个方法分布在两次注册中:
 
-> 相关列表端点：`agents.teams` 返回的团队列表会为每个团队附带一个精简的 `members_preview` 和 `last_message`（用于渲染侧边栏的"群聊"历史区）。关于实时的群聊会话原语，参见 [`group_chat.*`](/docs/zh/gateway/methods/group_chat)。
+- `register_teams_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:207-552`)——仅依赖 store 的处理器,只要 `team_store` 构造了就一直注册。
+- 两个在 `agent_init/mod.rs` 中手动连线的 `teams.chat.send` 和 `teams.chat.cancel`——仅在 team store 存在时注册,因为它们需要 `GatewayContext` + 执行路径来驱动 leader 运行和中止 fan-out 树。
 
-## CRUD
+团队的工作线程是持久的(`CoordTask` 看板 + `team_messages`);实时对话气泡(leader / member 叙述)在事件总线上以 `team.<id>.*` 流式传输,不作为 `teams.*` RPC 可查询。重载后,Panel 显示持久记录(任务 + 交付物),而非实时叙述。
 
-### teams.create
+## 方法
 
-从一个队长、一组成员以及一个可选的自动命名标志创建团队。当设置了 `auto_name` 时，空名称团队会在其第一条消息时获得 LLM 自动命名。
+### CRUD
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "teams.create",
-  "params": {
-    "leader": "main",
-    "members": ["reviewer", "tester", "documenter"],
-    "auto_name": true
-  }
-}
-```
+#### teams.create
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "team": {
-      "id": "team-1",
-      "name": "",
-      "leader": "main",
-      "members": ["reviewer", "tester", "documenter"]
-    }
-  }
-}
-```
-
-**参数：**
+创建持久团队。leader 自动以 `role="leader"` 注册。`auto_name: true` 触发一次性自动命名标志,使第一次 `teams.chat.send` 用 LLM 生成的主题替换临时名称。
 
 | 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `leader` | string | 是 | 负责规划与审查成员工作的代理 id |
-| `members` | string[] | 是 | 在分配的协调任务下工作的代理 id |
-| `auto_name` | boolean | 否 | 让 LLM 在第一条消息时为空名称团队命名 |
+|------|------|------|------|
+| `name` | string | 是 | 团队名(非空) |
+| `description` | string | 否 | 自由文本描述 |
+| `leader_id` | string | 是 | leader 的 agent id(规划 + 审查成员工作) |
+| `members` | object[] | 否 | 每项 `{ "agent_id", "role" }`(默认 role:`member`)。leader 自动注册;重复跳过。 |
+| `auto_name` | boolean | 否 | `true` 触发首发自动命名 |
 
-### teams.get
+**响应:** `{ "team_id", "name", "leader_id" }`。
 
-获取单个团队的详情（队长、成员、名称）。
+#### teams.get
 
-### teams.list
+获取团队的完整记录(团队、成员、任务)。
 
-列出所有配置的团队。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
 
-### teams.rename
+**响应:** `{ "team": { ...Team... }, "members": [ ...TeamMember... ], "tasks": [ ...CoordTask... ] }`。
 
-重命名团队。
+#### teams.list
 
-### teams.disband
+列出所有团队。**响应:** `{ "teams": [ ...TeamSummary... ] }`。
 
-解散团队——拆除其工作状态，同时保留历史记录。
+#### teams.rename
 
-### teams.delete
+重命名团队。Panel 侧边栏的 inline-edit 走这条路径。
 
-删除团队配置。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
+| `name` | string | 是 | 新名称(非空) |
 
-## 群聊（Chat）
+**响应:** 成功时 `{ "ok": true }`;未知 id 返回 `RESOURCE_NOT_FOUND`(`-32004`)。
 
-团队工作线程是一条持久的、每团队一份的群聊线程。其历史记录驱动群聊窗口中的归属气泡回放。
+#### teams.disband
 
-### teams.chat.send
+将团队标记为已解散(工作状态被拆除,历史保留)。触发 `team.changed` 事件,使群聊侧边栏和团队标签都刷新。
 
-向团队的群聊线程发送一条消息。第一条消息会被路由给队长进行规划，之后按成员各自的协调任务路由给成员。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "teams.chat.send",
-  "params": {
-    "team_id": "team-1",
-    "text": "Review this pull request for security issues",
-    "mention": "@all"
-  }
-}
-```
+**响应:** `{ "success": true }`。
 
-### teams.chat.thread
+#### teams.delete
 
-获取团队持久群聊线程的元数据。
+永久删除团队并级联清理。完整变体(`handle_delete`)级联五个从属存储(任务 / 工件 / 事件 / 消息 / 快照)。基础变体(`handle_delete_basic`)在从属存储未配置时使用。运行时只连接其中的一个,取决于哪些存储存在。
 
-### teams.chat.history
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
 
-回放某团队线程的消息历史（驱动归属气泡）。
+**响应:** `{ "success": true }`。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "teams.chat.history",
-  "params": {
-    "team_id": "team-1"
-  }
-}
-```
+#### agents.teams
 
-## 任务 / 看板（Tasks / Kanban）
+列出 agent 所属的所有团队(作为 leader 或 member)。当提供 live `AgentManager` + `MessageStore` 时,每个团队摘要会增加 `members_preview`(最多 4 个成员,含 name + emoji)和 `last_message` / `last_message_at`(最近的转写条目,截断到 60 字符)。
 
-成员在协调任务下工作（`Pending -> InProgress -> WaitingReview -> Completed`）。队长接受或拒绝交付物；当成员提交任务时，一次合成的重新派发会将该任务路由回队长进行审查。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 是 | agent id |
 
-### teams.create_task
+**响应:** `{ "teams": [ ...含 members_preview + last_message + last_message_at 的 TeamSummary... ] }`。
 
-为成员创建一个协调任务。
+### 聊天
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "teams.create_task",
-  "params": {
-    "team_id": "team-1",
-    "assignee": "reviewer",
-    "title": "Audit auth module for injection",
-    "description": "Check all query construction paths."
-  }
-}
-```
+团队工作线程是持久的(任务 + 工件),但实时对话气泡是流式的。重载后,Panel 显示持久记录。
 
-### teams.update_task
+#### teams.chat.send
 
-更新任务的状态、负责人或字段。
+启动(或继续)团队工作线程。将用户消息存入共享转写,然后通过 `GroupChatBroadcaster` 按 `@mention` 进行扇出(无 `@` 时回退到 leader)。扇出树先注册为跟踪节点,因此返回的 `run_id` 立即可被取消。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "teams.update_task",
-  "params": {
-    "team_id": "team-1",
-    "task_id": "task-7",
-    "status": "InProgress"
-  }
-}
-```
+在第一条消息上,如果团队是用 `auto_name: true` 创建的,主题 LLM 会在后台触发,替换临时名称。
 
-| 方法 | 说明 |
-|--------|-------------|
-| `teams.create_task` | 为成员创建一个协调任务 |
-| `teams.update_task` | 更新任务的状态/负责人/字段 |
-| `teams.list_tasks` | 列出团队任务板上的任务 |
-| `teams.add_task_comment` | 为任务添加评论 |
-| `teams.list_task_comments` | 列出任务的评论 |
-| `teams.list_task_events` | 列出任务的生命周期事件 |
-| `teams.list_task_runs` | 列出任务的执行运行记录 |
-| `teams.list_templates` | 列出可用的任务模板 |
-| `teams.task.pause` | 暂停正在运行的任务 |
-| `teams.task.resume` | 恢复已暂停的任务 |
-| `teams.task.retry` | 重试失败的任务 |
-| `teams.task.skip` | 跳过任务 |
-| `teams.task.trace` | 获取任务的执行追踪 |
-| `teams.task.journal.get` | 获取任务的日志条目 |
-| `teams.task.journal.list` | 列出任务的日志条目 |
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
+| `message` | string | 是 | 用户消息(非空) |
 
-## 快照（Snapshots）
+**响应:** `{ "run_id": "<uuid>" }`。将这个 `run_id` 与 `teams.chat.cancel` 配合使用即可停止扇出。
 
-| 方法 | 说明 |
-|--------|-------------|
-| `teams.snapshot.create` | 创建团队状态的快照 |
-| `teams.snapshot.get` | 获取单个快照 |
-| `teams.snapshot.list` | 列出团队的快照 |
-| `teams.snapshot.restore` | 从快照恢复团队状态 |
-| `teams.snapshot.delete` | 删除快照 |
+#### teams.chat.cancel
 
-## 工作流（Workflow）
+停止进行中的 `teams.chat.send` 扇出树。树级令牌先被投毒,然后每个仍运行的成员运行通过引擎的每运行 `CancellationToken` 被取消。未知的或已结束的 `run_id` 返回 `RESOURCE_NOT_FOUND`。
 
-| 方法 | 说明 |
-|--------|-------------|
-| `teams.workflow.export_canvas` | 导出团队工作流画布 |
-| `teams.workflow.import_canvas` | 导入工作流画布 |
-| `teams.workflow.approve_step` | 批准工作流步骤 |
-| `teams.workflow.reject_step` | 拒绝工作流步骤 |
-| `teams.workflow.retry_step` | 重试工作流步骤 |
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `run_id` | string | 是 | `teams.chat.send` 返回的 `run_id` |
 
-## ACP 成员（ACP members）
+**响应:** `{ "run_id", "cancelled": true, "members_running", "members_signalled" }`。
 
-| 方法 | 说明 |
-|--------|-------------|
-| `teams.acp_member.add` | 添加一个 ACP（外部 agent-client-protocol）成员 |
-| `teams.acp_member.list` | 列出团队的 ACP 成员 |
-| `teams.acp_member.remove` | 移除一个 ACP 成员 |
+#### teams.chat.history
 
-## 用量（Usage）
+将团队的持久群聊转写作为归属气泡回放。丢弃定向收件箱流量(通知器摘要、路由提示、发现 ping)——只呈现对话行(`MessageType::Message`)和广播器的对话内通知。返回最新的 200 个对话可见行。
 
-### teams.usage
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
 
-报告团队的用量（token、成本）。
+**响应:** `{ "items": [ ...{from_agent, content, msg_type, kind: "user"|"agent"|"system", created_at}... ] }` 按时间正序。
 
-## 另请参阅
+#### teams.chat.thread
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [group_chat.*](/docs/zh/gateway/methods/group_chat)——群聊会话原语
-- [架构：团队](/docs/zh/architecture/teams)——团队编排架构
+hydrate 团队的持久工作线程:`CoordTask` 和它们的提交工件按时间合并。实时对话气泡**不**包含在内——它们在运行期间通过 `team.<id>.*` 流式传输。
 
----
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
 
-## 26.7.x 补充
+**响应:** `{ "items": [ ...{kind: "task"|"artifact", agent_id, title, content, timestamp, artifact_id?}... ] }` 按 `timestamp` 排序。
 
-### 完整 RPC 集
+### 任务 / 看板
 
-- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
-- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
-- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
-- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
-- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
-- `teams.task.trace`
-- `agents.teams` —— 列出 agent 的团队
+看板状态机为 `Pending → InProgress → WaitingReview → Completed`(还有 `Blocked` / `Failed` / `Cancelled` / `Skipped` / `Paused` / `Unsatisfiable` 用于 Panel 绘制路径)。
 
-### 接地证据门
+#### teams.create_task
 
-26.7.21+：`task_review` 审批可要求 grounding。
+在团队的看板上创建一个 `CoordTask`。当提供 `owner` 时,任务被打上 `metadata.managed_by = "dispatcher"` 标记,自主调度器就会认领它;没有这个标记,`select_schedulable` 会过滤掉该任务,看板就不会推进。
 
-### Teams Kanban 深度重构
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
+| `subject` | string | 是 | 非空任务主题 |
+| `description` | string | 否 | 自由文本描述 |
+| `owner` | string | 否 | agent id;触发 `managed_by=dispatcher` |
+| `priority` | string | 否 | `low` / `normal` / `high` / `critical`(未知 id 返回 `INVALID_PARAMS`) |
+| `blocked_by` | string[] | 否 | 此任务被阻塞的其他任务 id |
+| `metadata` | object | 否 | 每任务元数据(原样保留) |
 
-26.7.24+：拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
+**响应:** `{ "task": { ...CoordTask... } }`。
 
-### Team 节点融合 Graph
+#### teams.update_task
 
-26.7.21+：图与多代理系统融合——`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher。
+增量更新任务。`metadata` 是**浅合并补丁**(读取之前的元数据并合并),因此 Panel 用户的 `metadata.managed_by=...` 写入不会擦除调度器的其他控制键。
 
-### 内置 `loop-auditor`
+`status` 接受 `pending` / `in_progress` / `completed` / `failed` / `cancelled`。`blocked` 是派生的,不存储——发送 `status="blocked"` 会被 `INTERNAL_ERROR` 拒绝。
 
-26.7.21+：审计 / 监督模板默认走独立上下文证据。
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+| `status` | string | 否 | 新状态(见上) |
+| `owner` | string | 否 | 新 owner agent id |
+| `result` | string | 否 | 自由文本任务结果(在重试 / 重置时清除) |
+| `metadata` | object | 否 | 浅合并补丁 |
+
+**响应:** `{ "task": { ...更新后 CoordTask... } }`。
+
+#### teams.list_tasks
+
+列出团队任务,可选过滤。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
+| `status` | string | 否 | 完整 10 变体词表:`pending` / `blocked` / `in_progress` / `waiting_review` / `completed` / `failed` / `cancelled` / `skipped` / `paused` / `unsatisfiable`(未知字符串返回显式错误) |
+| `owner` | string | 否 | 按 owner agent id 过滤 |
+
+**响应:** `{ "tasks": [ ...CoordTask... ] }`。
+
+#### teams.list_task_runs
+
+任务每次尝试的执行历史,按时间正序。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+
+**响应:** `{ "runs": [ ...CoordTaskRun... ] }`。
+
+#### teams.add_task_comment / teams.list_task_comments
+
+每个任务的自由文本交接便签。由成员留下上下文,由 Panel 用户标注状态。
+
+`add_task_comment`:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+| `author` | string | 是 | 非空作者 |
+| `body` | string | 是 | 非空正文 |
+
+**响应:** `{ "comment": { ...CoordTaskComment... } }`。
+
+`list_task_comments`:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+
+**响应:** `{ "comments": [ ...CoordTaskComment... ] }`(按时间正序)。
+
+#### teams.list_task_events
+
+读取团队事件日志中筛选到单一任务的部分。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+
+**响应:** `{ "events": [ ...EventLogStore::Event... ] }`(按时间正序,payload 中 `task_id` 匹配)。
+
+#### teams.task.trace
+
+单个任务的统一审计时间线:`task` + `runs` + `comments` + `events` + `artifacts` + `journal` 一次往返。缺失的可选存储(event_store / artifact_store)降级为空数组。Panel 的"Replay"抽屉在打开时调用此接口。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 是 | 任务 id |
+
+**响应:** `{ "task", "runs": [...], "comments": [...], "events": [...], "artifacts": [...], "journal": CoordTaskJournal | null }`。
+
+#### teams.task.journal.get / teams.task.journal.list
+
+每任务退出 journal 的读面(写面是 `task_exit_journal` 内建工具)。退出 journal 是成员在运行完成时写入的持久记录。
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `teams.task.journal.get` | `task_id` | `{ "journal": CoordTaskJournal_or_null }` |

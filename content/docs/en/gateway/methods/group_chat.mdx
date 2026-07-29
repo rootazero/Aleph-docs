@@ -3,183 +3,99 @@ title: "group_chat.*"
 description: "Group chat and multi-party conversation RPC methods"
 ---
 
-Group chat methods manage a multi-agent group-chat **session** — a shared conversation in which several agents (and the user) take turns under per-agent attribution.
+`group_chat.*` is the lower-level multi-agent group-chat **session primitive** that the durable `teams.chat.*` thread (and the Panel's three-panel group-chat window) build on. Six methods are registered in `HandlerRegistry::new()` as `service_unavailable` placeholders, then overlaid with the real handlers in `register_group_chat_handlers` once the `GroupChatOrchestrator` + `GroupChatExecutor` exist at server boot (`src/bin/aleph-server/commands/start/builder/handlers/system.rs:95-150`).
 
-> The durable per-team chat thread shown in the panel's three-panel group-chat window uses the `teams.chat.*` methods (`teams.chat.send`, `teams.chat.thread`, `teams.chat.history`) — see [teams.*](/docs/en/gateway/methods/teams). The `group_chat.*` methods below are the lower-level multi-agent group-chat **session primitive** that those team threads build on.
+The placeholder is what gets called between registry construction and orchestrator install — calls during that window return `INTERNAL_ERROR: group_chat.<method> requires GroupChatOrchestrator runtime - wire Gateway first`. In normal operation the orchestrator is installed before the first RPC arrives.
+
+For the durable per-team thread the Panel actually uses, see [teams.*](/docs/en/gateway/methods/teams) (`teams.chat.send` / `teams.chat.history` / `teams.chat.thread`).
 
 ## Methods
 
 ### group_chat.start
 
-Start a new group-chat session over a set of agents.
+Start a new group-chat session over a set of personas. When `initial_message` is supplied, executes the first round immediately and returns the round's messages.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "group_chat.start",
-  "params": {
-    "agents": ["planner", "coder", "reviewer"],
-    "topic": "Plan the v2 migration"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `personas` | object[] | yes | Each entry is a `PersonaSource` (e.g. `{ "kind": "Agent", "agent_id": "reviewer" }`) |
+| `topic` | string | no | Session topic |
+| `initial_message` | string | no | First user message — runs the first round |
+| `source_channel` | string | no | Defaults to `"rpc"` |
+| `source_session_key` | string | no | Defaults to `"rpc:direct"` |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "session_id": "gc-1",
-    "agents": ["planner", "coder", "reviewer"],
-    "created_at": "2024-01-15T10:30:00Z"
-  }
-}
-```
+**Response (no initial_message):** `{ "session_id" }`.
+
+**Response (with initial_message):** `{ "session_id", "messages": [ ...{session_id, speaker, content, round, sequence, is_final}... ] }`.
 
 ### group_chat.continue
 
-Advance the session with a new message and let the agents respond in turn.
+Advance the session with a new user message. The agents respond in turn up to `max_rounds`; once the limit is reached the session is force-ended and the call returns `INTERNAL_ERROR: Round limit exceeded`.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "group_chat.continue",
-  "params": {
-    "session_id": "gc-1",
-    "message": "What do you think about this approach?"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The id from `group_chat.start` |
+| `message` | string | yes | User message (non-empty) |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "messages": [
-      { "agent_id": "planner", "display_name": "Planner", "text": "This looks solid. I suggest..." },
-      { "agent_id": "coder", "display_name": "Coder", "text": "Implementation-wise, we could..." }
-    ]
-  }
-}
-```
+**Response:** `{ "session_id", "messages": [ ...{session_id, speaker, content, round, sequence, is_final}... ] }`.
 
 ### group_chat.mention
 
-Address a specific agent (or everyone) in the session — the panel's `@` roster auto-complete maps to this. Use `@all` to address all participants.
+Like `group_chat.continue`, but the `targets` array prioritises the mentioned personas in the round.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "group_chat.mention",
-  "params": {
-    "session_id": "gc-1",
-    "mention": "coder",
-    "message": "Can you sketch the schema change?"
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The id from `group_chat.start` |
+| `message` | string | yes | User message (non-empty) |
+| `targets` | string[] | no | Persona ids to prioritise (e.g. `["@all"]` or a specific `agent_id`) |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "messages": [
-      { "agent_id": "coder", "display_name": "Coder", "text": "Here's the migration outline..." }
-    ]
-  }
-}
-```
+**Response:** same shape as `group_chat.continue`. The panel's `@`-mention auto-complete maps to `targets`; `@all` expands to every participant.
 
 ### group_chat.history
 
-Get the message history for a session (powers the attribution-bubble replay).
+Get the conversation history for a session.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "group_chat.history",
-  "params": {
-    "session_id": "gc-1",
-    "limit": 50
-  }
-}
-```
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The id from `group_chat.start` |
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "messages": [
-      { "agent_id": "user", "display_name": "You", "text": "Plan the v2 migration" },
-      { "agent_id": "planner", "display_name": "Planner", "text": "This looks solid. I suggest..." }
-    ]
-  }
-}
-```
+**Response:** `{ "session_id", "history": [ ...{round, speaker, content, timestamp}... ], "current_round" }`. Read-only, safe to call at any time.
 
 ### group_chat.list
 
-List active group-chat sessions.
+List every active session. Sessions in any state other than `Active` are filtered out.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "group_chat.list",
-  "params": {}
-}
-```
+**Request:** no params.
+
+**Response:** `{ "sessions": [ ...{id, topic, participants: [{id, name}], current_round, status, created_at}... ] }`.
 
 ### group_chat.end
 
-End a group-chat session.
+End a group-chat session. The session Arc is dropped, the orchestrator forgets the session, and any in-flight executor round falls through.
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "group_chat.end",
-  "params": {
-    "session_id": "gc-1"
-  }
-}
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | yes | The id from `group_chat.start` |
+
+**Response:** `{ "ended": "<session_id>" }`.
+
+## Runtime lifecycle
+
 ```
+HandlerRegistry::new()       →  group_chat.* = service_unavailable placeholder
+   ↓
+register_group_chat_handlers →  group_chat.* = real handler (orchestrator-bound)
+   ↓
+session can be started
+```
+
+A minimal / simulated server that does not build a `GroupChatOrchestrator` keeps the placeholders forever. There is no runtime fallback that points `group_chat.*` at the `teams.chat.*` surface — the two namespaces share the same fan-out mechanics (the `teams` thread is built on top of the orchestrator's `GroupChatBroadcaster`), but the JSON-RPC contracts differ.
+
+## Concurrency
+
+Each session takes its own per-session lock for the duration of a round; the orchestrator lock is only held briefly to obtain the session handle. Different sessions proceed concurrently, and the round itself uses the same parallel-fan-out guard as `teams.chat.send` (chain depth + fan-out width).
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [teams.*](/docs/en/gateway/methods/teams) -- Durable per-team chat threads (`teams.chat.*`) and coordination
-- [Architecture: Group Chat](/docs/en/architecture/groupchat) -- Group chat architecture
-
----
-
-## 26.7.x Addendum
-
-### `group_chat.*` Full RPC
-
-- `group_chat.start` / `group_chat.end` / `group_chat.history` / `group_chat.list` / `group_chat.mention` / `group_chat.continue`
-
-### Team Chat Thread
-
-26.6.29+: the durable per-team chat thread (`teams.chat.*`) drives the three-panel group-chat window. `teams.chat.send` / `history` / `thread` / `cancel` supersede the older `group_chat.*`.
-
-### `teams.usage`
-
-26.7.x: team usage stats.
+- [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
+- [teams.*](/docs/en/gateway/methods/teams) -- The durable per-team chat thread built on top
+- [Architecture: Groups](/docs/en/architecture/groupchat) -- Group chat architecture

@@ -3,13 +3,22 @@ title: "agent.*"
 description: "Agent execution and control RPC methods"
 ---
 
-Agent methods control the core AI execution loop. Use these methods to start agent runs, stream responses, check execution status, retrieve conversation history, and clear sessions.
+Agent methods control Aleph's core AI execution loop (the Think→Act harness). `agent.*` is the direct entry used by panels and external integrations; chat-oriented clients normally use the [`chat.*`](./chat) family — both share the same execution adapter underneath.
 
 ## Methods
 
+| Method | Description |
+|--------|-------------|
+| [`agent.run`](#agentrun) | Start a run (asynchronous; returns `run_id` immediately) |
+| [`agent.status`](#agentstatus) | Poll a run's state by `run_id` |
+| [`agent.cancel`](#agentcancel) | Cancel an in-flight run |
+| [`agent.list`](#agentlist) | List agents registered in the router |
+
+> Historical aliases such as `agent.history` / `agent.clear` / `agent.respondToInput` / `agent.events` are not RPCs. Use `chat.history` / `chat.clear` for session reads and [`events.*`](./events) for streaming.
+
 ### agent.run
 
-Start an agent run with a user message. The agent will process the message through the Think→Act loop (Orchestrator → Harness → Thinker) and stream back the response via events.
+Start an agent run. The handler returns immediately with a `run_id`; the actual response is delivered as streaming events on the `stream.*` and `agent.*` topics.
 
 **Request:**
 ```json
@@ -18,10 +27,9 @@ Start an agent run with a user message. The agent will process the message throu
   "id": 1,
   "method": "agent.run",
   "params": {
-    "message": "Summarize today's news",
+    "input": "Summarize today's news",
     "session_key": "agent:main:main",
-    "thinking": "medium",
-    "model": null
+    "thinking": "medium"
   }
 }
 ```
@@ -33,62 +41,8 @@ Start an agent run with a user message. The agent will process the message throu
   "id": 1,
   "result": {
     "run_id": "run-uuid-123",
-    "status": "running",
-    "session_key": "agent:main:main"
-  }
-}
-```
-
-The response is returned immediately when the run starts. The actual output is delivered as streaming events -- subscribe to `stream.*` and `agent.*` topics to receive them.
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `message` | string | Yes | The user message to process |
-| `session_key` | string | No | Session key for context. Defaults to `"agent:main:main"` |
-| `thinking` | string | No | Thinking level: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`. Default: `"medium"` |
-| `model` | string | No | Override the model for this run (e.g. `"claude-sonnet-4-20250514"`) |
-
-**Stream Events:**
-
-After calling `agent.run`, the following events are emitted (if subscribed):
-
-| Topic | Description |
-|-------|-------------|
-| `agent.started` | Run has been queued and started |
-| `stream.start` | Streaming output is beginning |
-| `stream.chunk` | Text chunk from the agent response |
-| `stream.tool_start` | Agent is calling a tool |
-| `stream.tool_end` | Tool execution completed |
-| `stream.end` | Streaming output is complete |
-| `agent.completed` | Run finished successfully |
-| `agent.error` | Run encountered an error |
-
-### agent.cancel
-
-Cancel a running agent. The agent will stop at the next safe checkpoint and return a partial response.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "agent.cancel",
-  "params": {
-    "run_id": "run-uuid-123"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "cancelled": true,
-    "run_id": "run-uuid-123"
+    "session_key": "agent:main:main",
+    "accepted_at": "2026-03-15T10:00:00Z"
   }
 }
 ```
@@ -97,21 +51,39 @@ Cancel a running agent. The agent will stop at the next safe checkpoint and retu
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `run_id` | string | Yes | The run ID returned by `agent.run` |
+| `input` | string | Yes | User input; must be non-empty |
+| `session_key` | string | No | Session key; auto-derived if omitted |
+| `channel` | string | No | Channel identifier (e.g. `"cli:term1"`) |
+| `peer_id` | string | No | Per-peer session isolation key |
+| `stream` | boolean | No | Whether to emit streaming events (default `true`) |
+| `thinking` | string | No | Reasoning depth: `off` / `minimal` / `low` / `medium` / `high` / `xhigh` (default `minimal`) |
+| `attachments` | object[] | No | File attachments (`name` / `mime_type` / base64 `data`) |
+| `agent_id` | string | No | Explicit target agent, bypasses channel binding |
+| `project_root` | string | No | Project root, overrides the default workspace |
+| `model_override` | object | No | Per-turn model override (see [`model_override`](./chat#chat-send)) |
+| `exec_tier` | string | No | Execution tier chosen in the composer (first-turn only) |
+| `mode` | string | No | Session mode: `chat` / `work` / `code` |
+| `voice_input` | boolean | No | Mark the turn as ASR-transcribed speech |
+
+**Response fields:**
+
+| Field | Description |
+|--------|-------------|
+| `run_id` | Unique run identifier; pair with `agent.status` / `agent.cancel` |
+| `session_key` | Resolved session key |
+| `accepted_at` | RFC3339 UTC timestamp |
 
 ### agent.status
 
-Get the current status of an agent run. Useful for polling-based clients that do not use event subscriptions.
+Look up the current state of a run by `run_id`.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
+  "id": 2,
   "method": "agent.status",
-  "params": {
-    "run_id": "run-uuid-123"
-  }
+  "params": { "run_id": "run-uuid-123" }
 }
 ```
 
@@ -119,181 +91,131 @@ Get the current status of an agent run. Useful for polling-based clients that do
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 3,
+  "id": 2,
   "result": {
     "run_id": "run-uuid-123",
-    "status": "completed",
-    "started_at": 1706400000000,
-    "completed_at": 1706400005000,
-    "iterations": 3,
-    "tokens_used": 1247,
-    "tools_called": ["shell:exec", "file:read"]
+    "session_key": "agent:main:main",
+    "status": "running",
+    "elapsed_ms": 1247
   }
 }
 ```
 
-**Parameters:**
+`status` is one of `running` / `completed` / `failed` / `cancelled`. An unknown `run_id` returns `-32602 Invalid params`.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `run_id` | string | Yes | The run ID to query |
+### agent.cancel
 
-**Status Values:**
-
-| Status | Description |
-|--------|-------------|
-| `pending` | Queued, not yet started |
-| `running` | Currently executing |
-| `completed` | Finished successfully |
-| `cancelled` | Cancelled by user |
-| `failed` | Encountered an error |
-
-### agent.respondToInput
-
-Send a response to an agent that is waiting for human input (human-in-the-loop). Used when the agent has paused execution pending user approval or additional information.
+Cancel an in-flight run. The cancel token is forwarded to the execution adapter; the run stops at the next safe checkpoint and releases its resources.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 4,
-  "method": "agent.respondToInput",
-  "params": {
-    "run_id": "run-uuid-123",
-    "response": "Yes, proceed with the deletion"
-  }
+  "id": 3,
+  "method": "agent.cancel",
+  "params": { "run_id": "run-uuid-123" }
 }
 ```
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "accepted": true,
-    "run_id": "run-uuid-123"
-  }
-}
+{ "jsonrpc": "2.0", "id": 3, "result": { "run_id": "run-uuid-123", "cancelled": true } }
 ```
 
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `run_id` | string | Yes | The run ID waiting for input |
-| `response` | string | Yes | The user's response text |
+`cancelled` indicates the cancel request was accepted; the transitional state until the run truly stops is visible via `agent.status`.
 
 ### agent.list
 
-List all available agents configured in the system.
+List every agent registered in the `AgentRouter` plus the current default.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "agent.list",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 4, "method": "agent.list" }
 ```
 
 **Response:**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 5,
+  "id": 4,
   "result": {
     "agents": [
-      {
-        "id": "main",
-        "name": "Main Agent",
-        "description": "General-purpose assistant",
-        "model": "claude-sonnet-4-20250514",
-        "enabled": true
-      },
-      {
-        "id": "coder",
-        "name": "Code Assistant",
-        "description": "Specialized for programming tasks",
-        "model": "gpt-4o",
-        "enabled": true
-      }
+      { "id": "main", "name": "Main", "enabled": true, "is_default": true }
     ],
-    "total": 2
+    "default": "main"
   }
 }
 ```
 
-**Parameters:**
+Each entry exposes `id` / `name` / `enabled` / `is_default`, exactly as returned by `AgentRouter::list_agents()`.
 
-None.
+## Streaming Events
+
+After `agent.run` is accepted, the event bus delivers run lifecycle changes as WebSocket notifications (topic names come from `GatewayEventFrame::topic_name()`):
+
+| Topic | Description |
+|-------|-------------|
+| `run.accepted` | Run queued and started |
+| `agent.reasoning` | Reasoning-phase output |
+| `agent.reasoning.block` | Reasoning block (dual-process cognition) |
+| `agent.tool.start` | Tool call begins |
+| `agent.tool.update` | Tool progress update |
+| `agent.tool.end` | Tool call ends |
+| `agent.trace` | Execution-trace event |
+| `agent.response.chunk` | Response text chunk |
+| `agent.context.gauge` | Context-window utilisation |
+| `agent.run.complete` | Run completed successfully |
+| `agent.run.error` | Run failed |
+| `agent.run.retrying` | Failure-driven retry |
+| `agent.ask.user` | `ask_user` clarification request |
+| `agent.clarification.ended` | Clarification round resolved |
+| `agent.uncertainty` | Model uncertainty signal |
+| `agent.model.resolved` | Model selection resolved |
+
+Non-streaming events share the same bus:
+
+| Topic | Description |
+|-------|-------------|
+| `session.updated` / `session.lifecycle.changed` | Session changes |
+| `running.set.changed` | Active-run set changes |
+| `channel.message` / `channel.typing` / `channel.status` / `channel.error` | Channel events |
+| `config.changed` | Configuration change |
+| `approval.requested` / `approval.resolved` / `approval.expired` | Approval requests |
+| `cron.job.changed` / `heartbeat.task.changed` | Scheduler task changes |
+| `team.changed` | Team changes |
+| `acp.sessions.changed` | ACP session changes |
+| `gateway.token.rotated` / `gateway.device.revoked` | Gateway credential events |
+| `surface.notify` / `surface.approval` | Surface notifications |
+| `runtimes.install.progress` | Runtime installation progress |
 
 ## Session Key Formats
 
-Agent methods accept a `session_key` parameter that determines context isolation. See the [Protocol](/docs/en/gateway/protocol) page for WebSocket transport details.
+The `session_key` parameter determines context isolation. See the [Protocol](../protocol) page for WebSocket transport details.
 
 | Format | Example | Description |
 |--------|---------|-------------|
 | Main | `agent:main:main` | Shared cross-channel session |
 | DM | `agent:main:telegram:dm:user123` | Per-user direct message |
 | Group | `agent:main:discord:group:guild-id` | Group/channel chat |
-| Task | `agent:main:cron:daily-summary` | Cron job or webhook task |
-| Ephemeral | `agent:main:ephemeral:uuid` | Temporary, no persistence |
+| Task | `agent:main:cron:daily-summary` | Cron or webhook task |
+| Ephemeral | `agent:main:ephemeral:uuid` | Temporary, non-persistent |
 
 ## Thinking Levels
 
-The `thinking` parameter controls how much reasoning the agent performs before responding.
+`thinking` controls how much reasoning the agent performs before responding.
 
-| Level | Token Budget | Use Case |
-|-------|-------------|----------|
-| `off` | 0 | Fast, direct answers |
-| `minimal` | 1,024 | Simple queries |
-| `low` | 2,048 | Standard conversation |
-| `medium` | 4,096 | Complex tasks (default) |
-| `high` | 8,192 | Multi-step reasoning |
-| `xhigh` | 16,384 | Deep analysis |
+| Level | Use Case |
+|-------|---------|
+| `off` | Fast, direct answers |
+| `minimal` | Simple queries (default) |
+| `low` | Standard conversation |
+| `medium` | Complex tasks |
+| `high` | Multi-step reasoning |
+| `xhigh` | Deep analysis |
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [events.*](/docs/en/gateway/methods/events) -- Subscribe to agent events
-- [session.*](/docs/en/gateway/methods/session) -- Session management
-
----
-
-## 26.7.x Addendum
-
-### `agent.run` / `agent.status` / `agent.cancel` / `agent.list`
-
-26.7.x: base agent RPC. `chat.send` / `chat.abort` / `chat.history` / `chat.clear` are the more modern entry points.
-
-### `chat.*` Preferred
-
-26.7.x prefer `chat.*` over `agent.*`:
-
-- `chat.send` — send a message (with `session_mode` field)
-- `chat.abort` — abort a run
-- `chat.history` — history
-- `chat.clear` — clear
-- `chat.context_estimate` — context-window estimate
-- `chat.rewind` — rewind to an earlier turn
-
-### `session.*` / `sessions.*`
-
-- `session.usage` — usage + cost (core-priced)
-- `session.compact` — `/compact` equivalent
-- `session.truncate` — `truncate_to_fit` floor
-- `sessions.list` / `sessions.history` / `sessions.new` / `sessions.preview` / `sessions.delete` / `sessions.patch` / `sessions.set_project_root` / `sessions.set_topic` / `sessions.reset`
-
-### `agents.*`
-
-- `agents.list` / `agents.get` / `agents.create` / `agents.update` / `agents.delete` / `agents.set_default`
-- `agents.files.list` / `get` / `set` / `delete`
-- `agents.tools_schema` — tool schema
-- `agents.teams` — list the agent's teams
-- `agents.bindings` — agent ↔ channel binding
-
-### `subagent.tree`
-
-26.7.x: returns the subagent tree (node identity + live events + tree RPC).
+- [Methods Reference](./index) -- All method namespaces
+- [events.*](./events) -- Subscribe to agent events
+- [chat.*](./chat) -- Chat interface (`chat.send` / `chat.abort` / ...)
+- [session.*](./session) -- Session management

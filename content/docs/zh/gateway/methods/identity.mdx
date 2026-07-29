@@ -3,21 +3,40 @@ title: "identity.*"
 description: "身份和灵魂管理 RPC 方法"
 ---
 
-身份方法管理会话期间 AI 的身份（灵魂）。获取有效身份、设置会话级覆盖和列出可用身份源。
+`identity.*` 读写代理目录下的身份文件（`~/.aleph/agents/{agent_id}/`），即每轮提示中 `SoulLayer` / `IdentityFilesLayer` 真正读取的文件。所有方法都在 boot 路径由 `register_identity_handlers` 接入 `SharedIdentityCtx`（默认代理 ID 在启动时捕获），运行时通过 `JsonRpcRequest` 中的可选 `agent_id` 字段覆盖目标代理。
 
 ## 方法
 
+| 方法 | 说明 |
+|--------|-------------|
+| [`identity.get`](#identityget) | 读取 `SOUL.md` 原文与结构化预览，附带身份文件状态 |
+| [`identity.set`](#identityset) | 写入身份文件（默认 `SOUL.md`），旧版本自动备份 |
+| [`identity.clear`](#identityclear) | 移除身份文件（恢复默认 persona） |
+| [`identity.list`](#identitylist) | 列出全部身份文件的存在 / 大小状态 |
+
+> 历史文档中提到的 `identity.sign` / `identity.verify` / `identity.rotate` 不是 RPC；签名 / 验证链由 `src/gateway/security/crypto.rs` 提供，但仅供网关内部委托链使用，**未对外暴露**为 JSON-RPC 方法。
+
+## 身份文件清单
+
+`IDENTITY_FILE_NAMES`（`src/thinker/identity_files.rs:17`）定义了 5 个规范文件，按以下顺序加载：
+
+| 文件 | 用途 |
+|--------|---------|
+| `SOUL.md` | 核心 persona / 身份声明 |
+| `IDENTITY.md` | 身份元数据 |
+| `AGENTS.md` | 代理补充说明 |
+| `TOOLS.md` | 工具补充说明 |
+| `HEARTBEAT.md` | 心跳探测补充说明 |
+
+`MEMORY.md` 不在白名单内（写入会被 `validate_identity_file_name` 拒绝），记忆系统使用独立存储。
+
 ### identity.get
 
-返回当前会话的有效 SoulManifest，包括会话覆盖是否处于活动状态。
+读取指定代理身份的 `SOUL.md` 原文 + 结构化解析（来自 `SoulManifest::from_file` 的尽力解析），并返回全部身份文件的状态。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "identity.get"
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "identity.get", "params": { "agent_id": "main" } }
 ```
 
 **响应：**
@@ -26,32 +45,27 @@ description: "身份和灵魂管理 RPC 方法"
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "soul": {
-      "identity": "I am Aleph, your AI assistant.",
-      "directives": ["Be helpful", "Be concise"]
-    },
-    "has_session_override": false
+    "agent_id": "main",
+    "soul_md": "I am Aleph, calm and precise.\n",
+    "parsed": { "identity": "I am Aleph", "relationship": "peer" },
+    "files": [
+      { "name": "SOUL.md", "exists": true, "size_bytes": 4096, "path": "/home/user/.aleph/agents/main/SOUL.md" },
+      { "name": "IDENTITY.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/IDENTITY.md" }
+    ],
+    "has_custom_identity": true
   }
 }
 ```
+
+`agent_id` 可省略，省略时使用启动时捕获的默认代理。`agent_id` 字段必须通过路径安全校验（不允许 `..`、路径分隔符或 NUL 字符）。
 
 ### identity.set
 
-设置会话级身份覆盖。这会临时更改当前会话的 AI 行为，而无需修改全局身份文件。
+写入身份文件，默认目标是 `SOUL.md`。写入前会先调用 `backup_identity_file` 将旧文件快照到 `<agent_dir>/backups/<file>.<UTC timestamp>`（保留最近 5 个备份）。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "identity.set",
-  "params": {
-    "soul": {
-      "identity": "I am a specialized coding assistant.",
-      "directives": ["Focus on code quality", "Explain concisely"]
-    }
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "method": "identity.set", "params": { "content": "You are Aleph, calm and precise.", "file_name": "SOUL.md" } }
 ```
 
 **响应：**
@@ -60,7 +74,12 @@ description: "身份和灵魂管理 RPC 方法"
   "jsonrpc": "2.0",
   "id": 2,
   "result": {
-    "success": true
+    "success": true,
+    "agent_id": "main",
+    "file_name": "SOUL.md",
+    "bytes_written": 33,
+    "backup_path": "/home/user/.aleph/agents/main/backups/SOUL.md.20260315T100000000Z",
+    "note": "Identity updated. Takes effect on the next turn."
   }
 }
 ```
@@ -69,21 +88,18 @@ description: "身份和灵魂管理 RPC 方法"
 
 | 参数 | 类型 | 必填 | 说明 |
 |-----------|------|----------|-------------|
-| `soul` | object | 是 | 要应用的 SoulManifest |
-| `soul.identity` | string | 是 | 身份声明 |
-| `soul.directives` | string[] | 否 | 行为指令 |
+| `content` | string | 是 | 完整 markdown 内容；单文件最大 1 MB |
+| `file_name` | string | 否 | 目标文件名（必须在 `IDENTITY_FILE_NAMES` 白名单内），默认 `SOUL.md` |
+
+写入立即生效：每轮提示都会重新读取 `SOUL.md`，所以下一次 turn 即可看到新身份。
 
 ### identity.clear
 
-清除会话级身份覆盖，恢复到全局身份。
+移除身份文件（默认 `SOUL.md`），恢复默认 persona。已删除的 `clear` 是幂等的——再次清除会返回 `had_content: false` 而非错误。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "identity.clear"
-}
+{ "jsonrpc": "2.0", "id": 3, "method": "identity.clear", "params": { "file_name": "SOUL.md" } }
 ```
 
 **响应：**
@@ -93,22 +109,24 @@ description: "身份和灵魂管理 RPC 方法"
   "id": 3,
   "result": {
     "success": true,
-    "had_override": true
+    "agent_id": "main",
+    "file_name": "SOUL.md",
+    "had_content": true,
+    "backup_path": "/home/user/.aleph/agents/main/backups/SOUL.md.20260315T100000000Z",
+    "note": "Identity reverted to default. Takes effect on the next turn."
   }
 }
 ```
 
+**参数：** `file_name`（可选，默认 `SOUL.md`，同 `identity.set` 的白名单校验）。
+
 ### identity.list
 
-列出所有可用身份源及其加载状态。
+列出全部身份文件的存在 / 大小 / 路径。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "identity.list"
-}
+{ "jsonrpc": "2.0", "id": 4, "method": "identity.list", "params": { "agent_id": "main" } }
 ```
 
 **响应：**
@@ -117,73 +135,32 @@ description: "身份和灵魂管理 RPC 方法"
   "jsonrpc": "2.0",
   "id": 4,
   "result": {
-    "sources": [
-      {
-        "source_type": "global",
-        "path": "/Users/user/.aleph/soul.md",
-        "loaded": true
-      },
-      {
-        "source_type": "session",
-        "path": "<session>",
-        "loaded": true
-      }
+    "agent_id": "main",
+    "files": [
+      { "name": "SOUL.md", "exists": true, "size_bytes": 4096, "path": "/home/user/.aleph/agents/main/SOUL.md" },
+      { "name": "IDENTITY.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/IDENTITY.md" },
+      { "name": "AGENTS.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/AGENTS.md" },
+      { "name": "TOOLS.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/TOOLS.md" },
+      { "name": "HEARTBEAT.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/HEARTBEAT.md" }
     ]
   }
 }
 ```
 
-**源类型：**
+## 安全约束
 
-| 类型 | 说明 |
-|------|-------------|
-| `global` | 从 `~/.aleph/soul.md` 加载 |
-| `session` | 会话级覆盖（通过 `identity.set` 设置） |
+`IdentityHandlerContext::resolve` 拒绝任何包含以下字符的 `agent_id`：
 
-## 身份文件
+- `/` 或 `\`（路径分隔符）
+- `..`（路径穿越）
+- NUL 字符（`\0`）
 
-全局身份从 `~/.aleph/soul.md` 加载。这是一个包含以下内容的 markdown 文件：
+无效 `agent_id` 返回 `-32602 Invalid params`。
 
-```markdown
-# Soul
+## 与 self_config 工具的关系
 
-I am Aleph, a polymorphic AI assistant.
-
-## Directives
-
-- Be helpful and accurate
-- Be concise unless asked for detail
-- Respect user privacy
-```
+`identity.*` RPC 与 `self_config` LLM 工具读写同一组文件：工具的写入会立即被下一次 RPC 读取到，反之亦然。两者都通过 `crate::thinker::identity_files` 模块。
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### `identity.*` RPC
-
-- `identity.get` / `identity.list` / `identity.set` / `identity.clear`
-
-### `gateway.identity.get` / `gateway.credentials`
-
-网关侧身份与凭据。
-
-### `agents.bindings` / `channels.set_agent`
-
-agent ↔ channel 绑定。
-
-### 委托角色链
-
-26.7.26+：身份链路生命周期内闭包；`SignerKey` 由对应 Agent 持有；`OperationLedger` 由签名者所属链路回放。
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### 失败关闭
-
-26.7.21+：策略文件缺失或不一致**拒绝授权**。
+- [方法参考](./index)——所有方法命名空间

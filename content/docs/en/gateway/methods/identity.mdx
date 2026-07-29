@@ -3,21 +3,40 @@ title: "identity.*"
 description: "Identity and soul management RPC methods"
 ---
 
-Identity methods manage the AI's identity (soul) during sessions. Get the effective identity, set session-level overrides, and list available identity sources.
+`identity.*` reads and writes the identity files under each agent's directory (`~/.aleph/agents/{agent_id}/`) — the very files that `SoulLayer` / `IdentityFilesLayer` inject into every turn's prompt. All methods are wired at boot by `register_identity_handlers` against a `SharedIdentityCtx` (the default agent ID is captured at startup); the optional `agent_id` field on each request overrides the target agent.
 
 ## Methods
 
+| Method | Description |
+|--------|-------------|
+| [`identity.get`](#identityget) | Read the live `SOUL.md` (raw + structured preview) and the status of every identity file |
+| [`identity.set`](#identityset) | Write an identity file (default `SOUL.md`), snapshotting the prior version |
+| [`identity.clear`](#identityclear) | Remove an identity file (revert to default persona) |
+| [`identity.list`](#identitylist) | List existence / size of every identity file |
+
+> Historical references to `identity.sign` / `identity.verify` / `identity.rotate` are not RPCs. The sign / verify chain lives in `src/gateway/security/crypto.rs` for internal delegation only and is **not** exposed via JSON-RPC.
+
+## Identity File Catalogue
+
+`IDENTITY_FILE_NAMES` (`src/thinker/identity_files.rs:17`) defines the five canonical files, loaded in this order:
+
+| File | Purpose |
+|--------|---------|
+| `SOUL.md` | Core persona / identity statement |
+| `IDENTITY.md` | Identity metadata |
+| `AGENTS.md` | Agent-supplemental notes |
+| `TOOLS.md` | Tool-supplemental notes |
+| `HEARTBEAT.md` | Heartbeat-probe supplemental notes |
+
+`MEMORY.md` is not whitelisted (writes are rejected by `validate_identity_file_name`); the memory system uses its own storage.
+
 ### identity.get
 
-Returns the effective SoulManifest for the current session, including whether a session override is active.
+Read the target agent's live `SOUL.md` (raw + best-effort structured parse via `SoulManifest::from_file`) plus the status of every identity file.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "identity.get"
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "identity.get", "params": { "agent_id": "main" } }
 ```
 
 **Response:**
@@ -26,32 +45,27 @@ Returns the effective SoulManifest for the current session, including whether a 
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "soul": {
-      "identity": "I am Aleph, your AI assistant.",
-      "directives": ["Be helpful", "Be concise"]
-    },
-    "has_session_override": false
+    "agent_id": "main",
+    "soul_md": "I am Aleph, calm and precise.\n",
+    "parsed": { "identity": "I am Aleph", "relationship": "peer" },
+    "files": [
+      { "name": "SOUL.md", "exists": true, "size_bytes": 4096, "path": "/home/user/.aleph/agents/main/SOUL.md" },
+      { "name": "IDENTITY.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/IDENTITY.md" }
+    ],
+    "has_custom_identity": true
   }
 }
 ```
+
+`agent_id` is optional; when omitted, the default captured at boot is used. The field must pass the path-safety check (no `..`, no separators, no NUL).
 
 ### identity.set
 
-Sets a session-level identity override. This temporarily changes the AI's behavior for the current session without modifying the global identity file.
+Write an identity file (default `SOUL.md`). Before writing, `backup_identity_file` snapshots the prior version into `<agent_dir>/backups/<file>.<UTC timestamp>` (the newest 5 backups are kept).
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "identity.set",
-  "params": {
-    "soul": {
-      "identity": "I am a specialized coding assistant.",
-      "directives": ["Focus on code quality", "Explain concisely"]
-    }
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "method": "identity.set", "params": { "content": "You are Aleph, calm and precise.", "file_name": "SOUL.md" } }
 ```
 
 **Response:**
@@ -60,7 +74,12 @@ Sets a session-level identity override. This temporarily changes the AI's behavi
   "jsonrpc": "2.0",
   "id": 2,
   "result": {
-    "success": true
+    "success": true,
+    "agent_id": "main",
+    "file_name": "SOUL.md",
+    "bytes_written": 33,
+    "backup_path": "/home/user/.aleph/agents/main/backups/SOUL.md.20260315T100000000Z",
+    "note": "Identity updated. Takes effect on the next turn."
   }
 }
 ```
@@ -69,21 +88,18 @@ Sets a session-level identity override. This temporarily changes the AI's behavi
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `soul` | object | Yes | SoulManifest to apply |
-| `soul.identity` | string | Yes | Identity statement |
-| `soul.directives` | string[] | No | Behavioral directives |
+| `content` | string | Yes | Full markdown content; max 1 MB per file |
+| `file_name` | string | No | Target file (must be in the `IDENTITY_FILE_NAMES` whitelist); default `SOUL.md` |
+
+Changes take effect on the next turn: every prompt re-reads `SOUL.md`.
 
 ### identity.clear
 
-Clears the session-level identity override, reverting to the global identity.
+Remove an identity file (default `SOUL.md`) and revert to the default persona. `clear` is idempotent: clearing an absent file returns `had_content: false` rather than an error.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "identity.clear"
-}
+{ "jsonrpc": "2.0", "id": 3, "method": "identity.clear", "params": { "file_name": "SOUL.md" } }
 ```
 
 **Response:**
@@ -93,22 +109,24 @@ Clears the session-level identity override, reverting to the global identity.
   "id": 3,
   "result": {
     "success": true,
-    "had_override": true
+    "agent_id": "main",
+    "file_name": "SOUL.md",
+    "had_content": true,
+    "backup_path": "/home/user/.aleph/agents/main/backups/SOUL.md.20260315T100000000Z",
+    "note": "Identity reverted to default. Takes effect on the next turn."
   }
 }
 ```
 
+**Parameter:** `file_name` (optional, default `SOUL.md`, same whitelist check as `identity.set`).
+
 ### identity.list
 
-Lists all available identity sources and their load status.
+List every identity file with existence / size / path.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "identity.list"
-}
+{ "jsonrpc": "2.0", "id": 4, "method": "identity.list", "params": { "agent_id": "main" } }
 ```
 
 **Response:**
@@ -117,73 +135,32 @@ Lists all available identity sources and their load status.
   "jsonrpc": "2.0",
   "id": 4,
   "result": {
-    "sources": [
-      {
-        "source_type": "global",
-        "path": "/Users/user/.aleph/soul.md",
-        "loaded": true
-      },
-      {
-        "source_type": "session",
-        "path": "<session>",
-        "loaded": true
-      }
+    "agent_id": "main",
+    "files": [
+      { "name": "SOUL.md", "exists": true, "size_bytes": 4096, "path": "/home/user/.aleph/agents/main/SOUL.md" },
+      { "name": "IDENTITY.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/IDENTITY.md" },
+      { "name": "AGENTS.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/AGENTS.md" },
+      { "name": "TOOLS.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/TOOLS.md" },
+      { "name": "HEARTBEAT.md", "exists": false, "size_bytes": 0, "path": "/home/user/.aleph/agents/main/HEARTBEAT.md" }
     ]
   }
 }
 ```
 
-**Source Types:**
+## Safety Constraints
 
-| Type | Description |
-|------|-------------|
-| `global` | Loaded from `~/.aleph/soul.md` |
-| `session` | Session-level override (set via `identity.set`) |
+`IdentityHandlerContext::resolve` rejects any `agent_id` containing:
 
-## Identity File
+- `/` or `\` (path separators)
+- `..` (path traversal)
+- NUL (`\0`)
 
-The global identity is loaded from `~/.aleph/soul.md`. This is a markdown file containing:
+An invalid `agent_id` returns `-32602 Invalid params`.
 
-```markdown
-# Soul
+## Relation to the `self_config` Tool
 
-I am Aleph, a polymorphic AI assistant.
-
-## Directives
-
-- Be helpful and accurate
-- Be concise unless asked for detail
-- Respect user privacy
-```
+`identity.*` RPC and the `self_config` LLM tool read and write the same files: a tool write is immediately visible to the next RPC read, and vice versa. Both paths go through `crate::thinker::identity_files`.
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-
----
-
-## 26.7.x Addendum
-
-### `identity.*` RPC
-
-- `identity.get` / `identity.list` / `identity.set` / `identity.clear`
-
-### `gateway.identity.get` / `gateway.credentials`
-
-Gateway-side identity and credentials.
-
-### `agents.bindings` / `channels.set_agent`
-
-agent ↔ channel binding.
-
-### Delegated Role Chain
-
-26.7.26+: the identity chain is closed within the chain's lifecycle; `SignerKey` is held by the corresponding Agent; `OperationLedger` is replayable against the chain the signer belongs to.
-
-### Real Client IP
-
-26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
-
-### Fail-Closed
-
-26.7.21+: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+- [Methods Reference](./index) -- All method namespaces

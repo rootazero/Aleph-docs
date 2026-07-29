@@ -3,68 +3,81 @@ title: "events.*"
 description: "事件订阅和流式 RPC 方法"
 ---
 
-事件方法管理 WebSocket 连接上的实时事件订阅。使用 glob 模式订阅主题，以接收有关代理活动、流式输出、配置更改等的通知。
+`events.*` 管理 WebSocket 连接上的实时事件订阅。所有事件都通过同一个主题总线投递（`src/gateway/event_bus.rs`），并由 `SubscriptionManager` 按连接维护订阅。
+
+## 方法
+
+| 方法 | 说明 |
+|--------|-------------|
+| [`events.subscribe`](#eventssubscribe) | 添加主题订阅（累加） |
+| [`events.unsubscribe`](#eventsunsubscribe) | 移除主题订阅 |
+| [`events.list`](#eventslist) | 列出当前连接的活动订阅 |
 
 ## 事件传递
 
-事件作为 WebSocket 连接上的 JSON-RPC 通知（无 `id` 字段）传递：
+事件以 WebSocket 上的 JSON-RPC 通知（无 `id` 字段）形式投递，结构由 `TopicEvent` 序列化：
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-uuid-123",
-      "content": "Here is the response..."
-    },
+    "topic": "agent.run.complete",
+    "data": { "run_id": "run-uuid-123", "duration_ms": 5000 },
     "timestamp": 1706400000000
   }
 }
 ```
 
-事件是即发即弃的：服务器发送它们而不等待确认。如果客户端断开连接，断开连接期间的事件将丢失。
-
-## 方法
+事件为即发即弃：服务器推送，不等待确认；客户端断连期间的事件会丢失。每条事件主题名由 `GatewayEventFrame::topic_name()` 返回，详见[事件主题](#事件主题)。
 
 ### events.subscribe
 
-使用 glob 模式订阅一个或多个事件主题。订阅是累加的——多次调用 subscribe 会添加新模式而不会删除现有模式。
+订阅一个或多个主题。订阅是**累加的**——多次调用会持续追加模式，不影响已有订阅。
 
-**请求：**
+**请求（仅模式）：**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "method": "events.subscribe",
   "params": {
-    "patterns": ["stream.*", "agent.*"]
+    "topics": ["agent.run.*", "session.*"]
+  }
+}
+```
+
+**请求（带字段过滤）：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "events.subscribe",
+  "params": {
+    "topics": [
+      "agent.run.*",
+      { "topic": "tools.changed", "where": [{ "field": "scope", "equals": "extension" }] }
+    ]
   }
 }
 ```
 
 **响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "subscribed": ["stream.*", "agent.*"],
-    "active_patterns": ["stream.*", "agent.*"]
-  }
-}
+{ "jsonrpc": "2.0", "id": 1, "result": { "subscribed": ["agent.run.*", "session.*"], "changed": 2 } }
 ```
 
 **参数：**
 
 | 参数 | 类型 | 必填 | 说明 |
 |-----------|------|----------|-------------|
-| `patterns` | string[] | 是 | 要订阅的 glob 模式数组 |
+| `topics` | array | 是 | 主题选择器数组；每个元素为字符串模式或 `{topic, where}` 过滤对象 |
+
+`where` 子句中的每个谓词为 `{ "field": "<json_pointer>", "equals": <value> }`；payload 中对应字段必须严格等于给定值才会投递。无 payload 时带谓词的订阅会被跳过（不会盲目放行）。
 
 ### events.unsubscribe
 
-删除一个或多个事件订阅。模式必须与订阅的内容完全匹配。
+按精确匹配移除模式。模式必须与已订阅的形式完全一致才会被移除。
 
 **请求：**
 ```json
@@ -72,247 +85,133 @@ description: "事件订阅和流式 RPC 方法"
   "jsonrpc": "2.0",
   "id": 2,
   "method": "events.unsubscribe",
-  "params": {
-    "patterns": ["stream.*"]
-  }
+  "params": { "topics": ["agent.run.*"] }
 }
 ```
 
 **响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "unsubscribed": ["stream.*"],
-    "active_patterns": ["agent.*"]
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "result": { "subscribed": ["session.*"], "changed": 1 } }
 ```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `patterns` | string[] | 是 | 要取消订阅的模式数组 |
 
 ### events.list
 
-列出当前 WebSocket 连接的所有活动事件订阅。
+列出当前连接的全部已订阅模式。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "events.list"
-}
+{ "jsonrpc": "2.0", "id": 3, "method": "events.list" }
 ```
 
 **响应：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "patterns": ["agent.*"],
-    "total": 1
-  }
-}
+{ "jsonrpc": "2.0", "id": 3, "result": { "subscribed": ["session.*"] } }
 ```
-
-此方法不接受参数。
 
 ## 事件主题
 
-### 流式事件（`stream.*`）
+主题空间按命名空间分组；同一组事件可能在 `events.subscribe` 中用通配 `*` 一并订阅。
 
-在代理响应生成期间发出。
+### Run / Agent 生命周期（`run.*`、`agent.*`）
 
-| 主题 | 说明 | 数据字段 |
-|-------|-------------|-------------|
-| `stream.start` | 响应流式传输开始 | `run_id` |
-| `stream.chunk` | 代理的文本块 | `run_id`, `content` |
-| `stream.tool_start` | 代理正在调用工具 | `run_id`, `tool_name`, `args` |
-| `stream.tool_end` | 工具执行完成 | `run_id`, `tool_name`, `result`, `duration_ms` |
-| `stream.thinking` | 推理步骤（CoT 透明性） | `run_id`, `step_type`, `content` |
-| `stream.end` | 响应流式传输完成 | `run_id` |
+| 主题 | 说明 |
+|-------|-------------|
+| `run.accepted` | run 已入队并启动 |
+| `agent.reasoning` | 思考阶段输出 |
+| `agent.reasoning.block` | 推理块（双过程认知） |
+| `agent.tool.start` | 工具调用开始 |
+| `agent.tool.update` | 工具进度更新 |
+| `agent.tool.end` | 工具调用结束 |
+| `agent.trace` | 执行轨迹事件 |
+| `agent.response.chunk` | 响应文本块 |
+| `agent.context.gauge` | 上下文窗口使用率 |
+| `agent.run.complete` | run 成功完成 |
+| `agent.run.error` | run 出错 |
+| `agent.run.retrying` | 失败重试 |
+| `agent.ask.user` | `ask_user` 触发澄清 |
+| `agent.clarification.ended` | 澄清回合结束 |
+| `agent.uncertainty` | 模型不确定性信号 |
+| `agent.model.resolved` | 模型选择已解析 |
 
-**示例——stream.chunk：**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-uuid-123",
-      "content": "Based on my analysis, "
-    }
-  }
-}
-```
+### Session / Running Set
 
-**示例——stream.tool_start：**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.tool_start",
-    "data": {
-      "run_id": "run-uuid-123",
-      "tool_name": "shell:exec",
-      "args": { "command": "git log --oneline -5" }
-    }
-  }
-}
-```
+| 主题 | 说明 |
+|-------|-------------|
+| `session.updated` | 会话元数据更新 |
+| `session.lifecycle.changed` | 会话生命周期阶段变化 |
+| `running.set.changed` | 活跃 run 集合变化 |
 
-### 代理事件（`agent.*`）
+### Channels
 
-在代理生命周期更改时发出。
+| 主题 | 说明 |
+|-------|-------------|
+| `channel.message` | 入站消息 |
+| `channel.typing` | 输入指示器 |
+| `channel.status` | 通道运行状态 |
+| `channel.error` | 通道错误 |
 
-| 主题 | 说明 | 数据字段 |
-|-------|-------------|-------------|
-| `agent.started` | 代理运行已启动 | `run_id`, `session_key` |
-| `agent.completed` | 代理运行完成 | `run_id`, `session_key`, `tokens_used` |
-| `agent.error` | 代理运行遇到错误 | `run_id`, `error` |
-| `agent.cancelled` | 代理运行被取消 | `run_id` |
+### Config / Approvals
 
-**示例——agent.completed：**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "agent.completed",
-    "data": {
-      "run_id": "run-uuid-123",
-      "session_key": "agent:main:main",
-      "tokens_used": 1247,
-      "duration_ms": 5000
-    }
-  }
-}
-```
+| 主题 | 说明 |
+|-------|-------------|
+| `config.changed` | 配置变更（来自 `[gateway.config_watcher]` 热重载或 RPC） |
+| `approval.requested` / `approval.resolved` / `approval.expired` | 审批生命周期 |
 
-### 会话事件（`session.*`）
+### Cron / Heartbeat
 
-在会话状态更改时发出。
+| 主题 | 说明 |
+|-------|-------------|
+| `cron.job.changed` | cron 任务变更（含 `cron.run` 触发） |
+| `heartbeat.task.changed` | 心跳任务变更 |
 
-| 主题 | 说明 | 数据字段 |
-|-------|-------------|-------------|
-| `session.created` | 新会话已创建 | `session_key` |
-| `session.deleted` | 会话已删除 | `session_key` |
-| `session.compacted` | 会话已压缩 | `session_key`, `tokens_before`, `tokens_after` |
+### Teams / ACP / Gateway 凭据
 
-### 配置事件（`config.*`）
+| 主题 | 说明 |
+|-------|-------------|
+| `team.changed` | 团队组成或任务变更 |
+| `acp.sessions.changed` | ACP 会话集合变化 |
+| `gateway.token.rotated` | 网关 token 轮换 |
+| `gateway.device.revoked` | 设备撤销 |
 
-在配置更改时发出。
+### Surfaces / Runtimes
 
-| 主题 | 说明 | 数据字段 |
-|-------|-------------|-------------|
-| `config.changed` | 配置已修改 | `changed_keys`, `source` |
-| `config.reloaded` | 配置已从文件重新加载 | `source` |
-
-### Cron 事件（`cron.*`）
-
-在计划任务执行期间发出。
-
-| 主题 | 说明 | 数据字段 |
-|-------|-------------|-------------|
-| `cron.triggered` | 任务已触发 | `job_id`, `run_id`, `trigger_source` |
-| `cron.completed` | 任务运行完成 | `job_id`, `run_id`, `duration_ms` |
-| `cron.failed` | 任务运行失败 | `job_id`, `run_id`, `error` |
-
-### 执行事件（`exec.*`）
-
-在命令执行审批期间发出。
-
-| 主题 | 说明 | 数据字段 |
-|-------|-------------|-------------|
-| `exec.approval_requested` | 命令需要审批 | `id`, `command`, `risk_level` |
-| `exec.approval_resolved` | 审批决策已做出 | `id`, `decision` |
+| 主题 | 说明 |
+|-------|-------------|
+| `surface.notify` | 面板通用通知 |
+| `surface.approval` | 面板审批请求 |
+| `runtimes.install.progress` | 运行时安装进度（步骤 / 日志 / 完成 / 失败） |
 
 ## Glob 模式匹配
 
-事件订阅模式使用 glob 风格匹配：
+订阅模式使用 glob 风格匹配（`src/gateway/event_bus.rs::topic_matches`）：
 
-| 模式 | 匹配项 |
+| 模式 | 匹配 |
 |---------|---------|
-| `stream.*` | 所有流式事件：`stream.chunk`、`stream.start` 等 |
-| `agent.*` | 所有代理生命周期事件 |
+| `agent.run.*` | `agent.run.started`、`agent.run.complete` 等 |
+| `agent.*` | 所有 `agent.` 前缀的事件 |
 | `*` | 所有事件 |
-| `stream.chunk` | 仅精确匹配 |
-| `*.completed` | 任何 `completed` 事件：`agent.completed`、`cron.completed` 等 |
+| `agent.run.complete` | 仅精确匹配 |
+| `*.complete` | 任何以 `.complete` 结尾的事件 |
 
-模式与完整主题字符串匹配。`*` 通配符匹配任何非点字符序列。单独使用 `*` 可订阅所有内容。
+`*` 通配符匹配单个非点段；模式按完整主题字符串匹配。
 
 ## 典型客户端流程
 
-典型客户端在启动代理交互之前订阅事件：
-
 ```json
-// 1. 订阅相关事件
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "events.subscribe",
-  "params": {
-    "patterns": ["stream.*", "agent.*", "exec.*"]
-  }
-}
+// 1. 订阅相关主题
+{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*", "session.*"] } }
 
-// 2. 启动代理运行
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "agent.run",
-  "params": {
-    "message": "Check disk usage and alert if over 80%"
-  }
-}
+// 2. 启动一次 run
+{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Check disk usage" } }
 
-// 3. 接收流式事件
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.started", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.start", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.tool_start", "data": { "run_id": "run-123", "tool_name": "shell:exec" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.tool_end", "data": { "run_id": "run-123", "tool_name": "shell:exec" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.chunk", "data": { "run_id": "run-123", "content": "Disk usage is at 45%..." } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "stream.end", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.completed", "data": { "run_id": "run-123" } } }
+// 3. 接收事件（无 id = 通知）
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "run.accepted", "data": { "run_id": "run-123" } } }
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "run_id": "run-123", "content": "Disk usage is at 45%..." } } }
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.run.complete", "data": { "run_id": "run-123", "duration_ms": 4200 } } }
 ```
 
 ## 另请参阅
 
-- [协议](/docs/zh/gateway/protocol)——事件传递格式和 WebSocket 传输
-- [agent.*](/docs/zh/gateway/methods/agent)——发出事件的代理方法
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### 事件主题
-
-26.7.x 事件总线主题包括：
-
-- `stream.*` —— 流式（start/token/tool_call/done/end）
-- `agent.*` —— agent 状态
-- `memory.*` —— 记忆变化
-- `session.*` —— 会话事件
-- `team.*` —— 团队事件
-- `governance.*` —— 治理事件（loop_graph）
-- `tool.*` —— 工具调用
-- `heartbeat.*` —— Heartbeat 触发
-- `cron.*` —— Cron 触发
-- `system.*` —— 系统事件
-
-### `events.subscribe` / `events.unsubscribe`
-
-订阅与取消订阅模式（`patterns` 数组）。
-
-### WS 任务泄漏修复
-
-26.7.21+：每连接事件转发任务不再泄漏；`broadcast::RecvError::Lagged` 恢复而非永久死亡。
+- [协议](../protocol)——事件传递格式与 WebSocket 传输
+- [agent.*](./agent)——发出事件的代理方法
+- [方法参考](./index)——所有方法命名空间

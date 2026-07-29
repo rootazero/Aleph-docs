@@ -3,25 +3,56 @@ title: "config.*"
 description: "运行时配置 RPC 方法"
 ---
 
-配置方法提供运行时配置管理。读取当前配置、应用部分更新、替换完整配置、从磁盘重新加载、验证配置对象——全部无需重启网关服务器。
-
-:::warning
-本页记录的是预期 API。实际运行时注册的方法为：`config.reload`、`config.get`、`config.validate`、`config.path`、`config.get_tool_permissions`、`config.update_tool_permissions`。像 `config.patch` 和 `config.apply` 这样的方法反映的是设计目标，但可能与当前的运行时接线有所不同。请参阅[方法参考](/docs/zh/gateway/methods)获取准确的方法列表。
-:::
+`config.*` 提供运行时配置管理。所有方法都不要求重启网关即可生效；具体可见副作用在每条方法中说明。
 
 ## 方法
 
-### config.get
+| 方法 | 说明 |
+|--------|-------------|
+| [`config.schema`](#configschema) | 返回完整 JSON Schema（无需参数） |
+| [`config.get`](#configget) | 读取当前生效配置（含源文件路径与 mtime） |
+| [`config.patch`](#configpatch) | 局部覆盖（JSON Merge Patch / RFC 7386 风格） |
+| [`config.reload`](#configreload) | 从磁盘重新加载配置 |
 
-获取当前活动配置。
+注册于 `HandlerRegistry::new()` 但通常不通过 RPC 调用、仅供 boot 路径使用的辅助方法：
+
+| 方法 | 说明 |
+|--------|-------------|
+| `config.get_full_config` | boot 路径使用的原始配置读取 |
+| `config.path` | 当前配置文件绝对路径 |
+| `config.validate` | 不落盘地验证配置对象 |
+| `config.reload_with_subsystems` | 触发子系统热重载 |
+| `config.get_tool_permissions` / `config.update_tool_permissions` | 工具权限读写 |
+
+> `config.apply`（整配置覆盖）当前未注册；如需整配置替换请使用 `config.patch` 配合 `config.reload`。
+
+### config.schema
+
+返回 `~/.aleph/config.json` 的完整 JSON Schema。无参数。
 
 **请求：**
+```json
+{ "jsonrpc": "2.0", "id": 1, "method": "config.schema" }
+```
+
+**响应：**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "config.get"
+  "result": {
+    "schema": { "type": "object", "$schema": "...", "properties": { "...": { "...": "..." } } }
+  }
 }
+```
+
+### config.get
+
+读取当前生效配置（`ConfigWatcher` 视角）。
+
+**请求：**
+```json
+{ "jsonrpc": "2.0", "id": 1, "method": "config.get" }
 ```
 
 **响应：**
@@ -31,39 +62,20 @@ description: "运行时配置 RPC 方法"
   "id": 1,
   "result": {
     "config": {
-      "agent": {
-        "default_model": "claude-sonnet-4-20250514",
-        "thinking_level": "medium",
-        "max_iterations": 25,
-        "token_budget": 128000
-      },
-      "gateway": {
-        "bind": "127.0.0.1:18790",
-        "require_auth": true,
-        "cors_origins": ["http://localhost:3000"]
-      },
-      "interfaces": {
-        "telegram": {
-          "enabled": true,
-          "token": "[REDACTED]"
-        }
-      },
-      "exec": {
-        "security": "allowlist",
-        "allowlist": ["git *", "npm install", "cargo build"]
-      }
+      "general": { "default_provider": "openai", "fallback_providers": [] },
+      "execution": { "default_timeout_secs": 600, "max_runs_global": 16 }
     },
-    "source": "~/.aleph/config.json",
+    "source": "/home/user/.aleph/config.json",
     "loaded_at": 1706400000000
   }
 }
 ```
 
-此方法不接受参数。敏感值（API 密钥、令牌）在响应中会被编辑。
+敏感字段（API 密钥、令牌）在响应中经过编辑。`source` 与 `loaded_at` 标识当前生效配置的来源与加载时间。
 
 ### config.patch
 
-使用 JSON Merge Patch（RFC 7386）应用部分更新。仅更改指定的字段；所有其他字段保持不变。更改立即生效。
+通过 JSON Merge Patch（RFC 7386 风格）应用局部覆盖。仅修改显式提供的字段；其余字段保持原值。
 
 **请求：**
 ```json
@@ -73,10 +85,8 @@ description: "运行时配置 RPC 方法"
   "method": "config.patch",
   "params": {
     "patch": {
-      "agent": {
-        "thinking_level": "high",
-        "max_iterations": 50
-      }
+      "execution": { "max_runs_global": 32 },
+      "general": { "fallback_providers": ["anthropic", "openai"] }
     }
   }
 }
@@ -89,10 +99,7 @@ description: "运行时配置 RPC 方法"
   "id": 2,
   "result": {
     "applied": true,
-    "changed_keys": [
-      "agent.thinking_level",
-      "agent.max_iterations"
-    ],
+    "changed_keys": ["execution.max_runs_global", "general.fallback_providers"],
     "restart_required": false
   }
 }
@@ -102,182 +109,43 @@ description: "运行时配置 RPC 方法"
 
 | 参数 | 类型 | 必填 | 说明 |
 |-----------|------|----------|-------------|
-| `patch` | object | 是 | JSON Merge Patch 对象。将键设为 `null` 可删除它。 |
+| `patch` | object | 是 | Merge Patch 对象。将字段设为 `null` 可清除它 |
 
-某些配置更改需要接口或服务重启。在这种情况下，`restart_required` 将为 `true`，并列出受影响的组件。
-
-**示例——删除字段：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "config.patch",
-  "params": {
-    "patch": {
-      "interfaces": {
-        "discord": null
-      }
-    }
-  }
-}
-```
-
-### config.apply
-
-替换整个配置。这是完全覆盖——新配置中未包含的任何字段都将被删除。请谨慎使用；对于增量更改，优先使用 `config.patch`。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "config.apply",
-  "params": {
-    "config": {
-      "agent": {
-        "default_model": "claude-sonnet-4-20250514",
-        "thinking_level": "medium",
-        "max_iterations": 25,
-        "token_budget": 128000
-      },
-      "gateway": {
-        "bind": "127.0.0.1:18790",
-        "require_auth": false
-      }
-    }
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "applied": true,
-    "restart_required": true,
-    "restart_components": ["gateway"]
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `config` | object | 是 | 要应用的完整配置对象 |
+`restart_required` 为 `true` 时表示需要重启某接口或服务才会真正生效，并在 `restart_components` 中列出受影响组件。
 
 ### config.reload
 
-从磁盘上的配置文件（`~/.aleph/config.json`）重新加载配置。在手动编辑文件或从 dotfiles 仓库拉取更改后很有用。
+从磁盘上的配置文件重新加载。适用于手动编辑文件或 dotfiles 仓库同步后的场景。
 
 **请求：**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "config.reload"
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "config.reload" }
 ```
 
 **响应：**
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 5,
+  "id": 1,
   "result": {
     "reloaded": true,
-    "source": "~/.aleph/config.json",
-    "changed_keys": [
-      "agent.default_model",
-      "interfaces.telegram.token"
-    ],
-    "restart_required": true,
-    "restart_components": ["telegram"]
+    "source": "/home/user/.aleph/config.json",
+    "changed_keys": ["general.default_provider"],
+    "restart_required": false
   }
 }
 ```
 
-此方法不接受参数。网关自动检测哪些部分发生了更改，并报告是否需要组件重启。
+## 热重载与可调字段
 
-### config.validate
+`[gateway.config_watcher]` 控制文件监视器；写盘即触发一次 reload 流程：
 
-根据模式验证配置对象而不应用它。返回发现的任何验证错误。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "config.validate",
-  "params": {
-    "config": {
-      "agent": {
-        "default_model": "nonexistent-model",
-        "thinking_level": "ultra",
-        "max_iterations": -5
-      }
-    }
-  }
-}
-```
-
-**响应（有效）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "valid": true,
-    "warnings": []
-  }
-}
-```
-
-**响应（无效）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "valid": false,
-    "errors": [
-      {
-        "path": "agent.thinking_level",
-        "message": "Invalid value 'ultra'. Expected one of: off, minimal, low, medium, high, xhigh"
-      },
-      {
-        "path": "agent.max_iterations",
-        "message": "Value must be a positive integer"
-      }
-    ],
-    "warnings": [
-      {
-        "path": "agent.default_model",
-        "message": "Model 'nonexistent-model' is not in the known model list"
-      }
-    ]
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `config` | object | 是 | 要验证的配置对象 |
-
-## 热重载
-
-网关使用文件系统监视器监视 `~/.aleph/config.json` 的更改。当文件被修改时：
-
-1. **去抖**——等待 500ms 以确保额外的写入完成
+1. **去抖**——等待 500 ms 收尾所有写操作
 2. **解析**——读取并解析新配置
-3. **验证**——根据配置模式进行检查
-4. **差异**——计算哪些部分发生了变化
-5. **应用**——更新内存中的配置并重启受影响的接口
-6. **发送**——向所有订阅的客户端发送 `config.changed` 事件
+3. **验证**——按 schema 校验
+4. **差异**——计算变化的字段路径
+5. **应用**——更新内存配置并重启受影响的接口
+6. **通知**——向已订阅客户端发送 `config.changed` 事件
 
 ```json
 {
@@ -286,67 +154,45 @@ description: "运行时配置 RPC 方法"
   "params": {
     "topic": "config.changed",
     "data": {
-      "changed_keys": ["agent.thinking_level"],
-      "source": "file_watcher",
+      "section": "execution",
+      "value": { "max_runs_global": 32 },
       "timestamp": 1706400000000
     }
   }
 }
 ```
 
-## 配置部分
+**可热重载：** `[general]` 模型目录与故障转移链、`[providers.*]` provider 配置、channels 启停、`[execution]` 运行上限、`[cron]` 调度器设置、`[exec]` 审批规则。
 
-| 部分 | 说明 | 热重载 |
-|---------|-------------|------------|
-| `agent` | 模型、思考级别、迭代限制 | 是 |
-| `gateway` | 绑定地址、认证设置 | 需要重启 |
-| `interfaces` | Telegram、Discord、iMessage 配置 | 重启受影响的接口 |
-| `exec` | 安全级别、允许列表、拒绝列表 | 是 |
-| `memory` | 向量数据库设置、嵌入模型 | 需要重启 |
-| `cron` | 调度器设置 | 是 |
-| `browser` | CDP 设置、无头模式 | 需要重启 |
+**需要重启：** 核心端口、绑定地址、TLS 证书、`[memory]` 嵌入模型与向量库设置、`[browser]` CDP 设置。
+
+## 相关配置段
+
+`config.*` 不负责读写这些专用段，请使用对应命名空间：
+
+| 段 | 命名空间 |
+|---------|-------------|
+| `[behavior]` | `behavior_config.get` / `behavior_config.update` |
+| `[browser]` | `browser_config.get` / `browser_config.update` |
+| `[execution]` | `execution_config.get` / `execution_config.update` |
+| `[fetch]` | `fetch_config.get` / `fetch_config.update` / `fetch_config.test` |
+| `[general]` | `general_config.get` / `general_config.update` |
+| `[generation]` | `generation_config.get` / `generation_config.update` |
+| `[memory]` | `memory_config.get` / `memory_config.update` |
+| `[rerank]` | `rerank_config.get` / `rerank_config.update` / `rerank_config.test` |
+| `[route]` | `route_config.get` / `route_config.update` |
+| `[routing_rules]` | `routing_rules.*` |
+| `[search]` | `search_config.*` |
+| `[security]` | `security_config.*` |
+| `[mcp.servers]` | `mcp_config.*` |
+| `[plugins]` | `plugins.*` / `plugin.*` |
+| `[providers]` | `providers.*` |
+| `[generation_providers]` | `generation_providers.*` |
+| `[embedding]` | `embedding_providers.*` |
+| `[runtimes]` | `runtimes.*` |
+| `[gateway]` | `gateway.ticket.*` / `gateway.token.*` / `gateway.credentials` |
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有方法命名空间
-- [协议](/docs/zh/gateway/protocol)——JSON-RPC 2.0 传输
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC 集
-
-26.7.x 配置完整 RPC：
-
-- `config.get` / `config.get_full_config` / `config.path` / `config.schema` / `config.patch` / `config.validate` / `config.reload` / `config.reload_with_subsystems` / `config.get_tool_permissions` / `config.update_tool_permissions`
-- `behavior_config.get` / `update`
-- `browser_config.get` / `update`
-- `embedding_providers.add` / `get` / `list` / `presets` / `remove` / `test` / `update`
-- `execution_config.get` / `update`
-- `fetch_config.get` / `test` / `update`
-- `general_config.get` / `update`
-- `generation_config.get` / `update`
-- `generation_providers.create` / `delete` / `get` / `list` / `list_presets` / `test` / `update` / `voices`
-- `memory_config.get` / `update`
-- `mcp_config.create` / `delete` / `get` / `list` / `update`
-- `providers.catalog` / `providers.create` / `delete` / `get` / `list` / `healthcheck` / `test` / `update`
-- `rerank_config.get` / `test` / `update`
-- `route_config.get` / `update`
-- `routing_rules.create` / `delete` / `get` / `list` / `move` / `update`
-- `search_config.get` / `test` / `update`
-- `security_config.get` / `update`
-- `runtimes.install` / `list` / `refresh`
-
-### 新增配置段
-
-`[gateway.tls]` / `trusted_proxy` / `allow_insecure_remote` / `[agents.defaults] session_mode` / `[agents.defaults] exec_tier` / `[sandbox.command_policy]` / `[tools] defer_mcp_tools` / `[tools] enable_tool_search` / `[[hook]]` / `[[mcp.servers]]` / `[[plugin.marketplace]]` / `[projects]` / `[runtimes]` / `[voice]`。
-
-### 失败关闭
-
-26.7.21：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### 热重载
-
-可热重载：模型目录与故障转移链、provider 配置、channels 启停、`[execution]` 运行上限。
-需重启：核心端口、绑定地址、TLS 证书。
+- [方法参考](./index)——所有方法命名空间
+- [协议](../protocol)——JSON-RPC 2.0 传输

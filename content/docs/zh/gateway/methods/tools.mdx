@@ -1,0 +1,103 @@
+---
+title: "tools.*"
+description: "工具注册表与调用 RPC 方法"
+---
+
+`tools.*` 是对 `ToolCatalog` 的运行时接口。总共五个方法。其中三个(`tools.catalog`、`tools.effective`、`tools.invoke`)在 `HandlerRegistry::new()` 中以占位符形式注册,在启动连接真实 `ToolRegistry` 前返回 `SERVICE_UNAVAILABLE`。其余两个(`tools.cancel_call`、`tools.in_flight`)直接在 `agent_init::tool_catalog_init` 中注册,仅在启动时安装了进程级 `InFlightToolCalls` 注册表时才会出现。所有五个共享同一后端 `ToolCatalog` / `InFlightToolCalls` / `BuiltinToolRegistry`,所以面板和代理循环看到同一工具面。
+
+日常使用请优先 `chat.send` / `agent.run`——代理循环从同一注册表分发正确的工具。此处的 RPC 用于 E2E 工具和算子工具。
+
+## 方法
+
+### tools.catalog
+
+列出所有按来源分组的活动工具。供 Panel 的"工具目录"标签和 `aleph doctor` 使用。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `source` | string | 否 | 精确 id(`"mcp:github"`、`"native"` 等)或族前缀(`"mcp:*"`、`"plugin:*"`、`"skill:*"`) |
+
+**响应:** `ToolsListResult`: `{ "groups": [ ...ToolGroup... ], "total", "agent_id"? }`。每个 `ToolGroup` 包含 `id`(`native` / `builtin` / `mcp:<server>` / `skill:<id>` / `plugin:<plugin_id>` / `custom`)、`label`、`tools: [ {name, description, source} ]`。`total` 是 source 过滤后的计数。
+
+BTreeMap 排序使输出确定:`builtin`、`mcp:<a>`、`mcp:<b>`、`native`、`plugin:<id>`、`skill:<id>`、`custom`。
+
+### tools.effective
+
+列出特定 agent 可用的工具。先应用 agent allowlist,然后应用可选的 `source` 过滤。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 否 | 默认为 `main` |
+| `source` | string | 否 | 与 `tools.catalog` 相同的精确 / `prefix:*` 过滤 |
+
+**响应:** 相同的 `ToolsListResult` 形态;`agent_id` 始终填充。
+
+### tools.invoke
+
+直接执行单个内建工具,绕过 LLM 代理循环。`ToolRegistry` 携带工具实现。在触及注册表之前应用两个硬底:
+
+1. **危险工具底**——`security::dangerous_tools::is_denied_on_gateway_surface` 拒绝 RCE / 主机变更 / 自我重配工具。完整的 `dangerous-tools` 拒绝列表与 openclaw 对齐。
+2. **确认门控底**——自我声明 `requires_confirmation` 的工具(如 `vault_store`、`team_disband`)被拒绝。网关没有审批传输来抛出卡片。
+
+底通过 `ALEPH_GATEWAY_TOOLS_ALLOW` 环境变量可覆盖。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `tool_name` | string | 是 | 规范工具名(如 `memory_search`、`note_manage`) |
+| `arguments` | object | 否 | 传给工具的 JSON 参数(schema 取决于工具) |
+| `agent_id` | string | 否 | 提供时,合并到 `arguments.agent_id`(除非已经存在) |
+
+**响应(成功):** `{ "ok": true, "tool_name", "result" }`。
+
+**响应(拒绝):** `INVALID_PARAMS`,带拒绝原因和环境变量覆盖提示。
+
+当注册表连接了 live `AgentRegistry`(生产启动路径)时,请求还必须通过 agent 的 `is_tool_allowed` allowlist——若未通过,返回 `INVALID_PARAMS: tool '<name>' not allowed for agent '<id>'`。
+
+### tools.cancel_call
+
+对特定 `tool_call_id` 触发 harness 下发的每调用 `CancellationToken`。工具适配器(以及子代理运行时)中的 `tokio::select!` 分支短路调用,并在下一轮向 LLM 抛出协作取消错误。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `call_id` | string | 是 | LLM 下发的进行中调用的 `tool_call_id` |
+
+**响应:** `{ "ok": true, "cancelled": true | false, "call_id" }`。`cancelled: false` 当 `call_id` 不在 in-flight 注册表中(已完成或未知 id)。
+
+### tools.in_flight
+
+每个当前运行的工具调用的诊断列表。供 Panel 在发出定向取消前使用。
+
+**请求:** 无参数。
+
+**响应:** `{ "calls": [ ...{call_id, tool_name, started_at_ms}... ], "count" }`。
+
+## 启动时的接线
+
+| 方法 | 注册时机 |
+|------|----------|
+| `tools.catalog` | `HandlerRegistry::new()`——始终存在,占位符错误直到启动连接 live 注册表 |
+| `tools.effective` | 同上——占位符 |
+| `tools.invoke` | `agent_init::tool_catalog_init` 仅在存在真实 `BuiltinToolRegistry` 时;模拟模式下占位符保留 |
+| `tools.cancel_call` | `agent_init::tool_catalog_init` 仅在启动时安装了进程级 `InFlightToolCalls` 注册表 |
+| `tools.in_flight` | 同 `tools.cancel_call` |
+
+## 来源分类
+
+每个 `ToolSource` 被分到六个来源 id 之一。目录、effective 视图和可见性组共享同一分类:
+
+| 来源 id | 变体 | 示例 |
+|------|------|------|
+| `native` | `ToolSource::Native` | 硬编码内建能力 |
+| `builtin` | `ToolSource::Builtin` | `BUILTIN_TOOL_DEFINITIONS` 循环条目 |
+| `mcp:<server>` | `ToolSource::Mcp { server }` | 通过 `mcp.add` 添加的服务器(如 `mcp:github`) |
+| `skill:<id>` | `ToolSource::Skill { id }` | `skill_read` 等 |
+| `plugin:<plugin_id>` | `ToolSource::Plugin { plugin_id }` | 插件注册的工具 |
+| `custom` | `ToolSource::Custom { .. }` | 用户定义 |
+
+精确 id 和 `prefix:*` 源过滤(在 `tools.catalog` / `tools.effective` 中)与此 id 匹配。`mcp:*` 返回每个 MCP 服务器的所有工具;`plugin:*` 返回每个加载插件的所有工具。
+
+## 另请参阅
+
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [工具概念](/docs/zh/concepts/tools)——工具目录的组成
+- [agent.*](/docs/zh/gateway/methods/agent)——LLM 大多数工具调用的入口

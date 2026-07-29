@@ -1,13 +1,22 @@
 ---
 title: "extensions.*"
-description: "统一扩展门面 RPC 方法（扩展商店）"
+description: "统一扩展门面 RPC 方法(扩展商店)"
 ---
 
-扩展方法是 Aleph 三种扩展类型——`Skill`、`Plugin` 和 `Mcp`——之上的统一门面。对于日常用户，这些是同一个面向用户的概念：**扩展**。`extensions.*` 命名空间驱动**扩展商店**面板（`/extensions`），它按功能类别浏览三者、呈现信任层级，并驱动受信任门控的安装。这是一层薄联邦：每个方法按类型路由到现有的 `skills.*`、`plugins.*` 和 `mcp.*` 后端。
+`extensions.*` 是 Aleph 三种扩展类型——`Skill` / `Plugin` / `Mcp`——之上的统一门面。对于日常用户,这些是同一个概念(扩展);该命名空间为**扩展商店**面板提供动力,并按 `kind` 路由到现有的 `skills.*` / `plugins.*` / `mcp.*` 后端。
 
-> **另见：** [概念：扩展商店](/docs/zh/concepts/extensions-store) 解释了伞形模型、信任层级、商店智能体以及安装前的披露流程。各类型后端仍可用于底层控制：[skills.*](/docs/zh/gateway/methods/skills)、[plugins.*](/docs/zh/gateway/methods/plugins)、[mcp.*](/docs/zh/gateway/methods/mcp)。
+七个方法在两次连接中分布:
 
-一个 `ExtensionEntry`（`extensions.catalog` 和 `extensions.installed` 返回的行结构）形如：
+- `register_extensions_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/extensions.rs:15-58`)——四个生命周期/读方法。
+- `register_extensions_install_handlers`(同文件,60-98 行)——三个受信任门控的安装流方法,它们还需要 vault 和 `MarketplaceManager`。
+
+整个命名空间在启动时 `hub_catalog.db` 成功打开时才能连接;若本地缓存无法创建,四个生命周期方法会被跳过并记录警告。安装侧方法另外需要 `MarketplaceManager` 被构造。
+
+之前版本中描述的两个 `sources.*` 方法(`extensions.sources.list` / `refresh`)在 26.6.22+ Hub 收敛中**被撤回**——目录源现在是由 `AlephHubCatalog` 持有的内部概念,操作员通过捆绑同步循环和 `extensions.catalog` 视图达成相同效果。
+
+## 目录条目形态
+
+`extensions.catalog` 和 `extensions.installed` 返回 `ExtensionEntry` 行。`id` 带 kind 前缀(`mcp:registry/exa-search`、`plugin:acme/foo`、`skill:user/web_search`);`via` 字段是上游出处标签(如 `Aleph Hub`、`MCP Registry`)。
 
 ```json
 {
@@ -19,481 +28,147 @@ description: "统一扩展门面 RPC 方法（扩展商店）"
   "trust_tier": "Verified",
   "installed": false,
   "enabled": false,
-  "requires_config": true
+  "requires_config": true,
+  "via": "Aleph Hub"
 }
 ```
 
 | 字段 | 类型 | 说明 |
-|-------|------|-------------|
-| `id` | string | 稳定的扩展标识符（带类型前缀） |
-| `kind` | string | `"Skill"`、`"Plugin"`、`"Mcp"` 之一 |
-| `name` | string | 显示名称 |
-| `description` | string | 简短摘要 |
-| `category` | string | 功能类别（Search、Developer、Data、Productivity、Writing、Communication、Knowledge、Files、Design、Automation、Finance、Utilities、Other） |
-| `trust_tier` | string | `"Official"`、`"Verified"`、`"Community"` 或 `"Unverified"` |
-| `installed` | boolean | 扩展当前是否已安装 |
-| `enabled` | boolean | 扩展是否已启用（仅在已安装时有意义） |
+|------|------|------|
+| `id` | string | 稳定的扩展标识符(带 kind 前缀) |
+| `kind` | string | `Skill` / `Plugin` / `Mcp` |
+| `name` | string | 显示名 |
+| `description` | string | 简短描述 |
+| `category` | string | 功能类别(`Search` / `Developer` / `Data` / `Productivity` / `Writing` / `Communication` / `Knowledge` / `Files` / `Design` / `Automation` / `Finance` / `Utilities` / `Other`) |
+| `trust_tier` | string | `Official` / `Verified` / `Community` / `Unverified` |
+| `installed` | boolean | 当前是否已安装 |
+| `enabled` | boolean | 已安装后是否启用(只在 `installed` 时有意义) |
 | `requires_config` | boolean | 运行前是否需要配置/密钥值 |
+| `via` | string | 上游出处标签(由目录源设置) |
 
 ## 方法
 
 ### extensions.catalog
 
-浏览已缓存的目录（支持离线；由 SQLite 支撑）。结果可按类型、功能类别、源或自由文本查询过滤。
+读取已缓存的、可离线的目录,与实时已安装集合对账。过滤在内存中执行;缺失后端降级为空而不是错误。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "extensions.catalog",
-  "params": {
-    "category": "Search",
-    "kind": "Mcp",
-    "query": "web"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `kind` | string | 否 | `Skill` / `Plugin` / `Mcp` |
+| `category` | string | 否 | 功能类别 |
+| `source_id` | string | 否 | 目录源 id(如 `aleph-hub`、`mcp-registry`) |
+| `query` | string | 否 | 在 `name` 和 `description` 上的自由文本搜索 |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "entries": [
-      {
-        "id": "mcp:registry/exa-search",
-        "kind": "Mcp",
-        "name": "Exa Search",
-        "description": "Web and code search via the Exa API.",
-        "category": "Search",
-        "trust_tier": "Verified",
-        "installed": false,
-        "enabled": false,
-        "requires_config": true
-      }
-    ]
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `kind` | string | 否 | 按 `"Skill"`、`"Plugin"` 或 `"Mcp"` 过滤 |
-| `category` | string | 否 | 按功能类别过滤 |
-| `source_id` | string | 否 | 按目录源过滤（参见 `extensions.sources.list`） |
-| `query` | string | 否 | 在名称和描述上进行自由文本搜索 |
+**响应:** `{ "extensions": [ ...ExtensionEntry(带 `via` 导出的 source_label)... ] }`。每行的 `installed` 和 `enabled` 字段通过与 live MCP actor + 插件注册表 + 技能系统对账来盖章。
 
 ### extensions.installed
 
-返回跨全部三种类型的已安装扩展的对账列表，包括在商店之外手动安装的项目。
+跨所有三个后端的实时已安装扩展对账。任一后端失败会被记录并跳过,所以出问题的 MCP actor 不会让面板的"已安装"列表清空。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "extensions.installed",
-  "params": {}
-}
-```
+**请求:** 无参数。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "entries": [
-      {
-        "id": "mcp:registry/exa-search",
-        "kind": "Mcp",
-        "name": "Exa Search",
-        "description": "Web and code search via the Exa API.",
-        "category": "Search",
-        "trust_tier": "Verified",
-        "installed": true,
-        "enabled": true,
-        "requires_config": true
-      },
-      {
-        "id": "skill:user/web_search",
-        "kind": "Skill",
-        "name": "Web Search",
-        "description": "Manually installed skill.",
-        "category": "Search",
-        "trust_tier": "Unverified",
-        "installed": true,
-        "enabled": true,
-        "requires_config": false
-      }
-    ]
-  }
-}
-```
+**响应:** `{ "extensions": [ ...ExtensionEntry... ] }`。每行带有规范 `id`(如 `local:mcp:<id>`、`local:plugin:<id>`、`local:skill:<id>`)和 `installed: true` 戳。
 
 ### extensions.disclosure
 
-返回某个目录条目强制性的安装前披露载荷：确切的命令和参数、声明的密钥及其用途、网络/文件系统可达范围、固定版本 + SHA256、信任层级，以及任何注入加固发现项。UI 必须在 `extensions.install` 之前展示此内容。
+为目录条目返回强制的安装前披露载荷。Panel 在 `extensions.install` 之前渲染它。披露从已解析的安装 spec 构建;缺失 spec 返回错误。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "extensions.disclosure",
-  "params": {
-    "id": "mcp:registry/exa-search"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 目录扩展 id |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "id": "mcp:registry/exa-search",
-    "kind": "Mcp",
-    "trust_tier": "Verified",
-    "risk_class": "mcp-remote",
-    "command": "npx",
-    "args": ["-y", "@exa/mcp-server"],
-    "version": "1.4.0",
-    "sha256": "sha256:9f2c...e1a4",
-    "secrets": [
-      { "key": "EXA_API_KEY", "purpose": "Authenticate to the Exa search API" }
-    ],
-    "network": ["api.exa.ai"],
-    "filesystem": [],
-    "injection_findings": [],
-    "requires_ack": false
-  }
-}
-```
+**响应:** `{ "disclosure": { ...DisclosurePayload... }, "injection_findings": [ ...InjectionFinding... ], "post_install": { ...安装后验证载荷... } }`。
 
-**参数：**
+`DisclosurePayload` 包含精确的 `command` / `args`、声明的 `secrets` 及其用途、`network` / `filesystem` 触达范围、`version`、`sha256`、`risk_class`(`mcp-remote` / `mcp-stdio` / `plugin-…` / `skill-*`)、`trust_tier`、`ack_required`、`requires_ack`(社区或 LLM 派生的 MCP 条目为 `true`)。
 
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `id` | string | 是 | 要披露的目录扩展 ID |
+`risk_class`:
+- `mcp-stdio`——运行命令,风险最高
+- `mcp-remote`——较温和(仅网络)
+- `plugin-*`——可指导 agent
+- `skill-*`——可指导 agent
 
-> `risk_class` 反映扩展能做什么：MCP-stdio 条目（`"runs commands"`）风险最高，技能和插件（`"can instruct the agent"`）为中等，远程 MCP 较缓和。来自社区或 LLM 派生的 MCP 条目会设置 `requires_ack: true`，要求在安装时明确进行"我了解此风险"的确认。
+社区或 LLM 派生的 MCP 条目设置 `ack_required: true` 和 `requires_ack: true`,要求在安装时显式确认"我了解此风险"。
 
 ### extensions.configure
 
-为扩展写入配置和密钥值。密钥值存储在操作系统钥匙串/保管库中——绝不以明文形式——并仅通过键引用呈现。
+根据 spec 校验提交的配置。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "extensions.configure",
-  "params": {
-    "id": "mcp:registry/exa-search",
-    "config": { "max_results": 10 },
-    "secrets": { "EXA_API_KEY": "sk-exa-..." }
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 目录扩展 id |
+| `values` | object | 否 | 键/值配置;密钥字段由 spec 的 `secret: true` 标志识别 |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "id": "mcp:registry/exa-search",
-    "requires_config": false
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `id` | string | 是 | 要配置的扩展 ID |
-| `config` | object | 否 | 非密钥配置键/值对 |
-| `secrets` | object | 否 | 密钥值；持久化到操作系统钥匙串/保管库 |
+**响应:** `{ "ok", "missing": [ ...string... ] }`。`missing` 列出缺失或为空的必填字段。
 
 ### extensions.install
 
-安装扩展。此操作受信任门控：服务端会重新校验规约、信任判定、固定版本和 SHA256。结果可能表明安装已完成、需要确认（`needs_ack`）、缺少必需的配置/密钥（`missing`），或返回安装后的验证结果。
+受信任门控的安装流水线。服务端重新校验 spec、信任判定、固定版本和 SHA256。密钥字段写入 vault,在 MCP 配置中按 `{{secret:NAME}}` 引用(在每个服务器启动时解析——永不以明文持久化)。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "extensions.install",
-  "params": {
-    "id": "mcp:registry/exa-search",
-    "ack": false
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 目录扩展 id |
+| `values` | object | 否 | 键/值配置;密钥字段入 vault,普通字段入配置 |
+| `acknowledge_risk` | boolean | 否 | 社区/LLM 派生的 MCP 条目需要 `true`(否则安装停在 `needs_ack`) |
 
-**响应（需要确认）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "status": "needs_ack",
-    "id": "mcp:registry/exa-search",
-    "reason": "Community/LLM-derived MCP requires explicit risk acknowledgement."
-  }
-}
-```
+**响应(needs_ack):** `{ "ok": false, "needs_ack": true, "disclosure": { ...DisclosurePayload... }, "injection_findings": [...] }`。
 
-**响应（缺少配置）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "status": "missing",
-    "id": "mcp:registry/exa-search",
-    "missing_config": ["EXA_API_KEY"]
-  }
-}
-```
+**响应(missing):** `{ "ok": false, "missing": [ ...必填字段... ] }`。
 
-**响应（已安装 + 已验证）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "status": "installed",
-    "id": "mcp:registry/exa-search",
-    "verify": { "ok": true, "sha256_matched": true }
-  }
-}
-```
+**响应(installed):** `{ "ok": true, "outcome": { "kind": "mcp|plugin|skill", "id" | "path" }, "verify": { "ok", "tool_count"? | "error"? }, "pin": { "version", "sha256" }, "injection_findings": [...] }`。成功的 MCP 安装,`verify.tool_count` 确认服务器在启动尝试后已列出。成功的插件/技能安装,会调用 `extensions.reload()`,使新能力无需重启守护进程即可生效。
 
-**参数：**
-
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `id` | string | 是 | 要安装的目录扩展 ID |
-| `ack` | boolean | 否 | 为社区/LLM 派生的 MCP 确认"我了解此风险" |
-
-> OCI / Docker 镜像 MCP 条目可在目录中浏览，但在 v1 中**不可安装**。沙箱化执行是快速跟进项，同样不在 v1 范围内——安装绝不会绕过规约、信任判定、SHA256 校验或密钥处理。
+**OCI / Docker MCP 条目在 v1 中不可安装**——请求返回 `INVALID_PARAMS: OCI/Docker MCP containers are not installable in this version`。沙箱执行是快速跟进项。
 
 ### extensions.toggle
 
-在不卸载的情况下启用或禁用一个已安装的扩展。
+启用或禁用已安装的扩展。id 必须是 `installed (local:)` id;目录 id(`mcp-official:io.x/y`)被 `INVALID_PARAMS` 拒绝。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "extensions.toggle",
-  "params": {
-    "id": "mcp:registry/exa-search",
-    "enabled": false
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "id": "mcp:registry/exa-search",
-    "enabled": false
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `id` | string | 是 | 已安装的扩展 ID |
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 已安装(local:)的扩展 id |
 | `enabled` | boolean | 是 | 目标启用状态 |
+
+**响应:** `{ "ok": true }`。
+
+按 kind 行为:
+- `local:mcp:<id>`——`mcp.start_server` / `mcp.stop_server`
+- `local:plugin:<id>`——`ExtensionManager::set_plugin_enabled`(同步内存注册表,然后重新检查服务状态)
+- `local:skill:<id>`——`SkillSystem::update_config` 带 `SetEnabled(enabled)`
 
 ### extensions.uninstall
 
-移除一个已安装的扩展并撤销其存储的密钥。
+移除已安装的扩展并撤销其存储的密钥。id 必须是 `installed (local:)` id。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "extensions.uninstall",
-  "params": {
-    "id": "mcp:registry/exa-search"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 已安装(local:)的扩展 id |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "result": {
-    "id": "mcp:registry/exa-search",
-    "uninstalled": true
-  }
-}
-```
+**响应:** `{ "ok": true }`。
 
-**参数：**
+按 kind 行为:
+- `local:mcp:<id>`——`mcp.remove_server`
+- `local:plugin:<id>`——运行时下线 + `remove_dir_all` 插件目录(路径穿越保护镜像 `plugins::handlers::manage::is_safe_plugin_name`;`..` 或 `/` 之类的相对组件会被拒绝)
+- `local:skill:<id>`——`SkillSystem::remove_skill`
 
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `id` | string | 是 | 要移除的已安装扩展 ID |
+在移除之后触发新的 `extensions.reload()`,所以 live `extensions.installed` 视图立即反映变更。
 
-### extensions.sources.list
+## 按 kind 后端
 
-列出目录源，每个源带有其信任层级以及它贡献的类型。
+`extensions.*` 是一层薄门面。每个方法的实际工作委派给按 kind 后端;目录和后端保持同步,因为每个方法在响应之前也会与 live 集对账。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 8,
-  "method": "extensions.sources.list",
-  "params": {}
-}
-```
+| Kind | 后端命名空间 | 工作发生位置 |
+|------|--------------|--------------|
+| `Skill` | `skills.*` | `SkillSystem` + 捆绑同步循环 |
+| `Plugin` | `plugin.*` / `plugins.*` | `ExtensionManager` + `MarketplaceManager` |
+| `Mcp` | `mcp.*` / `mcp_config.*` | `McpManagerActor` + `McpManagerHandle` |
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 8,
-  "result": {
-    "sources": [
-      {
-        "id": "aleph-marketplace",
-        "name": "Aleph / Claude Plugin Marketplace",
-        "trust_tier": "Official",
-        "kinds": ["Plugin", "Skill"],
-        "last_synced": "2026-06-20T09:00:00Z"
-      },
-      {
-        "id": "mcp-registry",
-        "name": "Official MCP Registry (registry.modelcontextprotocol.io)",
-        "trust_tier": "Community",
-        "kinds": ["Mcp"],
-        "last_synced": "2026-06-20T09:00:00Z"
-      },
-      {
-        "id": "docker-mcp-catalog",
-        "name": "Docker MCP Catalog",
-        "trust_tier": "Verified",
-        "kinds": ["Mcp"],
-        "last_synced": "2026-06-20T09:00:00Z"
-      }
-    ]
-  }
-}
-```
+对后端的修改(如 `mcp.add`)会在 Panel 下次重新获取 `extensions.installed` 时被反映出来(总线也会发出 `tools.changed`)。
 
-### extensions.sources.refresh
+## 能力 ledger
 
-触发对一个或全部目录源的后台重新同步。已缓存的 SQLite 目录会被更新，以保持浏览的离线能力。
+每安装的可见能力列表在每次安装时从磁盘**重新构建**(Capability Ledger 在 `~/.aleph/runtimes/ledger.json`)。安装处理函数的安装前披露从这个 ledger 构建,这样 Panel 可以渲染扩展在运行时实际看到的内容——而不是目录中"它声称能做到"的乐观版本。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 9,
-  "method": "extensions.sources.refresh",
-  "params": {
-    "source_id": "mcp-registry"
-  }
-}
-```
+## 另请参阅
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 9,
-  "result": {
-    "refreshing": true,
-    "source_id": "mcp-registry"
-  }
-}
-```
-
-**参数：**
-
-| 参数 | 类型 | 必需 | 说明 |
-|-----------|------|----------|-------------|
-| `source_id` | string | 否 | 要刷新的源；省略则刷新全部源 |
-
-## 商店智能体工具
-
-**商店智能体**是一个内置的、受保护（不可删除）的智能体，负责 discover → curate → install → verify 生命周期。它策展目录并驱动安装，但无法绕过系统护栏（规约、信任判定、SHA256、密钥处理）——与任何用户发起的 `extensions.install` 受到相同的门控。
-
-这五个工具构成它的私有工具集。它们是**内部/仅限智能体**的，不向聊天智能体暴露：
-
-| 工具 | 用途 |
-|------|---------|
-| `store_catalog_sync` | 将源目录同步到缓存的商店中 |
-| `store_fetch_docs` | 获取扩展的文档（含长尾 URL/repo 读取） |
-| `store_resolve_spec` | 解析安装规约（命令、参数、版本、SHA256） |
-| `store_install_run` | 执行已解析的安装 |
-| `store_install_verify` | 验证已安装的扩展（SHA256 + 健康检查） |
-
-## 另见
-
-- [概念：扩展商店](/docs/zh/concepts/extensions-store) —— 统一的扩展伞形概念、信任层级与商店智能体
-- [skills.*](/docs/zh/gateway/methods/skills) —— 技能后端（类型 `Skill`）
-- [plugins.*](/docs/zh/gateway/methods/plugins) —— 插件宿主后端（类型 `Plugin`）
-- [mcp.*](/docs/zh/gateway/methods/mcp) —— MCP 服务器后端（类型 `Mcp`）
-- [方法参考](/docs/zh/gateway/methods) —— 所有方法命名空间
-
----
-
-## 26.7.x 补充
-
-### 完整 RPC 集
-
-- `extensions.catalog` —— 扩展目录
-- `extensions.configure` —— 配置
-- `extensions.disclosure` —— 安装前披露
-- `extensions.install` / `extensions.installed` / `extensions.uninstall` / `extensions.toggle`
-
-### `plugin.*` 规范名空间
-
-- `plugin.list` / `plugin.install` / `plugin.installFromZip` / `plugin.uninstall` / `plugin.update`
-- `plugin.enable` / `plugin.disable` / `plugin.load` / `plugin.unload` / `plugin.reload`
-- `plugin.callTool` / `plugin.executeCommand`
-- `plugin.marketplace.list` / `plugin.marketplace.add`
-
-### `plugins.*` 旧名空间（向后兼容）
-
-`plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall` / `plugins.enable` / `plugins.disable` / `plugins.load` / `plugins.unload` / `plugins.callTool` / `plugins.executeCommand`
-
-### `plugin.install` 统一入口
-
-26.7.21+：按源（市场 / 压缩包 / 路径）分类统一处理。
-
-### 生命周期竞态修复
-
-26.7.21+：
-
-- 并发 `reload` 在 load guard 下串行
-- 格式错误的插件结果不再掩盖为 `ServiceResult::ok`
-- `AuthorInfo` 解析使用最左分隔符
-
-### Capability Ledger
-
-26.7.x：每次安装时从磁盘**重建**的可见能力清单——安装前披露。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [扩展商店](/docs/zh/concepts/extensions-store)——统一门面的上下文
+- [skills.*](/docs/zh/gateway/methods/skills) / [plugins.*](/docs/zh/gateway/methods/plugins) / [mcp.*](/docs/zh/gateway/methods/mcp)——按 kind 后端

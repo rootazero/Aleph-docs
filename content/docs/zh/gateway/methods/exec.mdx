@@ -1,233 +1,49 @@
 ---
 title: "exec.*"
-description: "执行 RPC 方法"
+description: "执行审批 RPC 方法"
 ---
 
-具有三层安全性的命令执行审批系统。
+`exec.*` 是运行时执行等级门控的审批接口。运行时仅提供**两个真实 JSON-RPC 方法**(`exec.approval.resolve`、`exec.approvals.pending`);其余的审批 UX——`exec.approval.request`、审批卡、Ask / Auto / Full 切换——都内嵌在**代理循环**中,通过 `chat.send` 或 `agent.run` 触发,而不是本命名空间。
 
-:::warning
-本页记录的是预期 API。`exec.*` 方法（`exec.approval.request`、`exec.approval.resolve`、`exec.approvals.get`、`exec.approvals.set`、`exec.approvals.pending`）在源处理程序（`src/gateway/handlers/exec_approvals.rs`）中定义，但**当前未在运行时处理程序注册中接线**。它们反映的是设计目标，但尚未通过 JSON-RPC 公开。请参阅[方法参考](/docs/zh/gateway/methods)获取准确的方法列表。
-:::
-
-## 安全级别
-
-| 级别 | 说明 |
-|-------|-------------|
-| `deny` | 阻止所有命令 |
-| `allowlist` | 仅批准的规则 |
-| `full` | 允许所有内容 |
+26.7.15+ 引入的 Ask/Auto/Full 执行等级门控在 `src/tools/scoped/` 中(动作感知的审批卡,以及绕过斜杠快路径、`tools.invoke` 和后台延续的拦截);相关接线细节见 `docs/superpowers/specs/2026-05-21-gateway-robustness-kit-design.md`。本页面仅记录 RPC 接口。
 
 ## 方法
 
-### exec.approval.request
-
-请求命令执行审批。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "exec.approval.request",
-  "params": {
-    "command": "rm -rf /tmp/cache",
-    "cwd": "/home/user",
-    "agent_id": "main",
-    "session_key": "agent:main:main",
-    "timeout_ms": 120000
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "id": "approval-uuid",
-    "approved": true,
-    "decision": "allow_once",
-    "timeout": false
-  }
-}
-```
-
 ### exec.approval.resolve
 
-解决待处理的审批请求。
+用决定解决待处理的审批请求。审批结果是一次性授权(`allow_once`)或更长生命周期的范围(`allow_session`、`allowlist`)。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "exec.approval.resolve",
-  "params": {
-    "id": "approval-uuid",
-    "decision": "allow_once",
-    "resolved_by": "user@terminal"
-  }
-}
-```
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 审批 id(随审批卡/询问卡片一同下发) |
+| `decision` | string | 是 | `allow_once` / `allow_session` / `allowlist` / `deny` |
+| `resolved_by` | string | 否 | 解决审批的操作员的显示名 |
+| `reason` | string | 否 | 自由文本原因;在 `deny` 时原样回传给模型,使其能基于真实反对理由重规划;在 `allow_*` 时被忽略。 |
 
-**决策类型：**
-
-| 决策 | 说明 |
-|----------|-------------|
-| `allow_once` | 仅允许此执行 |
-| `allow_session` | 允许当前会话 |
-| `allowlist` | 添加到永久允许列表 |
-| `deny` | 拒绝执行 |
-
-### exec.approvals.get
-
-获取当前审批配置。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "exec.approvals.get"
-}
-```
-
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "config": {
-      "version": 1,
-      "security": "allowlist",
-      "allowlist": [
-        "git *",
-        "npm install",
-        "cargo build"
-      ],
-      "denylist": [
-        "rm -rf /"
-      ]
-    },
-    "hash": "sha256:abc123..."
-  }
-}
-```
-
-### exec.approvals.set
-
-使用乐观锁定更新审批配置。
-
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "exec.approvals.set",
-  "params": {
-    "config": {
-      "version": 1,
-      "security": "allowlist",
-      "allowlist": [
-        "git *",
-        "npm *",
-        "cargo *"
-      ]
-    },
-    "base_hash": "sha256:abc123..."
-  }
-}
-```
+**响应:** 找到并解决时 `{ "ok": true }`;否则返回 `INVALID_PARAMS: Approval not found or already resolved: <id>`。
 
 ### exec.approvals.pending
 
-列出待处理的审批请求。
+列出所有仍在等待决定的审批。只读;卡和工具都从同一份内存映射中消费。
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "exec.approvals.pending"
-}
-```
+**响应:** `{ "pending": [ ...PendingApproval... ] }`。
 
-**响应：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "pending": [
-      {
-        "id": "uuid-1",
-        "command": "sudo apt update",
-        "cwd": "/home/user",
-        "agent_id": "main",
-        "session_key": "agent:main:main",
-        "created_at": "2024-01-15T10:30:00Z"
-      }
-    ]
-  }
-}
-```
+每个 `PendingApproval` 包含工具调用、运营可授予的作用域,以及产生该卡的 agent session key,这样面板在重载后能重新渲染任何进行中的卡片。
 
-## 允许列表模式
+## 不作为 RPC 存在的方法
 
-模式支持 glob 风格匹配：
+老版本中本页描述但**未在当前 alpeh-server 上注册**的方法:
 
-| 模式 | 匹配项 |
-|---------|---------|
-| `git *` | 任何 git 命令 |
-| `npm install` | 精确匹配 |
-| `cargo build --*` | 带有任何参数的 cargo build |
-| `ls -la /tmp/*` | /tmp 子目录中的 ls |
+| 方法 | 不作为 RPC 存在的原因 |
+|------|---------------------|
+| `exec.approval.request` | 模型从不主动调用——`src/tools/scoped/` 中的动作感知门控在工具元数据提示需要确认时,直接在事件总线上抛出审批卡。 |
+| `exec.approvals.get` | 没有"审批配置"可读——授权是内存中的一次性 / 会话级产物,无磁盘形态。 |
+| `exec.approvals.set` | 同上,没有可写的配置。 |
 
-## IPC 集成
+客户端若想程序化驱动流程,唯一的合法入口是 `exec.approval.resolve`(回答一张卡)和 `exec.approvals.pending`(枚举开放中的卡)。
 
-对于 CLI 集成，Aleph 支持 Unix 套接字 IPC：
+## 另请参阅
 
-```
-/tmp/aleph-exec-{user}.sock
-```
-
-IPC 协议使用 HMAC-SHA256 进行认证：
-
-1. 客户端发送质询请求
-2. 服务器响应 nonce
-3. 客户端使用共享密钥签名
-4. 服务器验证并继续
-
----
-
-## 26.7.x 补充
-
-### `tools.*` 完整 RPC
-
-- `tools.catalog` —— 工具目录（带 name + description）
-- `tools.effective` —— 当前会话生效的工具集
-- `tools.invoke` —— 工具调用
-- `tools.cancel_call` —— 取消正在运行的工具
-- `tools.in_flight` —— 列出正在运行的工具调用
-
-### `tools.search`（progressive tool disclosure）
-
-26.7.7+ `tool_search` 元工具——按 BM25 ranker 在 catalog 中按需查找。
-
-### 资源声明三态
-
-`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`——Act 阶段按声明分桶并行。
-
-### 跨批次去重
-
-`Memo / Cross-batch Dedup` —— 相同 `(name, args)` 复用首次结果。
-
-### Action-aware Approval
-
-26.7.15+ 审批门在 `src/tools/scoped/` 单一强点。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
-
-### 失败关闭
-
-未知工具在 `ask` tier 下**失败关闭**。
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [chat.*](/docs/zh/gateway/methods/chat)——模型使用的传输
+- [clarification.*](#)——`ask_user` 同级面(同一执行等级门控族)

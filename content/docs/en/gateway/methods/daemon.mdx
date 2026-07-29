@@ -3,22 +3,25 @@ title: "daemon.*"
 description: "Daemon control and lifecycle RPC methods"
 ---
 
-Daemon methods control the Aleph background daemon process — start, stop, restart, and query the daemon that hosts the gateway and manages all subsystems.
+`daemon.*` exposes the control plane of the Aleph daemon (the `aleph-server` process that embeds the gateway). All handlers live in `src/gateway/handlers/daemon_control.rs`; `daemon.logs` is registered directly in `HandlerRegistry::new()` (no runtime state required), while `daemon.status` and `daemon.shutdown` are wired at gateway boot.
 
 ## Methods
 
+| Method | Description |
+|--------|-------------|
+| [`daemon.status`](#daemonstatus) | Daemon runtime state |
+| [`daemon.shutdown`](#daemonshutdown) | Initiate graceful shutdown |
+| [`daemon.logs`](#daemonlogs) | Tail recent logs by level and line count |
+
+> `daemon.start` / `daemon.stop` / `daemon.restart` / `daemon.reload` are not RPCs. Daemon lifecycle is owned by the host (`aleph-server daemon`, `aleph-server service`, or a service manager like `systemd` / `launchd`).
+
 ### daemon.status
 
-Get the current daemon status.
+Read daemon runtime information (uptime, version, platform).
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "daemon.status",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 1, "method": "daemon.status" }
 ```
 
 **Response:**
@@ -27,59 +30,41 @@ Get the current daemon status.
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "status": "running",
-    "pid": 12345,
-    "version": "0.1.0",
-    "started_at": "2024-01-15T10:00:00Z",
-    "uptime_seconds": 1800,
-    "components": {
-      "gateway": "healthy",
-      "memory": "healthy",
-      "mcp": "healthy"
-    }
+    "running": true,
+    "uptime_secs": 1800,
+    "version": "<build-version>",
+    "platform": "linux-x86_64"
   }
 }
 ```
 
-### daemon.start
+`uptime_secs` is measured from the `Instant` captured at process start; `version` is taken from the `ALEPH_VERSION` build-time env var.
 
-Start the daemon if it's not running.
+### daemon.shutdown
+
+Trigger a graceful shutdown: send the response first, then a spawned task calls `std::process::exit(0)` 100 ms later. The exit code is honoured by `aleph-server`'s SIGTERM handler.
 
 **Request:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "daemon.start",
-  "params": {}
-}
+{ "jsonrpc": "2.0", "id": 2, "method": "daemon.shutdown" }
 ```
 
 **Response:**
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "started": true,
-    "pid": 12346
-  }
-}
+{ "jsonrpc": "2.0", "id": 2, "result": { "status": "shutting_down" } }
 ```
 
-### daemon.stop
+### daemon.logs
 
-Stop the daemon gracefully.
+Tail the most recent log file (matched by `aleph-*.log.*` filename, picking the latest mtime). Optionally filter by level using whole-token matching on ` ERROR ` / `[ERROR]` style markers, so `WARN` is not falsely matched by an `ERROR` filter.
 
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 3,
-  "method": "daemon.stop",
-  "params": {
-    "force": false
-  }
+  "method": "daemon.logs",
+  "params": { "lines": 50, "level": "error" }
 }
 ```
 
@@ -89,95 +74,31 @@ Stop the daemon gracefully.
   "jsonrpc": "2.0",
   "id": 3,
   "result": {
-    "stopped": true
+    "logs": ["2026-03-15T10:30:00Z ERROR gateway: connection refused", "..."],
+    "file": "/home/user/.aleph/logs/aleph-server.log.2026-03-15"
   }
 }
 ```
+
+When no `aleph-*.log.*` file exists in the directory, the handler returns `{ "logs": [], "file": null, "total_lines": 0 }`.
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `force` | boolean | No | Force stop without graceful shutdown |
+| `lines` | number | No | Number of trailing lines to return (default 50) |
+| `level` | string | No | Filter by level: `error` / `warn` / `info` / `debug` / `trace` |
 
-### daemon.restart
+## CLI Equivalents
 
-Restart the daemon.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "daemon.restart",
-  "params": {
-    "force": false
-  }
-}
-```
-
-### daemon.reload
-
-Reload daemon configuration without restarting.
-
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "daemon.reload",
-  "params": {}
-}
-```
-
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "reloaded": true,
-    "config_valid": true
-  }
-}
-```
-
-## CLI Equivalent
-
-These RPC methods mirror the CLI commands:
-
-```bash
-aleph-server start    # Start daemon
-aleph-server stop     # Stop daemon
-aleph-server restart  # Restart daemon
-aleph-server status   # Check status
-```
+| Purpose | CLI |
+|--------|---------|
+| Start the daemon | `aleph-server start` |
+| Stop the daemon | `aleph-server stop` |
+| Register as a system service (launchd / systemd-user / Task Scheduler) | `aleph-server service install` |
+| Show version / platform | `aleph-server version` |
 
 ## See Also
 
-- [Methods Reference](/docs/en/gateway/methods) -- All method namespaces
-- [Getting Started: Quick Start](/docs/en/getting-started/quick-start) -- Daemon setup
-
----
-
-## 26.7.x Addendum
-
-### `daemon.logs` / `daemon.shutdown` / `daemon.status`
-
-26.7.x: daemon-management RPC.
-
-### `aleph-server service` Subcommand
-
-26.7.1+: install / start / enable auto-start / uninstall system service (launchd / systemd-user / Task Scheduler).
-
-### Day-Boundary Log Rotation
-
-26.7.24+: the daemon supports day-boundary log rotation; on startup it writes an `ALEPH-BOOT` marker. The sleep inhibitor is silent on stderr.
-
-### Heartbeat Refuses Dangerous Tools
-
-26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools.
-
-### Guardian Judge Payload Masks Secrets
-
-26.7.21+: the LLM judge used by heartbeat probes (`Guardian Judge`) must mask secrets in its payload.
+- [Methods Reference](./index) -- All method namespaces
+- [logs.*](./logs) -- `logs.getDirectory` / `logs.getLevel` / `logs.setLevel`
