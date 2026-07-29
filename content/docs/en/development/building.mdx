@@ -9,17 +9,17 @@ This guide covers everything you need to compile Aleph from source, from install
 
 ### Rust Toolchain
 
-Aleph requires **Rust 1.92 or later** (edition 2021). Install via [rustup](https://rustup.rs/):
+Aleph requires **Rust 1.95 or later** (edition 2021). The MSRV is raised by `sysinfo 0.39`, and `rust-toolchain.toml` pins the build to `1.96.0`. Install via [rustup](https://rustup.rs/):
 
 ```bash
 # Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Ensure the stable toolchain is active
-rustup default stable
+# Accept the rust-toolchain.toml pin
+rustup show
 
-# Verify version
-rustc --version   # must be >= 1.92
+# Verify the version
+rustc --version   # must be >= 1.95
 cargo --version
 ```
 
@@ -76,6 +76,7 @@ Aleph/
 │   └── bin/aleph-server/       # Server binary
 ├── desktop/
 │   ├── shared/                 # DesktopCapability trait + IPC protocol
+│   ├── shell/                  # Tauri desktop shell
 │   ├── macos/                  # macOS native implementation
 │   ├── linux/                  # Linux native implementation
 │   └── windows/                # Windows native implementation
@@ -100,6 +101,7 @@ members = [
     "desktop/macos",
     "desktop/linux",
     "desktop/windows",
+    "desktop/shell",
     "shared/logging",
     "shared/protocol",
     "shared/ui_logic",
@@ -110,24 +112,24 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "26.7.21"   # CalVer; keep in sync with the VERSION file
 edition = "2021"
 license = "MIT"
-rust-version = "1.92"
+rust-version = "1.95"
 ```
 
 ## Feature Flags
 
-Aleph compiles **all production features by default**. Only test and experimental features are gated:
+Aleph compiles **all production features by default**. Only test and experimental features are gated (kept in sync with `Cargo.toml`):
 
 ```toml
 [features]
 default = []
 loom = ["dep:loom"]               # Concurrency testing with Loom
 test-helpers = []                  # Integration test utilities
-control-plane = []                 # Experimental: Control Plane UI
+control-plane = []                 # Experimental: Control Plane UI (Leptos/WASM dashboard)
 disabled-tests = []                # Disabled test modules (awaiting rewrite)
-telegram-draft-api = []            # Experimental: Telegram Draft API
+plugin-wasm = []                   # Placeholder for the in-flight WASM plugin runtime; keeps `tests/wasm_capability_test.rs`'s `cfg(feature = "plugin-wasm")` gate
 ```
 
 **No feature flags are required for production builds.** All channels, tools, and integrations are compiled and enabled/disabled at runtime via `config.toml` configuration.
@@ -345,9 +347,9 @@ Consider using `cargo check` instead of `cargo build` when you only need to veri
 
 **Code is the authority** — every doc number is just a copy of `CEILING`:
 
-- Top-level 8 + `agent/` 4 = **12 files**
-- Line count gated by `src/harness/tests/budget.rs` ratchet
-- Currently 5,055 lines (2026-07-26 revision)
+- Top-level 8 + `agent/` 4 = **12 files** (tests under `tests/` do not count toward the ratchet)
+- Line count gated by `src/harness/tests/budget.rs` ratchet, bound to the `CEILING` constant
+- Current `CEILING` = **5,055** (`src/harness/tests/budget.rs:335`, 2026-07-26 revision); treat any line count reproduced here as a stale copy
 - The 3 questions before adding code: scaffolding vs cognition? Will a model upgrade still need it? How many real consumers does it have?
 
 ### YAGNI Withdrawal

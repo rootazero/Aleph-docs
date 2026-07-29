@@ -264,12 +264,12 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | Skill System v1 | Skill System v2 | Complete rewrite |
 | EvolutionTracker | Registry | Part of old skill system |
 | SolidificationDetector | EligibilityService | Part of old skill system |
-| SubagentTool | FlowRunTool | Architecture changed |
+| SubagentTool | (retained as the sub-agent spawn tool) | Coexists with `FlowRunTool` (`src/orchestrator/flow_run_tool.rs`); the former handles sub-agent spawn, the latter handles flow orchestration |
 | LoopToolRegistry | ToolService | Unified tool façade |
 | ClawHub settings tab | Extensions Store | ClawHub demoted to long-tail; settings tab removed |
 | `teams.run` | `teams.chat.send` / Coord Tasks | Method never existed — teams use the chat thread + tasks |
 | `coordination: sequential\|parallel\|hierarchical` | Team Strata (leader-first planning) | Coordination modes were fictional |
-| DiminishingReturnsDetector | (removed) | Harness ratchet lowered; the hard stop inside the loop violates R10 |
+| DiminishingReturnsDetector | (removed) | Harness ratchet tightened to the current `CEILING` (`src/harness/tests/budget.rs:335`); the hard stop inside the loop violates R10 |
 | Telegram local pairing store | Router-singleton pairing store | Channel-local store never took effect |
 | Discord parallel nested config layers | Router-singleton config | Parallel layers removed |
 | Provider failover deep-clone whole session | Atomic regen marker + single clone | Performance and correctness fix |

@@ -36,7 +36,7 @@ alephcore
   ├── capability      # Capability detection
   ├── cli             # CLI helpers (inquire prompts)
   ├── command         # Command definitions
-  ├── components      # Reusable components
+  ├── components      # Shared domain types (only `types/`; the legacy EventHandler chain was removed during the Harness migration)
   ├── compressor      # Context compression
   ├── conversation    # Multi-turn conversation management
   ├── daemon          # Proactive AI daemon (worldmodel, perception)
@@ -82,7 +82,7 @@ alephcore
   ├── tools           # Tool trait system
   ├── video           # Video transcript extraction
   ├── vision          # Vision/image processing
-  └── wizard          # Configuration wizard flows
+  └── wizard          # Session-based configuration wizard (`wizard.*` RPC, Panel-driven; no CLI subcommand)
 ```
 
 Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) below.
@@ -105,7 +105,7 @@ Modules marked with `*` are feature-gated. See [Feature Flags](#feature-flags) b
 
 | Type | Module | Description |
 |------|--------|-------------|
-| `AgentHarness` | `harness::AgentHarness` | Core Think→Act execution engine (locked at 12 files / 5,055 lines) |
+| `AgentHarness` | `harness::AgentHarness` | Core Think→Act execution engine (ratchet: 12 files, `CEILING = 5,055` at `src/harness/tests/budget.rs:335`) |
 | `AgentHarness::new` | `harness::AgentHarness` | Construct with `HarnessDeps` |
 | `HarnessDeps` | `harness::deps` | Injected dependencies (session, tool, provider, callback) |
 | `HarnessRunner` | `harness::HarnessRunner` | Polymorphic seam (replaces the legacy `Harness` trait) |
@@ -423,7 +423,7 @@ use alephcore::verification::{ToolCallSummary, TurnVerifyContext, VerifierVerdic
 
 ### Harness API
 
-`alephcore::harness::AgentHarness` — locked at 12 files / 5,055 lines. `run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`.
+`alephcore::harness::AgentHarness` — ratchet: 12 files, `CEILING = 5,055` at `src/harness/tests/budget.rs:335` (2026-07-26). `run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`.
 
 ### Thinker API
 

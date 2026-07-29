@@ -21,50 +21,60 @@ User Input ──▶ Agent Loop ──▶ [PreToolUse hooks] ──▶ Tool Exec
 
 ## Hook Events
 
-Every hook is bound to a specific event. Aleph supports the following hook events:
+Every hook is bound to a specific event. The single source of truth for the exhaustive list is the `HookEvent` enum in `src/extension/types/hooks.rs`. Serialization uses `snake_case` (`before_tool_call`); `PascalCase` aliases are kept for backward compatibility with legacy `hooks.json` (`PreToolUse` ↔ `BeforeToolCall`). The `hooks.events` RPC and the `hooks_manage events` command both project `HookEvent::ALL` and do not maintain their own hand-written lists.
 
 ### Tool Lifecycle
 
 | Event | When It Fires | Can Block? |
 |-------|---------------|------------|
-| `PreToolUse` | Before a tool is executed | Yes |
-| `PostToolUse` | After a tool completes successfully | No |
-| `PostToolUseFailure` | After a tool fails | No |
+| `BeforeToolCall` | Before a tool is executed | Yes |
+| `AfterToolCall` | After a tool completes successfully | Yes (can rewrite the output) |
+| `AfterToolCallFailure` | After a tool fails | No |
+| `ToolResultPersist` | When a tool result is being persisted | No |
 
-### Session Lifecycle
+### Session and Agent
 
 | Event | When It Fires | Can Block? |
 |-------|---------------|------------|
-| `SessionStart` | When a new session begins | No |
+| `BeforeAgentStart` | Before the agent begins processing | Yes |
+| `AgentEnd` | When the agent completes | Yes (can rewrite the final output) |
+| `SessionStart` | When a new session begins | Yes |
 | `SessionEnd` | When a session ends | No |
-| `PreCompact` | Before session compaction | Yes |
+| `BeforeCompaction` | Before session compaction | Yes |
+| `AfterCompaction` | After session compaction | No |
+| `UserPromptSubmit` | After the user submits a prompt, before the first think call | Yes |
+| `Stop` | When the model produces a turn with no tool calls | Yes (interceptor may veto) |
 
-### User Interaction
-
-| Event | When It Fires | Can Block? |
-|-------|---------------|------------|
-| `UserPromptSubmit` | When the user submits a prompt | Yes |
-| `PermissionRequest` | When a tool requests elevated permission | Yes |
-
-### Agent Lifecycle
+### Subagent
 
 | Event | When It Fires | Can Block? |
 |-------|---------------|------------|
-| `SubagentStart` | When a sub-agent is launched | No |
-| `SubagentStop` | When a sub-agent finishes | No |
-| `Stop` | When processing stops | No |
+| `SubagentStart` | When a sub-agent is spawned | No (observer-only) |
+| `SubagentStop` | When a sub-agent completes | No |
+
+### Message Channels
+
+| Event | When It Fires | Can Block? |
+|-------|---------------|------------|
+| `MessageReceived` | When a channel message is received | Yes |
+| `MessageSending` | Before a message is sent to a channel | Yes |
+| `MessageSent` | After a message has been sent | No |
+
+### Provider and Gateway
+
+| Event | When It Fires | Can Block? |
+|-------|---------------|------------|
+| `PreApiRequest` | Before an LLM provider request is issued | No |
+| `PostApiRequest` | After an LLM provider response is received | No |
+| `GatewayStart` | When the gateway starts | No |
+| `GatewayStop` | When the gateway stops | No |
+
+### Notification and Permission
+
+| Event | When It Fires | Can Block? |
+|-------|---------------|------------|
 | `Notification` | When a notification is sent | No |
-| `Setup` | During initial setup | No |
-
-### Chat and Command (Plugin Events)
-
-| Event | When It Fires | Can Block? |
-|-------|---------------|------------|
-| `ChatMessage` | When a chat message is received | Yes |
-| `ChatParams` | When chat parameters are configured | Yes |
-| `ChatResponse` | When a chat response is generated | No |
-| `CommandExecuteBefore` | Before a command executes | Yes |
-| `CommandExecuteAfter` | After a command executes | No |
+| `PermissionRequest` | When a tool requests elevated permission | Yes |
 
 ## Hook Kinds
 
@@ -82,7 +92,7 @@ Use interceptors for:
 ```toml
 # Block all shell commands that contain 'rm -rf'
 [[hooks]]
-event = "PreToolUse"
+event = "before_tool_call"   # PascalCase aliases PreToolUse / BeforeToolCall also accepted
 kind = "interceptor"
 priority = "system"
 matcher = "shell:exec"

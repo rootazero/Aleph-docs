@@ -36,7 +36,7 @@ alephcore
   ├── capability      # 能力检测
   ├── cli             # CLI 助手（inquire 提示）
   ├── command         # 命令定义
-  ├── components      # 可重用组件
+  ├── components      # 共享域类型（仅 `types/`；原 EventHandler 链路已在 Harness 迁移时移除）
   ├── compressor      # 上下文压缩
   ├── conversation    # 多轮对话管理
   ├── daemon          # 主动 AI 守护进程（worldmodel、perception）
@@ -82,7 +82,7 @@ alephcore
   ├── tools           # 工具 trait 系统
   ├── video           # 视频转录提取
   ├── vision          # 视觉/图像处理
-  └── wizard          # 配置向导流程
+  └── wizard          # 会话制配置向导（`wizard.*` RPC，Panel 驱动；CLI 无对应子命令）
 ```
 
 标记 `*` 的模块是功能门控的。参见下面的 [功能标志](#功能标志)。
@@ -105,7 +105,7 @@ alephcore
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AgentHarness` | `harness::AgentHarness` | 核心 Think→Act 执行引擎（锁 12 文件 / 5055 行） |
+| `AgentHarness` | `harness::AgentHarness` | 核心 Think→Act 执行引擎（ratchet：12 文件，`CEILING = 5055`，`src/harness/tests/budget.rs:335`） |
 | `AgentHarness::new` | `harness::AgentHarness` | 用 `HarnessDeps` 构造 |
 | `HarnessDeps` | `harness::deps` | 注入的依赖（session、tool、provider、callback） |
 | `HarnessRunner` | `harness::HarnessRunner` | 多态 seam（替代旧 `Harness` trait） |
@@ -435,7 +435,7 @@ use alephcore::verification::{ToolCallSummary, TurnVerifyContext, VerifierVerdic
 
 ### Harness API
 
-`alephcore::harness::AgentHarness` —— 锁 12 文件 / 5055 行。`run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`。
+`alephcore::harness::AgentHarness` —— ratchet：12 文件，`CEILING = 5055`（`src/harness/tests/budget.rs:335`，2026-07-26 修订）。`run()` / `run_turn()` / `terminate_reason()` / `token_breakdown()` / `last_turn_context_tokens()` / `tool_timeline()` / `duration_ms()`。
 
 ### Thinker API
 

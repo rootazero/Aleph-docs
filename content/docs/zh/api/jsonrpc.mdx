@@ -84,17 +84,9 @@ description: "WebSocket JSON-RPC 2.0 接口的完整方法参考"
 | `events.unsubscribe` | 移除订阅 | `patterns[]` | `{ unsubscribed[], active_patterns[] }` |
 | `events.list` | 列出活动订阅 | -- | `{ patterns[], total }` |
 
-### wizard.* — 设置向导
+### wizard.* — 设置向导（Panel 驱动；非 CLI 子命令）
 
-[完整文档](/docs/zh/gateway/methods/wizard)
-
-| 方法 | 描述 | 关键参数 | 返回 |
-|--------|-------------|----------------|---------|
-| `wizard.start` | 启动向导会话 | `wizard_type`, `initial_data?` | `{ session_id, step, status }` |
-| `wizard.answer` | 回答当前步骤 | `session_id`, `step_id`, `value` | `{ done, step?, status }` |
-| `wizard.next` | 前进过信息步骤 | `session_id` | `{ done, step?, status }` |
-| `wizard.cancel` | 取消向导 | `session_id` | `{ cancelled }` |
-| `wizard.status` | 获取向导状态 | `session_id` | `{ status }` |
+`wizard.*` 方法在源 handler（`src/gateway/handlers/wizard.rs`）中定义，但**当前未在运行时 handler 注册中接线**——它们反映设计目标，尚未经 JSON-RPC 暴露。Panel 在握手窗口内通过 RPC 启动会话，CLI **不**暴露 `aleph wizard` 子命令。详见 [网关方法参考](/docs/zh/gateway/methods) 了解当前真实暴露的方法集合。
 
 ### cron.* — 计划作业
 

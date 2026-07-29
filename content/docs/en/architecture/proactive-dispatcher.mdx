@@ -158,9 +158,9 @@ Three-phase flow:
 
 ---
 
-## Components (`src/components/`)
+## Shared domain types (`src/components/`)
 
-`src/components/` is now a thin shell: `mod.rs` + `types/`. It exists as the **composite-component namespace** for types (tasks, plans, events) shared across cron / heartbeat / task pipelines. Specific modules (e.g. `ComponentSpec` / `ComponentState`) are added on demand — do not assume the legacy sub-directory listing.
+`src/components/` is now a thin shell: `mod.rs` + `types/`. The legacy `EventHandler` chain (`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`) was removed during the Harness migration; only the shared domain types remain and are consumed by the event system.
 
 ---
 

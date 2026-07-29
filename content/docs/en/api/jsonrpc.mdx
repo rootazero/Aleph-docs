@@ -84,17 +84,9 @@ When `require_auth` is enabled in the Gateway config, the **first message** on a
 | `events.unsubscribe` | Remove subscriptions | `patterns[]` | `{ unsubscribed[], active_patterns[] }` |
 | `events.list` | List active subscriptions | -- | `{ patterns[], total }` |
 
-### wizard.* -- Setup Wizards
+### wizard.* -- Setup Wizards (Panel-driven; not a CLI subcommand)
 
-[Full documentation](/docs/en/gateway/methods/wizard)
-
-| Method | Description | Key Parameters | Returns |
-|--------|-------------|----------------|---------|
-| `wizard.start` | Start a wizard session | `wizard_type`, `initial_data?` | `{ session_id, step, status }` |
-| `wizard.answer` | Answer current step | `session_id`, `step_id`, `value` | `{ done, step?, status }` |
-| `wizard.next` | Advance past informational step | `session_id` | `{ done, step?, status }` |
-| `wizard.cancel` | Cancel a wizard | `session_id` | `{ cancelled }` |
-| `wizard.status` | Get wizard status | `session_id` | `{ status }` |
+The `wizard.*` methods are defined in the source handler (`src/gateway/handlers/wizard.rs`) but are **not currently wired** in the runtime handler registration — they reflect the design target, and are not yet exposed via JSON-RPC. The Panel invokes them from the handshake window; the CLI does **not** expose an `aleph wizard` subcommand. See [Methods Reference](/docs/en/gateway/methods) for the accurate list of currently exposed methods.
 
 ### cron.* -- Scheduled Jobs
 

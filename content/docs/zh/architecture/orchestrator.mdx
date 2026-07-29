@@ -176,9 +176,9 @@ FlowOutcome → 网关渲染响应
 
 26.7.15+：子 harness 拿到一个**被父会话 scope 的 `ToolResultStore`**——之前 process-wide 导致 silent zero-hit recall。
 
-### 工具链 ratchet 下调到 5008 行
+### Harness 行数 ratchet — `CEILING` 为唯一权威
 
-26.7.21+：`DiminishingReturnsDetector` 硬停止被移除（R10 禁止在循环内做完成度判断）；卡住的运行由 `max_iterations` / `ToolLoopVerifier` / 模型自身停手来兜底。当前线预算 ratchet = 5008 行。
+26.7.21+：`DiminishingReturnsDetector` 硬停止被移除（R10 禁止在循环内做完成度判断）；卡住的运行由 `max_iterations` / `ToolLoopVerifier` / 模型自身停手来兜底。行数 ratchet 由 `src/harness/tests/budget.rs::CEILING` 守，本页不复述具体数字，以源码常量为权威。
 
 ### 详见
 

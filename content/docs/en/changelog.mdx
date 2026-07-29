@@ -50,7 +50,7 @@ The largest feature drop in a while — 282 commits across three days. Three thr
 - **Extension lifecycle races** — concurrent `reload` is now serialized under the load guard; malformed plugin results are no longer masked as `ServiceResult::ok`; `AuthorInfo` parsing uses the leftmost separator.
 - **Cluster node keys were byte-sliced**, breaking CJK node names — normalization is now Unicode-aware.
 - **macOS capture and recording rails.** Screen recording is cropped to the requested region via `setSourceRect`; completion is verified before reporting success; typed bridge errors are preserved on OCR, window-capture, media, input, and screenshot rails.
-- **Harness ratchet lowered to 5008** by removing the `DiminishingReturnsDetector` hard stop — a deterministic completion judgment inside the loop, which R10 forbids.
+- **Harness ratchet tightened to the current `CEILING`** (guarded by `src/harness/tests/budget.rs:335`) by removing the `DiminishingReturnsDetector` hard stop — a deterministic completion judgment inside the loop, which R10 forbids. The code is the source of truth; any number reproduced in docs is just a copy of `CEILING`.
 - **Session and team integrity.** `retire_from` is atomic and shutdown timeouts surface; active team names are unique via a partial index; team protocol text and artifact content are size-capped.
 - **Wire request ids no longer use UUIDs** (atomic counter; the dependency is dropped from `aleph-protocol`); a custom regex that fails to compile no longer discards the valid ones alongside it.
 

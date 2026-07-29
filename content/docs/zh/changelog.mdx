@@ -50,7 +50,7 @@ Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版
 - **扩展生命周期竞态**——并发 `reload` 现在在 load guard 下串行；格式错误的插件结果不再被掩盖为 `ServiceResult::ok`；`AuthorInfo` 解析使用最左分隔符。
 - **集群节点键按字节切片**，CJK 节点名断裂——现在按 Unicode 归一化。
 - **macOS 截屏与录音轨道**——屏幕录制通过 `setSourceRect` 裁剪到所请求区域（按物理像素而非点）；完成时验证产生了输出再报告成功；OCR、窗口捕获、媒体、输入、截屏轨道上的类型化 bridge 错误被保留而不是扁平化；`screen_record` 序列化错误会向上传播而不是变成 `null`。
-- **Harness ratchet 降到 5008**——通过移除 `DiminishingReturnsDetector` 硬停（R10 禁止循环内确定性完成判断）。卡住的运行受 `max_iterations` + 工具循环验证器 + 模型自身停止控制。
+- **Harness ratchet 收紧至当前 `CEILING`**（`src/harness/tests/budget.rs:335` 守）——通过移除 `DiminishingReturnsDetector` 硬停（R10 禁止循环内确定性完成判断）。卡住的运行受 `max_iterations` + 工具循环验证器 + 模型自身停止控制。代码是权威；本文档数字只是 `CEILING` 的副本。
 - **会话与团队完整性**——`retire_from` 原子；关闭超时被上报；活跃团队名通过部分索引保证唯一；团队协议文本与工件内容大小加封顶；`sessions` 与 `tasks` 增加 presence opt-in、加哈希的 carryover 文件名、确定性的模板环境排序。
 - **线缆请求 id 不再用 UUID**——换成原子计数器，从 `aleph-protocol` 移除该依赖；一个编译失败的自定义 regex 不会再把合法的 regex 一并丢弃。
 

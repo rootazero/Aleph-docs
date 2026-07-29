@@ -283,13 +283,9 @@ aleph-server secret providers
 
 ## 26.7.x 补充
 
-### `aleph wizard` 11 阶段
+### `wizard.*` RPC（无 `aleph wizard` CLI 子命令）
 
-26.7.21+ 完整流程：欢迎、provider、凭据、主模型、辅助模型、思考级别、**会话模式（chat / work / code）**、**执行等级（ask / auto / full）**、消息应用、**网关 TLS**、完成。
-
-### `aleph wizard --mode`
-
-新增子命令：仅切换默认会话模式。
+设置向导通过 Gateway 暴露为 `wizard.*` JSON-RPC（`wizard.start` / `wizard.next` / `wizard.answer` / `wizard.cancel` / `wizard.status`），由 Panel 在握手窗口内调用。`aleph` / `aleph-server` CLI **不**提供 `wizard` 子命令——完整流程由 Panel 驱动。
 
 ### `aleph-server service` 子命令
 
@@ -319,6 +315,6 @@ R9 提示词骨架大小校验命令——`src/thinker/prompt_contract.rs` 的 `
 
 ### 详见
 
-- [设置向导](/docs/zh/getting-started/wizard) —— 完整 11 阶段
+- [设置向导（`wizard.*` RPC，Panel 驱动）](/docs/zh/getting-started/wizard) —— 完整 11 阶段
 - [CLI 命令参考](/docs/zh/cli/commands) —— 完整命令
 - [配置](/docs/zh/getting-started/configuration) —— 完整 `config.toml` 字段

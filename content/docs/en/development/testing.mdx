@@ -446,9 +446,9 @@ async fn memory_store_returns_facts_sorted_by_relevance() {
 
 **Code is the authority** — every doc number is just a copy of `CEILING`:
 
-- Top-level 8 + `agent/` 4 = **12 files**
-- Line count gated by `src/harness/tests/budget.rs` ratchet
-- Currently 5,055 lines (2026-07-26 revision)
+- Top-level 8 + `agent/` 4 = **12 files** (tests under `tests/` do not count toward the ratchet)
+- Line count gated by `src/harness/tests/budget.rs` ratchet, bound to the `CEILING` constant
+- Current `CEILING` = **5,055** (`src/harness/tests/budget.rs:335`, 2026-07-26 revision); treat any line count reproduced here as a stale copy
 - The 3 questions before adding code: scaffolding vs cognition? Will a model upgrade still need it? How many real consumers does it have?
 
 ### YAGNI Withdrawal

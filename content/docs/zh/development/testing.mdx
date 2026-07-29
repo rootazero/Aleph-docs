@@ -446,9 +446,9 @@ async fn memory_store_returns_facts_sorted_by_relevance() {
 
 **代码是权威**——任何文档数字都只是 `CEILING` 的副本：
 
-- 顶层 8 + `agent/` 4 = **12 文件**
-- 行数由 `src/harness/tests/budget.rs` 的 ratchet 守
-- 当前 5055 行（2026-07-26 修订）
+- 顶层 8 + `agent/` 4 = **12 文件**（测试文件在 `tests/`，不入 ratchet）
+- 行数由 `src/harness/tests/budget.rs` 的 ratchet 守，绑定常量 `CEILING`
+- 当前 `CEILING` = **5055**（`src/harness/tests/budget.rs:335`，2026-07-26 修订）；不要把本节数字当副本
 - 加代码前必答 3 问：脚手架 vs 认知？模型升级后是否还需要？真实消费者有几个？
 
 ### YAGNI 撤回

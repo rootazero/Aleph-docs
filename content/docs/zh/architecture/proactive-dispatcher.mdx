@@ -3,7 +3,7 @@ title: "主动任务调度"
 description: "守护后台任务：cron / heartbeat 实化服务；runtimes 能力 ledger；wake queue 与防风暴守卫；不再有 `src/daemon/`。"
 ---
 
-> 文档历史版本中的 `daemon::dispatcher` 模块、`src/daemon/` 目录、`ProposedAction` / `PolicyEngine` / `DispatcherMode` 枚举**已全部移除**。本页描述当前 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 中的真实代码，附 `src/tasks/shared/`、`src/runtimes/` 与 `src/components/` 协作。
+> 文档历史版本中的 `daemon::dispatcher` 模块、`src/daemon/` 目录、`ProposedAction` / `PolicyEngine` / `DispatcherMode` 枚举**已全部移除**。本页描述当前 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 中的真实代码，附 `src/tasks/shared/`、`src/runtimes/` 协作；`src/components/` 只剩共享域类型。
 
 主动后台任务现在由两条正交的服务组成：
 - **Cron**（`src/tasks/cron/`）—— 计划任务，按 cron 表达式 / 间隔 / 一次性触发
@@ -158,9 +158,9 @@ pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
 
 ---
 
-## Components（`src/components/`）
+## 共享域类型（`src/components/`）
 
-`src/components/` 仅剩最小骨架：`mod.rs` + `types/`。当前以**复合类型**（任务、计划、事件）的形式存在，是 cron / heartbeat / 任务流水线之间共享的**复合组件命名空间**。具体模块（如 `ComponentSpec` / `ComponentState`）按需扩展——不要假设旧的 `src/components/` 子目录列表。
+`src/components/` 仅剩最小骨架：`mod.rs` + `types/`。原 EventHandler 链路（`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`）在 Harness 迁移期间已删除，只剩共享域类型并由事件系统消费。
 
 ---
 

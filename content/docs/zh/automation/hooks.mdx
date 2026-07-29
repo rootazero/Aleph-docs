@@ -21,50 +21,60 @@ Aleph 的钩子系统位于代理循环和工具执行之间，形成事件驱�
 
 ## 钩子事件
 
-每个钩子都绑定到特定事件。Aleph 支持以下钩子事件：
+每个钩子都绑定到特定事件。完整事件列表的单一来源是 `src/extension/types/hooks.rs` 的 `HookEvent` 枚举，序列化用 `snake_case`（`before_tool_call`），同时保留 `PascalCase` 别名以兼容旧 `hooks.json`（`PreToolUse` ↔ `BeforeToolCall`）。`hooks.events` RPC 与 `hooks_manage events` 命令从 `HookEvent::ALL` 投影，不维护各自的手写清单。
 
 ### 工具生命周期
 
 | 事件 | 何时触发 | 可以阻止？ |
 |-------|---------------|------------|
-| `PreToolUse` | 在工具执行之前 | 是 |
-| `PostToolUse` | 工具成功完成后 | 否 |
-| `PostToolUseFailure` | 工具失败后 | 否 |
+| `BeforeToolCall` | 在工具执行之前 | 是 |
+| `AfterToolCall` | 工具成功完成后 | 是（可重写输出） |
+| `AfterToolCallFailure` | 工具失败后 | 否 |
+| `ToolResultPersist` | 工具结果落库时 | 否 |
 
-### 会话生命周期
-
-| 事件 | 何时触发 | 可以阻止？ |
-|-------|---------------|------------|
-| `SessionStart` | 当新会话开始时 | 否 |
-| `SessionEnd` | 当会话结束时 | 否 |
-| `PreCompact` | 会话压缩之前 | 是 |
-
-### 用户交互
+### 会话与代理
 
 | 事件 | 何时触发 | 可以阻止？ |
 |-------|---------------|------------|
-| `UserPromptSubmit` | 当用户提交提示时 | 是 |
-| `PermissionRequest` | 当工具请求提升权限时 | 是 |
+| `BeforeAgentStart` | 在代理开始处理前 | 是 |
+| `AgentEnd` | 代理完成时 | 是（可重写最终输出） |
+| `SessionStart` | 新会话开始时 | 是 |
+| `SessionEnd` | 会话结束时 | 否 |
+| `BeforeCompaction` | 会话压缩之前 | 是 |
+| `AfterCompaction` | 会话压缩之后 | 否 |
+| `UserPromptSubmit` | 用户提交提示后、首个 think 调用前 | 是 |
+| `Stop` | 模型产出无工具调用的 turn | 是（interceptor 可否决） |
 
-### 代理生命周期
-
-| 事件 | 何时触发 | 可以阻止？ |
-|-------|---------------|------------|
-| `SubagentStart` | 当子代理启动时 | 否 |
-| `SubagentStop` | 当子代理完成时 | 否 |
-| `Stop` | 当处理停止时 | 否 |
-| `Notification` | 当发送通知时 | 否 |
-| `Setup` | 在初始设置期间 | 否 |
-
-### 聊天和命令（插件事件）
+### 子代理
 
 | 事件 | 何时触发 | 可以阻止？ |
 |-------|---------------|------------|
-| `ChatMessage` | 当收到聊天消息时 | 是 |
-| `ChatParams` | 当配置聊天参数时 | 是 |
-| `ChatResponse` | 当生成聊天响应时 | 否 |
-| `CommandExecuteBefore` | 在命令执行之前 | 是 |
-| `CommandExecuteAfter` | 在命令执行之后 | 否 |
+| `SubagentStart` | 子代理生成时 | 否（observer-only） |
+| `SubagentStop` | 子代理完成时 | 否 |
+
+### 消息通道
+
+| 事件 | 何时触发 | 可以阻止？ |
+|-------|---------------|------------|
+| `MessageReceived` | 收到通道消息时 | 是 |
+| `MessageSending` | 向通道发送消息前 | 是 |
+| `MessageSent` | 消息已发送时 | 否 |
+
+### 提供商与网关
+
+| 事件 | 何时触发 | 可以阻止？ |
+|-------|---------------|------------|
+| `PreApiRequest` | LLM 提供商请求发起前 | 否 |
+| `PostApiRequest` | LLM 提供商响应返回后 | 否 |
+| `GatewayStart` | 网关启动时 | 否 |
+| `GatewayStop` | 网关停止时 | 否 |
+
+### 通知与权限
+
+| 事件 | 何时触发 | 可以阻止？ |
+|-------|---------------|------------|
+| `Notification` | 发送通知时 | 否 |
+| `PermissionRequest` | 工具请求提升权限时 | 是 |
 
 ## 钩子种类
 
@@ -82,7 +92,7 @@ Aleph 的钩子系统位于代理循环和工具执行之间，形成事件驱�
 ```toml
 # 阻止所有包含 'rm -rf' 的 shell 命令
 [[hooks]]
-event = "PreToolUse"
+event = "before_tool_call"   # 也接受 PascalCase 别名 PreToolUse / BeforeToolCall
 kind = "interceptor"
 priority = "system"
 matcher = "shell:exec"

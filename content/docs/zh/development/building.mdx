@@ -9,17 +9,17 @@ description: "从源码构建 Aleph —— 前置条件、工作区结构、特�
 
 ### Rust 工具链
 
-Aleph 需要 **Rust 1.92 或更高版本**（edition 2021）。通过 [rustup](https://rustup.rs/) 安装：
+Aleph 需要 **Rust 1.95 或更高版本**（edition 2021）。MSRV 由 `sysinfo 0.39` 抬高，`rust-toolchain.toml` pin 到 `1.96.0`。通过 [rustup](https://rustup.rs/) 安装：
 
 ```bash
 # 安装 Rust（如果尚未安装）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 确保 stable 工具链处于活动状态
-rustup default stable
+# 接受 rust-toolchain.toml pin
+rustup show
 
 # 验证版本
-rustc --version   # 必须 >= 1.92
+rustc --version   # 必须 >= 1.95
 cargo --version
 ```
 
@@ -76,6 +76,7 @@ Aleph/
 │   └── bin/aleph-server/       # 服务器二进制文件
 ├── desktop/
 │   ├── shared/                 # DesktopCapability trait + IPC 协议
+│   ├── shell/                  # Tauri 桌面壳
 │   ├── macos/                  # macOS 原生实现
 │   ├── linux/                  # Linux 原生实现
 │   └── windows/                # Windows 原生实现
@@ -100,6 +101,7 @@ members = [
     "desktop/macos",
     "desktop/linux",
     "desktop/windows",
+    "desktop/shell",
     "shared/logging",
     "shared/protocol",
     "shared/ui_logic",
@@ -110,24 +112,24 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "26.7.21"   # CalVer；与 VERSION 文件保持一致
 edition = "2021"
 license = "MIT"
-rust-version = "1.92"
+rust-version = "1.95"
 ```
 
 ## 特性标志
 
-Aleph 默认编译**所有生产特性**。只有测试和实验特性会被门控：
+Aleph 默认编译**所有生产特性**。只有测试和实验特性会被门控（与 `Cargo.toml` 同步）：
 
 ```toml
 [features]
 default = []
 loom = ["dep:loom"]               # 使用 Loom 进行并发测试
 test-helpers = []                  # 集成测试工具
-control-plane = []                 # 实验性：Control Plane UI
+control-plane = []                 # 实验性：Control Plane UI（Leptos/WASM 仪表板）
 disabled-tests = []                # 禁用的测试模块（等待重写）
-telegram-draft-api = []            # 实验性：Telegram Draft API
+plugin-wasm = []                   # WASM 插件运行时的占位（`tests/wasm_capability_test.rs` 守 `cfg(feature = "plugin-wasm")`）
 ```
 
 **生产构建不需要任何特性标志。** 所有通道、工具和集成都在编译时包含，并通过 `config.toml` 配置在运行时启用/禁用。
@@ -345,9 +347,9 @@ RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build
 
 **代码是权威**——任何文档数字都只是 `CEILING` 的副本：
 
-- 顶层 8 + `agent/` 4 = **12 文件**
-- 行数由 `src/harness/tests/budget.rs` 的 ratchet 守
-- 当前 5055 行（2026-07-26 修订）
+- 顶层 8 + `agent/` 4 = **12 文件**（测试文件在 `tests/`，不入 ratchet）
+- 行数由 `src/harness/tests/budget.rs` 的 ratchet 守，绑定常量 `CEILING`
+- 当前 `CEILING` = **5055**（`src/harness/tests/budget.rs:335`，2026-07-26 修订）；不要把本节数字当副本
 - 加代码前必答 3 问：脚手架 vs 认知？模型升级后是否还需要？真实消费者有几个？
 
 ### YAGNI 撤回

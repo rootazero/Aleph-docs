@@ -176,9 +176,9 @@ The `HarnessRunner` trait accepts the 13 parameters above (`src/orchestrator/dis
 
 26.7.15+: child harnesses get a `ToolResultStore` handle **scoped to the parent session** — previously process-wide, causing silent zero-hit recall.
 
-### Harness Ratchet Lowered to 5008 LOC
+### Harness Ratchet — `CEILING` Is the Authority
 
-26.7.21+: the `DiminishingReturnsDetector` hard stop was removed (R10 forbids completion judgment inside the loop). Stuck runs are now bounded by `max_iterations` / `ToolLoopVerifier` / the model's own stop. The current line-budget ratchet sits at 5008 LOC.
+26.7.21+: the `DiminishingReturnsDetector` hard stop was removed (R10 forbids completion judgment inside the loop). Stuck runs are now bounded by `max_iterations` / `ToolLoopVerifier` / the model's own stop. The line-budget ratchet is locked by `src/harness/tests/budget.rs::CEILING`; this page does not copy a current count, defer to the constant.
 
 ### See Also
 

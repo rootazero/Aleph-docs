@@ -264,12 +264,12 @@ description: "Aleph 概念的标准化术语和翻译"
 | Skill System v1 | Skill System v2 | 完全重写 |
 | EvolutionTracker | Registry | 旧技能系统的一部分 |
 | SolidificationDetector | EligibilityService | 旧技能系统的一部分 |
-| SubagentTool | FlowRunTool | 架构更改 |
+| SubagentTool | （保留为子代理生成工具） | 与 `FlowRunTool`（`src/orchestrator/flow_run_tool.rs`）并存；前者负责子代理 spawn，后者负责流程编排 |
 | LoopToolRegistry | ToolService | 统一工具外观 |
 | ClawHub 设置标签页 | 扩展商店 | ClawHub 降级为长尾；设置标签页已移除 |
 | `teams.run` | `teams.chat.send` / 协调任务 | 该方法从不存在——团队使用聊天线程 + 任务 |
 | `coordination: sequential\|parallel\|hierarchical` | 团队战略协调（队长先行规划） | 协调模式纯属虚构 |
-| DiminishingReturnsDetector | （已移除） | harness ratchet 从 5008 降到 5008 之下；该硬停违反 R10 |
+| DiminishingReturnsDetector | （已移除） | harness ratchet 收紧至当前 `CEILING`（`src/harness/tests/budget.rs:335`）；该硬停违反 R10 |
 | Telegram 本地 pairing store | 路由器单源 pairing store | 频道本地 store 从未生效 |
 | Discord 平行嵌套配置层 | 路由器单源配置 | 平行层已删除 |
 | Provider 故障转移深克隆全会话 | 原子 regen marker + 单次克隆 | 性能/正确性修复 |
