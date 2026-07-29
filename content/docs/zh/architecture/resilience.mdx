@@ -232,7 +232,7 @@ RoutingExperienceStore.record（src/routing/experience_store.rs，sqlite-vec k-N
 
 ## 失败关闭
 
-26.7.21 hardening：当策略文件缺失，或 `permissive_default` 与 `Default::default()` 不一致时，**授权被拒绝**（不静默通过）。`harness::tests::budget.rs` 中 `DiminishingReturnsDetector` 已被移除——它是 R10 禁止的循环内确定性 completion 判断；硬停止改由 `max_iterations`、工具循环验证和模型自停负责。
+26.7.21 hardening：策略文件缺失、不可读或解析失败时，**授权被拒绝**（不静默通过）。`src/harness/tests/budget.rs` 中 `DiminishingReturnsDetector` 已被移除——它是 R10 禁止的循环内确定性 completion 判断；硬停止改由 `max_iterations`、工具循环验证和模型自停负责。
 
 ---
 

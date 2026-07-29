@@ -179,7 +179,7 @@ The schema is versioned with migration utilities in `migration.rs`. Key indexes:
 
 ### Fail-Closed
 
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization is refused.
+26.7.21 hardening: when a policy file is missing, unreadable, or fails to parse, authorization is refused.
 
 ### See Also
 
