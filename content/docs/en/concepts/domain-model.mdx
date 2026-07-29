@@ -1,6 +1,6 @@
 ---
 title: "Domain Model"
-description: "Domain-Driven Design layer with Entity, AggregateRoot, and ValueObject traits. Pure domain logic with no platform dependencies."
+description: Domain-Driven Design layer with Entity, AggregateRoot, and ValueObject traits. Pure domain logic with no platform dependencies.
 ---
 
 The `domain` module implements Aleph's domain model using Domain-Driven Design (DDD) principles. It defines the core vocabulary of the system — what a Session is, what a Task means, how Intent is structured — independent of any infrastructure or framework concerns.
@@ -19,13 +19,15 @@ This module has no dependencies on `tokio`, `axum`, or any async runtime. It can
 
 ## Core Traits
 
+The domain layer ships only three **minimal marker traits** (`src/domain/mod.rs`) that establish the ubiquitous language — they specify identity and equality semantics, not fields.
+
 ### Entity
 
 Objects with a unique, immutable identity that remains constant through state changes.
 
 ```rust
 pub trait Entity {
-    type Id: Eq + Hash + Clone;
+    type Id: Eq + Clone + std::fmt::Display;
     fn id(&self) -> &Self::Id;
 }
 ```
@@ -39,12 +41,10 @@ Entities are compared by identity, not by attributes. Two Session objects with t
 The entry point of an aggregate — a consistency boundary that enforces domain invariants across multiple entities.
 
 ```rust
-pub trait AggregateRoot: Entity {
-    fn version(&self) -> u64;
-}
+pub trait AggregateRoot: Entity {}
 ```
 
-The AggregateRoot is the only object that outside code can reference directly. All other objects in the aggregate are accessed through it.
+The AggregateRoot is the only object that outside code can reference directly. All other objects in the aggregate are accessed through it. **Note: the actual trait does not carry a `version()` method** — version numbers are provided by individual aggregate implementations when needed; the trait itself does not require one.
 
 **Examples:** `TaskGraph` (contains Tasks and Dependencies), `MemoryFact` (contains ContextAnchors)
 
@@ -53,12 +53,10 @@ The AggregateRoot is the only object that outside code can reference directly. A
 Immutable objects defined entirely by their attributes. Two ValueObjects with the same attributes are equal and interchangeable.
 
 ```rust
-pub trait ValueObject: Eq + Clone {
-    fn validate(&self) -> Result<(), ValidationError>;
-}
+pub trait ValueObject: Eq + Clone {}
 ```
 
-ValueObjects have no identity — they are pure data. Changing any attribute creates a new ValueObject.
+ValueObjects have no identity — they are pure data. Changing any attribute creates a new ValueObject. **Note: the actual trait does not carry a `validate()` method** — validation lives in the constructing function (parse, don't validate) or in the use-site that needs the rule, not in the trait contract.
 
 **Examples:** `TaskStatus`, `FactType`, `GuestScope`, `FileContent`
 
@@ -68,48 +66,47 @@ ValueObjects have no identity — they are pure data. Changing any attribute cre
 
 ### Credentials
 
-Represents authentication credentials with automatic secret redaction.
+`Credentials` is an **enum**, not a struct (`src/a2a/domain/security.rs`).
 
 ```rust
-pub struct Credentials {
-    pub username: String,
-    pub secret: String, // Redacted in Debug output
+pub enum Credentials {
+    BearerToken(String),
+    ApiKey(String),
+    OAuth2Token(String),
+    None,
 }
 ```
 
-The `Debug` implementation prints `"[REDACTED]"` instead of the actual secret, preventing accidental exposure in logs.
+The `Debug` impl prints every variant as `[REDACTED]` so secrets never reach logs. `Credentials` is consumed by the `A2A` protocol adapters during remote handshakes; it does not live in this crate's `domain` module.
 
 ### TrustLevel
 
-Inferred trust level based on connection source.
+The `skill` module uses `TrustLevel` to decide whether a skill can be installed (`src/skill/guard.rs`).
 
 ```rust
 pub enum TrustLevel {
-    Local,      // localhost / loopback
-    Private,    // Private IP ranges (RFC 1918)
-    Public,     // Public internet
-    Untrusted,  // Known bad actors / blocklist
+    Builtin,    // Shipped with Aleph — always trusted.
+    Trusted,    // From a curated/known publisher.
+    Community,  // Arbitrary third-party (clawhub default).
 }
 ```
 
-Automatically inferred from IPv4/IPv6 addresses or hostnames. Used by the Gateway's security layer to determine default permission scopes.
+The decision is made by `install_allowed(ThreatLevel, TrustLevel)`; it is **not** auto-inferred from network origin.
 
 ### FileContent
 
-Validates file content against A2A specification invariants.
+The `A2A` payload form for file content (`src/a2a/domain/message.rs`).
 
 ```rust
 pub struct FileContent {
-    pub mime_type: String,
-    pub data: Vec<u8>,
-    pub name: String,
+    pub name: Option<String>,
+    pub mime_type: Option<String>,
+    pub bytes: Option<String>,  // Base64-encoded
+    pub uri: Option<String>,
 }
 ```
 
-The `validate()` method enforces:
-- MIME type is not empty and is parseable
-- Data is non-empty
-- Filename is valid (no path traversal, no null bytes)
+`validate()` (`pub const`, returns `Result<(), &'static str>`) only enforces that **exactly one** of `bytes` or `uri` is set — neither nor both is rejected. MIME parsing, filename escaping, and non-empty checks are handled at the serialization layer, not here.
 
 ---
 
@@ -119,12 +116,16 @@ Aleph's domain is organized into bounded contexts, each with its own ubiquitous 
 
 | Context | Key Types | Location |
 |---|---|---|
-| **Dispatcher** | `TaskGraph`, `Task`, `TaskStatus` | `src/dispatcher/` |
-| **Memory** | `MemoryFact`, `ContextAnchor`, `FactType` | `src/memory/` |
-| **Intent** | `AggregatedIntent`, `IntentSignal` | `src/intent/` |
-| **Identity** | `IdentityContext`, `GuestScope`, `TrustLevel` | `src/gateway/security/` |
+| **Memory** | `MemoryFact`, `ContextAnchor`, `NoteRelationArg` | `src/memory/` |
+| **Identity** | `IdentityContext`, `GuestScope`, `Role` | `shared/protocol/src/auth.rs`, `src/gateway/session_manager/` |
+| **Skill** | `TrustLevel`, `ThreatLevel` | `src/skill/guard.rs` |
+| **A2A** | `Credentials`, `FileContent`, `SecurityScheme` | `src/a2a/domain/` |
+| **Loop-Graph Governance** | `NodeKind`, `EdgeKind` | `src/loop_graph/types.rs` |
+| **Goal** | `Goal`, `GoalStatus`, `PursuitMode`, `GateOutcome` | `src/goal/types.rs` |
+| **Artifact** | `ArtifactRecord` | `src/artifacts/store.rs` |
+| **Team** | `TaskStatus`, `ArtifactType` | `src/teams/artifacts.rs` |
 
-Each context owns its own types and invariants. Cross-context references use explicit mapping layers, not direct type sharing.
+Cross-context references go through explicit mapping layers — `IdentityContext` lives in `aleph_protocol` (cross-process), while `src/memory/` carries its own `MemoryFact` and `ContextAnchor`; the two do not share types directly.
 
 ---
 
@@ -142,16 +143,19 @@ fn load_session(id: SessionId) -> Option<Session> { ... }
 
 ### Enum State Machines
 
+`TaskStatus` (`src/teams/artifacts.rs`) takes the form:
+
 ```rust
 pub enum TaskStatus {
     Pending,
-    Running { started_at: i64 },
-    Completed { result: TaskResult },
-    Failed { reason: String },
+    InProgress,
+    Completed,
+    Blocked,
+    Failed,
 }
 ```
 
-Illegal states are unrepresentable — a Task cannot be both Pending and Completed.
+Illegal states are unrepresentable — a Task cannot be both `Pending` and `Completed`.
 
 ### Parse, Don't Validate
 
@@ -168,7 +172,7 @@ impl Email {
 
 ## Code Location
 
-- `src/domain/` — Domain types and traits
+- `src/domain/` — Three marker traits plus the `skill` submodule
 - `docs/reference/DOMAIN_MODELING.md` — Extended domain modeling guide
 
 ## See Also
@@ -183,17 +187,17 @@ impl Email {
 
 ### POE Context Retired
 
-The POE (Principle-Operation-Evaluation) architecture was retired in 26.5+. Its "intelligence" migrated to system prompt templates (R9); success definition, validation, and evaluation are now naturally covered by a single LLM call. The Harness does not judge completion (**R10 "Don't #3**), nor does it participate in evaluation.
+The POE (Principle-Operation-Evaluation) runtime architecture was retired in 26.5+. Its "intelligence" migrated to system prompt templates (R9); success definition, validation, and evaluation are now naturally covered by a single LLM call. The Harness does not judge completion (**R10 "Don't #3"**) or participate in evaluation.
 
-Historical POE types — `SuccessManifest` aggregate root, `ValidationRule` and `Verdict` value objects (in `src/poe/types.rs`) — remain as read-only archaeological reference but are **not part of the runtime evaluation**.
+Historical POE types have been removed from the current source tree. Use Git history for the corresponding version rather than referring to a current module path.
 
 ### New Bounded Contexts
 
 - **Loop-Graph Governance context** (`src/loop_graph/`) — team nodes / audit ring / objective ACLs / victory-claim watchers / built-in `loop-auditor`
-- **Goal context** (`src/goal/`) — persistent goals managed by GoalStore
-- **Artifact context** (`src/artifacts/`) — deliverables (the product of `tools.publish`)
-- **Signing context** (`src/identity/signer.rs`) — per-agent signing key + signed operation ledger
+- **Goal context** (`src/goal/`) — persistent goals managed by `GoalStore`, with the maker/checker `GateOutcome` split
+- **Artifact context** (`src/artifacts/`) — deliverables produced by `artifact_publish`, `MAX_ARTIFACT_BYTES = 50 MiB` / `MAX_ARTIFACTS_PER_SESSION = 200`
+- **Signing context** (`src/identity/`) — per-agent Ed25519 key (`AgentKeystore`) plus hash-chained signed ledger (`AgentLedger`), verified by `verify_chain`
 
-### Harness 12 Files
+### Harness File and Line-Count Ratchets
 
-26.7.x: `src/harness/` is locked at **12 files**; the line count is gated by the ratchet in `src/harness/tests/budget.rs` (**code is the authority** — every doc number is just a copy of `CEILING`). See [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop).
+In 26.7.x, `src/harness/` is locked at **12 files**, and its line count is gated by `CEILING` in `src/harness/tests/budget.rs`. The source constant is the only authority; this page does not copy a current count that will drift. See [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop).

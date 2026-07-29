@@ -91,9 +91,9 @@ Aleph 完全在您自己的硬件上运行。服务器、记忆数据库、向�
 
 | 维度 | 范围 | 默认 | 调节方式 |
 |------|------|------|---------|
-| `exec_tier`（执行等级） | ask / auto / full | ask | Settings → Policies；`agents.defaults.exec_tier` |
-| `thinking`（思考级别） | off / minimal / low / medium / high / xhigh | medium | Settings → Policies；`agents.defaults.thinking` |
-| `session_mode`（会话模式） | chat / work / code | work | composer pill；`agents.defaults.session_mode` |
+| `exec_tier`（执行等级） | ask / auto / full | auto | Settings → Policies；composer pill |
+| `thinking`（思考级别） | off / minimal / low / medium / high / xhigh | minimal | Settings → Policies |
+| `session_mode`（会话模式） | chat / work / code | work | composer pill |
 
 三者是**正交**的：
 
@@ -111,7 +111,7 @@ Aleph 完全在您自己的硬件上运行。服务器、记忆数据库、向�
 
 ### 安全性
 
-安全性不是事后考虑 —— 它被烘焙进执行管道（R1–R7 的具体落地）。每个工具调用都通过检查可配置 allowlist 和审批规则的守卫系统。**默认姿势是失败关闭**：如果工具执行未被显式允许，它需要人工审批；如果策略文件缺失，`permissive_default` 必须等于 `Default::default()`，否则拒绝授权。
+安全性不是事后考虑 —— 它被烘焙进执行管道（R1–R7 的具体落地）。每个工具调用都通过检查可配置 allowlist 和审批规则的守卫系统。**默认姿势是失败关闭**：如果工具执行未被显式允许，它需要人工审批；`[sandbox.command_policy]` 硬底线任何档位都压不下去，是独立的硬过滤器（详见 [EXEC_TIER / SECURITY.md](https://github.com/rootazero/Aleph/blob/main/CLAUDE.md)）。
 
 详见 [安全](/docs/zh/security/overview)。
 
@@ -126,7 +126,7 @@ Aleph 支持多种扩展机制：
 
 ### 多通道存在
 
-Gateway 协议（~265 个 JSON-RPC 方法）为所有接口提供统一的控制平面：
+Gateway 协议（由 `src/gateway/handlers/mod.rs` 的 handler registry 定义）为所有接口提供统一的控制平面：
 
 - 用于开发工作流的 CLI
 - 用于专注工作会话的桌面应用

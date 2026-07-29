@@ -1,253 +1,139 @@
 ---
 title: "Extension System"
-description: "Plugin and skill management with WASM and Node.js runtimes, manifest-driven registration, and unified hook execution."
+description: "How Aleph discovers, registers, loads, and reloads plugin components while sharing the Skill and MCP backends."
 ---
 
-The `extension` module provides a unified extension system for Aleph. It supports both plugins (WASM and Node.js runtimes) and skills, with manifest-driven registration, a unified registry, and hook-based integration.
+Aleph has two related meanings for Extension:
 
-> **Disambiguation.** In the codebase, `extension` (the `src/extension/` module documented on this page) is the **plugin host** — the backend that loads, registers, and runs WASM/Node.js plugins. This is distinct from the user-facing umbrella concept "Extension", which unifies skills, plugins, and MCP servers under one idea and is browsed through the **Extensions Store**. That umbrella and its store live in a separate `src/store/` module; see [Extensions Store](/docs/en/concepts/extensions-store).
+- The user-facing Hub concept: one `Extension` with kind `Skill`, `Plugin`, or `Mcp`.
+- The `src/extension/` plugin host: the runtime and registry that load plugin components.
 
-## Design Philosophy
-
-1. **Unified registry** — Everything a plugin can provide (tools, channels, HTTP routes) is registered in a single `PluginRegistry`
-2. **Capability declarations** — Plugins declare what they provide via `CapabilityDeclaration` (see [Capability System](./capability-system))
-3. **Sandboxed runtimes** — WASM plugins run in a sandbox; Node.js plugins run in separate processes
-4. **Hot reload** — Extensions can be added, updated, or removed without restarting
-
----
+The Hub façade routes by kind. The plugin host does not replace `SkillSystem` or `McpManager`; it integrates with them.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        ExtensionManager                                  │
-│  - Orchestrates discovery, loading, registration, integration            │
-└────────────────────────────┬───────────────────────────────────────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-     PluginRegistry      PluginLoader        SkillSystem
-   (unified registry)  (Node.js, WASM)    (skills, agents)
-          │                   │                   │
-          └───────────────────┼───────────────────┘
-                              │
-                              ▼
-                        HookExecutor
-                       (unified hooks)
+```text
+ExtensionManager
+├── DiscoveryManager
+├── AdapterRegistry
+├── PluginRegistry
+├── PluginLoader
+├── shared SkillSystem
+├── HookExecutor
+├── ServiceManager
+└── ExtensionWatcher
 ```
 
----
+The manager's startup path is:
 
-## Core Components
+```text
+scan scopes
+  → parse and normalize a manifest
+  → validate the candidate
+  → resolve duplicate origins
+  → register static capabilities
+  → load Static, MCP, or WASM runtime
+  → publish skills and agents
+  → synchronize plugin MCP servers
+```
 
-### ExtensionManager
+The process-wide `SkillSystem` receives plugin skill roots, so plugin skills and filesystem skills share source precedence, snapshots, prompt XML, `skill_read`, status, and lifecycle operations.
 
-Central coordinator for all extensions:
+## Manifest adapters
+
+The preferred format is `.claude-plugin/plugin.toml`, followed by the read-compatible `.claude-plugin/plugin.json`. `aleph.plugin.toml` remains a deprecated compatibility format and emits a warning. The adapter registry also accepts supported Codex and Cursor layouts and a final auto-discovery adapter.
+
+Auto-discovery recognizes `skills/`, `agents/`, `commands/`, `hooks/hooks.json`, `hooks.json`, and `.mcp.json`. A directory containing one of these components can be treated as a static plugin without a manifest.
+
+## Unified capability registration
+
+`CapabilityDeclaration` has six production variants:
 
 ```rust
-pub struct ExtensionManager {
-    registry: PluginRegistry,
-    loader: PluginLoader,
-    skill_system: SkillSystem,
-}
-
-impl ExtensionManager {
-    pub async fn discover(&self,
-    ) -> Result<Vec<PluginManifest>> { /* ... */ }
-
-    pub async fn load(
-        &self,
-        manifest: &PluginManifest,
-    ) -> Result<LoadedPlugin> { /* ... */ }
-
-    pub async fn register(
-        &self,
-        plugin: LoadedPlugin,
-    ) -> Result<()> { /* ... */ }
+pub enum CapabilityDeclaration {
+    Tool(ToolRegistration),
+    Hook(HookRegistration),
+    Service(ServiceRegistration),
+    Skill(SkillRegistration),
+    Agent(AgentRegistration),
+    McpServer(McpServerConfig),
 }
 ```
 
-### PluginRegistry
+The registrar validates ownership, classifies the declaration tier, and dispatches it to the matching registry. Tools, hooks, and skills are core; agents are important; services and MCP servers are pluggable. Command Markdown is stored as a command-type skill.
 
-Unified registry for all plugin-provided capabilities:
+The `PluginRegistry` tracks plugins and their registered tools, hooks, services, skills, and agents. It keeps qualified keys such as `plugin:diagnostics:check` alongside short compatibility names. Registration does not grant a plugin permission to bypass tool execution policy.
 
-```rust
-pub struct PluginRegistry {
-    tools: HashMap<String, ToolRegistration>,
-    channels: HashMap<String, ChannelRegistration>,
-    hooks: HashMap<String, HookRegistration>,
-    http_routes: Vec<HttpRouteRegistration>,
-    providers: HashMap<String, ProviderRegistration>,
-}
+## Runtime integration
+
+| Plugin kind | Host |
+|---|---|
+| Static | Markdown components are registered without executable code |
+| MCP | `.mcp.json` is translated to namespaced transient MCP servers |
+| WASM | Extism loads the module and calls declared exports |
+
+An MCP plugin server ID is `plugin:<plugin-id>/<server-name>`. The MCP manager owns process health and tool discovery. The extension manager's synchronization is idempotent and non-fatal when no live MCP handle is attached, such as in CLI or test paths.
+
+WASM tool discovery is based on the plugin registration path. The module can register declarations through the WASM registrar; it is not documented as a Node.js IPC runtime.
+
+## Hooks and services
+
+Hooks are executed through the shared `HookExecutor`:
+
+- `interceptor` hooks run in priority order and can alter or stop a protected operation.
+- `observer` hooks run without becoming a blocking decision point.
+- The allowed kind depends on the event fire site.
+- A matcher is evaluated against `tool_name` only.
+
+Runtime inventory exposes the resolved kind, priority, actions, consent state, and whether the hook is reachable. Hook output is capped at 64 KiB and hook timeouts at 300 seconds.
+
+Background services require the plugin background permission and both a start and stop handler. Service lifecycle is coordinated during load, enable, disable, uninstall, hot reload, and daemon shutdown.
+
+## Discovery precedence
+
+Scope directories are checked high to low:
+
+```text
+agent > local > project > user
 ```
 
-**Registration types:**
-- `Tool` — Callable functions for the agent
-- `Hook` — Event interceptors
-- `Channel` — Messaging interface integrations
-- `Provider` — AI model backends
-- `HttpRoute` — REST API endpoints
-- `Cli` — CLI commands
-- `Service` — Background services
-- `Command` — In-chat commands
-- `Skill` — Prompt-based skills
-- `Agent` — Agent definitions
-- `McpServer` — MCP server configurations
+Duplicate plugin IDs are resolved by origin priority:
 
-### PluginLoader
-
-Loads plugins from different sources:
-
-```rust
-pub struct PluginLoader;
-
-impl PluginLoader {
-    pub async fn load_wasm(
-        &self,
-        path: &Path,
-    ) -> Result<WasmPlugin> { /* ... */ }
-
-    pub async fn load_nodejs(
-        &self,
-        path: &Path,
-    ) -> Result<NodeJsPlugin> { /* ... */ }
-}
+```text
+config > workspace > global > bundled
 ```
 
-**WASM runtime:** Uses Extism for sandboxed execution. Limited I/O, fast startup.
+The active record is loaded; overridden records remain visible for diagnostics. A `.disabled` marker prevents a directory from becoming a candidate.
 
-**Node.js runtime:** Spawns Node.js process with IPC communication. Full Node.js API access.
+## Lifecycle safety
 
-### Manifest
+`ExtensionManager::load_all` is protected by a load guard. The manager also tracks active plugin tool snapshots and a monotonic revision so the tool registry can refresh without rebuilding unrelated parts of the loop. Concurrent `reload` calls are serialized.
 
-Plugins declare their capabilities in a manifest file:
+Unloading a plugin performs runtime cleanup before deleting files. For MCP plugins, transient servers are removed from the live manager so processes and tools do not survive the plugin lifecycle. Malformed plugin results are returned as errors rather than being reported as successful service results.
 
-```toml
-[plugin]
-id = "my-plugin"
-name = "My Plugin"
-version = "1.0.0"
+## Relationship with the Hub
 
-[[capabilities]]
-type = "tool"
-name = "my_tool"
-description = "Does something useful"
+The Hub catalog is implemented in `src/hub/` and persists catalog entries in `hub_catalog.db`. It supplies an `InstallSpec` and routes a selected `Plugin` entry to the marketplace installer. The extension host then discovers and loads the installed plugin.
 
-[[capabilities]]
-type = "hook"
-event = "message_received"
-```
+The Hub is the catalog and trust boundary. This module is the plugin runtime and registration boundary. Neither module creates a multi-provider catalog model, and plugin manifests do not declare model providers through a plugin-provider section.
 
-**Manifest formats:**
-- `plugin.toml` — TOML format
-- `plugin.json` — JSON format
-- `cc-plugin.json` — Claude Code compatible
-- `.mcp.json` — MCP server config
+## Code locations
 
-### Scope
+- `src/extension/mod.rs` — manager and shared subsystem wiring
+- `src/extension/manifest/` — adapters and normalized manifests
+- `src/extension/discovery/` — candidates, scopes, and conflict resolution
+- `src/extension/capability.rs` — declarations and tiers
+- `src/extension/registrar/` — registration dispatch
+- `src/extension/registry/` — component registry
+- `src/extension/loader.rs` — runtime loader
+- `src/extension/hooks/` — hook executor and consent
+- `src/extension/watcher.rs` — change detection and reload
+- `src/hub/` — user-facing catalog and install router
 
-Plugins operate within a scope that limits their access:
+## Related pages
 
-```rust
-pub struct PluginScope {
-    allowed_apis: Vec<String>,
-    file_access: FileAccessPolicy,
-    network_access: NetworkAccessPolicy,
-}
-```
-
----
-
-## Hook System
-
-Hooks allow plugins to intercept and modify system events:
-
-```rust
-pub enum HookEvent {
-    MessageReceived { message: Message },
-    ToolInvoked { name: String, args: Value },
-    ResponseGenerated { text: String },
-}
-
-pub trait HookHandler: Send + Sync {
-    async fn handle(
-        &self,
-        event: &HookEvent,
-    ) -> HookResult;
-}
-```
-
-**HookResult:**
-- `Continue` — Proceed with the event
-- `Intercept { modified }` — Replace the event with modified version
-- `Block { reason }` — Cancel the event
-
----
-
-## Discovery
-
-Extensions are discovered from multiple locations:
-
-1. `~/.aleph/plugins/` — User-installed plugins
-2. `./.aleph/plugins/` — Project-level plugins
-3. Built-in plugins bundled with Aleph
-
-The `PluginWatcher` monitors these directories for changes and triggers hot reload.
-
----
-
-## Safety Properties
-
-- **Sandboxed WASM** — Extism provides memory isolation and capability-based security
-- **Scope enforcement** — Plugins can only access declared APIs
-- **Manifest validation** — All manifests are validated before loading
-- **No `static mut`** — Uses `OnceLock` for lazy initialization
-
----
-
-## Code Location
-
-- `src/extension/mod.rs` — `ExtensionManager`
-- `src/extension/registry.rs` — `PluginRegistry`
-- `src/extension/loader.rs` — `PluginLoader`
-- `src/extension/manifest/` — Manifest parsing
-- `src/extension/runtime/` — WASM and Node.js runtimes
-- `src/extension/hooks/` — Hook system
-- `src/extension/watcher.rs` — Hot reload watcher
-- `src/extension/scope.rs` — Permission scopes
-
-## See Also
-
-- [Capability System](./capability-system) — Plugin capability declarations
-- [Skill System](./skill-system) — Skill management
-- [Extensions Store](/docs/en/concepts/extensions-store) — The user-facing umbrella concept (skill + plugin + MCP) and its store
-
----
-
-## 26.7.x Addendum
-
-### Two Namespaces
-
-26.7.x introduces the **singular `plugin.*` as the canonical** namespace; the plural `plugins.*` is kept for backward compatibility. The canonical namespace is CC-compatible.
-
-### `plugin.reload` Serialized
-
-26.7.21+: concurrent `reload` is now **serialized** under the load guard — previously a source of race conditions (two reloads ran concurrently and overwrote each other's state).
-
-### Plugin Loader
-
-`src/extension/loader.rs::register_memory_extension_if_declared` mounts the memory extension when declared; only mounts when a `memory` section is present, otherwise skips.
-
-### Fail-Open → Fail-Closed
-
-26.7.21 hardening: the default failure behavior for plugins / skills / MCP servers **fails closed** — some scenarios were previously fail-open, introducing security risks.
-
-### Signed Operation Ledger
-
-`~/.aleph/ops.log` records the per-agent signed operation sequence — see [Identity & Signing](/docs/en/concepts/identity-context#26.7.x-addendum).
-
-### See Also
-
-- [Extensions](/docs/en/concepts/extensions) — umbrella concept
-- [Extensions Store](/docs/en/concepts/extensions-store) — user perspective
-- [Skill System](/docs/en/concepts/skill-system) — parallel to plugins
+- [Extensions](./extensions) — plugin manifest and runtime details
+- [Skills](./skills) — shared skill authoring contract
+- [Skill System](./skill-system) — skill backend
+- [Extensions Store](./extensions-store) — unified Hub surface
+- [Capability System](./capability-system) — declarations, permissions, and runtime ledgers

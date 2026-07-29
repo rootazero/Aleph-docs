@@ -1,15 +1,17 @@
 ---
 title: "PII Protection"
-description: "Gateway-level PII filtering engine that detects and redacts personally identifiable information before it reaches LLM API providers."
+description: "Gateway-level PII filtering engine that detects and redacts personally identifiable information before it reaches LLM API providers, with per-category and per-platform policy."
 ---
 
-The `pii` module provides gateway-level privacy protection that filters outbound messages before they reach LLM API providers. Unlike log-scrubbing utilities (which accept false positives), this engine is tuned for precision — false positives degrade LLM comprehension.
+The `pii` module provides gateway-level privacy protection that filters outbound messages before they reach LLM API providers. The engine is tuned for precision — false positives directly degrade agent comprehension.
 
 ## Design Philosophy
 
 1. **Precision over recall** — False positives harm agent performance; the engine favors accuracy
-2. **Rule-based detection** — Regex patterns for known PII types, not heuristic ML
-3. **Allowlist exemption** — Known-safe values can bypass filtering
+2. **Rule-based detection** — Regex patterns for known PII categories, plus user-defined rules
+3. **Per-category action** — Each category independently selects `Block` / `Warn` / `Off`
+4. **Platform overrides** — A single platform can carry an independent rule set that overrides the defaults
+5. **Fail closed** — A failed detector refuses to allow, instead of fail-open
 
 ---
 
@@ -23,15 +25,11 @@ The main filtering engine:
 pub struct PiiEngine {
     rules: Vec<Box<dyn PiiRule>>,
     allowlist: PiiAllowlist,
-    action: PiiAction,
-}
-
-impl PiiEngine {
-    pub fn filter(&self,
-        text: &str,
-    ) -> FilterResult { /* ... */ }
+    config: PrivacyConfig,
 }
 ```
+
+The engine exposes a global singleton through `OnceLock` (`PII_ENGINE`), injected at startup via `PiiEngine::init`; the runtime replaces configuration with `PiiEngine::reload`. `process_outbound` and `process_inbound` hold the engine through a synchronous `RwLock<PiiEngine>`, with a short critical section that does not cross `await`.
 
 ### PiiSeverity
 
@@ -44,14 +42,25 @@ pub enum PiiSeverity {
 }
 ```
 
+### PiiAction
+
+The per-category disposition:
+
+```rust
+pub enum PiiAction {
+    Block,   // replace with placeholder (default)
+    Warn,    // pass through but record
+    Off,     // do not filter
+}
+```
+
 ### FilterResult
 
 ```rust
 pub struct FilterResult {
-    pub text: String,           // Filtered text (with replacements)
-    pub blocked_count: usize,   // Replaced matches
-    pub warned_count: usize,    // Logged but not replaced
-    pub matches: Vec<PiiMatch>,
+    pub text: String,           // filtered text with replacements
+    pub blocked_count: usize,   // number of replacements
+    pub warned_count: usize,    // number of warnings
 }
 ```
 
@@ -59,33 +68,56 @@ pub struct FilterResult {
 
 ## Detection Rules
 
-Built-in rules detect:
+Built-in rules cover:
 
-| Type | Examples | Severity |
-|---|---|---|
-| **Email addresses** | `user@example.com` | Medium |
-| **Phone numbers** | `+1-555-123-4567` | High |
-| **Credit cards** | `4111-1111-1111-1111` | Critical |
-| **SSN / ID cards** | Chinese ID: `110101199001011234` | Critical |
-| **API keys** | `sk-abc123...` | Critical |
-| **SSH keys** | `ssh-rsa AAAA...` | High |
-| **IP addresses** | `192.168.1.1` | Low |
+| Type | Examples | Default action | Severity |
+|---|---|---|---|
+| **Email addresses** | `user@example.com` | `Block` | Medium |
+| **Phone numbers** | `+1-555-123-4567` | `Block` | High |
+| **Bank cards** | `4111-1111-1111-1111` | `Block` | Critical |
+| **ID cards** | `110101199001011234` | `Block` | Critical |
+| **API keys** | `sk-abc123…` | `Block` | Critical |
+| **SSH keys** | `ssh-rsa AAAA…` | `Block` | High |
+| **IP addresses** | `192.168.1.1` | `Block` | Low |
 
-### ID Card Validation
+The `api_key` category also catches general `Bearer` tokens (see `leak_detector.rs` and `vendor_patterns.rs`).
+
+### Chinese ID Card Validation
 
 Chinese ID card numbers are validated with:
-- Length check (18 digits)
-- Province code validation (first 2 digits)
-- Date validation (digits 7-14)
-- Checksum verification (last digit via weighted sum)
 
-**Safety:** Uses `.get(..n)` instead of byte slicing for UTF-8 safety.
+- Length (18 digits)
+- Province code (first 2 digits)
+- Date (digits 7–14)
+- Weighted checksum (last digit)
+
+String slicing uses `.get(..n)` or `char_indices()` to honor UTF-8 boundaries instead of `&s[..n]`.
+
+### Overlap De-Dup
+
+The match set is sorted before replacement:
+
+1. **`Block` always wins** — a `Block` hit must beat any `Warn` hit it overlaps, so a high-severity `Warn` cannot swallow a low-severity `Block` (e.g. `api_key=warn` suppressing `phone=block`)
+2. Within equal block-ness, sort by severity descending
+3. Dedup overlapping intervals
+4. Sort by `start` descending and replace tail-first so earlier offsets stay valid
+
+### Custom Rules
+
+```toml
+[[privacy.custom_rules]]
+name = "internal_token"
+pattern = "IT-[A-Z0-9]{16}"
+placeholder = "[INTERNAL_TOKEN]"
+severity = "high"
+action = "block"
+```
+
+`build_rules(&config.custom_rules)` compiles user regex at startup; a bad pattern is a fatal configuration error.
 
 ---
 
 ## Allowlist
-
-Known-safe values can be exempted from filtering:
 
 ```rust
 pub struct PiiAllowlist {
@@ -93,66 +125,82 @@ pub struct PiiAllowlist {
 }
 ```
 
-Allowlist entries are regex patterns matched against detected values before replacement.
+Entries are regex patterns matched against detected values before the replacement is applied — a hit skips replacement.
 
 ---
 
-## Actions
+## Platform Overrides
+
+`PrivacyConfig.platform_policies` lets a single platform carry an independent rule set:
 
 ```rust
-pub enum PiiAction {
-    Block,   // Replace with placeholder
-    Warn,    // Log but don't replace
-    Allow,   // Ignore
+pub struct PlatformPiiPolicy {
+    pub pii_filtering: Option<bool>,
+    pub id_card: Option<PiiAction>,
+    pub bank_card: Option<PiiAction>,
+    pub phone: Option<PiiAction>,
+    pub api_key: Option<PiiAction>,
+    pub ssh_key: Option<PiiAction>,
+    pub email: Option<PiiAction>,
+    pub ip_address: Option<PiiAction>,
+    pub exclude_providers: Option<Vec<String>>,
 }
 ```
 
-**Platform policy:** Different providers may have different PII requirements. The engine respects `PlatformPiiPolicy` from configuration.
+`exclude_providers` lets specific providers skip PII filtering entirely; the remaining fields override the default action inside `filter_with_platform`. `effective_config` clones the config and applies overrides, so platform policy never mutates the global configuration.
+
+---
+
+## Fail Closed
+
+A detector that fails internally (regex match / config load / state read) **refuses to allow** — any call that demands an "allow" verdict without a legitimate detection result is denied. This replaces the earlier fail-open behavior where detection failure would let the message through.
+
+---
+
+## Tool-Call and Context Integration
+
+`RuntimeSecurityGuard::process_outbound` slots the PII engine into the pipeline as: secret resolution → leak detection → PII filtering → placeholder substitution. Outbound messages pass through secret detection first (so the engine never has to handle freshly decrypted secrets again), then through the PII engine, and finally the placeholders are substituted.
+
+`process_inbound` runs the same engine a second time before the LLM's response reaches the host, in case the LLM re-introduces sensitive material when echoing back.
+
+Boundary-marker handling: prompt-context inputs (transcript / focus / prior-summary) are escaped before being placed inside boundary markers, so a forged marker cannot bleed into the next session.
+
+---
+
+## ToolAwareChunker
+
+`ToolAwareChunker` (`src/context/compact/tool_aware_chunker.rs`) chunks paragraphs for compression and recall:
+
+```rust
+pub struct ToolAwareChunker {
+    pub chunk_token_limit: usize,
+    pub token_ratio: f64,
+}
+```
+
+A non-positive or non-finite `token_ratio` falls back to **`0.25`** instead of panicking — the previous `assert!` would crash the agent loop on a misconfigured caller (e.g. an MCP or Skill that injects a bad ratio). The chunker never splits a single `SemanticUnit`; an over-budget unit claims its own chunk.
 
 ---
 
 ## Safety Properties
 
-- **UTF-8 safe** — `.get(..n)` for all string slicing, `char_indices()` for boundary checks
-- **Lock recovery** — `unwrap_or_else(|e| e.into_inner())` for RwLock
-- **No `static mut`** — Uses `OnceLock` for static regex
-- **Regex safety** — All regex literals use `.expect("valid regex literal")`
+- **UTF-8 safe** — `.get(..n)` and `char_indices()` for all string slicing
+- **Lock recovery** — `unwrap_or_else(|e| e.into_inner())` for `RwLock`
+- **No `static mut`** — `OnceLock` holds the global regex singleton
+- **Regex literal compile** — `expect("valid regex literal")` for startup literals; runtime ratio errors fall back
+- **Conflict de-dup** — `Block` always beats `Warn` to resolve overlaps
 
 ---
 
 ## Code Location
 
-- `src/pii/mod.rs` — Module entry point
-- `src/pii/engine.rs` — Core filtering engine
-- `src/pii/rules/` — Detection rules (email, phone, credit card, ID card, API key, SSH key, IP)
-- `src/pii/allowlist.rs` — Exemption management
+- `src/pii/mod.rs` — module entry
+- `src/pii/engine.rs` — core filtering engine
+- `src/pii/rules/` — detection rules (email / phone / bank / id / api_key / ssh_key / ip)
+- `src/pii/allowlist.rs` — exemption management
 
 ## See Also
 
-- [Security Primitives](./security-primitives) — Runtime guard integration
-- [Secret Management](./secret-management) — Encrypted credential storage
-
----
-
-## 26.7.x Addendum
-
-### Adversarial-Review Fixes
-
-26.7.x PII protection received an adversarial-review pass (the `pii:` commit family), covering:
-
-- Pattern recognition (regex / ML hybrid)
-- Replacement strategy (semantic-preserving vs full)
-- Audit trail
-
-### Fail-Closed
-
-26.7.21+: the PII detector **refuses to allow** on failure — previously fail-open (detection failure still allowed), introducing leakage risk.
-
-### Integration with Hooks
-
-26.7.x: PII cleanup can hook in as a `tool.invoke.post` Hook — the audit trail records every cleanup.
-
-### See Also
-
-- [Security Primitives](/docs/en/concepts/security-primitives) — the full primitive set
-- [Error Handling](/docs/en/concepts/error-handling) — fail-closed
+- [Security Primitives](/docs/en/concepts/security-primitives) — runtime guard integration
+- [Secret Management](/docs/en/concepts/secret-management) — encrypted credential storage
+- [Configuration](/docs/en/concepts/configuration) — `PrivacyConfig` and platform policies

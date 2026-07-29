@@ -5,7 +5,7 @@ description: "AgentDef and FlowSpec resolution, HarnessDeps assembly, and dispat
 
 # Orchestrator
 
-The Orchestrator is the bridge between the **Gateway** (chat ingress, protocol adapters) and the **AgentHarness** (Think→Act loop). It resolves the agent's configuration, assembles execution dependencies, and dispatches the flow.
+The Orchestrator is the bridge between the **Gateway** (chat ingress, protocol adapters) and the **AgentHarness** (Think→Act loop). It receives a `FlowRequest`, assembles execution context, and dispatches via the `HarnessRunner` trait to the Phase-4 `AgentHarness`. The orchestrator keeps "routing" and "execution" cleanly separated: the gateway only owns the former, `AgentHarness` only owns the latter.
 
 ## Role in the Architecture
 
@@ -16,91 +16,127 @@ Gateway FlowRequest
 ┌─────────────┐
 │ Orchestrator │
 │              │
-│ • Resolve    │
-│ • Build      │
-│ • Dispatch   │
+│ • Resolve FlowSpec / FlowInput │
+│ • SessionLock + channel events │
+│ • Dispatch to HarnessRunner    │
 └──────┬───────┘
-       │ HarnessRunner::run
+       │ HarnessRunner::run (returns FlowOutcome)
        ▼
 ┌─────────────┐
-│   Harness   │
+│   AgentHarness (Think→Act)  │
 └─────────────┘
 ```
 
 **Location**: `src/orchestrator/`
 
+- `mod.rs` — public re-exports + module declarations
+- `dispatch.rs` — `Orchestrator` / `FlowRequest` / `FlowHandle` / `FlowOutcome` / `HarnessRunner` trait
+- `harness_bridge/` — `AgentHarnessRunner` (the production `HarnessRunner` implementation)
+- `flow_spec.rs` — declarative `FlowSpec` / `FlowInput` / `BrainRef` / `SandboxKind` / `SessionStrategy` / `FlowOverrides`
+- `flow_registry.rs` / `resolver.rs` — routing resolution + session resolution
+- `sandbox_factory.rs` — `WorkspaceSandbox` / `DenyAllSandbox` / `WorkspaceBuilder`
+- `deps_builder.rs` — boot-time provider chain / context budget / strategy planner assembly
+- `loader.rs` / `presets/` / `errors.rs` / `flow_run_tool.rs` / `summary_format.rs`
+
 ---
 
-## AgentDef Resolution
+## Boundary: Orchestrator ≠ Harness
 
-`AgentDef` defines the agent's behavior — its model, available tools, system prompt, and personality. The Orchestrator resolves it from:
+The orchestrator only does:
 
-- **Static configuration** — `aleph.toml` or `.aleph/agent.toml`
-- **Dynamic override** — per-request parameters (e.g., `model`, `thinking`)
-- **Identity context** — owner vs. guest permissions
+1. **Resolve** — `FlowSpec` (declarative TOML) + `FlowInput` (`Prompt` / `Messages` / `History` / `Multimodal` / `Resume`) + runtime overrides coming from `FlowRequest`.
+2. **Assemble** — pick `Arc<dyn AiProvider>` (per `BrainRef::Default` / `Preferred` / `Strict`), build `Arc<dyn Sandbox>` (per `SandboxKind::Workspace` / `None`), take a `SessionLockGuard` (mutual exclusion per session).
+3. **Dispatch** — call `HarnessRunner::run(...)` and wrap the result in a `FlowHandle { session_key, events, completion, cancel }` returned to the gateway.
 
-The resolved `AgentDef` is passed into the flow as part of `FlowSpec`.
+The orchestrator **does not** call the LLM, **does not** invoke tools, **does not** judge completion. That work lives entirely inside `AgentHarness` (Phase 4). `HarnessDeps` injects those capabilities as `Arc<dyn Trait>` into the harness, but the **struct definition and field shape live in `src/harness/deps.rs`**; the orchestrator only holds references and constructs `AgentHarness` instances on demand.
 
 ---
 
 ## FlowSpec Resolution
 
-`FlowSpec` defines the execution flow for a single request:
+`FlowSpec` (declarative, loaded from TOML) is the execution specification of a single flow:
 
 | Field | Description |
 |-------|-------------|
-| `agent_id` | Target agent identifier |
-| `input` | User message or command |
-| `identity` | IdentityContext (owner / guest / anonymous) |
-| `abort_signal` | Cancellation token |
-| `tool_filter` | Optional tool whitelist / blacklist |
-| `context_budget` | Token budget override |
+| `id` | Flow identifier |
+| `description` | Flow purpose |
+| `agent` | Target `AgentId` |
+| `brain` | `BrainRef`: `Default` / `Preferred { provider }` / `Strict { provider, model }` |
+| `sandbox_kind` | `None` / `Workspace` |
+| `session_strategy` | `Reuse` / `Fresh` / `Child { parent_session_key? }` |
+| `priority` | Dispatch priority (0-255, default 128) |
+| `overrides` | `FlowOverrides { max_iterations, context_mode, extra_system_prompt }` |
 
-The Orchestrator merges request-level overrides with the resolved `AgentDef` to produce the final `FlowSpec`.
+`FlowRequest` (runtime) merges request-level overrides with the declarative `FlowSpec` and carries optional `tool_service` / `trace_sink` / `interaction_manifest` / `sandbox_override` / `workspace_override` / `max_iterations_override` / `transient_context` / `think_level` / `envelope` / `model_directive` so the `HarnessRunner` implementation can override defaults per call.
 
 ---
 
-## HarnessDeps Assembly
+## HarnessDeps (Phase-4 Injection)
 
-Once `AgentDef` and `FlowSpec` are resolved, the Orchestrator builds `HarnessDeps` — the complete dependency bundle for the Harness runtime:
+The `HarnessRunner` implementation converts the 13 parameters of `Arc<dyn HarnessRunner>::run(...)` into `HarnessDeps` (defined in [`src/harness/deps.rs`](../../../../../../../Aleph/src/harness/deps.rs)) and hands it to `AgentHarness::new`. The current field shape (only optional fields shown — required fields like `session` / `tools` / `llm` are in the source):
 
 ```rust
 pub struct HarnessDeps {
-    pub session: Arc<dyn SessionService>,       // Append-only history
-    pub tools: Arc<dyn ToolService>,            // Tool catalog + execution
-    pub sandbox: Arc<dyn Sandbox>,              // Exec environment, capability ledger
-    pub llm: Arc<dyn AiProvider>,               // LLM provider
-    pub stop_hooks: Option<Arc<Vec<Arc<dyn StopHookHandler>>>>, // Optional stop hooks
-    pub context_budget: Option<Arc<Mutex<ContextBudget>>>,      // Optional pressure sensor
-    pub context_compactor: Option<Arc<ContextCompactor>>,       // Optional LLM-based compactor
-    pub skill_prefetcher: Option<Arc<SkillPrefetcher>>,         // Optional skill discovery
-    pub trace_sink: Option<Arc<dyn TraceSink>>,                 // Optional observability sink
-    pub system_prompt: Option<String>,          // Optional system prompt override
-    pub max_iterations: Option<usize>,          // Optional hard iteration cap
-    pub power: Option<Arc<dyn PowerCapability>>, // Optional sleep inhibitor (macOS)
+    pub session: Arc<dyn SessionService>,
+    pub tools: Arc<dyn ToolService>,
+    pub llm: Arc<dyn AiProvider>,
+    pub robustness_profile: ModelRobustnessProfile,
+
+    pub verifier_chain: Option<Arc<VerifierChain>>,     // between Think and Act
+    pub context_budget: Option<Arc<Mutex<ContextBudget>>>,
+    pub context_compactor: Option<Arc<ContextCompactor>>,
+    pub preflight_pipeline: Option<Arc<PreflightPipeline>>,
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
+    pub system_prompt: Option<String>,
+    pub system_prompt_parts: Option<Vec<SystemPromptPart>>, // stable/dynamic split
+    pub recall_context: Option<String>,                  // per-turn trailing recall
+    pub chain_context: ChainContext,                     // subagent depth
+
+    pub guardrails: Option<Arc<GuardrailRegistry>>,      // input/output/tool guards
+    pub max_iterations: Option<usize>,
+    pub power: Option<Arc<dyn PowerCapability>>,         // macOS sleep inhibitor
+    pub stall_config: Option<StallConfig>,
+    pub consecutive_failure_cap: Option<usize>,
+    pub turn_timeout: Option<Duration>,
+    pub turn_budget: Option<Arc<TurnResultBudget>>,      // tool-result Layer 3
+    pub result_store: Option<Arc<ToolResultStore>>,
+    pub session_epoch_registrar: Option<Arc<dyn SessionEpochRegistrar>>,
+    pub tool_signal_sink: Arc<dyn ToolSignalSink>,
+    pub in_flight_tool_calls: Option<Arc<InFlightToolCalls>>,
+    pub parallel_tool_concurrency: Option<usize>,
 }
 ```
 
-All dependencies are injected as `Arc<dyn Trait>` (or `Option<Arc<...>>` for optional features), allowing test doubles and runtime swapping.
+The `Arc<dyn Trait>` (or `Option<Arc<...>>`) pattern enables test doubles and hot reload (`default_provider`): `AgentHarnessRunner` holds an `Arc<dyn DefaultProviderHandle>`, re-resolves the current default provider on every `run()`, so a UI-driven `set_default` takes effect on the next turn without a restart.
 
 ---
 
 ## Dispatch Flow
 
 ```
-FlowRequest { agent_id, input, identity, ... }
+FlowRequest { agent_id, input, channel, ...overrides... }
      │
      ▼
-Resolve AgentDef + FlowSpec
+Orchestrator::dispatch
+   • Resolve FlowSpec (TOML) + FlowInput
+   • Pick AiProvider (BrainRef) + Sandbox (SandboxKind)
+   • SessionLockGuard acquired
      │
      ▼
-Build HarnessDeps
+HarnessRunner::run(session_key, spec, input, sandbox, events,
+                   cancel, tool_service_override?, trace_sink?,
+                   interaction_manifest?, workspace_override?,
+                   max_iterations_override?, transient_context?,
+                   think_level?, envelope?, model_directive?)
      │
      ▼
-HarnessRunner::run(flow, deps) → FlowOutcome
+FlowHandle { session_key, events, completion, cancel }
+     │
+     ▼
+FlowOutcome → Gateway renders response
 ```
 
-The `HarnessRunner::run` function takes ownership of both the `FlowRequest` and `HarnessDeps`, drives the Think→Act loop to completion, and returns a `FlowOutcome` containing the final response, stream events, and any errors.
+The `HarnessRunner` trait accepts the 13 parameters above (`src/orchestrator/dispatch.rs::HarnessRunner::run`) and hands control to the Phase-4 `AgentHarness`. `AgentHarness::run` returns a structured `FlowOutcome` containing final text, token breakdown (cache hits / reasoning), tool timeline, pricing estimate (`pricing::CostEstimate`), and a precise `terminate_reason` (replacing the old `hit_limit: bool`).
 
 ---
 
@@ -108,10 +144,13 @@ The `HarnessRunner::run` function takes ownership of both the `FlowRequest` and 
 
 | Type | Purpose | Location |
 |------|---------|----------|
-| `FlowRequest` | Incoming request from Gateway | `src/orchestrator/` |
-| `HarnessDeps` | Assembled dependency bundle | `src/orchestrator/` |
-| `FlowOutcome` | Execution result (response, events, errors) | `src/orchestrator/` |
-| `HarnessRunner` | Entry point for Harness execution | `src/harness/` |
+| `FlowRequest` | Incoming request from Gateway | `src/orchestrator/dispatch.rs` |
+| `FlowSpec` / `FlowInput` / `BrainRef` / `SessionStrategy` | Declarative flow spec | `src/orchestrator/flow_spec.rs` |
+| `FlowHandle` | Spawn handle returned to the Gateway (events / completion / cancel) | `src/orchestrator/dispatch.rs` |
+| `FlowOutcome` / `FlowStreamEvent` / `TerminateReason` | Execution result (with precise exit reason) | `src/orchestrator/dispatch.rs` |
+| `HarnessRunner` | Execution entry trait | `src/orchestrator/dispatch.rs` |
+| `AgentHarnessRunner` | Production `HarnessRunner` implementation → `AgentHarness` | `src/orchestrator/harness_bridge/` |
+| `HarnessDeps` | Harness dependency bundle (struct definition) | `src/harness/deps.rs` |
 
 ---
 
@@ -136,6 +175,10 @@ The `HarnessRunner::run` function takes ownership of both the `FlowRequest` and 
 ### Subagent-Scoped Tool Output
 
 26.7.15+: child harnesses get a `ToolResultStore` handle **scoped to the parent session** — previously process-wide, causing silent zero-hit recall.
+
+### Harness Ratchet Lowered to 5008 LOC
+
+26.7.21+: the `DiminishingReturnsDetector` hard stop was removed (R10 forbids completion judgment inside the loop). Stuck runs are now bounded by `max_iterations` / `ToolLoopVerifier` / the model's own stop. The current line-budget ratchet sits at 5008 LOC.
 
 ### See Also
 

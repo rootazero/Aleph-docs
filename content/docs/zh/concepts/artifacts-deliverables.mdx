@@ -1,0 +1,210 @@
+---
+title: "工件与可交付物（Artifact Store & Deliverable）"
+description: "会话产生或接收的所有字节 blob 的权威结算层；模型通过 artifact_publish 工具把完成的工作产物发布为 Deliverable，Panel 在 Deliverables 面板里展示并由 capability byte route 提供直读。"
+---
+
+Artifact 系统是 Aleph 中**会话产生或接收的所有字节 blob 的权威结算层**——上传的文件、工具生成的图片、导出的会话副本，以及最重要的：**模型把完成的工作产物发布成的 Deliverable**（报告 / 分析 / 文档）。Round 3 后的 artifact 系统是「**settlement layer + capability byte route + 4 origin + LRU 配额**」的复合架构，**不再**走过去的 inspector 右栏。
+
+> **为什么需要 artifact store？** `agent_trace` 流是有损的（有界 `mpsc` + `try_send`，宁可丢帧也不反压 agent 循环）。如果 UI 把一个实时事件当作真值记录，每次丢帧都会留下永久"幽灵"。所以 live 通知是**无内容的失效 ping**，每个消费者都重新 `read ArtifactStore::list`。
+
+## 数据模型（`src/artifacts/mod.rs`）
+
+```rust
+pub enum ArtifactOrigin {
+    Inbound,      // 来自用户 / 通道的上传或附件
+    Outbound,     // 工具在 run 中产出（生成的图、渲染的图表）
+    Export,       // Aleph 按需生成（如会话转写导出）
+    Deliverable,  // 由 agent 发布为最终工作产物 —— Panel 会钉到 pane 顶部并打开最新一份
+}
+
+pub struct ArtifactRecord {
+    pub id: String,           // UUID v4（小写连字符）
+    pub session_key: String,  // 原始 session_key（如 agent:main:main）
+    pub run_id: Option<String>,
+    pub origin: ArtifactOrigin,
+    pub filename: String,     // 净化后：不含目录分量
+    pub mime_type: String,    // 由调用方盖戳，从字节嗅探
+    pub size: u64,
+    pub created_at: i64,      // unix ms
+}
+```
+
+`ArtifactRecord` 不可变（写盘后 sidecar 不再变），与 `ArtifactStore::list` 的 `read_dir` 模式契合。Round 3 后的 Panel 把 Deliverable **钉到 pane 顶部**并把最新一份在浏览器里打开——对前三种 origin 做这件事就是错的。
+
+## 磁盘布局
+
+无索引文件、无数据库表。`ArtifactStore::list` 是对 sidecar 的 `read_dir`：
+
+```text
+<root>/<encoded_session>/<id>.bin     # 原始字节
+<root>/<encoded_session>/<id>.json    # ArtifactRecord sidecar
+```
+
+`<root>` 默认是 `<aleph_data_dir>/artifacts`（**刻意放在 `std::env::temp_dir()` 之外**：入站媒体目前落在 temp 目录，每个 run 结束都会被 `remove_dir_all`，而 artifact 必须活过 run）。
+
+- **会话结构隔离**：一个会话的 artifact 只存在于 key 编码出的目录下；`encode_session_key` 是单射的（`%` 自身被转义），所以**两个不同的 key 永远不会撞到同一目录**；持有 session A 的 key 的读者**无法命名** session B 目录里的路径
+- **写入原子化**：temp 文件 + rename，崩溃也不会留下半写 blob
+- **记录不可变**：写完后 sidecar 不变
+- **会话路径编码**（`encode_session_key`）：`%` / `:` / `/` 等被百分号转义，Windows 上 `:` 是非法文件名字符、URL 上 `/` 是路径分隔符，转义后**整段单目录**、**整段单文件名**
+
+## 配额
+
+```rust
+pub const MAX_ARTIFACT_BYTES: u64 = 50 * 1024 * 1024;       // 50 MB / blob（与 media::cache::MAX_FILE_SIZE 对齐）
+pub const MAX_ARTIFACTS_PER_SESSION: usize = 200;            // 每会话最多保留 200 份；超出按 LRU 淘汰
+const MAX_FILENAME_CHARS: usize = 200;
+const MAX_MIME_BYTES: usize = 255;
+const FALLBACK_FILENAME: &str = "unnamed";
+const FALLBACK_MIME: &str = "application/octet-stream";
+```
+
+50 MB cap 与 media cache 对齐——一份能通过 media cache 的附件，绝不会在这里被拒。`MAX_ARTIFACTS_PER_SESSION = 200` 是 LRU 软上限：超过时按 `rank` 排序淘汰最旧的 Inbound / Outbound / Export，**Deliverable 永远最后被淘汰**（`eviction_rank` 把 Deliverable 单独抬高一级）—— 一份被替代的 Deliverable 不能因多工具产出的图片洪流而丢失。
+
+## 发布可交付物
+
+agent 通过 `artifact_publish` 工具（`src/builtin_tools/artifact_publish.rs`）把完成的工作产物发布为 `Deliverable`：
+
+```rust
+// src/builtin_tools/artifact_publish.rs（节选）
+let spec = PublishSpec {
+    name: "report.md",
+    mime_type: "text/html",  // 渲染为可独立打开的 HTML
+    bytes: rendered_html.as_bytes(),  // 渲染后的完整 HTML（不是 raw markdown）
+    metadata: json!({
+        "run_id": current_run_id,
+        "session_key": current_session_key,
+        "tags": ["analysis", "weekly"],
+    }),
+};
+artifact_store.put(session_key, ArtifactOrigin::Deliverable, spec).await?;
+```
+
+**关键细节**：`artifact_publish` 接收**模型已经在 LLM 侧拼好的 Markdown**（`ArtifactPublishArgs { title, content, figures }`），工具**自己**渲染为 HTML（`crate::export::render_document_html`），再以 `text/html` mime 落地——这样 artifact store 里存的就是**真正能独立打开的文档**，不是模型在 LLM 上下文里的「报告」字面量。**figures** 数组接收之前 turn 已 publish 的 artifact id（`artifacts.list` 查到），被 `export::collect_artifacts` 拉字节内联（4 MiB / 24 MiB 双层预算）。
+
+**与其他 origin 的区别**：transcript export 是"对话"本身；Deliverable 是对话所产出的"报告 / 分析 / 文档"。Panel 把 Deliverable **钉到 pane 顶部**并把最新一份在浏览器里打开——对前三种 origin 做这件事就是错的。
+
+### Tool / Channel 上的差异化（Round 3 补完）
+
+`artifact_publish` 在不同通道上**必须**走不同路径（R5 通知原则 + 跨通道一致性）：
+
+| 通道 | 行为 |
+|------|------|
+| **Panel** | artifact 落 `ArtifactOrigin::Deliverable` → 触发 `unseen_artifacts` badge + 自动开窗 |
+| **Telegram / Discord** | **不能自动开窗**（用户没有「Panel pane」），降级为 banner 通知 + 文本内携带**实质内容**（不是空 link） |
+| **CLI / TUI** | 写到本地 Deliverable 列表，提示用户用 Panel 打开 |
+
+**对通道而言**：`artifact_publish` **必须按 `turn.channel_id` 分支**（不是通道各自的孤立工具），且非 Panel 通道**必须** carry 实质内容——否则 Telegram 用户只看到一条空 link，**比不发送还糟糕**。
+
+## RPC 接口（`artifacts.*`）
+
+`src/gateway/handlers/artifacts.rs`（~650 行）暴露三类 RPC：
+
+| 方法 | 用途 |
+|------|------|
+| `artifacts.list` | 列出当前会话的所有 artifact（按 `origin` 过滤可选） |
+| `artifacts.read_text` | 读取文本 blob（**512 KB cap**，UTF-8 边界裁剪，**纯读路由**——不应进 Mutate lane） |
+| `artifacts.publish` | 写入一个 `Deliverable`（仅供 `artifact_publish` 工具调用） |
+
+**Gateway capability byte route**（`src/gateway/server/artifact_route.rs`）让远端客户端经认证 WS 也能读取——
+
+| 守卫 | 在 WS 上 | 在 byte route 上 |
+|------|----------|------------------|
+| 远程明文拒绝（`refuse_insecure_remote`） | 426 | 426 |
+| 跨域 / DNS-rebinding（`OriginPolicy`） | 403 | 403 |
+| 速率限制 | 共享 `RateLimiter` | 独立 `RateLimiter`（防图片 gallery 抢占 chat.send 桶） |
+| 授权 | `connect` + device tier | **capability 在路径上** |
+| 范围 | 每连接一个 session | session 由 capability 反解 |
+
+capability 在 path 上：路径 `/artifact/{cap}/{id}/{filename}`，**绝不在 query 上**（query 会进 access log / 错误追踪泄露）。未知 capability = 404、过期 capability = 404（不可与「该 id 不存在」区分——防 cap 持有者枚举别人的 artifact id）。
+
+`artifacts.read_text` 是个**纯读路由**——`Mutate lane` 不接这条 RPC（Panel 端不会用 `apply_layer_two` 路径来读），保持 artifact 流的「只读 + 落盘分离」纯洁度。
+
+## Panel "Deliverables" 面板
+
+`interfaces/webchat/src/components/artifacts/`（5 个子模块：deliverable / files / mod / preview / row）：
+
+- **替代原 inspector**——Deliverable 现在是面板的一等公民
+- **Text preview** + **artifact-driven badge** + **可见回退**（round-3 review：4 缺陷 + 1 capability gap 已修）
+- **Pin + Open in browser**：最新一份 Deliverable 在浏览器里打开；钉到 pane 顶部
+- **`unseen_artifacts` badge** 与 listing diff 同步（rename / 重构后保持一致）
+- **deliverable.rs**：单卡片渲染 + 标记 `is_deliverable` 优先排序
+- **files.rs**：项目树折叠成 artifact 面板的二级 section
+- **preview.rs**：in-pane 文本预览（不离开会话）
+
+`interfaces/webchat/src/api/typed/artifacts.ts` 提供类型化客户端：
+
+```ts
+const list = await artifacts.list({ session_key, origin_filter: "deliverable" });
+const text = await artifacts.read_text({ session_key, id });
+const artifact = await artifacts.publish({ session_key, name, mime_type, content_base64 });
+```
+
+## Session HTML 导出
+
+`src/export/`（`collect.rs`、`document.rs`、`export.css`、`markdown.rs`、`mod.rs`、`page.rs`、`session_html.rs`）提供：
+
+- **`session.export_html`**：把会话转写导出为独立 HTML（自包含 CSS）
+- **`session.export_markdown`**：纯函数式 markdown 导出（便于外部脚本再处理）
+- **`export.css`**：导出文档的样式（与 Panel 主题对齐）
+- `collect_artifacts` / `render_document_html` / `page.rs`：artifact 内联字节（双层预算 `MAX_INLINE_ARTIFACT_BYTES = 4 MiB` / `MAX_INLINE_TOTAL_BYTES = 24 MiB`）
+
+导出会被落地为 `ArtifactOrigin::Export`，可在 Deliverables 面板里浏览与再打开。`artifact_publish` 的 figures 数组走同一套 `collect_artifacts` ——**单一 HTML 渲染路径**，Panel 内与外发的样式字节一致。
+
+## 错误类型
+
+```rust
+pub enum ArtifactError {
+    TooLarge { size: u64, max: u64 },   // > MAX_ARTIFACT_BYTES
+    InvalidId(String),                  // id 不是 bare lowercase hyphenated UUID
+    NotFound(String),                   // 该 session 下没有该 id
+    Metadata(serde_json::Error),        // sidecar 编解码
+    Io(std::io::Error),                 // 文件系统错误
+    Root(String),                       // Aleph data dir 无法解析
+}
+```
+
+`InvalidId` 是**结构性拒绝**（不是 NotFound）——客户端发来 `../../etc/passwd` / `{not-a-uuid}` 时直接拒，连文件系统都不碰。`Metadata` 错误 = sidecar JSON 损坏，**不** propagate 到 agent 上下文（corrupt sidecar 仍归 Ok(None)，read 路径不影响主流程。
+
+## 关键源文件
+
+- `src/artifacts/mod.rs` — `ArtifactOrigin` / `ArtifactRecord` / `ArtifactError` / `encode_session_key`（会话路径单射 + Windows 非法字符兼容）
+- `src/artifacts/store.rs` — `ArtifactStore` (`put` / `list` / `read` / `purge_session`)、字节侧写、LRU 淘汰（Deliverable 永远最后被淘汰）、目录净化
+- `src/builtin_tools/artifact_publish.rs` — `ArtifactPublishTool`（`ArtifactPublishArgs { title, content, figures }`，渲染为 HTML 后入 store，failure-soft per R7）
+- `src/export/{mod,collect,document,page,markdown,session_html,export}.rs` — HTML / Markdown 渲染
+- `src/gateway/handlers/artifacts.rs` — 3 个 RPC（~650 行）
+- `src/gateway/server/artifact_route.rs` — `ArtifactRouteState` + `artifact_routes()` + capability 解码（防 cap 持有者枚举别人的 id）
+- `interfaces/webchat/src/components/artifacts/{mod,deliverable,files,preview,row}.rs` — Panel 5 个子模块
+- `interfaces/webchat/src/api/artifacts.ts` — Panel 端类型化 RPC 客户端
+
+## 关键约束与契约
+
+- **`ArtifactRecord.id`** 必须是 bare lowercase hyphenated UUID（`Uuid::parse_str` 严格 parse + `hyphenated().to_string()` 回环校验）—— 这是 byte route 唯一信源，**id 是 path 的一部分**
+- **`encode_session_key` 单射**——`%` 自身被转义，所以 `a%3Ab` 与 `a:b` 编码后不同；这是「两个不同 key 不撞目录」的根基
+- **`MAX_ARTIFACT_BYTES = 50 MB` 与 media::cache 对齐**——一份通过 media cache 的附件，绝不在 artifact store 这里被拒
+- **Deliverable 永远最后被淘汰**——`eviction_rank` 把 Deliverable 单独抬高一级，防止「session 跑出 200 张图片就丢用户报告」
+- **capability 在 path 上**——`/artifact/{cap}/{id}/{filename}`，**绝不在 query 上**（query 会进 access log / error trace）
+- **读路由不进 Mutate lane**——`artifacts.read_text` 是纯读，rate_limiter 走独立 `RpcHeavy` 桶，不抢 chat.send 容量
+- **HTML 是单一渲染路径**——`artifact_publish` / `session.export_html` / `read_text` preview 都走 `export::render_document_html`，Panel 内与外发的样式字节一致
+
+## 26.7.x 补充
+
+### Round 3 review（4 缺陷 + 1 capability gap 已修）
+
+`artifacts.list` / 面板渲染 / `unseen_artifacts` badge 与 listing diff 同步（rename / 重构后保持一致）。Panel 4 缺陷 + 1 capability gap 在 Round 3 一次性修完。
+
+### 与 `Loop / Goal / Strategy` 的关系
+
+`artifact_publish` 是 standing goal / strategy 的常见产出路径 —— `Loop / Goal / Strategy` 子系统产出的 `Strategy` 计划、`GoalLessonsPromoteStage` 升级的长期笔记、`feedback_distill` 的技能蒸馏，全部走 artifact_publish 落地为可独立打开的 HTML 报告。`Strategy::goal_id` / `Goal::lessons` / `FeedbackDistillStage` 的产物可被 `note_graph_query` 反向追溯到 `ArtifactRecord.id`，全链路 audit 闭环。
+
+### 与 `voice.format` 的关系
+
+`artifact_publish` 的 figures 数组是 artifact 之间的引用（`ArtifactRecord` 嵌套），与 `voice.format` 的「直接字面量抛光」互不干扰 —— 两条路径分别解决不同问题：artifact_publish = 报告产出后的落盘 + 渲染；voice.format = 实时字幕的展示抛光。
+
+### 见另请参阅
+
+- [扩展商店](/docs/zh/concepts/extensions-store) —— Hub 单一源
+- [会话模式](/docs/zh/architecture/overview#第三双生子会话模式) —— `session_mode` 静态分区
+- [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy) —— Strategy 是 Deliverable 的常见产出路径
+- [架构 `src/artifacts/`](/docs/zh/architecture/overview#核心模块) —— 模块清单
+- [导出模块源码](https://github.com/rootazero/Aleph/blob/main/src/export) — HTML / Markdown 渲染
+- [artifact byte route 源码](https://github.com/rootazero/Aleph/blob/main/src/gateway/server/artifact_route.rs) — capability 校验

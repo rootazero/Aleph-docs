@@ -1,15 +1,13 @@
 ---
 title: "思考器"
-description: "LLM 交互层、具有 29 层的 PromptBuilder、节缓存和思考级别。"
+description: "36 层的提示组装（19 Stable / 17 Dynamic）、缓存区分裂、骨架字节棘轮、UnifiedMessage 流式。"
 ---
 
 # 思考器
 
-思考器负责所有 LLM 交互和决策。它是 Think→Act 循环的大脑。
+思考器负责所有 LLM 交互与提示组装。唯一的公共入口是 `thinker::PromptBuilder`，它包装了一个 `PromptPipeline`。旧的 `agent_loop::PromptBuilder` 在工具链迁移（第 6/7 阶段）期间被删除。
 
 **位置**: `src/thinker/`
-
-唯一的公共入口点是 `thinker::PromptBuilder`，它包装了 `PromptPipeline`。旧的 `agent_loop::PromptBuilder` 在工具链迁移期间（第 6/7 阶段）被删除。
 
 ---
 
@@ -17,103 +15,109 @@ description: "LLM 交互层、具有 29 层的 PromptBuilder、节缓存和思�
 
 | 组件 | 文件 | 用途 |
 |-----------|------|---------|
-| `ProviderRegistry` | `mod.rs` | 模型路由和提供商解析 |
-| `PromptBuilder` | `prompt_builder/` | 从上下文构建提示 |
-| `PromptPipeline` | `prompt_pipeline.rs` | 可组合提示组装引擎 |
-| `PromptLayer` | `prompt_layer.rs` | 单个提示层的 trait |
-| `InteractionManifest` | `interaction.rs` | 频道能力感知 |
+| `PromptBuilder` | `prompt_builder/` | 为子代理与主循环路径构建系统提示 |
+| `PromptPipeline` | `prompt_pipeline.rs` | 基于有序层列表的可组合提示组装引擎 |
+| `PromptLayer` | `prompt_layer.rs` | 单个层的 trait；声明 priority / paths / stability |
+| `PromptConfig` | `prompt_builder.rs` | 用户可调的提示开关（`language`、`extra_files`、…） |
+| `InteractionManifest` | `interaction.rs` | 频道能力感知（paradigm + capabilities + constraints） |
 | `SecurityContext` | `security_context.rs` | 策略驱动的权限 |
-| `ContextAggregator` | `context.rs` | 协调交互和安全 |
-| `SoulManifest` | `soul.rs` | 身份/个性定义 |
-| `IdentityResolver` | `identity.rs` | 分层身份解析 |
-| `MemoryContextProvider` | `memory_context_provider.rs` | 用于上下文注入的记忆检索 |
-| `TokenBudget` | `prompt_budget.rs` | 提示预算执行 |
+| `ContextAggregator` | `context.rs` | 把 interaction + security 调和为 `ResolvedContext` |
+| `PromptMode` | `prompt_mode.rs` | `Full` / `Compact` / `Minimal` 模式过滤 |
+| `IdentityFiles` | `identity_files.rs` | 已加载的 `SOUL.md` / `IDENTITY.md` / `AGENTS.md` / `TOOLS.md` / `HEARTBEAT.md` |
+| `SoulManifest` | `soul.rs` | `SOUL.md` 结构化解析器（供 `identity.get` 预览使用） |
+| `MemoryContextProvider` | `memory_context_provider.rs` | 记忆信封 + 取向 + 召回消息构造器 |
+| `UnifiedMessage` / `ProviderDelta` | `src/providers/message.rs` | LLM 无关的消息 + 流式增量 |
+| `MessageAssembler` | `src/providers/message_assembler.rs` | 单一 reducer，拥有组装中的消息并实时剥离内联 `<think>` |
 
 ---
 
 ## PromptBuilder
 
 ```rust
-// 标准用法
-let builder = PromptBuilder::new(config);
+// 子代理内联提示（扁平字符串，无缓存分裂）
 let prompt = builder.build_system_prompt(&tools);
 
-// 带灵魂身份
-let prompt = builder.build_system_prompt_with_soul(&tools, &soul, profile);
+// 主循环提示分裂为可缓存的 Stable 前缀 + Dynamic 后缀
+let prompt = builder.build_system_prompt_cached_with_mode(&tools, &soul, profile, PromptMode::Full);
 
-// 子代理用法（替换旧的 prompt_sections::resolve()）
+// 代理定义（子代理角色标头 + 协议块）
 let prompt = builder.build_for_agent(&agent_def, &tools, &soul);
-
-// 模式 + 预算控制
-let result = builder.build_with_budget(&tools, &soul, profile, PromptMode::Compact, &budget);
 ```
+
+主循环路径发出一个 `SystemPromptPart` Stable 前缀（可被 LLM 提供商缓存）和一个无标记的 Dynamic 尾部。Cached 路径是生产入口；Basic 路径用于内联子代理提示。
 
 ---
 
-## 33 层
+## 36 层
 
-提示系统从 33 个有序层组装提示。层根据缓存资格分为两个区域。
+`PromptPipeline::default_layers()` 注册 **36 层**（按优先级排序），由 `test_default_layers_count` 锁定（`assert_eq!(pipeline.layer_count(), 36)`）。**19 层**位于 **Stable** 前缀区（优先级 `< 1700`，符合 section 级缓存资格），**17 层**位于 **Dynamic** 后缀区（优先级 `>= 1700`，从不缓存）。区分由 `stable_layers_come_before_dynamic` 锁定。
 
-### 稳定区域（优先级 50–1600）
+### Stable 区（优先级 < 1700）
 
-内容很少更改——符合节级缓存条件。
+内容很少变化——符合提供商的 section 级缓存资格。
 
 | 优先级 | 层 | 说明 |
 |----------|-------|-------|
-| 50 | `SoulLayer` | 身份 / 个性 |
+| 50 | `SoulLayer` | `~/.aleph/agents/{id}/SOUL.md` |
 | 55 | `AgentRoleLayer` | 子代理角色标头 + 协议块 |
-| 75 | `ProfileLayer` | 工作空间配置文件覆盖 |
-| 100 | `RoleLayer` | 基础助手角色 |
-| 300 | `EnvironmentLayer` | OS、日期、工作目录 |
-| 400 | `RuntimeCapabilitiesLayer` | Python、Node.js、FFmpeg 等 |
-| 500 | `ToolsLayer` | 工具定义（文本模式） |
-| 501 | `HydratedToolsLayer` | 语义检索工具定义 |
-| 550 | `ToolUsageGrammarLayer` | 数据驱动的工具使用约定 |
-| 600 | `SecurityLayer` | 安全 / 安全指南 |
-| 700 | `ProtocolTokensLayer` | JSON-RPC 协议令牌 |
-| 710 | `HeartbeatLayer` | 会话保持活动指令 |
-| 800 | `OperationalGuidelinesLayer` | 操作规则 |
-| 900 | `CitationStandardsLayer` | 引用格式 |
-| 1000 | `GenerationModelsLayer` | 可用图像/视频/音频模型 |
+| 60 | `CuratedMemoryLayer` | 预渲染的 `<CuratedMemory>` + `<UserProfile>` 信封 |
+| 70 | `StrategyLayer` | 活动的 StraTA 策略（焊接的 `<strategy>` 信封） |
+| 75 | `ChainContextLayer` | 子代理委派深度（根 ⇒ 静默） |
+| 100 | `ProfileLayer` | `AGENTS.md` 工作空间覆盖 |
+| 200 | `RoleLayer` | 基础助手角色 |
+| 300 | `EnvironmentLayer` | 进程不变的一半（Stable 事实：机器 / OS） |
+| 400 | `RuntimeCapabilitiesLayer` | 检测到的 Python / Node / FFmpeg 运行时 |
+| 502 | `ToolRuntimeStateLayer` | 30s-TTL 工具健康缓存的快照 |
+| 600 | `SecurityLayer` | 跨工具安全姿态（仅 Static 区事实） |
+| 605 | `ProtocolTokensLayer` | Background paradigm 的 JSON-RPC 协议令牌 |
+| 700 | `OperationalGuidelinesLayer` | Background 操作规则 |
+| 800 | `MultiStepConductLayer` | 自主 scratchpad 规划 + 交互式进度叙述 |
+| 810 | `ProviderGuidanceLayer` | `model_behaviors/{family}.md` 基线 + 增量 |
+| 900 | `SessionBudgetLayer` | 解析后的 per-run `iteration_cap` |
+| 950 | `CitationStandardsLayer` | 引用格式 |
 | 1050 | `SkillInstructionsLayer` | 活动技能指令 |
-| 1100 | `SpecialActionsLayer` | 特殊操作语法 |
-| 1200 | `ResponseFormatLayer` | 响应结构 |
+| 1100 | `SpecialActionsLayer` | 自我纠错日志 + flagging |
 | 1300 | `GuidelinesLayer` | 一般指南 |
-| 1350 | `ThinkingGuidanceLayer` | 结构化推理指南 |
-| 1400 | `SkillModeLayer` | 严格技能工作流执行 |
-| 1500 | `CustomInstructionsLayer` | 用户自定义指令 |
-| 1600 | `LanguageLayer` | 响应语言 |
+| 1600 | `LanguageLayer` | `[general] language` 配置的响应语言 |
 
-### 动态区域（优先级 1700–1760）
+### Dynamic 区（优先级 ≥ 1700）
 
-每个请求，从不缓存。
+每个请求的内容——从不缓存。17 层（由 `dynamic_names.len() == 17` 锁定）。
 
 | 优先级 | 层 | 说明 |
 |----------|-------|-------|
-| 1700 | `InboundContextLayer` | 发送者、频道、会话元数据 |
-| 1704 | `AgentCatalogLayer` | 可用子代理目录 |
-| 1705 | `McpInstructionsLayer` | MCP 服务器指令 |
-| 1706 | `McpToolIndexLayer` | MCP 工具索引条目 |
-| 1710 | `VoiceModeLayer` | 语音特定响应指令 |
-| 1720 | `RuntimeContextLayer` | 当前时间、会话信息 |
-| 1730 | `IdentityFilesLayer` | SOUL.md、IDENTITY.md 工作空间文件 |
-| 1740 | `MemoryAugmentationLayer` | 双路径记忆注入 |
-| 1750 | `SessionContextGuideLayer` | 压缩会话上下文指南 |
-| 1760 | `SessionResumeLayer` | 会话恢复上下文 |
+| 1701 | `RuntimeContextLayer` | 每 run 变化的一半（cwd、时间）——与 `EnvironmentLayer` 分离 |
+| 1702 | `ToolRuntimeStateLayer` 原本位于 502；移至 Dynamic，避免探测翻转使缓存前缀失效 |
+| 1715 | `DoctorRepairHintLayer` | WebRich paradigm + 失败的 doctor 检查 |
+| 1720 | `VoiceModeLayer` | 语音转写轮次 |
+| 1725 | `McpInstructionsLayer` | 已连接的 MCP 服务器指令 |
+| 1730 | `IdentityFilesLayer` | `IDENTITY.md` / `TOOLS.md` / `HEARTBEAT.md` |
+| 1735 | `ExtraFilesLayer` | `[prompt.extra_files]` |
+| 1740 | `MemoryProtocolLayer` | 跨工具记忆写入指引 |
+| 1750 | `TimerLoopLayer` | 活动 watch loop 状态 |
+| 1753 | `GraphTopologyLayer` | loop-graph 治理拓扑 |
+| 1754 | `StandingGoalLayer` | 活动常驻目标 |
+| 1755 | `ExecutionPlanLayer` | 至少有 1 项的活动 scratchpad 计划 |
+| 1756 | `StrategyPointerLayer` | 在读头附近回显策略护栏 |
+| 1757 | `SessionContextGuideLayer` | 带有压缩摘要的历史 |
+| 1758 | `OperatingEnvelopeLayer` | 审批 tier + usage mode（Dynamic，使 composer 药丸翻转不会让前缀失效） |
+| 1760 | `AgentCatalogLayer` | 可用子代理目录 |
+| 1799 | `ProviderGuidanceLayer` 运行时增量 | 每请求 `behavior_name` 解析 |
+
+已作为死注入面删除的层：`ToolsLayer`（文本 schema 回退；原生 `tool_use` 总是胜出）、`ToolUsageGrammarLayer`、`ThinkingGuidanceLayer`、`GenerationModelsLayer`、`CustomInstructionsLayer`、`InboundContextLayer`、`SessionResumeLayer`、`McpResourceIndexLayer`、`McpToolIndexLayer`、`HydratedToolsLayer`、`SkillModeLayer`、`HeartbeatLayer`、`ResponseFormatLayer`、`MemoryAugmentationLayer`。R9 三把棘轮（`reachable_layers`、`scaffold_bytes_ratchet`、`no_sentence_is_stated_twice`、`no_environment_fact_is_stated_twice`）锁住存活集合。
 
 ---
 
 ## 组装路径
 
-每个层声明它参与哪些路径。管道在组装时按路径过滤。
+`AssemblyPath` 只有**两个**变体——幽灵路径正是层静默消失的途径，所以每个变体有且仅有一个入口。
 
 | 路径 | 说明 |
 |------|-------------|
-| `Basic` | 最小化——仅配置 + 工具列表 |
-| `Hydration` | 工具来自语义检索 (`HydrationResult`) |
-| `Soul` | 灵魂丰富——包括身份 / 个性 |
-| `Context` | 上下文感知——使用 `ResolvedContext` |
-| `Cached` | 预缓存的稳定前缀 |
+| `Basic` | 子代理内联提示——单一扁平字符串，无缓存分裂。入口：`PromptBuilder::build_system_prompt`（subagent_spawner）。 |
+| `Cached` | 主循环提示——分裂为可缓存的 Stable 前缀 + Dynamic 后缀。入口：`PromptBuilder::build_system_prompt_cached_with_mode`（harness_bridge::prompt_build）。 |
+
+原来的 `Hydration` / `Soul` / `Context` 路径已被撤回；它们最后的真实调用方早在数月前就已迁出，提示侧代码已不可达。
 
 ---
 
@@ -121,21 +125,56 @@ let result = builder.build_with_budget(&tools, &soul, profile, PromptMode::Compa
 
 | 模式 | 行为 |
 |------|----------|
-| `Full` (默认) | 所有 33 层参与 |
-| `Compact` | 排除 13 个重型层 (`RuntimeContextLayer`、`EnvironmentLayer`、`RuntimeCapabilitiesLayer`、`ProtocolTokensLayer`、`HeartbeatLayer`、`OperationalGuidelinesLayer`、`CitationStandardsLayer`、`GenerationModelsLayer`、`SkillInstructionsLayer`、`SpecialActionsLayer`、`GuidelinesLayer`、`ThinkingGuidanceLayer`、`SkillModeLayer`) |
-| `Minimal` | 仅 5 个核心层：`SoulLayer`、`ToolsLayer`、`HydratedToolsLayer`、`ResponseFormatLayer`、`LanguageLayer` |
+| `Full`（默认） | 全部 36 层参与 |
+| `Compact` | 排除 15 个重型 Stable 层；保留 Dynamic 事实 |
+| `Minimal` | 仅配置响应语言 + soul + curated memory |
 
 ---
 
-## 节级缓存
+## 骨架字节棘轮
 
-`execute_cached()` 在第一次调用后缓存每个 `LayerStability::Stable` 层的输出。动态层始终重新计算。~23/33 层是稳定的。
+`prompt_contract::scaffold_bytes_ratchet` 跨 5 个 paradigm 测量 always-on 提示骨架，并强制 `SCAFFOLD_CEILING_BYTES = 5_913`（2026-07-26，WebRich 最坏情况）。上限取跨 paradigm 的最大值而非单一选定的 paradigm，因为没有 paradigm 占主导：
 
-```rust
-pipeline.invalidate("soul");    // 按名称使一层无效
-pipeline.invalidate_all();      // 清除所有缓存的节
-pipeline.cache_stats();         // CacheStats { hits, misses, entries }
 ```
+Background  4,904 B  （守护进程默认 paradigm）
+CLI         ~5,140 B
+Messaging   ~5,200 B
+WebRich     5,913 B   ← 上限（Background 独有 + MultiStepConductLayer + DoctorRepairHintLayer）
+Embedded    ~5,000 B
+```
+
+字节预算由 `aleph-server prompt-size --path cached --paradigm <paradigm>` 测量，作用于 `production_shaped` 的 `LayerInput`——后者会填上 4 个始终存在的字段（`runtime_context`、`approval_tier`、`session_mode`、`sandbox_summary`），确保棘轮的视野与网关实际发出的字节一致。
+
+---
+
+## 会话模式
+
+`chat` / `work` / `code` 是用户选定的工具**呈现面**的静态分区，与权限正交（审批仍由 exec tier 决定）。每个模式在 `OperatingEnvelopeLayer` 加上一行缓存稳定的提示，使模式翻转把字节从缓存前缀移至 Dynamic 后缀。
+
+---
+
+## UnifiedMessage 与 ProviderDelta
+
+`UnifiedMessage` 是 LLM 无关的中间消息表示；`ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallDelta`）。单一 `MessageAssembler` reducer 拥有组装中的消息并实时剥离内联 `<think>` 块。工具链桥接（`src/harness/agent/think.rs`）把借用的 `HarnessCallback` 包成 `DeltaSink`，让实时 token 增量在提供商流式输出时进入网关回调。
+
+---
+
+## `tool_search` 元工具
+
+26.7.7+ 渐进式工具披露：请求携带**静态**的核心工具集 + 全量工具目录名称列表，加 `tool_search` 作为按需加载 schema 的元工具。模型 100% 驱动发现；工具链不做任何基于消息内容的工具过滤（R10「5 不」#2）。静态分区同样位于 `src/tools/scoped/`（allowlist / 权限 Deny / 健康闸门 `retain` 链），那在工具层，不在工具链。
+
+---
+
+## R10 的三把棘轮
+
+| 测试 | 文件 | 守护 |
+|------|------|--------|
+| `reachable_layers` | `src/thinker/prompt_contract.rs` | 每个注册层要么在某些 paradigm 下贡献内容，要么列入 `CONDITIONALLY_SILENT` 并说明唤醒它的会话内容 |
+| `scaffold_bytes_ratchet` | `src/thinker/prompt_contract.rs` | always-on 提示在所有 paradigm 下 ≤ `SCAFFOLD_CEILING_BYTES` |
+| `no_sentence_is_stated_twice` | `src/thinker/prompt_contract.rs` | 跨层句子级重复被禁止 |
+| `no_environment_fact_is_stated_twice` | `src/thinker/prompt_contract.rs` | 同一个环境事实（OS、cwd、时间、…）不得被两个层陈述 |
+
+`aleph-server prompt-size` 报告任意 paradigm 的实际字节数与逐层明细。
 
 ---
 
@@ -146,27 +185,13 @@ pub enum ThinkingLevel {
     Off,        // 无扩展思考
     Minimal,    // budget_tokens: 1024
     Low,        // budget_tokens: 2048
-    Medium,     // budget_tokens: 4096 (默认)
+    Medium,     // budget_tokens: 4096（默认）
     High,       // budget_tokens: 8192
     XHigh,      // budget_tokens: 16384
 }
 ```
 
----
-
-## 提供商回退
-
-当提供商不支持扩展思考时，Aleph 会优雅地回退：
-
-```
-用户请求：thinking = High
-    │
-    ├─▶ Claude Opus → ✓ 原生扩展思考
-    │
-    ├─▶ GPT-4o → ✗ 不支持 → 回退到 o1
-    │
-    └─▶ Gemini → ✗ 不支持 → 使用 thinkingPreface 提示
-```
+级别经由 `FlowRequest::think_level` 传递，并被转发进 `HarnessRunner::run`，写入 `HarnessDeps` 让每个 `RequestPayload` 都带上它。原生不支持扩展思考的提供商优雅降级——OpenAI 的 o-series 路径原生接受该级别，Gemini 用 `thinkingPreface` 提示词拐弯。
 
 ---
 
@@ -177,63 +202,28 @@ LLM 响应流
     │
     ▼
 ┌─────────────────────────────────────────┐
-│ BlockStateManager                        │
-│   • 跟踪当前块类型                       │
-│   • 检测块边界                           │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│ BlockReplyChunker                        │
-│   • 分割成语义块                         │
-│   • 处理代码块、列表等                   │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│ BlockCoalescer                           │
-│   • 合并小块                             │
-│   • 发出完整块                           │
-└─────────────────────────────────────────┘
-    │
-    ▼
-Event: StreamChunk { content, block_type }
+│ 提供商（HTTP / 原生 SDK）                │
+│   • 流式块 → ProviderDelta               │
+│   • TextDelta  → 实时预览                │
+│   • ThinkingDelta → 推理通道             │
+│   • ToolCallDelta → 由汇编器折叠         │
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+           MessageAssembler（单一 reducer）
+             • 拥有进行中的消息
+             • 实时剥离内联 `<think>`
+             │
+             ▼
+       AssistantMessage（SessionEvent）
 ```
+
+工具链的 `CallbackSink` 把借用的 `HarnessCallback` 桥接进提供商层的 `DeltaSink`；文本与思考增量被转发用于实时预览，工具调用与簿记增量由提供商的 `DeltaCollector` 折叠，并通过组装好的 `ProviderResponse` 浮出。
 
 ---
 
 ## 另请参阅
 
 - [工具链](./harness) — Think→Act 循环
-- [分发器](./dispatcher) — 任务编排
-- [记忆系统](./memory) — 上下文增强
-
----
-
-## 26.7.x 补充
-
-### Layers 重组
-
-26.7.x：~28 个细层替代旧 6 层心智模型（位于 `src/thinker/layers/`）。详见 [提示系统](/docs/zh/concepts/prompt-system) 与 [思考器（概念）](/docs/zh/concepts/thinker)。
-
-### R9 两把尺
-
-`reachable_layers` / `scaffold_bytes_ratchet` / `no_sentence_is_stated_twice`——`aleph-server prompt-size` 给出实际字节数。
-
-### `session_mode` 行
-
-每个会话模式加一行缓存稳定的提示词。
-
-### UnificationMessage / ProviderDelta
-
-`UnifiedMessage` 是 LLM 无关的中间消息表示；`ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallDelta`）。`MessageAssembler` 单一 reducer 装配消息并实时剥离 `<think>` 块。
-
-### `tool_search` 元工具
-
-26.7.7+ 渐进式工具披露——core 工具静态常驻，全量工具目录 + `tool_search` 元工具按需加载 schema。
-
-### 详见
-
-- [思考器（概念）](/docs/zh/concepts/thinker)
-- [提示系统](/docs/zh/concepts/prompt-system)
-- [架构红线 R9](/docs/zh/philosophy/redlines#r9-智慧在-prompt-中-intelligence-lives-in-the-prompt)
+- [分发器](./dispatcher) — flow 分发 + harness runner
+- [记忆系统](./memory) — 记忆信封 + 召回消息注入

@@ -1,216 +1,90 @@
 ---
 title: "AI Providers"
-description: "LLM provider abstraction with retry logic, delta streaming, auth profiles, and multi-provider fallback."
+description: "Unified model-provider adapters with streaming, live routing, ordered failover, cooldowns, circuit breaking, and truthful usage accounting."
 ---
 
-The `providers` module provides a unified interface for LLM backends. It supports multiple providers (OpenAI, Anthropic, Ollama, etc.) with retry logic, delta streaming, auth profile management, and automatic fallback.
+Aleph exposes model backends through the object-safe `AiProvider` trait. Protocol adapters translate unified message history, tools, media, and generation settings to each upstream API, while decorators add model overrides, thinking level, metering, MoA, and provider failover without putting recovery policy in the agent loop.
 
-## Design Philosophy
+## Provider Contract
 
-1. **Provider abstraction** — All LLMs implement the same `LlmProvider` trait
-2. **Resilient connections** — Exponential backoff retry with configurable policies
-3. **Streaming first** — Token-level streaming is the default, not an afterthought
+The core call is `AiProvider::process(RequestPayload) -> ProviderResponse`. Providers also report protocol and serving provider/model hints so behavior selection, pricing, and attribution use the endpoint that actually served the request rather than a wrapper name.
 
----
+Streaming uses `execute_streaming_dyn` and `supports_streaming`. The outermost decorator must preserve the streaming path. The default implementation replays a completed response to the sink, so a missing specialization degrades from live streaming to batched delivery rather than producing silence.
 
-## Core Components
+## Configuration
 
-### LlmProvider Trait
+Providers are entries in the plural top-level table:
 
-```rust
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse>;
+```toml
+[providers.primary]
+protocol = "anthropic"
+models = ["claude-sonnet-4-6"]
+enabled = true
 
-    async fn complete_stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Box<dyn Stream<Item = ProviderDelta>>>;
+[providers.local]
+protocol = "ollama"
+models = ["qwen3"]
+base_url = "http://127.0.0.1:11434"
+enabled = true
 
-    fn name(&self) -> &str;
-    fn capabilities(&self) -> ProviderCapabilities;
-}
+[general]
+default_provider = "primary"
+fallback_providers = ["local"]
 ```
 
-**Capabilities:**
-- `streaming` — Supports token-level streaming
-- `function_calling` — Supports tool/function calls
-- `vision` — Supports image input
-- `json_mode` — Supports structured JSON output
+`models` is ordered and its first entry is the default. `model = "..."` remains a backward-compatible input alias. Common fields include `protocol`, `models`, `base_url`, `enabled`, request and stream-idle timeouts, context-window override, sampling controls, cache retention, model behavior, and protocol-specific options.
 
-### ProviderRegistry
+API keys are runtime-only values loaded from the encrypted vault and are not persisted by `ProviderConfig`. Use provider setup or secret-management surfaces rather than writing credentials into the provider table.
 
-Manages multiple providers with fallback:
+The singular `[provider.<name>]` path is not valid. Provider entries also do not have a `max_failures` field; failover membership and policy are configured separately.
 
-```rust
-pub struct ProviderRegistry {
-    providers: HashMap<String, Arc<dyn LlmProvider>>,
-    default: String,
-}
+## Failover Walk
 
-impl ProviderRegistry {
-    pub fn get(
-        &self,
-        name: &str,
-    ) -> Option<Arc<dyn LlmProvider>> { /* ... */ }
+`FailoverProvider` is a decorator around a live primary and an ordered provider/model candidate chain. The harness sees one provider and does not implement retries or select fallbacks.
 
-    pub fn list(&self,
-    ) -> Vec<String> { /* ... */ }
-}
-```
+For each request, the provider layer:
 
-**Determinism:** Fallback selection uses `keys().min()` for lexicographically first provider.
+1. Resolves the live primary and effective fallback membership.
+2. Applies explicit local/cloud route policy and capability requirements.
+3. Orders eligible candidates using configured order or load-balancing policy.
+4. Skips open circuits and active provider/model cooldowns where possible.
+5. Retries or advances according to the typed failure decision.
+6. Records health, cooldown, load, usage, serving provider, and serving model.
 
-### Retry Logic
+Configured fallback names reference keys in `[providers]`. If no explicit chain is configured, the production chain can derive fallback membership from the live provider registry; provider additions and removals then affect the next request. `effective_fallback_names` is shared by the walk and `route_status`, so diagnostics describe the chain that is actually used.
 
-```rust
-pub async fn retry_with_policy<F, Fut, T>(
-    operation: F,
-    policy: RetryPolicy,
-) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    let mut attempt = 0;
-    loop {
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(e) if attempt < policy.max_attempts => {
-                let delay = calculate_delay(attempt, &policy);
-                sleep(delay).await;
-                attempt += 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-```
+A streaming candidate may fail over only before user-visible content has been emitted. Once content has reached the sink, the emission guard stops the walk rather than appending a second provider's answer to a partial first answer.
 
-**Backoff:** Exponential with cap (max 300s for policy-based, 30s for simple backoff).
+## Live Route State
 
-**Safety:**
-- `saturating_sub(1)` for attempt calculation (prevents underflow)
-- `.min(300.0)` for backoff cap (prevents infinity/NaN)
+`[route]` controls local/cloud preference, optional cloud escalation, load balancing, provider targets, and rate ceilings. `RouteHandle` stores the entire route state in one `ArcSwap`: a write publishes one generation atomically, and each request reads one coherent snapshot. The next request therefore sees either all old fields or all new fields, never a torn mixture.
 
-### Delta Streaming
+Candidate slot and endpoint tier are separate concepts. The primary slot owns an explicitly selected model; fallback slots use their own model catalogs. Local/cloud tier is used only for route policy and cost ordering.
 
-Converts provider-specific streaming formats to unified deltas:
+## Reliability and Accounting
 
-```rust
-pub struct ProviderDelta {
-    pub content: Option<String>,
-    pub tool_call: Option<ToolCallDelta>,
-    pub finish_reason: Option<String>,
-}
-```
+- Transient overload, timeout, and rate-limit failures use bounded retry and backoff decisions.
+- Circuit-breaker, provider cooldown, and model cooldown state is shared across global and per-agent chains.
+- Provider response body reads and streaming idle gaps are bounded.
+- Cache read and creation tokens are included when enforcing throughput windows.
+- Metering attributes cost and usage to the actual serving provider/model.
+- `route_status` exposes chain membership, health, cooldown, load, and route decisions.
 
-**Supported formats:**
-- OpenAI SSE (`data: {...}`)
-- Anthropic SSE (`event: content_block_delta`)
-- Ollama JSON streaming
+The failover hot path borrows the request conversation instead of cloning the complete history for every attempt. The provider refactor also removed roughly 2,000 lines of unreachable parallel provider code, leaving the `AiProvider`/protocol-adapter/failover path as the maintained runtime.
 
-### Auth Profiles
+## Code Locations
 
-Manages API credentials:
-
-```rust
-pub struct AuthProfile {
-    pub provider: String,
-    pub api_key: SecretString,
-    pub base_url: Option<String>,
-}
-
-pub struct AuthProfileRegistry {
-    profiles: HashMap<String, AuthProfile>,
-}
-```
-
-**Security:** API keys stored as `SecretString` (zeroizes on drop, redacts in Debug).
-
----
-
-## Supported Providers
-
-| Provider | Streaming | Tools | Vision | JSON Mode |
-|---|---|---|---|---|
-| **OpenAI** | ✅ | ✅ | ✅ | ✅ |
-| **Anthropic** | ✅ | ✅ | ✅ | — |
-| **Ollama** | ✅ | ✅ | — | ✅ |
-| **Azure OpenAI** | ✅ | ✅ | ✅ | ✅ |
-| **Google Gemini** | ✅ | ✅ | ✅ | ✅ |
-
----
-
-## Safety Properties
-
-- **No lock issues** — Uses `tokio::sync` with recovery pattern
-- **No unwrap in production** — All retries return `Result`
-- **Deterministic fallback** — Sorted provider selection
-- **Bounded backoff** — Prevents infinite delay growth
-
----
-
-## Code Location
-
-- `src/providers/mod.rs` — Module entry point
-- `src/providers/registry.rs` — Provider registry
-- `src/providers/retry.rs` — Retry logic
-- `src/providers/delta.rs` — Delta streaming
-- `src/providers/auth_profile_registry.rs` — Auth management
-- `src/providers/openai.rs` — OpenAI provider
-- `src/providers/anthropic.rs` — Anthropic provider
-- `src/providers/ollama.rs` — Ollama provider
+- `src/providers/mod.rs` — `AiProvider` and provider construction
+- `src/providers/protocols/` — protocol adapters
+- `src/providers/http_provider.rs` — HTTP execution and live streaming
+- `src/providers/failover/` — candidate walk, decisions, circuits, and cooldowns
+- `src/providers/route_policy.rs` — candidate gating and ordering
+- `src/providers/route_handle.rs` — atomic live route snapshots
+- `src/providers/route_observe.rs` — `route_status` rendering
+- `src/config/types/provider.rs` — `[providers.<name>]` entry schema
 
 ## See Also
 
-- [Thinker](./thinker) — Prompt construction
-- [Gateway](./gateway) — Execution engine
-- [Secret Management](./secret-management) — Credential storage
-
----
-
-## 26.7.x Addendum
-
-### Provider Failover Refactor
-
-26.7.21+ major refactor: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
-
-### Real Cost Accounting
-
-26.7.15+: `session.usage` now carries a real spend ledger (both cost and token counts were partly fabricated before). The core holds a **single-source** price table; the shell no longer carries a duplicate.
-
-### VESR Dynamic Model Routing
-
-26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (**k-NN over sqlite-vec**), so the model sees which models have actually performed for this kind of work.
-
-### Protocol Adapters
-
-The `[provider.<name>]` block configures:
-
-- `protocol` — `anthropic` / `openai` / `gemini` / `ollama` / `openai_compat` / ...
-- `model` — default model
-- `api_key` — API key (supports `${ENV_VAR}` interpolation)
-- `base_url` — OpenAI-compatible custom base (Ollama, vLLM, etc.)
-- `max_failures` — failover threshold
-
-### `runtimes.install` / `list` / `refresh`
-
-26.7.x runtime management: auto-discover and install language runtimes (Node / Python / Bun / uv / ...). The capability ledger is rebuilt from disk.
-
-### `embedding_providers.*` / `generation_providers.*` / `rerank_config.*`
-
-26.7.x split categories — embedding, generation, rerank each have their own provider config RPCs.
-
-### `route_config.*` / `routing_rules.*`
-
-26.7.x routing rules (`routing_rules.create` / `list` / `get` / `update` / `delete` / `move`) — fine-grained routing control.
-
-### See Also
-
-- [Generation](/docs/en/concepts/generation) — detail
-- [Architecture / Providers](/docs/en/architecture/providers) — architecture
-- [Gateway RPC `providers.*`](/docs/en/gateway/methods/providers) — protocol
+- [Execution Engine](/docs/en/concepts/execution-engine) — how provider calls enter a run
+- [Secret Management](/docs/en/concepts/secret-management) — credential storage
+- [Generation](/docs/en/concepts/generation) — image, audio, and video providers

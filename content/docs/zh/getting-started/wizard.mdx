@@ -1,228 +1,100 @@
 ---
-title: "设置向导"
-description: "通过 Aleph 的交互式入门向导完成配置"
+title: "首次配置"
+description: "使用当前 CLI、配置文件和 Panel 完成 Aleph 首次配置"
 ---
 
-设置向导是配置 Aleph 并使其准备就绪的最快方式。它以分步流程引导你完成每一个基本设置——从选择 AI 提供商到选择会话模式、设置 TLS 证书与连接消息应用。
+当前版本的 `aleph-server` CLI **没有** `wizard` 子命令。`src/wizard/` 提供的是供 Gateway/客户端使用的会话式流程框架，不等同于 `aleph wizard` 命令。
 
-## 启动向导
+## 1. 创建配置文件
 
-从命令行运行入门向导：
-
-```bash
-aleph wizard
-```
-
-向导会在你的终端中打开一个交互式会话。如果你正在构建客户端界面，也可以通过网关 RPC 启动它（参见 [向导 RPC 方法](/docs/gateway/methods/wizard)）。
-
-### 向导变体
-
-| 命令 | 流程 | 描述 |
-|------|------|------|
-| `aleph wizard` | `onboarding` | 完整的入门流程 —— 推荐给首次使用的用户 |
-| `aleph wizard --quick` | `quick-setup` | 最小化配置 —— 只需一个 API 密钥即可就绪 |
-| `aleph wizard --provider` | `provider-setup` | 添加或重新配置单个 AI 提供商 |
-| `aleph wizard --mode` | `mode-setup` | 仅切换默认会话模式（`chat` / `work` / `code`） |
-
-## 完整流程
-
-以下是完整入门向导的 11 个阶段。
-
-### 阶段 1 —— 欢迎
-
-向导会向你问好并解释将要配置的内容：
-
-- AI 提供商和模型
-- 可选的用于故障转移的辅助模型
-- AI 回复的思考级别
-- **会话模式**（chat / work / code）—— 工具呈现面的静态分区
-- **执行等级**（Ask / Auto / Full）—— 工具执行的安全等级
-- 消息应用集成
-- **网关 TLS** —— 是否启用自签名 TLS、绑定非环回接口
-
-无需输入 —— 按 **Enter** 继续。
-
-### 阶段 2 —— 提供商选择
-
-选择你的主要 AI 提供商。使用方向键高亮选项，然后按 **Enter** 选择。
-
-| 提供商 | 说明 |
-|--------|------|
-| **Anthropic (Claude)** | 推荐 —— 最适合编程和推理 |
-| **OpenAI (GPT)** | GPT-4o 和 o3 系列 |
-| **Google (Gemini)** | Gemini Pro 和 Ultra |
-| **Ollama (本地)** | 在你自己的硬件上运行模型 —— 无需 API 密钥 |
-| **OpenRouter** | 通过单个密钥访问多个提供商 |
-
-### 阶段 3 —— 凭据
-
-如果你选择了云提供商，向导会要求你提供 API 密钥：
-
-```
-Enter your anthropic API key:
-> sk-ant-••••••••
-```
-
-输入是隐藏的 —— 你的密钥永远不会显示在屏幕上。Aleph 将其安全地存储在本地保险库 `~/.aleph/` 中。
-
-如果你选择了 **Ollama**，向导会跳过此步骤，并提醒你确保 Ollama 已在本地安装并运行。
-
-### 阶段 4 —— 主模型
-
-为你选择的提供商选择默认模型。选项因提供商而异。例如，使用 Anthropic：
-
-| 模型 | 描述 |
-|------|------|
-| Claude Opus 4.5 | 最强大，最适合复杂任务 |
-| Claude Sonnet 4 | 快速且功能强大（推荐） |
-| Claude Haiku | 最快，适合简单任务 |
-
-### 阶段 5 —— 辅助模型（可选）
-
-向导会询问你是否要配置故障转移模型：
-
-```
-Would you like to configure a secondary model for failover? (y/N)
-```
-
-如果回答 **是**，你需要重复提供商、凭据和模型步骤来配置辅助提供商。当主模型不可用时，Aleph 会自动回退到辅助模型（原子计数器与原子 regen marker 守护切换，不克隆整段会话）。
-
-### 阶段 6 —— 思考级别
-
-选择 Aleph 在回复前的推理深度：
-
-| 级别 | 描述 |
-|------|------|
-| Off | 不进行扩展思考 |
-| Minimal | 简短推理 |
-| Low | 快速分析 |
-| **Medium** | 平衡 —— 适合大多数任务（推荐） |
-| High | 针对复杂问题的深入分析 |
-| XHigh | 最大深度 —— 较慢但全面 |
-
-你可以随时通过 `aleph chat --thinking high` 按会话更改此设置。
-
-### 阶段 7 —— 会话模式（chat / work / code）
-
-会话模式与思考级别**正交**——它**只对工具呈现面**做静态分区，不影响权限：
-
-| 模式 | 工具集大小 | 推荐场景 |
-|------|-----------|---------|
-| **chat** | 最小核心 | 一般聊天、问答、轻量工具 |
-| **work** | 中等（含工作流工具） | 日常办公、文档处理 |
-| **code** | 全量（含开发工具集） | 编程、调试、CI 任务 |
-
-可在运行时通过 `session_set_mode` 工具切换。详情参见 [会话模式](/docs/zh/architecture/overview#第三双生子会话模式)。
-
-### 阶段 8 —— 执行等级
-
-| 等级 | 行为 |
-|------|------|
-| **Ask** | 每个工具执行前请求审批；未知工具失败关闭 |
-| **Auto** | 幂等工具自动放行，破坏性工具仍需审批 |
-| **Full** | 全部自动放行（除独立的安全硬过滤） |
-
-与 `[sandbox.command_policy]` 的硬底不冲突 —— 硬底优先级最高，不能被任何等级拉低。详情参见 [执行审批](/docs/zh/security/exec-approval)。
-
-### 阶段 9 —— 消息应用
-
-选择要连接的消息平台。这是可选的 —— 你可以不按任何选项直接按 **Enter** 跳过。
-
-| 应用 | 状态 |
-|------|------|
-| Telegram | 可用 |
-| Discord | 可用 |
-| iMessage | 可用（macOS 发送门控在 BlueBubbles 私有 API） |
-| WebChat | 内置 |
-
-如果你选择了一个或多个应用，向导**不会**在此处收集机器人令牌。你可以在向导完成后通过 `~/.aleph/aleph.toml` 或 `aleph config set` 配置这些令牌。
-
-### 阶段 10 —— 网关 TLS
-
-如果你的核心需要从其他机器访问（不是纯本地），向导会引导你配置 TLS：
-
-- **仅环回**：保持 `bind = 127.0.0.1`，跳过 TLS
-- **自签名**：启用 `[gateway.tls]`；SAN 自动覆盖主机非环回接口 IP；Panel 端通过 TOFU 审批
-- **受信任的反向代理**：终止 TLS 在代理上；配置 `[gateway] trusted_proxy` 列表
-
-详情参见 [网关协议](/docs/zh/gateway/protocol#tls--tofu)。
-
-### 阶段 11 —— 完成
-
-向导会显示你配置的所有内容的摘要：
-
-```
-Configuration Summary:
-
-  Primary Provider:     anthropic
-  Primary Model:        claude-sonnet-4-20250514
-  Secondary:            openai/gpt-4o
-  Thinking Level:       medium
-  Session Mode:         work
-  Exec Tier:            ask
-  Messaging Apps:       telegram, discord
-  Gateway TLS:          self-signed (SAN auto)
-```
-
-在继续之前仔细查看摘要：
-
-```
-Apply this configuration? (Y/n)
-```
-
-如果你确认，向导会验证你的 API 密钥并将配置写入 `~/.aleph/aleph.toml`。进度指示器会显示状态：
-
-```
-  Validating API keys...
-  Saving configuration...
-  Configuration saved
-```
-
-如果你拒绝，向导会退出而不保存任何内容。
-
-```
-Aleph is ready! Run 'aleph-server start' (or 'aleph chat' for the CLI).
-```
-
-完成了。使用 `aleph-server start` 启动核心，或使用 `aleph chat` 在 CLI 中直接对话。
-
-## 重新运行向导
-
-你可以随时再次运行向导：
+Aleph 默认读取 `~/.aleph/config.toml`；可用 `ALEPH_HOME` 覆盖根目录。
 
 ```bash
-# 完整的入门流程 —— 会覆盖现有配置
-aleph wizard
-
-# 添加新提供商而不更改其他设置
-aleph wizard --provider
-
-# 仅切换默认会话模式
-aleph wizard --mode
+mkdir -p ~/.aleph
 ```
 
-再次运行向导会替换你完成的任何阶段的值。你跳过的设置（例如，拒绝辅助模型）会从当前配置中保持不变。
+最小配置示例：
 
-## 快速设置
+```toml
+[general]
+default_provider = "claude"
 
-如果你只想使用推荐默认值（Anthropic Claude Sonnet 4、work 模式、Ask 等级、中等思考级别）快速开始，请使用快速设置：
+[providers.claude]
+provider_type = "claude"
+enabled = true
+api_key = "${ANTHROPIC_API_KEY}"
+models = ["<当前模型目录中的模型 ID>"]
+
+[policies]
+mode = "work"
+exec_tier = "auto"
+
+[gateway]
+host = "127.0.0.1"
+port = 18790
+```
+
+模型 ID 会随提供商更新，请以当前模型目录和 Panel 中的提供商列表为准，不要复制过期的静态模型名。
+
+## 2. 配置凭据
+
+可通过环境变量插值提供密钥：
 
 ```bash
-aleph wizard --quick
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-快速设置只询问你的 Anthropic API 密钥，并自动配置其他所有内容。大约需要 10 秒钟。
+生产环境建议使用 Aleph 的加密机密管理，而不是把密钥明文写入配置文件。相关 CLI：
 
-## 提示
+```bash
+aleph-server secret --help
+```
 
-- **API 密钥错误？** 重新运行 `aleph wizard --provider` 来更新凭据。
-- **稍后更改思考级别：** 使用 `aleph config set agents.defaults.thinking high` 或在单个命令中传递 `--thinking`。
-- **切换会话模式：** 运行 `aleph wizard --mode`，或在 CLI/TUI 中使用 `/mode` 斜杠命令，或让模型调用 `session_set_mode` 工具。
-- **消息令牌：** 在向导完成后，使用 `aleph config set channels.telegram.token "YOUR_TOKEN"` 设置机器人令牌，然后使用 `aleph channels start telegram` 启动频道。
-- **完全跳过向导：** 高级用户可以直接编辑 `~/.aleph/aleph.toml` —— 参见 [配置](./configuration) 获取完整参考。
+## 3. 检查并启动
+
+```bash
+aleph-server doctor
+aleph-server start
+```
+
+Gateway 默认监听 `127.0.0.1:18790`；WebSocket endpoint 为 `ws://127.0.0.1:18790/ws`。浏览器 Panel 使用同一端口的 HTTP 页面。
+
+## 4. 设置会话策略
+
+全局默认值位于 `[policies]`：
+
+- `mode = "chat" | "work" | "code"`：只控制工具呈现面，默认 `work`
+- `exec_tier = "ask" | "auto" | "full"`：控制审批策略，默认 `auto`
+
+会话模式还可在 Panel 中切换，或由模型调用 `session_set_mode` 工具更新。`[sandbox.command_policy]` 始终是不可被执行等级降低的安全硬底。
+
+## 5. 配置远程访问
+
+非环回绑定必须使用原生 TLS、可信 TLS 反向代理，或显式选择不安全远程传输。推荐原生自签名 TLS：
+
+```toml
+[gateway]
+host = "0.0.0.0"
+port = 18790
+
+[gateway.tls]
+enabled = true
+```
+
+`cert_path` 与 `key_path` 留空时，核心会生成自签名证书；Panel 首次连接通过 TOFU 审批并固定证书。
+
+## 6. 配置消息通道
+
+Telegram、Discord 和 iMessage 的字段与访问策略由当前通道 schema 定义。建议在 Panel 中配置，或对照对应接口文档编辑 `config.toml`：
+
+- [Telegram](/docs/zh/interfaces/telegram)
+- [Discord](/docs/zh/interfaces/discord)
+- [iMessage](/docs/zh/interfaces/imessage)
+
+配置完成后重启核心，或按照当前配置热重载影响分类操作。
 
 ## 下一步
 
-- [配置](./configuration) —— 手动微调每个设置
-- [部署](./deployment) —— 将 Aleph 作为持久服务运行
-- [快速入门](./quick-start) —— 立即开始聊天
+- [配置](./configuration) —— 核心配置结构
+- [部署](./deployment) —— 作为持久服务运行
+- [快速上手](./quick-start) —— 启动并验证 Gateway

@@ -235,7 +235,36 @@ require_plan_approval = true
 
 ### 接地证据门
 
-26.7.21+：`task_review` 审批可要求 grounding。
+26.7.21+：`task_review` 审批可要求 grounding；附带 `GroundingVerdict` 验收元数据。
+
+### 团队 Run Mode Pin
+
+26.7.25+：队长在 `teams.run` 时把 `usage_mode`（chat / work / code）**盖戳**并向子成员继承：
+
+- **子代理不能发起 `session_set_mode` 工具调用**——继承是单向的
+- `teams.run` 拒绝任何来自子代理的 `session_set_mode` 请求
+- 队长通过 `task_review` 切换模式时，整队重新对齐
+
+```rust
+// src/teams/runner.rs（节选）
+if turn.is_subagent() {
+    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
+    ensure!(request.action != Some("session_set_mode"),
+        "subagents inherit parent mode; cannot switch mid-team-run");
+}
+```
+
+### Team Chat Strategy 与 `/loop` / `/goal` 优先级
+
+26.7.26+：
+
+- **`team_chat` strategy** 与成员的 `/loop` / `/goal` 共存时，优先级为 `loop > session > team_chat`
+- 团队聊天中 `planner` fire-once（`atomic put_if_absent` 防 race）
+- **`team_key(team_id)` composite key** —— strategy 的命名空间之一（详见 [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy)）
+
+### 防风暴守卫
+
+26.7.22+：每任务执行超时覆盖；操作者可调广播防风暴守卫（`group-chat anti-storm activation budget + entropy reduction`）。
 
 ### 完整 `teams.*` RPC
 

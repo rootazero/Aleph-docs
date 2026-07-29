@@ -1,261 +1,253 @@
 ---
 title: "Task Scheduling"
-description: "Lane-based sub-agent scheduling with resource isolation, anti-starvation, recursion limits, cron jobs, and heartbeat monitoring."
+description: "Cron jobs, heartbeat probes, and the shared infrastructure that drives scheduled agent tasks from the Aleph daemon."
 ---
 
-The `scheduler` and `tasks` modules handle task execution scheduling in Aleph. The scheduler manages sub-agent execution with resource constraints, while the tasks module provides time-based (cron) and health-check (heartbeat) job scheduling.
+The `tasks` module covers Aleph's time-based scheduling: **cron** for recurring agent jobs, **heartbeat** for periodic external probes with L1→L2 escalation, and a **shared** infrastructure layer (clock abstraction, delivery, schedule parsing, persistence, reaper) that both subsystems use. The daemon process owns the timer loops and is the canonical host for cron and heartbeat RPCs.
 
 ## Design Philosophy
 
 The scheduling system follows three principles:
 
-1. **Resource isolation** — Each "lane" of execution has independent quotas and concurrency limits
-2. **Anti-starvation** — Long-waiting jobs receive priority boosts to prevent indefinite blocking
-3. **Recursion safety** — Sub-agent spawning is tracked and limited to prevent infinite recursion
+1. **Testable time** — Every time-dependent module accepts a `Clock` trait so tests inject a `FakeClock` and the production code uses `SystemClock` (`Utc::now()`).
+2. **Atomic persistence** — Both `CronStore` and `HeartbeatStore` are SQLite-backed with an in-memory cache; changes are applied in memory and persisted on `persist()`, so the on-disk row always matches the live view the timer loop saw.
+3. **Push, not poll** — Successful mutations publish `CronJobChanged` / `HeartbeatTaskChanged` on the gateway event bus so the panel can drop its refresh loop.
 
 ---
 
-## Lane-Based Scheduler
+## Cron Jobs
 
-The `LaneScheduler` provides structured concurrency for sub-agent execution:
+The `tasks::cron` module schedules recurring jobs. A `CronService` wraps an internal `ServiceState` and exposes the public async API that gateway handlers and CLI tools call.
 
 ```
-┌─────────────────────────────────────────────┐
-│           LaneScheduler                      │
-├─────────────────────────────────────────────┤
-│                                             │
-│  Lane A ( foreground )  max=3, quota=100    │
-│    ├─ Run 1 (running)                       │
-│    ├─ Run 2 (queued)                        │
-│    └─ Run 3 (queued)                        │
-│                                             │
-│  Lane B ( background )  max=1, quota=50     │
-│    └─ Run 4 (running)                       │
-│                                             │
-│  Global limit: 5 concurrent runs            │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                     CronService                           │
+├──────────────────────────────────────────────────────────┤
+│  state: Arc<ServiceState<SystemClock>>                    │
+│    ├─ store:  Arc<Mutex<CronStore>>  (SQLite + in-mem)    │
+│    ├─ clock:  Arc<dyn Clock>                              │
+│    └─ config: CronConfig                                  │
+│  event_bus: Option<Arc<GatewayEventBus>>  (CronJobChanged)│
+└──────────────────────────────────────────────────────────┘
+            │                               ▲
+            ▼                               │
+   gateway handlers ◄─────handle_*──────────┘
+   (cron.list, cron.get, cron.create, cron.update,
+    cron.delete, cron.status, cron.run, cron.runs,
+    cron.toggle)
 ```
 
-### Lane
+### Schedule kinds
 
-An isolated execution lane with its own quota and concurrency limit:
+A `CronJob` carries one of three schedule kinds (`src/tasks/cron/config.rs`):
 
 ```rust
-pub struct Lane {
-    name: String,
-    max_concurrent: usize,
-    quota: LaneQuota,
+pub enum ScheduleKind {
+    /// Fire at a specific timestamp.
+    At { at: i64, delete_after_run: bool },
+    /// Fire every N milliseconds (with optional anchor).
+    Every { every_ms: i64, anchor_ms: Option<i64> },
+    /// Standard 6-field cron expression with optional tz / stagger.
+    Cron { expr: String, tz: Option<String>, stagger_ms: Option<i64> },
 }
 ```
 
-### LaneScheduler
+### Public API
 
 ```rust
-pub struct LaneScheduler {
-    lanes: Vec<Lane>,
-    global_max: usize,
-    recursion_tracker: RecursionTracker,
-}
-
-impl LaneScheduler {
-    pub async fn schedule(
-        &self,
-        run: QueuedRun,
-    ) -> Result<ScheduleGuard> { /* ... */ }
-
-    pub fn stats(&self,
-    ) -> SchedulerStats { /* ... */ }
-}
-```
-
-**ScheduleGuard** uses RAII — when dropped, the run's permit is automatically released. The scheduler uses `std::mem::forget(permit)` + `ScheduleGuard` for manual control, which is correct but requires care: early returns between `forget` and guard construction would leak permits.
-
-### Anti-Starvation
-
-```rust
-pub struct WaitTimeTracker;
-
-impl WaitTimeTracker {
-    pub fn sweep_anti_starvation(
-        &self,
-        lanes: &mut [LaneState],
-    ) { /* ... */ }
-}
-```
-
-Jobs waiting longer than a threshold receive priority boosts. Note: boosts apply per-lane, so new jobs in a boosted lane also benefit.
-
-### Recursion Tracking
-
-```rust
-pub struct RecursionTracker {
-    max_depth: usize,
-}
-```
-
-Tracks sub-agent spawn depth. If a sub-agent tries to spawn another sub-agent beyond `max_depth`, the request is blocked.
-
-### LaneState
-
-```rust
-pub struct LaneState {
-    queued: VecDeque<QueuedRun>,
-    running: HashMap<RunId, RunningRun>,
-}
-```
-
-**Integer safety:** Wait time calculations use `.max(0)` to prevent clock skew underflow, and `.min(10)` before `as i8` to prevent overflow.
-
----
-
-## Cron Tasks
-
-The `tasks::cron` module schedules recurring jobs:
-
-```rust
-pub struct CronService {
-    db: Connection,
-    clock: Arc<dyn Clock>,
-}
-
 impl CronService {
-    pub async fn create_job(
-        &self,
-        config: JobConfig,
-    ) -> Result<JobId> { /* ... */ }
+    pub fn new(config: CronConfig) -> Result<Self, String>;
+    pub fn with_event_bus(self, bus: Arc<GatewayEventBus>) -> Self;
 
-    pub async fn list_jobs(&self,
-    ) -> Result<Vec<Job>> { /* ... */ }
+    pub async fn list_jobs(&self) -> Result<Vec<CronJobView>, String>;
+    pub async fn get_job(&self, id: &str) -> Result<CronJobView, String>;
 
-    pub async fn delete_job(
-        &self,
-        id: JobId,
-    ) -> Result<()> { /* ... */ }
+    pub async fn add_job(&self, job: CronJob) -> Result<String, String>;
+    pub async fn update_job(&self, id: &str, updates: CronJobUpdates) -> Result<(), String>;
+    pub async fn delete_job(&self, id: &str) -> Result<(), String>;
+
+    pub async fn enable_job(&self, id: &str) -> Result<(), String>;
+    pub async fn disable_job(&self, id: &str) -> Result<(), String>;
+    pub async fn toggle_job(&self, id: &str) -> Result<bool, String>;
+    pub async fn run_job(&self, id: &str) -> Result<(), String>;
+
+    pub async fn reap_history(&self) -> Result<u64, String>;
 }
 ```
 
-**Features:**
-- Cron expression parsing (standard Unix cron syntax)
-- Job execution history
-- Timeout handling
-- Three-phase concurrency: schedule → execute → cleanup (minimizes lock hold time)
+### Features
 
-**Clock abstraction:** Uses a `Clock` trait with `FakeClock` for testability.
+- **Schedule kinds** — one-shot (`At`), interval (`Every`), and standard 6-field cron expressions with optional timezone and per-job stagger.
+- **JSON atomic persistence** with in-memory cache; `persist()` writes the in-memory working copy to SQLite on every mutation.
+- **Concurrent execution** with a configurable per-process cap; jobs can also pin a `SessionTarget::Main` (same session) or `Isolated` (default) session.
+- **Job chaining** — `on_success` / `on_failure` triggers compose jobs into DAGs; cycles are refused at config time.
+- **Failure alerting** — `FailureAlertConfig` (after N consecutive failures, cooldown, target) plus a global `notify_on_failure_default` policy that defaults unconfigured jobs to alert the originating channel.
+- **Run history** — every run lands in `cron_runs` with `started_at`, `completed_at`, `status` (`Ok` / `Error` / `Skipped` / `Timeout`), `ErrorReason::Transient|Permanent`, and the triggering source (`Schedule` / `Chain` / `Manual` / `Catchup`).
+- **Template rendering** — `tasks::cron::template` substitutes variables into job prompts before agent invocation.
+- **Webhook delivery** — `tasks::cron::webhook_target` lets a job post its outcome to an arbitrary HTTP endpoint.
+- **Carry-over sweeper** — `tasks::cron::carryover` runs a process-global sweep (`OnceLock`-guarded, no double-spawn across hot-reload) to resume interrupted jobs.
 
-### JobRun
+### Clock abstraction
+
+The cron service depends on the shared `Clock` trait (`src/tasks/shared/clock.rs`):
 
 ```rust
-pub struct JobRun {
-    started_at: i64,
-    completed_at: Option<i64>,
-}
-
-impl JobRun {
-    pub fn success(self) -> Self {
-        let now = self.clock.now();
-        let duration_ms = now
-            .saturating_sub(self.started_at)
-            .saturating_mul(1000);
-        // ...
-    }
+pub trait Clock: Send + Sync + 'static {
+    fn now_ms(&self) -> i64;
+    fn now_utc(&self) -> DateTime<Utc> { /* default from now_ms */ }
 }
 ```
 
-**Integer safety:** Uses `saturating_sub` and `saturating_mul` to prevent clock skew underflow.
+`SystemClock` is the production implementation; `FakeClock` (in the `testing` submodule) provides deterministic time control for unit tests.
+
+### RPCs (real implementations)
+
+All `cron.*` RPCs registered in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` are backed by real handlers (`src/gateway/handlers/cron/real.rs`). The earlier `*_stub` placeholders that lived in `src/gateway/handlers/cron/stubs.rs` are no longer reached on the hot path:
+
+| Method | Handler |
+|---|---|
+| `cron.list` | `cron::handle_list` |
+| `cron.get` | `cron::handle_get` |
+| `cron.create` | `cron::handle_create` |
+| `cron.update` | `cron::handle_update` |
+| `cron.delete` | `cron::handle_delete` |
+| `cron.status` | `cron::handle_status` |
+| `cron.run` | `cron::handle_run` |
+| `cron.runs` | `cron::handle_runs` |
+| `cron.toggle` | `cron::handle_toggle` |
 
 ---
 
-## Heartbeat Tasks
+## Heartbeat Probes
 
-The `tasks::heartbeat` module monitors external services:
+The `tasks::heartbeat` module runs periodic L1 probes with optional L2 agent analysis when a probe fires. The same `CronService`-style pattern — `HeartbeatService` facade, `HeartbeatServiceState`, `HeartbeatStore` — keeps the two subsystems symmetric.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     HeartbeatService                          │
+├──────────────────────────────────────────────────────────────┤
+│  state: Arc<HeartbeatServiceState>                            │
+│    ├─ store: Arc<Mutex<HeartbeatStore>>                       │
+│    └─ config: HeartbeatConfig (tick interval, max concurrent, │
+│                                 per-job timeout, dedup)       │
+│  wake_queue: Arc<WakeQueue>                                   │
+│  event_bus: Option<Arc<GatewayEventBus>> (HeartbeatTaskChanged)│
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Features
+
+- **Probe execution** — `tasks::heartbeat::executor` runs each task's configured `ProbeConfig` (tool + params + trigger condition).
+- **Wake queue** — `tasks::heartbeat::wake` lets an external caller poke a wake signal into the timer loop without blocking on the per-task mutex.
+- **Deduplication** — `tasks::heartbeat::dedup` collapses repeated outcomes within a `DedupConfig { window_ms, similarity_threshold, max_history }` so noisy probes do not flood the model.
+- **Run history** — `tasks::heartbeat::history` persists past runs for inspection via `heartbeat.runs`.
+- **Configurable intervals and timeouts** — `HeartbeatConfig::tick_interval_secs`, `max_concurrent`, `job_timeout_secs`.
+
+### Public API
 
 ```rust
-pub struct HeartbeatService {
-    intervals: Vec<HeartbeatInterval>,
-}
-
 impl HeartbeatService {
-    pub async fn check_all(
-        &self,
-    ) -> Vec<HeartbeatResult> { /* ... */ }
+    pub fn new(store: HeartbeatStore, config: HeartbeatConfig) -> Self;
+    pub fn with_event_bus(self, bus: Arc<GatewayEventBus>) -> Self;
+
+    pub async fn list_tasks(&self) -> Vec<HeartbeatTaskView>;
+    pub async fn get_task(&self, id: &str) -> Option<HeartbeatTaskView>;
+
+    pub async fn add_task<C: Clock>(&self, task: HeartbeatTask, clock: &C) -> Result<String, String>;
+    pub async fn update_task<C: Clock>(&self, id: &str, updates: HeartbeatTaskUpdates, clock: &C)
+        -> Result<(), String>;
+    pub async fn delete_task(&self, id: &str) -> Result<(), String>;
+    pub async fn toggle_task<C: Clock>(&self, id: &str, clock: &C) -> Result<bool, String>;
+
+    pub async fn reap_history(&self) -> Result<usize, String>;
+    pub fn request_shutdown(&self);
 }
 ```
 
-**Features:**
-- URL health checking
-- Response time tracking
-- Deduplication (avoids redundant checks)
-- Configurable intervals and timeouts
+### RPCs (real implementations)
+
+All `heartbeat.*` RPCs registered in `agents.rs` are real handlers (`src/gateway/handlers/heartbeat.rs`); the older `*_stub` definitions remain in the file as regression tests but are no longer dispatched by the registry:
+
+| Method | Handler |
+|---|---|
+| `heartbeat.list` | `heartbeat::handle_list` |
+| `heartbeat.get` | `heartbeat::handle_get` |
+| `heartbeat.create` | `heartbeat::handle_create` |
+| `heartbeat.update` | `heartbeat::handle_update` |
+| `heartbeat.delete` | `heartbeat::handle_delete` |
+| `heartbeat.toggle` | `heartbeat::handle_toggle` |
+| `heartbeat.wake` | `heartbeat::handle_wake` |
+| `heartbeat.runs` | `heartbeat::handle_runs` |
 
 ---
 
 ## Task Infrastructure
 
-The `tasks::shared` module provides cross-cutting infrastructure:
+The `tasks::shared` module provides cross-cutting infrastructure consumed by both cron and heartbeat:
 
-- `Clock` trait — Abstracts time for testability
-- `Schedule` — Schedule parsing and next-run calculation
-- `Delivery` — Task result delivery mechanisms
-- `Store` — Persistence layer for task state
+- `clock` — `Clock` trait, `SystemClock`, `FakeClock` (in `testing`).
+- `schedule` — Pure schedule-kind parsing and next-run computation.
+- `delivery` — `DeliveryEngine` / `DeliveryPayload` / `DeliveryTarget` (how cron results land in a channel or webhook).
+- `store` — Reusable SQLite helpers (open, schema migration, in-memory cache).
+- `targets` — Delivery target type definitions (channels, webhooks).
+- `active_hours` — Quiet-hours and active-hours gating for jobs.
+- `retry_hint` — Retry policy primitives (transient vs permanent classification).
+- `reaper` — Periodically calls `cron.reap_history` / `heartbeat.reap_history` so `cron_runs` / heartbeat history rows do not grow without bound.
 
 ---
 
 ## Safety Properties
 
-- **No underflow** — All time calculations use `saturating_sub`/`saturating_mul`
-- **Semaphore safety** — `was_running` check prevents permit inflation
-- **No lock issues** — Uses `unwrap_or_else(|e| e.into_inner())`
-- **No SQL injection** — All queries use parameterized `params![]`
-- **UTF-8 safe** — `truncate_string()` uses `char_indices()`
-- **No `static mut`** — Uses `crate::sync_primitives::Arc`
+- **No underflow** — Time arithmetic uses `saturating_sub` / `saturating_mul` (`Clock::now_utc` uses `from_timestamp_millis` so pre-epoch values round-trip correctly).
+- **No SQL injection** — All queries use parameterised `params![]`.
+- **UTF-8 safe** — String truncation uses `char_indices()`-aware helpers.
+- **No `static mut`** — All shared state goes through `crate::sync_primitives`.
 
 ---
 
 ## Code Location
 
-**Scheduler:**
-- `src/scheduler/mod.rs` — Module entry point
-- `src/scheduler/lane_scheduler.rs` — Main scheduler
-- `src/scheduler/lane.rs` — Lane definition
-- `src/scheduler/lane_config.rs` — Quota and config
-- `src/scheduler/lane_state.rs` — Queue and running state
-- `src/scheduler/anti_starvation.rs` — Priority boosting
-- `src/scheduler/recursion_tracker.rs` — Depth tracking
+**Cron:**
+- `src/tasks/cron/mod.rs` — `CronService` facade
+- `src/tasks/cron/config.rs` — `CronConfig`, `CronJob`, `ScheduleKind`, `RunStatus`, `ErrorReason`, `SessionTarget`, `TriggerSource`, `FailureAlertConfig`, `JobStateV2`, `JobRun`
+- `src/tasks/cron/store.rs` — `CronStore` (SQLite + in-memory cache)
+- `src/tasks/cron/service/` — `ServiceState`, `ops` (CRUD), `timer` (next-due loop), `concurrency`, `catchup`
+- `src/tasks/cron/executor.rs` — Job execution
+- `src/tasks/cron/chain.rs` — Job chaining (`on_success` / `on_failure`)
+- `src/tasks/cron/alert.rs` — Failure alerting
+- `src/tasks/cron/template.rs` — Prompt template rendering
+- `src/tasks/cron/webhook_target.rs` — Webhook delivery
+- `src/tasks/cron/stagger.rs` — Hash-based cron stagger
+- `src/tasks/cron/history.rs` — `cron_runs` schema and helpers
+- `src/tasks/cron/carryover.rs` — Carry-over sweeper
 
-**Tasks:**
-- `src/tasks/mod.rs` — Module entry point
-- `src/tasks/cron/` — Cron job scheduling
-- `src/tasks/heartbeat/` — Health check monitoring
-- `src/tasks/shared/` — Clock, schedule, delivery, store
+**Heartbeat:**
+- `src/tasks/heartbeat/mod.rs` — `HeartbeatService` facade
+- `src/tasks/heartbeat/config.rs` — `HeartbeatConfig`, `HeartbeatTask`, `HeartbeatTaskView`, `ProbeConfig`, `TriggerCondition`, `DedupConfig`
+- `src/tasks/heartbeat/store.rs` — `HeartbeatStore`
+- `src/tasks/heartbeat/service/` — `HeartbeatServiceState`, `ops`, `timer`
+- `src/tasks/heartbeat/executor.rs` — Probe execution
+- `src/tasks/heartbeat/probe.rs` — Probe dispatcher
+- `src/tasks/heartbeat/dedup.rs` — Outcome deduplication
+- `src/tasks/heartbeat/history.rs` — Run history
+- `src/tasks/heartbeat/wake.rs` — `WakeQueue`
+
+**Shared:**
+- `src/tasks/shared/clock.rs` — `Clock` trait + `SystemClock` + `FakeClock`
+- `src/tasks/shared/schedule.rs` — Pure scheduling computation
+- `src/tasks/shared/delivery.rs` — `DeliveryEngine` and friends
+- `src/tasks/shared/store.rs` — SQLite helpers
+- `src/tasks/shared/targets.rs` — Delivery target types
+- `src/tasks/shared/active_hours.rs` — Active-hours gating
+- `src/tasks/shared/retry_hint.rs` — Retry classification
+- `src/tasks/shared/reaper.rs` — History reaper daemon
+
+**RPCs:**
+- `src/gateway/handlers/cron/real.rs` — real `cron.*` handlers
+- `src/gateway/handlers/cron/stubs.rs` — legacy stubs (kept for regression tests, not dispatched)
+- `src/gateway/handlers/heartbeat.rs` — real `heartbeat.*` handlers (the file also contains the legacy `*_stub` definitions as regression tests)
+- `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` — registers `cron.*` and `heartbeat.*` on the gateway server
 
 ## See Also
 
-- [Agent Runtime](./agent-runtime) — How sub-agents are spawned and managed
-- [Arena](./arena) — Multi-agent collaboration workspace
-
----
-
-## 26.7.x Addendum
-
-### Cron Now Real (stubs → real)
-
-26.7.x: the historical `cron.*_stub` placeholder RPCs (`cron.list_stub` / `cron.get_stub` / ...) have been **realized**. `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status` / `cron.run` / `cron.runs` / `cron.toggle` now have real implementations (previously they were error-stubs).
-
-### Heartbeat Now Real
-
-Similarly: `heartbeat.list` / `heartbeat.get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` now have real implementations.
-
-### Daemon-Side Complete Chain
-
-Cron / Heartbeat's real implementation is driven by the [Daemon](/docs/en/concepts/daemon), including:
-
-- Day-boundary log rotation
-- `ALEPH-BOOT` marker
-- Silent sleep inhibitor
-- `Guardian Judge` proactive-wake decisions
-
-### See Also
-
-- [Daemon](/docs/en/concepts/daemon) — Cron / Heartbeat driver
-- [Automation / Cron Jobs](/docs/en/automation/cron-jobs) — full RPC
-- [Heartbeat](/docs/en/automation/heartbeat) — full RPC
+- [Daemon](./daemon) — Owns the timer loops, day-boundary log rotation, `ALEPH-BOOT` marker, sleep inhibitor, and the `Guardian Judge` proactive-wake decisions that drive cron and heartbeat in practice.

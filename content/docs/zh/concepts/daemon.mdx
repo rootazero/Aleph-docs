@@ -1,239 +1,160 @@
 ---
 title: "守护进程"
-description: "Aleph 的系统服务管理，支持具有资源治理和跨平台服务集成的持久后台操作。"
+description: "aleph-server 的系统服务管理、生命周期与日志轮转。"
 ---
 
-`daemon` 模块将 Aleph 管理为跨平台的持久系统服务。它处理服务安装、生命周期管理、资源监控、进程间通信和事件驱动的主动行动。
+`aleph-server` 二进制本身既是前台网关，也是 daemon。它通过 `aleph-server service …` 子命令把自己注册到平台原生的开机自启框架（macOS launchd LaunchAgent、Linux systemd --user、Windows Task Scheduler），由 OS 监督而不是自行 fork。
 
 ## 设计理念
 
-守护进程遵循三个原则：
-
-1. **跨平台抽象** —— 平台特定的服务 API 隐藏在 `ServiceManager` trait 后面
-2. **资源感知** —— 守护进程监控系统负载并在资源稀缺时限制操作
-3. **事件驱动主动性** —— OS 级事件触发代理行动，无需用户干预
+- **平台原生监督** —— 不再 fork 二次进程；服务描述符直接调用 `aleph-server start`，OS 看门狗负责失败重启。
+- **单源子命令** —— `aleph-server service {install|uninstall|enable|disable|status}` 是所有自启/取消自启逻辑的唯一入口。
+- **按用户注册** —— 不写 root-level 单元；每个用户独立安装到自己的 LaunchAgent / systemd-user unit / Scheduled Task。
 
 ---
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────┐
-│           守护进程模块                         │
-├─────────────────────────────────────────────┤
-│                                             │
-│  ┌──────────────┐  ┌──────────────────┐   │
-│  │ ServiceManager│  │ ResourceGovernor │   │
-│  │  (launchd)   │  │  (CPU/Mem/Bat)   │   │
-│  └──────────────┘  └──────────────────┘   │
-│                                             │
-│  ┌──────────────────────────────────────┐  │
-│  │        IPC 服务器                     │  │
-│  │  (Unix 套接字 + JSON-RPC 2.0)        │  │
-│  └──────────────────────────────────────┘  │
-│                                             │
-│  ┌──────────────────────────────────────┐  │
-│  │        事件总线                       │  │
-│  │  (进程/文件/时间/系统)               │  │
-│  └──────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│             aleph-server                  │
+├──────────────────────────────────────────┤
+│                                          │
+│  ┌────────────────┐  ┌────────────────┐ │
+│  │  start 命令    │  │ service 子命令 │ │
+│  │  (前台 / daemon│  │  install /     │ │
+│  │   --daemon)    │  │  uninstall /   │ │
+│  └────────────────┘  │  enable /      │ │
+│                      │  disable /     │ │
+│                      │  status        │ │
+│                      └────────────────┘ │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │   Gateway WebSocket (JSON-RPC 2.0)│  │
+│  │   daemon.status / daemon.shutdown │  │
+│  │   daemon.logs                     │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │   日志：                            │  │
+│  │   ~/.aleph/logs/aleph-server.log   │  │
+│  │   .YYYY-MM-DD  (按天 + 7 天保留)    │  │
+│  │   + 裸 stdout/stderr 重定向         │  │
+│  └────────────────────────────────────┘  │
+└──────────────────────────────────────────┘
 ```
 
 ---
 
-## 核心组件
+## `service` 子命令
 
-### ServiceManager
-
-系统服务管理的跨平台 trait：
-
-```rust
-pub trait ServiceManager: Send + Sync {
-    async fn install(&self, config: &DaemonConfig) -> Result<()>;
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn status(&self) -> ServiceStatus;
-}
-```
-
-**实现：**
-- `LaunchdService` (macOS) —— 管理 launchd plist 和服务生命周期
-- `SystemdService` (Linux) —— 计划中
-- `WindowsService` (Windows) —— 计划中
-
-### ResourceGovernor
-
-监控系统资源并做出执行决策：
-
-```rust
-pub struct ResourceGovernor {
-    limits: ResourceLimits,
-}
-
-impl ResourceGovernor {
-    pub async fn is_safe_to_run(&self,
-    ) -> bool { /* ... */ }
-    
-    pub fn current_pressure(&self) -> PressureLevel { /* ... */ }
-}
-```
-
-**监控：**
-- CPU 使用率
-- 内存消耗
-- 电池电量
-- 系统平均负载
-
-### IPC 服务器
-
-通过 Unix 域套接字的 JSON-RPC 2.0 服务器：
-
-```rust
-pub struct IpcServer {
-    socket_path: PathBuf,
-}
-```
-
-**套接字路径：** `~/.aleph/daemon.sock`
-
-**方法：**
-- `daemon.status` —— 获取守护进程状态
-- `daemon.ping` —— 健康检查
-- `daemon.shutdown` —— 优雅关闭
-
-### 事件总线
-
-为感知层发布 OS 级事件：
-
-```rust
-pub struct DaemonEventBus {
-    sender: broadcast::Sender<DaemonEvent>,
-}
-```
-
-**事件类型：**
-- `ProcessEvent` —— 应用程序启动/退出
-- `FsEvent` —— 文件创建/修改/删除
-- `TimeTrigger` —— 基于时间的计划事件
-- `SystemEvent` —— 电池、网络、显示状态变化
-
----
-
-## CLI 命令
+`aleph-server` 提供 `service` 子命令，封装所有「启动自启」安装/卸载/启停逻辑。安装脚本默认在装好二进制后调用一次 `service install`（`ALEPH_AUTOSTART=0` 可关闭）。
 
 ```bash
-# 将守护进程安装为系统服务
-aleph daemon install
-
-# 启动守护进程
-aleph daemon start
-
-# 检查状态
-aleph daemon status
-
-# 停止守护进程
-aleph daemon stop
-
-# 卸载守护进程
-aleph daemon uninstall
-
-# 在前台运行（开发）
-aleph daemon run
+aleph-server service install     # 写描述符 + 启用 + 立即启动（launchd LaunchAgent / systemd --user unit / Scheduled Task）
+aleph-server service uninstall   # 停止 + 移除描述符
+aleph-server service enable      # 设为开机/登录自启（不动运行中进程）
+aleph-server service disable     # 取消开机/登录自启（不动运行中进程）
+aleph-server service status      # 报告描述符是否存在 + 当前运行状态
 ```
+
+> 当前 `service` 没有 `start` 子动作：`install` 已包含立即启动；启停靠 OS 主管（launchctl load/unload、`systemctl --user start/stop`、`schtasks /Run`）。
+
+实现位于 `src/bin/aleph-server/commands/service/mod.rs`，按平台分支（macOS / Linux / Windows）写入对应的原生描述符：
+
+- **macOS**：`~/Library/LaunchAgents/ai.aleph.server.plist`，调用 `launchctl load -w` 立即加载并启用 RunAtLoad
+- **Linux**：`~/.config/systemd/user/aleph-server.service`，调用 `systemctl --user enable --now`；同时尽力 `loginctl enable-linger $USER` 让服务在开机后立即启动（无需登录会话），失败时给出提示
+- **Windows**：`Aleph\aleph-server` 计划任务，触发器为登录；通过 `aleph-server-hidden.vbs` shim 启动隐藏窗口
 
 ---
 
-## 配置
+## daemon RPC（gateway 内部）
 
-默认配置：
+下列方法在 gateway WebSocket 上注册，由客户端或 CLI 调用：
 
-```rust
-DaemonConfig {
-    socket_path: "~/.aleph/daemon.sock",
-    binary_path: "~/.aleph/bin/aleph-daemon",
-    log_dir: "~/.aleph/logs",
-    nice_value: 10,
-    soft_mem_limit: 512 * 1024 * 1024,  // 512MB
-    hard_mem_limit: 1024 * 1024 * 1024, // 1GB
-}
-```
+| 方法 | 说明 |
+|---|---|
+| `daemon.status` | 返回运行时间、版本、平台（`running` / `uptime_secs` / `version` / `platform`）|
+| `daemon.shutdown` | 优雅关闭：先返回响应，再延时 `std::process::exit(0)` |
+| `daemon.logs` | 读 `~/.aleph/logs/` 下最近的 `aleph-*.log`，可按 `level` 过滤，返回最近 `lines` 行 |
+
+无独立 Unix socket IPC —— 所有调用都走 gateway 的 WebSocket + JSON-RPC 2.0。
 
 ---
 
-## 分派器
+## 启动与前台运行
 
-`Dispatcher` 将事件路由到适当的行动：
-
-```rust
-pub struct Dispatcher {
-    policy_engine: PolicyEngine,
-    action_executor: ActionExecutor,
-}
+```bash
+aleph-server start               # 前台启动（默认子命令）
+aleph-server start --daemon      # 二次 fork 走 daemon 模式
+aleph-server start --log-file ~/.aleph/server.log
+aleph-server stop                # 停掉运行中的 daemon
+aleph-server status [--json]     # 状态查询
 ```
 
-**流程：**
-1. 原始 OS 事件进入事件总线
-2. `PolicyEngine` 评估风险并决定行动
-3. `ActionExecutor` 执行行动（如果资源受限则排队）
+参数（节选）：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-c, --config <path>` | `~/.aleph/config.toml` | 配置文件 |
+| `--daemon` | `false` | 走 daemonize 二段式 |
+| `--pid-file <path>` | `~/.aleph/gateway.pid` | daemon 模式 PID 文件 |
+| `--log-file <path>` | — | daemon stdout/stderr 重定向目标 |
+| `--bind <addr>` / `--port <n>` | `127.0.0.1` / `18790` | 监听地址与端口 |
+| `--force` | `false` | 即使端口占用也尝试启动 |
+| `--log-level` | `info` | tracing 日志级别 |
+| `--max-connections` | — | 最大并发连接数 |
 
 ---
 
-## 安全属性
+## 日志与轮转
 
-- **最小 unsafe** —— 只有 `libc::kill` 用于 SIGTERM 信号
-- **UTF-8 安全** —— 没有字节级字符串切片
-- **锁恢复** —— 使用 `unwrap_or_else(|e| e.into_inner())` 模式
-- **无 SQL 注入** —— 守护进程不使用数据库查询
+Aleph 有两条独立日志流：
+
+- **结构化日志** `~/.aleph/logs/aleph-server.log.YYYY-MM-DD`：tracing 写入，**按天轮转 + 7 天保留**，每行带时间戳。排查优先 grep 这一份。
+- **裸 stdout/stderr 流**（`--log-file` 或前台 shell 重定向）：只装 banner / warnings / panics / 子进程输出；非 TTY 时 tracing 的 console 层会被丢弃。
+
+每次启动向 stdout 打一行可 grep 的启动标记，用于在裸流里定位本次 boot（跨重启累积时不再误判历史行）：
+
+```
+ALEPH-BOOT ts=<RFC3339> pid=<pid> version=<ver>
+grep ALEPH-BOOT ~/.aleph/server.log | tail -1   # 之后的行 = 本次启动
+```
+
+裸流的轮转分两种情形：
+
+- **Daemon 模式**（`--daemon --log-file <path>`）：启动时自轮转 —— 若文件来自更早的一天、或超过 ~5 MB，归档为 `<name>.YYYY-MM-DD`（用文件自身最后写入日作后缀），并沿用 7 天保留老化。同日重启追加到同一文件（靠 `ALEPH-BOOT` 标记区分 boot）。单次长跑期间 fd 不会中途轮转（无 in-flight rotation）。
+- **前台 / 手动 shell 重定向**：fd 属于 shell，Aleph 无法轮转，需系统级 logrotate。仓库提供 `scripts/aleph-server.logrotate`（`copytruncate` + daily + 7 天）。
+
+> **睡眠抑制剂**（`inhibit_sleep("Aleph agent loop")`）由 harness 在每个 Think→Act 回合临时持有，不再向 stderr 刷噪声；不参与 daemon 日志。
+
+---
+
+## 心跳探针（Heartbeat）
+
+`aleph-server start` 会按 `[heartbeat]` 配置初始化 `HeartbeatService`：
+
+- **拒绝危险 / 确认门控工具**：`tasks/heartbeat/probe.rs` 在调用任何 probe tool 前调 `is_denied_on_gateway_surface(tool_name)`，命中即拒绝；无 LLM 在回路、故无审批通路。
+- **Guardian Judge 范围**：GuardianJudge 在 *审批* 流（`src/approval/guardian_requester.rs`）中扮演 LLM 风险判官，**不在 heartbeat 探针里**；探针是纯 L1 触发器评估。
+- **payload 掩码**：Guardian Judge 提示载荷中的密钥已被掩码处理 —— 不再序列化进日志或审计员输入。
 
 ---
 
 ## 代码位置
 
-- `src/daemon/mod.rs` —— 模块入口点
-- `src/daemon/cli.rs` —— CLI 命令定义
-- `src/daemon/service_manager.rs` —— 服务管理 trait
-- `src/daemon/platforms/launchd.rs` —— macOS launchd 实现
-- `src/daemon/resource_governor.rs` —— 资源监控
-- `src/daemon/ipc/` —— IPC 服务器和协议
-- `src/daemon/dispatcher/` —— 事件分派和策略引擎
-- `src/daemon/event_bus.rs` —— 事件分发
-- `src/daemon/worldmodel/` —— 世界状态跟踪
+- `src/bin/aleph-server/cli.rs` —— CLI 定义（`Start` / `Stop` / `Status` / `Doctor` / `PromptSize` / `Service` / `Hooks` / `Secret` / `Identity` / `Plugin(s)` / `Gateway` / `BootstrapRuntime` / `Pair` / `BootstrapToken` / `Update`）
+- `src/bin/aleph-server/main.rs` —— 命令分派与启动
+- `src/bin/aleph-server/daemon.rs` —— PID 文件 / 锁 / 日志轮转 / `daemonize()`
+- `src/bin/aleph-server/commands/service/mod.rs` —— 跨平台 `service` 子命令实现
+- `src/bin/aleph-server/commands/service/descriptors.rs` —— launchd plist / systemd unit / 计划任务 XML / vbs shim
+- `src/bin/aleph-server/commands/start/helpers.rs` —— 启动边界 `ALEPH-BOOT` marker
+- `src/gateway/handlers/daemon_control.rs` —— `daemon.status` / `daemon.shutdown` / `daemon.logs` RPC
+- `src/tasks/heartbeat/probe.rs` —— heartbeat probe 与 dangerous-tool 闸门
+- `src/approval/guardian_requester.rs` —— Guardian Judge 审批判官
 
-## 另请参阅
+## 相关页面
 
-- [事件系统](./event-system) —— 事件分发模式
-- [配置](./configuration) —— 守护进程配置选项
-
----
-
-## 26.7.x 补充
-
-### `aleph-server service` 子命令
-
-26.7.1+：独立的 `aleph-server` 二进制获得 `service` 子命令，安装器默认即「登录时启动」：
-
-```bash
-aleph-server service install     # 安装（launchd / systemd-user / Task Scheduler）
-aleph-server service start       # 立即启动
-aleph-server service status      # 查看状态
-aleph-server service enable      # 启用自启
-aleph-server service uninstall   # 卸载
-```
-
-### Day-boundary 日志轮转
-
-26.7.24+：守护进程支持 day-boundary 日志轮转；启动时写 `ALEPH-BOOT` marker 到日志开头，便于运维定位每次启动的边界。睡眠抑制剂在 stderr 上静默，不再刷噪音。
-
-### 守护者判官（Guardian Judge）
-
-26.7.21+：Heartbeat 探针使用 LLM 判官 `Guardian Judge` 决定是否需要主动唤醒。**Payload 必须隐藏密钥**——密钥不会再被序列化到日志或被审计员读取。
-
-### Heartbeat 拒绝危险工具
-
-26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。`Heartbeat` 现在是实化（stubs → real）的周期守护。
-
-### 见另请参阅
-
-- [自动化 / Heartbeat](/docs/zh/automation/heartbeat) — `heartbeat.*` RPC
-- [部署 service 子命令](/docs/zh/getting-started/deployment#作为系统服务service-子命令) — 安装与启动
-- [架构概览](/docs/zh/architecture/overview) — Heartbeat 在哪里驱动
+- [部署指南](/docs/zh/getting-started/deployment) —— 真实安装流程（自动启用自启）
+- [工作区](/docs/zh/concepts/workspaces) —— `~/.aleph/` 目录布局与日志路径
+- [进程管理](/docs/zh/reference/process-management) —— 进程级细节（锁、日志、轮转）
+- [心跳自动化](/docs/zh/automation/heartbeat) —— `heartbeat.*` RPC 与探针配置

@@ -1,0 +1,355 @@
+---
+title: "Loop / Goal / Strategy"
+description: "Three independent subsystems: loop (sustained repetition), goal (autonomous objective pursuit), strategy (team or naked-loop plan). Shared TreeBudget single-rail invariant, cross-session kill switch, four composite-key namespaces, plus the 9-action loop / 7-action goal / 3-action strategy tool surfaces."
+---
+
+> **Current state (26.7.22+).** Before 26.7.21, Aleph only had cron (persistent, cross-session, own session) and heartbeat (short-interval pulse). 26.7.22+ introduces **three independent subsystems** covering the middle ground: "I want to keep doing X in this session right now" / "I want to autonomously pursue a goal" / "the team needs a plan". The three are **not mutually exclusive** — a single session can have a loop + a goal + be referenced by a strategy.
+
+## Subsystem Positioning
+
+| Subsystem | Module | State machine | Trigger | Stop condition |
+|-----------|--------|---------------|---------|-----------------|
+| **Loop** (sustained repetition) | `src/looping/` (`types.rs` / `pursuit.rs` / `mod.rs`) | `Active` / `Paused` / `Stopped` (**in-process** `LoopRegistry`) | **continuation hook** claims the next tick per cadence after each run | `max_iterations` / `deadline_ms` / `token_budget` |
+| **Goal** (autonomous pursuit) | `src/goal/` (`pursuit.rs` / `store.rs` / `types.rs`) | `Active` / `Paused` / `Completed` / `Aborted` (**persisted**, DB-backed) | objective gate + stop_hooks | objective outcome (model self-report `maker` + objective validation `checker`; **both** must succeed for `Completed`) |
+| **Strategy** (team or naked-loop plan) | `src/strategy/` (`planner.rs` / `render.rs` / `store.rs` / `types.rs`) | `Draft` / `Active` / `Superseded` (**composite-keyed store**) | team_key / session_key named plan triggers | objective change / plan complete / team disband |
+
+## Loop — Multi-turn Watch in Current Session
+
+```rust
+// src/looping/types.rs
+pub enum Cadence {
+    Fixed { interval_ms: u64 },                                  // tick every N ms
+    ModelPaced { fallback_ms: u64 },                             // model reports next_wake_ms per tick
+}
+
+pub enum LoopStatus { Active, Paused, Stopped }
+
+pub struct LoopState {
+    pub session_id: String,
+    pub prompt: String,                  // verbatim re-injected each tick
+    pub cadence: Cadence,
+    pub next_wake_ms: Option<u64>,       // model-paced override
+    pub pending_tick_wake_ms: Option<u64>,  // fire time of enqueued tick
+    pub iterations_used: u32,
+    pub max_iterations: Option<u32>,
+    pub deadline_ms: Option<u64>,        // absolute epoch ms
+    pub token_budget: Option<u64>,       // soft token cap
+    pub tokens_at_start: u64,
+    pub baseline_captured: bool,
+    pub status: LoopStatus,
+    pub created_at_ms: u64,
+    pub stop_reason: Option<String>,     // user-facing reason: cap / failure / manual stop
+}
+```
+
+### Key Invariants
+
+- **`LoopRegistry` is in-process only**: daemon restart clears all loops ("dies with the session") — the fundamental distinction from goal
+- **`pending_tick_wake_ms` serializes**: every run completion enters the continuation hook; without this gate every user turn would spawn a self-perpetuating tick chain
+- **`Paused` vs `Stopped`**: both have `is_active() = false` (no tick fires), but `Paused.is_adjustable() = true` (caps/cadence/prompt can be tuned); `Stopped` cannot be resurrected, only `start` a new loop
+- **`over_budget` three-state**: requires `token_budget.is_some()` && `baseline_captured`; without baseline returns false (prevents "long session first tick instantly over budget")
+- **`RearmDecision` rather than `Exhausted`**: AgentBusy collisions don't waste iterations — re-arm the same tick instead
+
+### Rendering Layers (avoid polluting prompt cache)
+
+- **`human_summary(now_ms)`**: user-facing tool reply, **with countdown**
+- **`stable_summary()`**: enters SYSTEM PROMPT — **no countdown** (prompt cache is prefix-keyed, every byte change forces the whole history to re-WRITE at 1.25× instead of READ at 0.1×)
+- **`live_status(now_ms)`**: countdown moves to transient trailing user message (after cache breakpoint), byte changes cost only themselves
+
+### `loop` Tool (9 Actions)
+
+```rust
+loop(action: "start",     prompt, cadence, max_iterations?, deadline_ms?, token_budget?)
+loop(action: "stop",      session_id)
+loop(action: "pause",     session_id)
+loop(action: "resume",    session_id)
+loop(action: "status",    session_id?, now_ms?)
+loop(action: "update",    session_id, prompt?, cadence?, max_iterations?, deadline_ms?, token_budget?)
+loop(action: "list",      session_id?)           // list current session / all loops
+loop(action: "claim_tick", session_id)          // internal: continuation hook
+loop(action: "confirm_fire", session_id)        // internal: clears pending after tick fires
+```
+
+### `LoopRegistry` (in-process)
+
+`try_claim_tick(session, tokens, now)` is the **only** atomic claim point (under a single `Arc<Mutex<HashMap>>>` lock):
+
+```text
+1. session not present or !is_active() → Idle
+2. pending_tick_wake_ms within "before stale grace" → Idle (fan-out gate)
+3. should_continue? (max_iterations / over_budget / past_deadline):
+   yes → spend_iteration(), clear next_wake_ms (prevent model-busy-loop on stale wake),
+         set pending = Some(wake_ms), Fire
+   no  → exhausted? → Exhausted { note }, else Idle
+4. over_budget_lazy_capture: budget.set + baseline_captured=false + tokens_total=Some(t) →
+   with_baseline(t) (**only** once)
+5. past stale grace (60s): pending is dead, re-claim (do not re-spend iteration)
+```
+
+`rearm_after_busy(session, now)`: the woken tick has already passed `confirm_fire` so its pending is clear, but the session slot is now held by `AgentBusy` — don't re-spend, 30 s retry the same tick (`BUSY_RETRY_DELAY_MS`); mirrors the goal subsystem's `rearm_goal_after_busy`.
+
+`commit_field_update(next, reschedule)` is the **only** tool-write point (prevents a read→await→put race that lets the tool's stale `pending_tick_wake_ms` overwrite the tick pipeline's live value); re-reads live `pending` and `continuations_used`, merges into `next`, then writes. `reschedule = true` (user changed cadence / next_wake) clears `pending`; otherwise it is preserved.
+
+`transition(to, reason)` is the single atomic lifecycle move: `Stopped` is terminal (rejects any from-stopped move), `Paused` only from `Active`, `Active` only from `Paused`; leaving `Active` clears `pending` (so pause / stop make a sleeping tick's `confirm_fire` mismatch and skip).
+
+`stop_all(reason)` is the kill switch (cross-session): under a single lock, transitions every non-`Stopped` loop to `Stopped` and stamps the reason, **already-Stopped loops are left untouched** — supports incident response ("pause everything, audit, then resume one by one").
+
+## Goal — Autonomous Objective Pursuit + Objective Gate
+
+```rust
+// src/goal/types.rs
+pub enum GoalStatus { Active, Paused, Completed, Aborted }
+
+pub struct Goal {
+    pub id: String,
+    pub session_id: String,
+    pub description: String,                  // user / model statement
+    pub success_criteria: Vec<String>,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub iterations_used: u32,                  // in types.rs the field name is continuations_used
+    pub deadline_ms: Option<u64>,
+    pub baseline_captured: bool,
+    pub objective_gate: GateConfig,           // objective gate config
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub note: Option<String>,
+    pub gate_outcome: GateOutcome,            // Unchecked / Passed
+    pub gate_command: Option<String>,
+    pub lessons: Vec<String>,                // state file (ring of 5, newest kept)
+    pub pending_continuation_ms: Option<u64>,  // in-flight continuation fire time
+    pub waiting_until_ms: Option<u64>,        // wait_minutes barrier (hermes parity)
+    pub waiting_on_task: Option<String>,       // wait_for_task barrier
+    pub waiting_reason: Option<String>,
+    pub budget_members: Vec<BudgetMember>,    // tree budget members
+    pub completed_at_ms: Option<u64>,         // CAS stamp key for settle-notify
+}
+
+pub enum PursuitMode {
+    Passive,
+    Active { max_iterations: u32 },
+}
+
+pub enum GateOutcome {
+    Unchecked,   // default; gate not yet run
+    Passed,      // gate passed = completion truly confirmed
+}
+```
+
+### Objective Gate (**fail-closed**)
+
+Goal subsystem stop judgment **must never rely solely on the model saying "I'm done"**:
+
+- **`GateOutcome` type-state**: `maker` (model self-report) + `checker` (objective validation) must **both** succeed for `Completed`
+- **`stop_hooks` global hook**: the model's self-reported completion must pass through `process_global_stop_hooks`, which validates against the stated objectives
+- **Fail-closed** (§goal hardening ④): any stop_hook failure → default abort, not continue. `goal_continuation::gate_veto` treats `Error` as a veto — verifier failure = completion cannot be verified = completion cannot be claimed = block `complete`
+- **Cross-session kill switch**: in-place `reconfiguration` auto-invalidates a welded strategy (`clear_goal_welded_strategy` runs on `commit_gate_pass` success, **not** the `uninstall` path)
+
+### `GoalStore` + TreeBudget Single-Rail
+
+```rust
+// src/goal/store.rs
+pub struct GoalStore {
+    conn: Mutex<rusqlite::Connection>,  // goals.db + settle_notified
+}
+
+impl GoalStore {
+    pub fn open(path: &Path) -> Result<Self>;
+    pub fn put(&self, goal: &Goal) -> Result<()>;
+    pub fn get(&self, session_id: &str) -> Result<Option<Goal>>;
+    pub fn try_claim_continuation(
+        &self, session_id: &str, tokens_total: Option<u64>,
+        now_ms: u64, gate_configured: bool,
+    ) -> Result<ContinuationDecision>;
+    pub fn rearm_after_busy(&self, session: &str, now_ms: u64) -> Result<RearmDecision>;
+    pub fn try_claim_settle_notify(&self, goal: &Goal) -> Result<bool>;  // CAS on (id, completed_at_ms)
+    pub fn commit_field_update(&self, next: &Goal) -> Result<bool>;     // single tool-write point
+    pub fn pause_if_active / block_if_active / pause_all_active / supersede_wait_timer / clear_wait_barrier;
+}
+```
+
+**TreeBudget single-rail invariant** (end-to-end test guard): goal and loop share the same budget tree — **any sub-goal exceeding budget forces the entire tree to stop** — preventing one goal from consuming 99% of budget while sibling goals starve. `budget_members` is the list of delegated sessions a goal has registered (via `register_budget_member` on delegation), each member's `tokens_at_join` is the baseline at join time — **only spend after joining counts**; any pre-join sibling history is ignored.
+
+`try_claim_settle_notify` is the **CAS stamp** — `stamp = "{id}@{completed_at_ms}"`, stamped once per `Completed` transition (the value changes); `Clear` / `uninstall` / `reopen` no longer mint stamps (`completed_at_ms` is cleared when status leaves `Complete`). `loop_graph::service::notify_goal_settled` calls this on every turn before pinging the watcher cron — **only a real stamp change triggers the poke**, preventing the 60 s debounce from being re-burned every turn. Legacy rows (without `completed_at_ms`) fall back to `updated_at_ms`, so old data can fire the watcher at least once.
+
+### `goal` Tool (7 Actions)
+
+```rust
+goal(action: "create", description, success_criteria, objective_gate?, token_budget?, deadline_ms?, pursuit_max_iterations?)
+goal(action: "update", goal_id, status?, note?, token_budget?, deadline_ms?, pursuit_max_iterations?, gate_command?, wait_minutes?, wait_for_task?, wait_reason?, lessons?)
+goal(action: "pause", goal_id)
+goal(action: "resume", goal_id)
+goal(action: "abort", goal_id, reason?)
+goal(action: "complete", goal_id, evidence?)     // passes objective gate
+goal(action: "list", scope?: "session" | "cross_session")
+goal(action: "status", goal_id)
+```
+
+`pursuit_max_iterations = 0` is rejected at the tool boundary (**born-dead cap** P7: a goal set to 0 would be **permanently** Blocked, wasting autonomous runs).
+
+### Wait Barriers
+
+- **`waiting_until_ms` + `waiting_reason`**: hermes `wait_for_seconds` parity — the model calls `goal(update, wait_minutes=...)` to park itself; the store compares clocks. When the deadline arrives, the claim path arms an **exact timer** (reusing the Fire machinery: `confirm_fire` CAS + busy re-arm + stale-grace self-heal)
+- **`waiting_on_task`**: hermes `waiting_on_session` parity — park until a coordination task reaches settled state; `GoalWakeService` listens for task-settle events on the GlobalBus and clears the barrier automatically; **boot recheck** covers restart cases (a task that was already settled / vanished at boot is fail-open cleared); unknown `task_id` is also fail-open cleared
+- The two barriers are **mutually exclusive** (setting one clears the other)
+- A parked goal is still `Active` — execution cap / token budget **still bind** (**escape hatch**: a parked goal with exhausted iteration cap goes to Blocked immediately rather than arming a timer that would only wake into an instant Block)
+
+### `Goal` Lessons (State File)
+
+`lessons: Vec<String>` is maintained by `with_lesson_appended` (ring cap `MAX_LESSONS = 5`, newest kept): automatically collects objective-gate-veto `reason` strings, **and** accepts LLM-supplied additions through `goal(update, lessons=[...])`. `GoalLessonsPromoteStage` (the dream daemon) promotes these lessons from `goal` to L1 long-term notes — the wisdom sedimentation of a goal that has failed multiple times.
+
+## Strategy — Team / Naked-Loop Plan
+
+```rust
+// src/strategy/types.rs
+pub struct Strategy {
+    pub objective: String,
+    pub approach: String,
+    pub phases: Vec<String>,         // coarse, outcome-phrased arc
+    pub guardrails: Vec<String>,     // 1–3 concrete, violable distractors
+    pub success_criteria: String,
+    pub goal_id: Option<String>,    // bound to a goal; goal change auto-invalidates
+}
+
+pub enum StrategyKey {
+    NakedLoop { session_key: SessionKey },  // naked-loop plan
+    TeamChat { team_id: String },           // team plan
+    GoalBound { goal_id: String },          // goal-bound
+}
+```
+
+### Composite Key Namespaces
+
+| Key namespace | Who triggers | Scope |
+|--------------|--------------|-------|
+| `goal_key(goal_id)` | goal state changes (`auto-invalidate welded strategy on objective change`) | single goal |
+| `loop_key(loop_id)` | loop tick completion | single loop |
+| `session_key(session_id)` | naked-loop plan trigger (default on, `[strategy] plan_naked_loop = true`) | single session |
+| `team_key(team_id)` | team chat planner (default on, `[strategy] plan_team = true`) | entire team |
+
+The four keys **never collide** — the same session can hold a goal strategy + a loop strategy + a team strategy + a naked-loop strategy at once, and they don't overwrite each other (pinned by `composite_keys_do_not_clobber_each_other`).
+
+### Planner + Atomic Fire-Once
+
+```rust
+// src/strategy/planner.rs
+pub struct PlannerNode { /* tool-free fail-soft */ }
+
+impl PlannerNode {
+    pub async fn plan_strategy(&self, ctx: PlannerContext) -> Option<Strategy> { /* ... */ }
+}
+
+// In team chat: planner MUST fire-once (race protection)
+pub async fn try_fire_once(&self, key: &StrategyKey) -> Result<bool> {
+    self.store.put_if_absent(key, strategy).await    // → only one planner triggers successfully
+}
+```
+
+The planner is a **tool-free one-shot LLM call** (`ProviderRequest::new` with no tools, plus the curated `tool_descriptions` / `env_summary` / `lessons` environment triple). **Self-gate**: `strategy.guardrails` is empty → `is_empty()` → planner returns `None` itself (don't store, don't pollute the prompt cache); same objective re-plan → `goal_id` hits → skip (already planned once). Output is **pure / IO-free** — fail-soft, never errors.
+
+`put_if_absent` is the **atomic fire-once** primitive — two concurrent first messages both reach the planner, but only one inserts; a plain `put` (last-write-wins) would let both pay for the plan + store it.
+
+### `[strategy]` Configuration
+
+```toml
+[strategy]
+plan_team = true               # default on: team chat auto-plan
+plan_naked_loop = true         # default on: naked loop auto-plan
+objective_change_invalidate = true   # default on: welded strategy invalidated when goal changes
+```
+
+### `strategy` Tool (3 Actions)
+
+```rust
+strategy(action: "revise", key, objective?, approach?, phases?, guardrails?, success_criteria?)  // rewrite existing strategy
+strategy(action: "show", key)                // render current strategy
+strategy(action: "dumb_write", key, content) // bypass-validation write (only for trusted callers)
+```
+
+`revise` goes through `put` (overwrite); `show` goes through `render_strategy_summary` (cache-friendly stable bytes); `dumb_write` is the **trusted caller** bypass — R7 doesn't let the LLM itself bypass the planner self-gate, so `dumb_write` is documented for trusted callers only (system / governance layer).
+
+## Team Run Mode Pin
+
+The team leader **stamps** `usage_mode` (chat / work / code) on `team.run` and inherits it to sub-members — `teams.run` now **rejects** sub-member `session_set_mode` tool calls:
+
+```rust
+// src/teams/runner.rs
+if turn.is_subagent() {
+    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
+    ensure!(request.action != Some("session_set_mode"),
+        "subagents inherit parent mode; cannot switch mid-team-run");
+}
+```
+
+`task_review` approvals can require `grounding` — the acceptance metadata channel (zero-migration) carries a `[grounding]` comment with evidence (kind ∈ `exit_code` / `numeric` / `line_count`, **the same closed set as loop_graph anchor truth**). An approve without grounding evidence bounces (`grounding_required`); a reject never requires an anchor (reject is naturally conservative).
+
+## Loop / Goal / Strategy Collaboration
+
+- **goal → strategy**: goal state change → welded strategy auto-invalidation (`objective_change_invalidate = true`); `clear_goal_welded_strategy` is a single chokepoint (`builtin_tools/goal.rs` Passive / Blocked / clear / uninstall, plus `goal_continuation::post_run`'s `Exhausted` / `AwaitingGate gate_veto no runway` / gate-pass — all walk the same path)
+- **strategy → loop**: planner outputs plan → loop uses prompt to continue; the welded strategy is no longer "another LLM plan" — it's directly a stable segment in the prompt cache
+- **team_chat → strategy**: leader fire-once, atomic `put_if_absent`; the `subagent_tree` also rides team-dimension strategy
+- **goal_budget → loop_budget**: tree budget single-rail (one child over budget → whole tree stops)
+
+## Key Source Files
+
+- `src/looping/mod.rs` — `LoopRegistry` (in-process `Arc<Mutex<HashMap>>>`) + process-global `init_global` / `global`
+- `src/looping/types.rs` — `Cadence` / `LoopStatus` / `LoopState` + `human_summary` / `stable_summary` / `live_status` three-state rendering
+- `src/looping/pursuit.rs` — `exhausted` / `should_continue` / `tick_delay_ms` / `tick_prompt` / `cap_reached_note` / `deadline_reached_note` / `budget_reached_note` / `stop_reason_note` (pure functions, R7 intelligence in the prompt)
+- `src/builtin_tools/loop_manage.rs` — 9-action `loop` tool + `LoopManageTool`
+- `src/goal/mod.rs` — `init_global` / `global` process-global
+- `src/goal/types.rs` — `GoalStatus` / `PursuitMode` / `GateOutcome` / `Goal` (with 13 fields: `id` / `session_id` / `objective` / `success_criteria` / `status` / `token_budget` / `continuations_used` / `deadline_ms` / `baseline_captured` / `pending_continuation_ms` / `waiting_until_ms` / `waiting_on_task` / `waiting_reason` / `budget_members` / `completed_at_ms` / `note` / `gate_outcome` / `gate_command` / `lessons` / `created_at_ms` / `updated_at_ms` / `permanent`) + `BudgetMember` + `MAX_LESSONS = 5` + `MAX_BUDGET_MEMBERS = 32`
+- `src/goal/store.rs` — `GoalStore` + `ContinuationDecision` / `RearmDecision` enums + 8 atomic methods (`commit_gate_pass` / `claim_after_gate_veto` / `block_if_active` / `pause_if_active` / `pause_all_active` / `supersede_wait_timer` / `clear_wait_barrier` / `try_claim_settle_notify`)
+- `src/goal/pursuit.rs` — `should_continue` / `continuation_prompt` / `exhausted_while_active` / `stop_reason_note` / `awaiting_gate` / `gateless_terminal_complete` / `reopen_after_gate_failure` / `gate_failure_prompt` / `wait_parked` / `wait_resume_prompt` / `confirm_complete` (hermes-style pure functions)
+- `src/builtin_tools/goal.rs` — 7-action `goal` tool + `GoalTool`, includes `register_budget_member` (delegation registration)
+- `src/strategy/mod.rs` — 4 key constructor functions + `init_global` / `global`
+- `src/strategy/types.rs` — `Strategy` / `StrategyKey` / `is_empty` self-gate
+- `src/strategy/store.rs` — `StrategyStore` (SQLite, PK = `key`) + `put` / `put_if_absent` (atomic fire-once) / `get` / `delete` / `list_all`
+- `src/strategy/planner.rs` — `PlannerNode` (tool-free one-shot LLM) + `plan_strategy` + `try_fire_once` (atomic fire-once) + `env_summary` + `PLANNER_SYSTEM` prompt
+- `src/strategy/render.rs` — `render_strategy_summary` / `render_guardrails_only` / `render_workflow_global_frame` (pure functions, cache-friendly deterministic bytes, **no** `now_ms` / `HashMap` iteration)
+- `src/builtin_tools/strategy_manage.rs` — 3-action `strategy` tool
+- `src/teams/runner.rs` — `team.run` mode stamp + subagent mode pin guard
+- `src/gateway/execution_engine/goal_continuation.rs` — 5 execution points (`post_run` / `arbitrate_gate` / `block_goal_on_failure` / `rearm_goal_after_busy` / `clear_goal_welded_strategy`)
+- `src/gateway/goal_budget.rs` — `tree_tokens` (tree budget aggregation)
+- `src/gateway/execution_engine/goal_wait.rs` — barrier handling
+
+## 26.7.x Addendum
+
+### Loop Tool's 9 Actions
+
+26.7.x `loop` tool was completed to 9 actions (`start` / `stop` / `pause` / `resume` / `status` / `update` / `list` + internal `claim_tick` / `confirm_fire`); the last two are the continuation hook's atomic operations. `update` goes through `commit_field_update` (`reschedule = false` preserves live pending, `true` clears it) — **not** a raw `put` (a raw `put` would race with a firing tick over the `pending` field).
+
+### Goal Tool's 7 Actions
+
+`goal` tool: `create` / `update` (with `pursuit_max_iterations` boundary check, `wait_minutes` / `wait_for_task` barriers, `lessons` state-file append) / `pause` / `resume` / `abort` / `complete` (goes through the objective gate) / `list` (supports `session` / `cross_session` two scopes) / `status`. `pursuit_max_iterations = 0` is rejected at the tool boundary (born-dead cap P7).
+
+### TreeBudget Single-Rail (end-to-end test guard)
+
+Goal and loop share the same budget tree — any child over budget → whole tree stops. `budget_members: Vec<BudgetMember>` stores each delegated session's `tokens_at_join`; tree total = own session cumulative + Σ (member.now - member.tokens_at_join). Ring `MAX_BUDGET_MEMBERS = 32`; on overflow `register_budget_member` returns `Ok(false)` and warns (delegation can still proceed, this branch just isn't accounted).
+
+### `try_claim_settle_notify` (CAS Stamp)
+
+The settle-notification stamp is `(id, completed_at_ms)` — `completed_at_ms` is stamped **only** at the moment of transition INTO `Complete`, and cleared when status leaves. Post-completion lesson / note edits (which bump `updated_at_ms`) **cannot re-fire** the settle stamp (a stale goal cannot keep poking the watcher cron). Legacy rows (no `completed_at_ms`) fall back to `updated_at_ms`, so old data can still fire the watcher at least once.
+
+### Barrier Mutex + Fail-Open
+
+`waiting_until_ms` and `waiting_on_task` are mutually exclusive (setting one clears the other); `waiting_on_task` is fail-open — an unknown / vanished task is treated as settled (the boot recheck covers the restart case). Both barriers keep the goal in `Active` while parked — execution cap / token budget **still bind**; this is **not** unbounded parking.
+
+### Team Run Mode Pin
+
+`teams.run` rejects subagent `session_set_mode` — "the leader stamps, sub-members inherit". `task_review` accepts metadata carrying a `[grounding]` comment (kind ∈ `exit_code` / `numeric` / `line_count`) as evidence, **the same closed set as loop_graph anchor truth**. Reject never requires an anchor (reject is naturally conservative); an approve without grounding evidence bounces on `task_review(require_grounding=true)` (`grounding_required`).
+
+### Cross-task / Cross-Session Kill Switch
+
+- **Loop**: `LoopRegistry::stop_all(reason)` under a single lock transitions every non-`Stopped` loop to `Stopped` and stamps the reason (kill switch)
+- **Goal**: `GoalStore::pause_all_active(note)` under a single lock transitions every active goal to `Paused` (`pause_all` differs from `uninstall`: pause preserves the goal entity so the owner can resume)
+- **Strategy**: `auto_invalidate welded strategy on objective change` (when a goal changes, the welded strategy auto-invalidates via `clear_goal_welded_strategy`)
+
+### See Also
+
+- [Loop tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/loop_manage.rs) — 9-action implementation
+- [Goal tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/goal.rs) — 7 actions + `register_budget_member`
+- [Strategy tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/strategy_manage.rs) — 3 actions + revise / show / dumb_write
+- [Goal continuation driver](https://github.com/rootazero/Aleph/blob/main/src/gateway/execution_engine/goal_continuation.rs) — `post_run` / `gate_veto` / `clear_goal_welded_strategy`
+- [Goal store source](https://github.com/rootazero/Aleph/blob/main/src/goal/store.rs) — `try_claim_settle_notify` CAS
+- [Loop registry source](https://github.com/rootazero/Aleph/blob/main/src/looping/mod.rs) — `stop_all` cross-session kill switch
+- [Goal tree budget](https://github.com/rootazero/Aleph/blob/main/src/gateway/goal_budget.rs) — `tree_tokens` aggregation

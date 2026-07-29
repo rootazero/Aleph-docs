@@ -3,7 +3,7 @@ title: "Generation"
 description: "Media generation provider abstraction supporting images, video, audio, and speech through a unified trait-based interface with multiple backend providers."
 ---
 
-The `generation` module defines a unified interface for media generation backends. Whether the agent needs an image, a video clip, background music, or text-to-speech, all providers implement the same `GenerationProvider` trait for consistent interaction.
+The `generation` module defines a unified interface for media generation backends. Whether the agent needs an image, a video clip, background music, or text-to-speech, all providers implement the same `GenerationProvider` trait for consistent interaction. The cost surface returned by `session.usage` is computed from the core `crate::pricing` rate-card table; the shell no longer carries a duplicate copy that could drift.
 
 ## Design Philosophy
 
@@ -142,16 +142,23 @@ impl GenerationProviderRegistry {
 
 | Provider | Image | Video | Audio | Speech |
 |---|---|---|---|---|
-| DALL-E | ✅ | — | — | — |
-| Stable Diffusion | ✅ | — | — | — |
+| OpenAI Image | ✅ | — | — | — |
+| Stability | ✅ | — | — | — |
 | Midjourney | ✅ | — | — | — |
-| Runway | — | ✅ | — | — |
-| Pika | — | ✅ | — | — |
-| Sora | — | ✅ | — | — |
+| BFL | ✅ | — | — | — |
+| Fal | ✅ | ✅ | — | — |
+| Replicate | ✅ | ✅ | — | — |
+| Google Imagen | ✅ | — | — | — |
+| Google Veo | — | ✅ | — | — |
 | Suno | — | — | ✅ | — |
-| Udio | — | — | ✅ | — |
 | ElevenLabs | — | — | — | ✅ |
 | OpenAI TTS | — | — | — | ✅ |
+| OpenAI Whisper | — | — | — | transcription |
+| Deepgram TTS | — | — | — | ✅ |
+| Deepgram STT | — | — | — | transcription |
+| Cartesia | — | — | — | ✅ |
+| Azure Speech | — | — | — | ✅ |
+| Volcengine TTS | — | — | — | ✅ |
 
 ---
 
@@ -214,23 +221,23 @@ let output = provider.generate(request).await.unwrap();
 
 ### Provider Failover Refactor
 
-26.7.21+ major refactor: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
+26.7.21+: `FailoverProvider::walk` no longer deep-clones the whole conversation on every retry — the large fields (`messages` / `system_prompt` / `tools`) are kept as the caller's `&'a` borrows; only the small owned fields (`tool_choice` / `model` / `metadata`) are cloned per attempt so `model` can be restamped. ~2,000 lines of unreachable provider code were deleted; route state is published atomically, with no torn config reads.
 
 ### `session.usage` In-Core Pricing
 
-`session.usage` is computed in-core from a single pricing table. **The shell no longer carries a duplicate price table** — previously the shell held a redundant table, drifting across processes.
+`session.usage` is computed in-core from the single `crate::pricing` rate-card table. The duplicate `format_params_*` price table in the shell was deleted — previously it drifted across processes.
 
 ### VESR Dynamic Model Routing
 
-26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (**k-NN over sqlite-vec**), so the model sees which models have actually performed for this kind of work. Includes per-agent / per-model lifetime aggregates, USD-cost enrichment, and subagent routing capture.
+26.6.29+: replaces the deterministic router. `src/routing/recall.rs` records every completed run's outcome and recalls a per-model track record at run start (**k-NN over sqlite-vec**), so the model sees which models have actually performed for this kind of work. Includes per-agent / per-model lifetime aggregates, USD-cost enrichment (reusing `crate::pricing`), and subagent routing capture.
 
 ### Provider Presets Refreshed
 
-26.7.17+ presets refreshed — per-vendor latest models; the catalog is realigned.
+26.7.17+ per-vendor model presets refreshed to the latest; the catalog is realigned.
 
-### `[provider.claude]` / `[provider.openai]` / `[provider.ollama]`
+### Provider Configuration Block
 
-TOML blocks configure protocol + model + API key / base_url. Multiple providers can coexist; `agents.defaults.model` and the `models` failover chain control the use order.
+Each provider is configured through a `[providers.<name>]` table (protocol, model, API key, base URL). Multiple providers can coexist; `agents.defaults.model` and the `models` failover chain control the order. `[provider.<name>]` is not a valid key.
 
 ### See Also
 

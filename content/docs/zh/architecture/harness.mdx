@@ -1,44 +1,44 @@
 ---
 title: "工具链"
-description: "Think→Act 循环、状态机、停止钩子、上下文预算和紧急压缩。"
+description: "Think→Act 循环驱动，12 文件 / 行数棘轮，资源声明 Act 并发，工具循环验证器。"
 ---
 
 # 工具链
 
-`AgentHarness` 驱动所有网关聊天请求的 **Think → Act** 循环。它由编排器构建，并接收预解析的依赖项（`SessionService`、`ToolService`、`Sandbox`、`AiProvider`）。
+`AgentHarness` 驱动编排器分发的每一次 flow 的 **Think → Act** 循环。所有代理执行——包括子代理生成——都经过 `Orchestrator::dispatch` → `AgentHarnessRunner::run` → `AgentHarness`。工具链由编排器构建，接收预解析的依赖项（`SessionService`、`ToolService`、`Sandbox`、`AiProvider`，以及可选的 `PowerCapability`）。
 
 **位置**: `src/harness/`
 
-> **迁移完成**: 遗留的 `src/agent_loop/` 目录在第 7 阶段 (2026-04-21) 被删除。所有代理执行——包括 `SubagentTool`——现在通过 编排器 → 工具链 路由。
-
 ---
 
-## 内部循环图
+## 内部循环
 
 ```
-┌─────────────────────────────────────────┐
-│              AgentHarness                │
-├─────────────────────────────────────────┤
-│  ┌────────┐   ┌────────┐   ┌────────┐  │
-│  │准备    │──▶│ 思考   │──▶│解析    │  │
-│  │• 预算  │   │ • LLM  │   │• 解析  │  │
-│  │• 上下文│   │ • 决定 │   │• 决策  ││
-│  │• 预检  │   └────────┘   └────┬───┘  │
-│  └────────┘                      │      │
-│                             ┌────┴───┐  │
-│                             │  行动  │  │
-│                             │• 执行  │  │
-│                             │• 工具  │  │
-│                             └────┬───┘  │
-│                                  │      │
-│                             ┌────┴───┐  │
-│                             │完成    │  │
-│                             │• 评估  │  │
-│                             │• 压缩  ││
-│                             │• 决策  ││
-│                             └────────┘  │
-└─────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│                AgentHarness                    │
+├────────────────────────────────────────────────┤
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐    │
+│  │ 准备     │──▶│ 思考     │──▶│ 解析     │    │
+│  │ • 预算   │   │ • LLM    │   │ • 解析   │    │
+│  │ • 上下文 │   │ • 决定   │   │ • 工具   │    │
+│  │ • 验证   │   └──────────┘   └────┬─────┘    │
+│  └──────────┘                      │           │
+│                             ┌──────┴─────┐     │
+│                             │  行动      │     │
+│                             │ • 执行     │     │
+│                             │ • 并发     │     │
+│                             └──────┬─────┘     │
+│                                    │           │
+│                             ┌──────┴─────┐     │
+│                             │ 完成       │     │
+│                             │ • 跟踪     │     │
+│                             │ • 持久化   │     │
+│                             │ • 决策     │     │
+│                             └────────────┘     │
+└────────────────────────────────────────────────┘
 ```
+
+准备阶段向上下文预算查询压力信号，挑选正确的 paradigm，并询问验证器链。思考阶段调用提供商、应用输入/输出护栏、合并瞬态上下文。解析阶段解析响应并决定是否执行。行动阶段执行工具调用——串行或按资源声明并发。完成阶段刷新跟踪事件、把事件写入 `SessionService`、并发出 `TurnStep`。
 
 ---
 
@@ -46,103 +46,120 @@ description: "Think→Act 循环、状态机、停止钩子、上下文预算和
 
 ```rust
 pub struct AgentHarness {
-    deps: HarnessDeps,              // 构建时注入的所有依赖项
-    hit_limit: AtomicBool,          // 上下文预算强制提前退出时设置
+    deps: HarnessDeps,                         // 构建时注入的所有依赖
+    stall_tracker: Option<StallTracker>,       // 失速检测的活动追踪器
+    hit_limit: AtomicBool,                     // 任何上限触发提前退出时置位
+    total_tokens: AtomicU64,                   // 整个 run 的累计 token
+    terminate_reason: Mutex<TerminateReason>,  // 精确的循环退出原因
+    tool_timeline: Mutex<Vec<ToolInvocation>>,  // 每个工具的耗时 / 成功
 }
 ```
 
-`AgentHarness` 是无状态的——所有可变状态都存在于 `SessionService` 中。依赖项通过 `HarnessDeps` 在构建时注入：
+`AgentHarness` 除计数器外没有状态——所有真实状态都在 `SessionService`。依赖通过 `HarnessDeps` 在构建时注入。
 
 ---
 
-## 状态机
+## 循环输出类型
 
-`Harness` trait 定义了 Think→Act 契约。`TurnState` 是一个简单的二元结果：
+`src/harness/trait_def.rs` 定义循环控制接口：
 
-| 变体 | 含义 |
-|---------|---------|
-| `Continue` | 会话应运行另一个 Think→Act 轮次 |
-| `Done` | 会话完成；不需要进一步的轮次 |
+```rust
+pub enum TurnState {
+    Continue,   // 再跑一个 Think→Act 轮次
+    Done,       // 循环结束；不再需要轮次
+}
 
-外层循环 (`Harness::run`) 重复调用 `run_turn`，直到它返回 `Done` 或取消令牌触发。
+pub struct TurnStep {
+    pub state: TurnState,
+    pub executed: usize,                // 本轮成功执行的工具调用数
+    pub vetoed: bool,                   // 验证器驳回了本轮（强制 Continue + 重试）
+    pub split_child: Option<SessionId>, // 若分裂出子会话则为子会话 id
+}
+
+pub enum HarnessError {
+    Llm(AlephError),
+    Tool(ToolError),
+    Session(SessionError),
+    Cancelled,
+    StalledTurn { elapsed: Duration },  // Think 超过 turn_timeout；Act 由各工具自己的时钟约束
+}
+```
+
+多态缝是 `SessionDriver` 与 `Arc<dyn HarnessRunner>`（位于编排器）——这里**没有** `Harness` trait。旧 trait 及其默认 `run()` 因为零消费者已被删除。
+
+外层循环 `AgentHarness::run` 反复调用 `run_turn_internal`，直到它返回 `TurnState::Done` 或 `CancellationToken` 触发。
 
 ---
 
 ## 源映射
 
+`src/harness/` 由 `tests/budget.rs` 棘轮锁定为 **12 文件**（`CEILING = 5055`，2026-07-26）。第 13 个文件或任何行数增长都会让 `cargo test -p alephcore --lib` 失败。
+
 | 文件 | 角色 |
 |------|------|
-| `src/harness/agent.rs` | `AgentHarness` — 具体的 Think→Act 实现 |
-| `src/harness/trait_def.rs` | `Harness` trait + `TurnState` + `HarnessError` |
-| `src/harness/deps.rs` | `HarnessDeps` — 依赖包 |
-| `src/harness/callback.rs` | 用于事件流式传输的 `HarnessCallback` trait |
-| `src/harness/loop_callback.rs` | `LoopCallback` / `NoopCallback` |
-| `src/harness/trace.rs` | 跟踪事件类型 |
-| `src/harness/trace_sink.rs` | 用于可观察性的 `TraceSink` trait |
-| `src/harness/chain_context.rs` | 思维链上下文管理 |
+| `src/harness/mod.rs` | 模块入口，重新导出 |
+| `src/harness/agent.rs` | `AgentHarness` 结构 + 外层 `run()` 循环 + grace-turn 槽位 |
+| `src/harness/agent/think.rs` | Think 阶段——LLM 调用、护栏、验证器派发、反应式压缩救援 |
+| `src/harness/agent/act.rs` | Act 阶段——工具执行 + 资源声明的并行派发 |
+| `src/harness/agent/prompt.rs` | 每轮提示组装 |
+| `src/harness/agent/guardrails.rs` | 工具调用的 `Sanitize` / `Block` 后果 |
+| `src/harness/deps.rs` | `HarnessDeps`——依赖包 |
+| `src/harness/trait_def.rs` | `HarnessError`、`TurnState`、`TurnStep` |
+| `src/harness/callback.rs` | `HarnessCallback`——向网关的事件流式传输 |
+| `src/harness/chain_context.rs` | 轮次间状态接力 |
+| `src/harness/trace.rs` | 跟踪事件类型（DTO 转换在 `src/gateway/trace_protocol.rs`） |
+| `src/harness/trace_sink.rs` | 可观察性的 `TraceSink` trait |
+
+内联测试已迁移至 `src/harness/tests/`，12 文件预算只衡量生产代码。
+
+---
+
+## Act 阶段并行组
+
+Act 按 **资源声明** 给工具调用分桶，**桶内**并发 / **桶间**串行。工具声明以下三种之一：
+
+| 声明 | 含义 |
+|------|------|
+| `Shared` | 与任何其他声明无冲突 |
+| `Exclusive { Global }` | 互斥整个执行（如全局配置、worktree） |
+| `Exclusive { Paths }` | 互斥一组特定的文件路径 |
+
+两个基于模型**原始**参数被判定为不相交的调用必须保持不相交：若任何护栏**改写**了参数（PII 掩码），整批必须串行化——否则两个不同路径可能塌成同一个占位符而发生竞态。
+
+跨批去重：在同一批或跨批中重复的 `(name, args)` 复用首次结果，不会执行两次。
+
+每次调用的耗时由其**工具自身**的预算限定，在 `src/tools/scoped/dispatch.rs::execute_inner` 处收口。run 级 `turn_timeout` 只约束 Think；每调用超时在下一轮 Think 中表现为 `ToolError::Timeout`。
+
+---
+
+## 工具循环验证器
+
+`src/verification/` 提供轮次级的后置验证链，在 Think 与 Act 之间被询问。阻塞型裁决强制多走一次 `Continue`，让模型对失败做出反应。验证**不是**硬停启发式：只有模型显式 `stop` 才能干净地结束一个轮次。
 
 ---
 
 ## 睡眠抑制器
 
-每个 Think→Act 轮次获取类型为 `PreventUserIdleSystemSleep` 的 `IOPMAssertion`，原因字符串为 `"Aleph agent loop"`。断言由 RAII `InhibitorGuard` 持有，其 `Drop` 实现在轮次返回时立即释放它。长时间运行的代理轮次不再会被 macOS 在飞行中让主机进入睡眠而默默截断。
+每个 Think→Act 轮次通过 `PowerCapability::inhibit_sleep("Aleph agent loop")` 获取一个平台睡眠抑制。在 macOS 上它返回 `PreventUserIdleSystemSleep` 类型的 `IOPMAssertion`；在 Linux 与 Windows 上由桌面平台层做等效接线。返回的 RAII 守卫在其被丢弃的瞬间释放断言，所以一个长时间运行的代理轮次不会被主机空闲静默截断。
 
-守卫在 `src/harness/agent.rs` 中的 `run_turn` 开始时获取，并在函数返回时自动释放，无论它成功、返回错误还是被取消。
-
-要验证轮次进行中时断言是否处于活动状态：
+守卫在 Think 阶段顶端（`src/harness/agent/think.rs`）获取，并在轮次返回时自动释放——成功、错误或取消均可。
 
 ```bash
 pmset -g assertions | grep "Aleph agent loop"
 ```
 
-断言在轮次完成时从列表中消失。
+轮次完成的瞬间断言从列表中消失。
 
 实现文件：
 - `PowerCapability` trait: `desktop/shared/src/traits/power.rs`
 - macOS IOPMAssertion FFI: `desktop/macos/src/sleep_inhibitor.rs`
-- 代理循环接线: `src/harness/agent.rs::run_turn`
+- 工具链接线: `src/harness/agent/think.rs`
 
 ---
 
 ## 另请参阅
 
-- [思考器](./thinker) — LLM 交互层
-- [分发器](./dispatcher) — 任务编排
-- [会话服务](./session-service) — 仅追加事件日志
-- 沙箱 — 执行环境
-
----
-
-## 26.7.x 补充
-
-### `src/harness/` 锁 12 文件 + 行数 ratchet
-
-**代码是权威**——任何文档数字都只是 `CEILING` 的副本。当前 5055 行（2026-07-26 修订）。
-
-### Act 阶段并行组
-
-26.7.x：资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）驱动**桶内**并发、**桶间**串行。
-
-### 工具循环验证器
-
-`src/verification/` 提供 Turn-level 后置验证：仅模型显式 stop 结束一个 Turn。
-
-### 5 个「不」
-
-R10 具体落地：
-
-1. 不判断意图分类
-2. 不按消息意图做工具过滤（progressive tool disclosure 例外）
-3. 不做完成度判断（除模型显式 stop）
-4. 不做内容审查 / 安全打分
-5. 不做错误恢复策略选择
-
-### `DiminishingReturnsDetector` 已删
-
-26.7.20+：硬停被删除（违反 R10）。Stuck 由 `max_iterations` + 工具循环验证器 + 模型自身 stop 共同控制。
-
-### 详见
-
-- [Harness 哲学](/docs/zh/philosophy/harness-philosophy) — 完整论述
-- [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop)
-- [验证器](/docs/zh/concepts/supervisor-verification)
+- [思考器](./thinker) — 提示组装 + LLM 交互
+- [分发器](./dispatcher) — `Orchestrator::dispatch`（FlowRequest → HarnessRunner）
+- [会话服务](./session-service) — 每个会话的仅追加事件日志
+- [记忆系统](./memory) — Dream 守护进程 + SkillOpt 演化门

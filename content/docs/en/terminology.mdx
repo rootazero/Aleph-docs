@@ -98,8 +98,9 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 |---------|---------|------------|
 | **Extension** | 扩展 | User-facing umbrella for Skill + Plugin + MCP server — exactly one **kind** per Extension. See [Extensions Store](/docs/en/concepts/extensions-store) |
 | **Extensions Store** | 扩展商店 | Top-level panel mode (`/extensions`) for browsing/installing Extensions by functional category, with trust tiers and pre-install disclosure |
-| **ExtensionKind** | 扩展类型 | Store-facing kind enum `{Skill, Plugin, Mcp}` — distinct from the runtime `PluginKind {Wasm, Mcp, Static}` of the plugin host |
-| **Store Agent** | 商店智能体 | Built-in protected agent owning discover→curate→install→verify; cannot bypass system rails (specs, trust verdicts, SHA256, secrets) |
+| **ExtensionKind** | 扩展类型 | Store-facing kind enum `{Skill, Plugin, Mcp}` — distinct from plugin-host runtime `PluginKind {Wasm, Mcp, Static}` |
+| **Aleph Hub** | Aleph Hub | Single extension catalog source `aleph-hub` (`hub.heyaleph.com/catalog.json`), cold-start projected by `hub::primer` into `~/.aleph/hub_catalog.db` |
+| **Hub tools** | Hub 工具 | `hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify`, registered in the main built-in tool registry and constrained by trust and user-consent gates |
 | **Trust Tier** | 信任层级 | Source trust level: Official / Verified / Community / Unverified |
 | **Disclosure** | 披露 | Mandatory pre-install summary (command+args, secrets, network/fs reach, pinned version + SHA256, tier) |
 | **Source** | 源 | A catalog provider (plugin marketplaces, Official MCP Registry, Docker MCP Catalog) cached in SQLite for offline browse |
@@ -171,10 +172,38 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **WorldModel** | 世界模型 | Environmental state tracking for proactive behavior |
 | **Proactive Dispatcher** | 主动调度器 | Daemon that dispatches proactive tasks based on world state |
 | **Desktop Bridge** | 桌面桥 | UDS JSON-RPC protocol for desktop automation |
-| **Deliverable** | 交付物 | Work product produced by `tools.publish` — written to the Artifact store; the Panel opens it directly |
-| **Artifact Store** | 工件存储 | `src/artifacts/` — the unified backend for deliverables |
-| **Export Subsystem** | 导出子系统 | `src/export/` — renders a deliverable as a standalone HTML / document |
-| **Voice Subsystem** | 语音子系统 | Transcription (WhisperLiveKit / TWhisperLiveKit) and TTS (multi-provider with fallback) |
+| **Deliverable** | 交付物 | Work product produced by the `artifact_publish` tool — landed as `ArtifactOrigin::Deliverable`; Panel "Deliverables" pane pins and opens it |
+| **Artifact Store** | 工件存储 | `src/artifacts/` — unified backend for deliverables (`MAX_ARTIFACT_BYTES = 50 MB` + `MAX_ARTIFACTS_PER_SESSION = 200`) |
+| **ArtifactOrigin** | 工件来源 | `Inbound` / `Outbound` / `Export` / `Deliverable` four origins (wire-vocabulary single source: `aleph_protocol::artifact`) |
+| **Export Subsystem** | 导出子系统 | `src/export/` — renders deliverables as standalone HTML / Markdown documents (self-contained CSS) |
+| **Voice Subsystem** | 语音子系统 | Streaming ASR (Deepgram / WhisperLiveKit, local `aleph-voice` sherpa-onnx + mock engine) + TTS (multi-provider + fallback cap 2) |
+| **`TranscriptDelta`** | 转写增量 | Streaming transcript contract (`committed` / `interim` / `utterance_end` / `error`); Panel VAD authoritative |
+| **Vocabulary Biasing** | 域词偏置 | `[voice] vocabulary` config — translated per ASR backend to `hotwords` / `initial_prompt` / `prompt` / `keywords` |
+| **`StreamingTranscriber`** | 流式转写器 trait | Provider-neutral contract in `src/gateway/voice/streaming/mod.rs` |
+| **Voice-as-Context** | 语音即上下文 | ASR-transcribed signal into context aggregation (`per-turn transient recall`), not persisted as user message |
+| **Loop** | 循环 | `src/looping/` — current-session sustained repetition (9 actions); `LoopRegistry` is in-process only |
+| **Goal** | 目标 | `src/goal/` — autonomous objective pursuit (persisted `GoalStore` + objective gate + TreeBudget) |
+| **Strategy** | 策略 | `src/strategy/` — team or naked-loop plan (composite-keyed `StrategyStore`) |
+| **`LoopState`** | 循环状态 | `Active` / `Paused` / `Stopped` three-state (in-process) |
+| **`GoalStatus`** | 目标状态 | `Active` / `Paused` / `Completed` / `Aborted` |
+| **`GateOutcome`** | 门判定 | Goal subsystem objective gate type-state (maker / checker dual confirmation) |
+| **TreeBudget** | 预算树 | Goal and loop shared budget tree; any sub-goal exceeding budget forces entire tree to stop |
+| **Composite Key** | 复合键 | `goal_key` / `loop_key` / `session_key` / `team_key` four namespaces |
+| **Plan Team / Naked Loop** | 团队/裸循环策略 | `[strategy] plan_team` / `plan_naked_loop` config switches |
+| **Atomic Put-if-Absent** | 原子首发 | `StrategyStore` fire-once mechanism (race protection) |
+| **Run Mode Pin** | 运行模式钉 | Leader stamps `usage_mode`; subagents inherit; rejects `session_set_mode` mid-run |
+| **Loop Auditor** | 循环审计员 | Built-in protected agent; audit / supervision templates default to independent-context evidence |
+| **`loadable`** | 可加载容器 | `data.rs` + `loader.rs` — all fetches route through it; failed fetch unrepresentable as empty |
+| **Vault Card View** | Vault 卡片视图 | `cards.rs` — three-state shell (Loading / Empty / Content) |
+| **Evidence Chain** | 证据链 | `notes_citing` — render reverse links into drawer |
+| **Provenance** | 来源三元组 | writer / timestamp / source event (`provenance.rs`) |
+| **`notes_sources` / `notes_provenance`** | 笔记溯源表 | 26.7.22+ new; basis of graph cache and insights |
+| **Louvain** | Louvain 社区检测 | Hand-rolled implementation (no external crate, R3 compliant) |
+| **4-signal Recall** | 四信号召回 | Node relevance + Leiden refinement + wikilink skeleton + co-recall |
+| **Phone / Tablet Platform** | 手机 / 平板平台 | `interfaces/webchat/src/platform/{phone,tablet}/` — `phone` has 8 submodules; `tablet` currently mainly skeleton |
+| **UnifiedSaveBar** | 统一保存条 | `interfaces/webchat/src/platform/wide/views/settings/` — unified save mode for all settings pages |
+| **Phase 3 / Phase 4 Settings** | 第三 / 四阶段设置 | SearchRegistry UI + PII migration + Provider Presets Swift UI |
+| **`behavior.input_mode`** | 输入行为模式 | `cut` / `copy` / `halo` three options (CGEventTap hotkey + clipboard context) |
 
 ## Naming Conventions
 

@@ -1,32 +1,8 @@
-import type { ReactNode } from "react";
-import { Instrument_Serif, Space_Grotesk, Archivo, Space_Mono } from "next/font/google";
+import type { CSSProperties, ReactNode } from "react";
 import { DocsLayout } from "fumadocs-ui/layouts/docs";
 import { source } from "@/lib/source";
 import { baseOptions, translations } from "@/lib/layout.shared";
 import { DocsProviders } from "@/components/docs-providers";
-
-const serif = Instrument_Serif({
-  variable: "--font-serif",
-  subsets: ["latin"],
-  weight: "400",
-  style: ["normal", "italic"],
-});
-const display = Space_Grotesk({
-  variable: "--font-display",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-});
-const sans = Archivo({
-  variable: "--font-sans",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
-});
-const mono = Space_Mono({
-  variable: "--font-mono",
-  subsets: ["latin"],
-  weight: ["400", "700"],
-  style: ["normal", "italic"],
-});
 
 // Owns the <html>/<body> shell so the lang attribute tracks the active locale.
 export default async function Layout({
@@ -38,9 +14,16 @@ export default async function Layout({
 }) {
   const { lang } = await params;
 
+  const fallbackFonts = {
+    "--font-serif": '"Instrument Serif", Georgia, serif',
+    "--font-display": '"Space Grotesk", system-ui, sans-serif',
+    "--font-sans": '"Archivo", system-ui, sans-serif',
+    "--font-mono": '"Space Mono", ui-monospace, monospace',
+  } as CSSProperties;
+
   return (
     <html lang={lang} suppressHydrationWarning>
-      <body className={`${serif.variable} ${display.variable} ${sans.variable} ${mono.variable} antialiased`}>
+      <body className="antialiased" style={fallbackFonts}>
         <DocsProviders i18n={translations.provider(lang)}>
           <DocsLayout {...baseOptions(lang)} tree={source.getPageTree(lang)}>
             {children}

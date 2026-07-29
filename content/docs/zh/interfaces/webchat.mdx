@@ -389,3 +389,46 @@ curl http://127.0.0.1:18790/health
 ### 完整 `channel.*` / `channels.*` / `channel.pairing.*` RPC
 
 详见 [网关 RPC channels](/docs/zh/gateway/methods/channels)。
+
+### 平台拓扑（26.7.22+）
+
+`interfaces/webchat/src/platform/` 提供了**三套并行的面板布局**，按设备族切换：
+
+| 平台 | 路径 | 子模块数 | 形态 |
+|------|------|---------|------|
+| **wide**（桌面 / 宽屏） | `interfaces/webchat/src/platform/wide/` | `views/`（10+ 子视图）+ `mod.rs` | 侧栏 + 多列 |
+| **phone**（iPhone / Android 手机） | `interfaces/webchat/src/platform/phone/` | 8 个子模块（agents / chat / dashboard / extensions / memory / settings / teams / shell / more / mod） | 底部 tab + 单列 |
+| **tablet**（iPad） | `interfaces/webchat/src/platform/tablet/` | `mod.rs`（当前主要为骨架） | Split View / Stage Manager |
+
+**Phone 平台子视图**（按 iOS 子目录命名）：
+
+- `phone/chat` —— 单列聊天流 + 浮动 composer
+- `phone/memory` —— 卡片视图（继承 `wide/views/memory/cards.rs`）+ 触摸人体工学
+- `phone/agents` / `phone/teams` —— 移动版团队 / agent 列表
+- `phone/dashboard` —— 简化的运行状态
+- `phone/extensions` —— 移动版 Hub 商店（搜索 + 类别 chip + featured）
+- `phone/settings` —— 简化的设置屏（参 [iOS Panel Phase 1/2 fixes](/docs/zh/changelog#a-aleph-hub-单一源)）
+- `phone/more` —— 折叠菜单（Teams / Agents / Extensions / Wizard / Help）
+- `phone/shell` —— 移动 webview 容器（Capacitor / WKWebView）
+
+**Tablet 平台**：
+
+- `tablet/mod.rs` —— 当前主要为骨架；计划在 iPad 多任务 + Stage Manager 上做完整布局
+
+**Wide vs Phone 共享的子视图**（如 memory 的卡片渲染器）通过**模块继承**实现——`platform/wide/views/memory/cards.rs` 在 `platform/phone/memory/` 中复用，仅调整 padding / font scale。
+
+### iOS Panel 完整化（26.6.25+ / 26.7.22+）
+
+- **原生配对屏**：shake-to-reconfigure、Keychain 连接存储、加载失败回退
+- **完整 iPad 支持**：设备族、全屏、方向、Split View / Stage Manager 多任务、平板专属布局、触摸人体工学
+- **TestFlight** 内部分发
+- **默认 pairing 切到 HTTPS + ATS**（26.7.22+）
+- **iOS Keychain trust store + 决策镜像**（与 macOS WKWebView 共享决策核心）
+
+### View 子模块（wide/views/，26.7.22+）
+
+- **`memory/`**（11 个）—— Vault 面板重构：[详见](/docs/zh/concepts/memory#vault-面板重构26.7.2713-个-panelmemory-提交)
+- **`voice/`**（10 个）—— 实时字幕与 VAD：[详见](/docs/zh/concepts/voice-streaming#panel-视图-platformwideviewsvoice)
+- **`artifacts/`**（5 个）—— Deliverables 面板：[详见](/docs/zh/concepts/artifacts-deliverables#panel-deliverables-面板)
+- **`settings/`** —— 统一保存条 + Phase3/4 + Provider Presets Swift UI
+- **`agents/` / `teams/` / `extensions/` / `dashboard/` / `chat/`** —— 各顶层模式

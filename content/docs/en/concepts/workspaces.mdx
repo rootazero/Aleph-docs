@@ -1,130 +1,108 @@
 ---
 title: Workspaces
-description: How Aleph organizes per-agent state through workspace directories, including configuration files, session storage, plugin directories, and multi-agent isolation.
+description: How Aleph organizes per-agent state through `~/.aleph/` — configuration, sessions, memory, skills, plugins, Hub, projects, and logs.
 ---
 
-A workspace in Aleph is the on-disk state directory that contains everything the agent needs to operate: configuration, session history, memory databases, plugins, skills, and logs. The workspace model ensures clean separation between different agents and provides a predictable directory structure for all Aleph components to read and write state.
+Aleph converges all runtime state into a **unified home directory tree** — `~/.aleph/` (overridable via `ALEPH_HOME`). This page describes the current layout; legacy `~/.config/aleph/`, `facts.lance/`, `evolution.db`, `providers.toml` conventions have all been retired.
+
+> **Single-source convention**: all platforms use `~/.aleph/`; no `XDG_CONFIG_HOME` distinction; test / multi-instance scenarios are fully isolated via `ALEPH_HOME=/path/to/root`.
 
 ## Directory Structure
 
-By default, Aleph stores its workspace at `~/.config/aleph/` (with `~/.aleph/` as a common symlink or alternative). The full structure:
-
 ```
-~/.config/aleph/
-├── config.toml              # Main configuration file
-├── providers.toml           # AI provider credentials and settings
-├── sessions.db              # SQLite database for session history
+~/.aleph/
+├── config.toml                  # main config (see [Configuration](/docs/en/getting-started/configuration))
+├── config.toml.bak              # automatic pre-migration backup
+├── cache/                       # generic cache (safe to drop on restart)
 ├── memory/
-│   ├── facts.lance/         # LanceDB vector store for facts
-│   └── graph.db             # Knowledge graph (nodes + edges)
-├── skills/                  # User and evolved skills
-│   ├── code-review/
-│   │   └── SKILL.md
-│   └── git-commit/
-│       └── SKILL.md
-├── plugins/                 # Installed extensions
-│   ├── my-plugin/
-│   │   ├── aleph_plugin.toml
-│   │   └── dist/
-│   └── another-plugin/
-├── protocols/               # Custom protocol definitions (YAML)
-│   └── my-custom-api.yaml
-├── soul.md                  # Global identity/personality definition
-├── keys/                    # API keys and secrets vault
-├── logs/                    # Gateway and runtime logs
-│   ├── gateway.log
-│   └── agent.log
-└── evolution.db             # Skill evolution tracking database
+│   ├── note/                    # knowledge notes (Markdown + SQLite index + sqlite-vec vectors)
+│   ├── raw/                     # raw sources (input for note distillation)
+│   └── *.db                     # facts tables, graph cache, insights, etc.
+├── skills/                      # user-level skills (Markdown skill)
+├── agents/<id>/skills/          # active agent's private skills (highest priority)
+├── plugins/<plugin>/skills/     # plugin-bundled skills
+├── runtimes/                    # capability ledger — probe, bootstrap, persist external tool state
+├── hub_catalog.db                # Aleph Hub cache (hub::primer cold-start population)
+├── projects.json                # project storage (see projects.* RPC)
+├── projects.lock                # project storage file lock
+├── data/                        # runtime databases (see below)
+│   ├── aleph.lock               # instance lock (flock at the entry of `aleph-server start`; OS auto-releases)
+│   ├── sessions.db              # session event log (SessionEvent SSOT)
+│   ├── security.db              # device trust, certificate fingerprints, TOFU store + encrypted secret vault
+│   ├── pairing.db               # pairing & invite codes
+│   ├── devices.db               # device ledger
+│   ├── heartbeat.db             # heartbeat tasks / probe history
+│   └── scratchpad_bindings.json # session → active-plan pointers (preserved across daemon restart)
+├── logs/                        # gateway and runtime logs (tracing; daily rotation + 7-day retention)
+│   ├── aleph-server.log.YYYY-MM-DD
+│   └── ...
+└── soul.md                      # global identity/personality definition (overridden by .soul/identity.md)
 ```
+
+> **Historical migration**: `facts.lance/` (legacy LanceDB vector store) → consolidated into `memory/*.db` + `sqlite-vec`; `evolution.db` (legacy skill evolution DB) → consolidated into `dream_*` tables; `providers.toml` (legacy credentials file) → folded into `config.toml` under `[providers.*]`; `~/.config/aleph/` → unified to `~/.aleph/`.
 
 ## Configuration Files
 
-### config.toml
+### `config.toml`
 
-The primary configuration file controls all runtime behavior. It is organized into sections:
+The primary configuration file controls all runtime behavior. All fields support `${VAR_NAME}` environment-variable interpolation. Selected sections:
 
 ```toml
-[agent]
-max_iterations = 25
-token_budget = 128000
-thinking_level = "medium"
-enable_compression = true
-compression_threshold = 100000
+# Agent defaults (agents_def.rs)
+[agents.defaults]
+model = "anthropic/claude-sonnet-4"
+thinking = "medium"
+session_mode = "work"   # chat / work / code (third axis)
+exec_tier = "ask"        # ask / auto / full
 
+# Gateway (with TLS)
 [gateway]
-host = "127.0.0.1"
 port = 18790
+bind = "127.0.0.1"
 require_auth = false
 
-[interfaces.telegram]
-token = "BOT_TOKEN"
+[gateway.tls]
+# When cert/key are empty, the core auto-generates a self-signed cert;
+# SANs auto-cover the host's non-loopback IPs; remote clients must use wss.
+cert = "/path/to/cert.pem"
+
+# Channels
+[channels.telegram]
+enabled = false
+token = "${TELEGRAM_BOT_TOKEN}"
 allow_from = ["+1234567890"]
 
-[interfaces.discord]
-token = "BOT_TOKEN"
-guilds = ["guild-id-1"]
+[channels.discord]
+enabled = false
+token = "${DISCORD_BOT_TOKEN}"
 
-[skills]
+# Behavior / input mode
+[behavior]
+input_mode = "halo"   # cut / copy / halo
+hotkey = "double_shift"
+
+# Voice
+[voice]
+provider = "deepgram"
+vocabulary_bias = ["Aleph", "sqlite-vec", ...]
+[voice.streaming]
+pcm_input = false    # WhisperLiveKit must set true to skip FFmpeg decode
+
+# Heartbeat
+[heartbeat]
 enabled = true
-skills_dir = "skills"
-auto_match_enabled = false
-
-[extensions]
-enabled = true
-hot_reload = true
-
-[memory]
-auto_extract = true
-max_facts = 10000
+# See [Heartbeat Automation](/docs/en/automation/heartbeat)
 ```
 
-### providers.toml
+### Credential Storage
 
-Provider credentials are stored separately for security. This file is never committed to version control:
+API keys and secrets are held by the **OS keychain** and persisted as AES-256-GCM ciphertext in `data/security.db`. They are **never** written in plaintext to `config.toml`. MCP servers receive credentials through Aleph's WASM secret-injection boundary **per-server** at startup so a child process never inherits the daemon's raw env.
 
-```toml
-[providers.claude]
-protocol = "anthropic"
-model = "claude-opus-4-20250514"
-api_key = "sk-ant-..."
-enabled = true
+## Session Storage (`data/sessions.db`)
 
-[providers.openai]
-protocol = "openai"
-model = "gpt-4o"
-api_key = "sk-..."
-enabled = true
+The session event log is the **single source of truth** (`session_events` table); `MessageProjector` materialises events into the `messages` table, and `ProjectionReconciler` back-fills projections on startup. Schemas are defined in `src/session/events.rs` and `src/session/projector.rs`.
 
-[providers.ollama]
-protocol = "ollama"
-model = "llama3.2"
-base_url = "http://localhost:11434"
-enabled = true
-```
-
-## Session Storage
-
-All conversation sessions are persisted in the `sessions.db` SQLite database:
-
-```sql
-CREATE TABLE sessions (
-    session_key TEXT PRIMARY KEY,
-    messages TEXT,           -- JSON array of Message objects
-    created_at INTEGER,
-    updated_at INTEGER,
-    message_count INTEGER,
-    token_count INTEGER
-);
-
-CREATE TABLE session_metadata (
-    session_key TEXT PRIMARY KEY,
-    agent_id TEXT,
-    channel TEXT,
-    last_compaction INTEGER
-);
-```
-
-Session keys use a hierarchical format that encodes the agent, channel, and scope:
+**Session keys** use a hierarchical format encoding agent, channel, and scope:
 
 | Key Format | Example | Description |
 |------------|---------|-------------|
@@ -132,44 +110,77 @@ Session keys use a hierarchical format that encodes the agent, channel, and scop
 | `agent:main:telegram:dm:user123` | Per-user DM | Isolated Telegram conversation |
 | `agent:main:discord:group:guild-id` | Group chat | Discord guild conversation |
 | `agent:main:cron:daily-summary` | Cron task | Scheduled task session |
+| `agent:main:loop:<loop_id>` | Loop session | GoalLoop context |
+| `agent:main:goal:<goal_id>` | Goal session | GoalStore context |
+| `agent:main:heartbeat:<task_id>` | Heartbeat | Periodic daemon session |
 
-## Memory Storage
+## Memory Storage (`memory/`)
 
-The memory subsystem uses two storage backends within the workspace:
+The memory subsystem uses a single storage backend: **SQLite + sqlite-vec**, plus a notes layer (`memory/note/` Markdown files + SQLite index).
 
-### LanceDB Vector Store
+- **Facts tables**: `memory/facts*.db` — `notes`, `notes_sources`, `notes_provenance`, `notes_graph_cache`, `notes_graph_insights` (4-signal community-aware recall + Louvain refinement)
+- **Raw sources**: `memory/raw/` — distillation input; the notes layer back-fills `[[wikilink]]` edges from these
+- **Graph cache / insights**: written by `GraphRecomputeStage` into `notes_graph_cache` / `notes_graph_insights` (spawn_blocking, zero LLM)
 
-Facts are stored with vector embeddings for semantic search in the `memory/facts.lance/` directory. This enables the agent to recall relevant information from past conversations using similarity search.
+LanceDB and the legacy single-file `graph.db` have been folded in.
 
-### Knowledge Graph
+## Skill / Plugin Directories
 
-The `memory/graph.db` SQLite database stores structured relationships between entities as a graph of nodes and edges. This complements the vector store by enabling traversal-based queries like "what do I know about project X and its dependencies?"
+### Skills
 
-## Plugin Directories
+Roots scanned in priority order (see [Discovery](/docs/en/concepts/discovery)):
 
-Extensions are stored in `~/.aleph/plugins/`, with each plugin in its own subdirectory:
+1. `~/.aleph/agents/<id>/skills/` — **active agent's private skills** (highest priority)
+2. `~/.aleph/skills/` — user-level
+3. `<project>/.aleph/skills/` — project-level (native)
+4. `<project>/.claude/skills/` — project-level Claude Code compatible (outranked by the project `.aleph/` on clash)
+5. `~/.aleph/plugins/<plugin>/skills/` — plugin-bundled (authoritatively owned by `extension_manager`)
+
+Each skill sits in its own subdirectory with a `SKILL.md` marker (OpenCode-compatible discovery):
 
 ```
-plugins/
+~/.aleph/skills/
+├── code-review/
+│   └── SKILL.md
+└── git-commit/
+    └── SKILL.md
+```
+
+### Plugins
+
+```
+~/.aleph/plugins/
 ├── my-plugin/
-│   ├── aleph_plugin.toml    # Plugin manifest
+│   ├── aleph.plugin.toml    # V2 preferred manifest
 │   ├── package.json         # (Node.js plugins)
 │   ├── dist/
-│   │   └── index.js         # Compiled entry point
+│   │   └── index.js
 │   └── src/
-│       └── index.ts         # Source code
+│       └── index.ts
 └── wasm-tool/
-    ├── aleph_plugin.toml
-    └── plugin.wasm          # Compiled WASM module
+    ├── aleph.plugin.toml
+    └── plugin.wasm
 ```
 
-The extension system scans three search paths in order:
+A file watcher (`notify-debouncer-full`) triggers extension-system hot-reload ~600 ms after a change. `reload` is serialised under the load guard (the prior concurrent-reload race is fixed).
 
-1. `~/.aleph/plugins/` -- User-installed plugins (highest priority)
-2. `/usr/local/share/aleph/plugins/` -- System-wide plugins
-3. `./plugins/` -- Project-local plugins (relative to working directory)
+## Hub Cache (`hub/`)
 
-When hot reload is enabled, the file watcher monitors these directories and automatically loads, reloads, or unloads plugins as files change.
+`src/hub/primer.rs` projects official MCP presets, official plugins, and the official skill collection into `hub_catalog.db` on startup. Each entry is merged and tagged with `via {source}`; a background `hub_catalog_sync` task pulls incremental updates from Aleph Hub. See [Extensions Store](/docs/en/concepts/extensions-store).
+
+## Project Storage
+
+`projects.json` + `projects.lock` holds project metadata; RPC entry points are `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get`. The lock prevents concurrent corruption.
+
+## Workspace Storage
+
+Workspaces are the user-facing "multiple workspaces side-by-side" abstraction — switching workspace swaps default channel / persona / agent bindings. RPC entry points:
+
+- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
+- `channels.set_agent` — bind a channel to a specific agent (**now requires the agent to exist**; the prior version that accepted non-existent agents was fixed)
+- `agents.bindings` — query current agent ↔ channel bindings
+
+Backed by the SQLite `AgentEnvStore` (not by `~/.aleph/projects.json`); defined in `src/gateway/agent_env.rs`.
 
 ## Identity and Soul Files
 
@@ -180,7 +191,7 @@ Priority (highest to lowest):
 ┌─────────────┐
 │  Session     │  ← Runtime override via RPC
 ├─────────────┤
-│  Project     │  ← .soul/identity.md in project directory
+│  Project     │  ← .soul/identity.md in the project directory
 ├─────────────┤
 │  Global      │  ← ~/.aleph/soul.md
 ├─────────────┤
@@ -188,156 +199,49 @@ Priority (highest to lowest):
 └─────────────┘
 ```
 
-The global `soul.md` file in the workspace defines the agent's default personality:
-
-```markdown
----
-relationship: mentor
-expertise:
-  - Rust
-  - System design
----
-
-# Identity
-
-I am Aleph, your AI programming partner.
-
-## Directives
-
-- Be helpful and encouraging
-- Explain concepts clearly
-- Suggest best practices
-
-## Anti-Patterns
-
-- Never be condescending
-- Never make up information
-```
+The global `soul.md` defines the default personality; delegated-role chains and signer ownership are anchored by device/key records in `data/security.db`.
 
 ## Log Files
 
-Runtime logs are stored in the `logs/` directory:
+Runtime logs live in `logs/`:
 
-- `gateway.log` -- WebSocket server events, RPC calls, connection lifecycle.
-- `agent.log` -- Agent loop events, tool executions, LLM calls.
+- `aleph-server.log.YYYY-MM-DD` — `tracing` structured logs, rotated daily with 7-day retention
 
-Aleph uses the `tracing` crate with structured logging. Log levels can be configured via the `RUST_LOG` environment variable:
-
-```bash
-RUST_LOG=alephcore=debug cargo run -p alephcore --features gateway --bin aleph-gateway -- start
-```
-
-## Multi-Agent Workspace Separation
-
-When running multiple agents (e.g., a main agent and specialized sub-agents), each agent can maintain its own state while sharing the same workspace root:
-
-```
-~/.config/aleph/
-├── config.toml                    # Shared configuration
-├── sessions.db                    # Contains sessions for all agents
-│   ├── agent:main:main            # Main agent sessions
-│   ├── agent:main:telegram:dm:*   # Main agent Telegram sessions
-│   └── subagent:agent:main:translator  # Sub-agent sessions
-└── evolution.db                   # Shared skill evolution tracking
-```
-
-Sub-agent sessions use namespaced session keys (`subagent:agent:main:translator`) to maintain isolation within the shared database. The `SessionCoordinator` manages sub-agent session lifecycle:
-
-```rust
-pub struct SessionCoordinator {
-    db: Arc<VectorDatabase>,
-    config: CoordinatorConfig,
-}
-
-impl SessionCoordinator {
-    pub async fn create_session(&self, agent_type: &str, parent_id: &str)
-        -> Result<SessionHandle, AlephError>;
-    pub async fn acquire_session(&self, agent_type: &str, parent_id: &str)
-        -> Result<SessionHandle, AlephError>;
-    pub async fn release_session(&self, session_id: &str)
-        -> Result<(), AlephError>;
-}
-```
-
-Idle sub-agent sessions can be **swapped to disk** by the `SwapManager` to free memory:
-
-```rust
-pub struct SwapManager {
-    db: Arc<VectorDatabase>,
-    swap_dir: PathBuf,
-    config: SwapConfig,
-}
-
-impl SwapManager {
-    pub async fn swap_out(&self, session_id: &str, context: &SwappedContext)
-        -> Result<SwapResult, AlephError>;
-    pub async fn swap_in(&self, session_id: &str)
-        -> Result<SwappedContext, AlephError>;
-}
-```
+Aleph uses the `tracing` crate with structured logging. Log levels can be configured via the `RUST_LOG` environment variable. The `ALEPH-BOOT` marker is emitted on the raw stdout/stderr stream (not on the structured log stream) to delimit each boot for operators (see [Daemon](/docs/en/concepts/daemon)).
 
 ## Hot Reload
 
-Configuration changes are detected automatically via file watching:
+Configuration changes are detected automatically via file watching (500 ms debounce):
 
 ```
 ~/.aleph/config.toml modified
     │
     ▼
-Debounce (500ms)
-    │
-    ▼
-Parse new config → Validate against schema
+Debounce (500ms) → parse new config → schema validation
     │
     ▼
 Apply changes:
- • Restart affected interfaces
- • Update routing rules
- • Emit config.changed event
+  • Restart affected interfaces
+  • Update routing rules (routing_rules.*)
+  • Hot-update [execution] max_runs_global / max_runs_per_agent
+  • Emit config.changed event
 ```
 
-No restart is required for most configuration changes. Provider credentials, interface tokens, skill directories, and extension settings all support hot reload.
+Newly hot-reloadable fields include project storage, Hub sync TTL, and the `[voice] vocabulary` bias list (selected sections only).
+
+## Multi-Agent / Cluster Workspaces
+
+In cluster federation (see [Cluster](/en/architecture/cluster)), the **center** owns the full `~/.aleph/`; **nodes** carry only controlled subsets (per `[cluster.node].sync_paths`). Node keys are **Unicode-normalized**, so CJK node names work correctly (the prior byte-slicing behaviour broke them).
 
 ## Related Pages
 
-- [Agent Runtime](/docs/en/concepts/agent-runtime) -- How the agent uses workspace state during execution
-- [Messages](/docs/en/concepts/messages) -- Session storage and message persistence
-- [Extensions](/docs/en/concepts/extensions) -- Plugin directory layout and discovery
-- [Architecture Overview](/docs/en/architecture/overview) -- System-level view of the storage layer
-
----
-
-## 26.7.x Addendum
-
-### Workspace RPC
-
-26.7.x workspaces are backed by these RPC methods:
-
-- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
-- `channels.set_agent` — bind a channel to a specific agent (**now requires the agent to exist** — the prior `channels.set_agent` accepting non-existent agents was fixed)
-- `projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` — project store
-
-### File-Op Path Safety
-
-26.7.15+:
-
-- Symlink-safe delete/move
-- Glob/deny re-checks
-- Collision de-dup
-- Per-path locks
-- Hardened path deny gate (`%APPDATA%` expansion, system/proc guards)
-- `apply_patch` forward cursor that fails honestly on unplaceable additions
-
-### Cluster `file.write` No TOCTOU Window
-
-26.7.21 fix: cluster `file.write` no longer has a time-of-check-to-time-of-use window between the existence check and the write.
-
-### Unicode-Normalized Node Keys
-
-26.7.20+: cluster `normalize_node_key` is now Unicode-aware. CJK node names work correctly. Previously, byte-slicing broke CJK node names.
-
-### See Also
-
-- [Gateway RPC `workspace.*`](/docs/en/gateway/methods/workspace) — full RPC
-- [Gateway RPC `projects.*`](/docs/en/gateway/methods/workspace#projects) — project store
-- [Cluster](/docs/en/architecture/cluster) — node-key normalization
+- [Configuration](/docs/en/getting-started/configuration) — `config.toml` full field reference
+- [Agent Runtime](/docs/en/concepts/agent-runtime) — How the agent uses workspace state
+- [Messages](/docs/en/concepts/messages) — Session storage and message persistence
+- [Extensions](/docs/en/concepts/extensions) — Plugin layout and discovery
+- [Discovery](/docs/en/concepts/discovery) — Scan strategy and on-demand MCP / tool discovery
+- [Daemon](/docs/en/concepts/daemon) — Log rotation and the `ALEPH-BOOT` marker
+- [Architecture Overview](/docs/en/architecture/overview) — System-level view of the storage layer
+- [Gateway RPC `workspace.*`](/docs/en/gateway/methods/workspace) — Full RPC
+- [Gateway RPC `projects.*`](/docs/en/gateway/methods/workspace#projects) — Project store
+- [Cluster](/docs/en/architecture/cluster) — Node-key normalization

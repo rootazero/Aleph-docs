@@ -1,213 +1,91 @@
 ---
 title: "部署"
-description: "在 macOS、Linux、Docker 或反向代理后部署 Aleph"
+description: "以前台进程、系统服务或 TLS 反向代理运行 Aleph"
 ---
 
-本指南涵盖了在生产环境中运行 Aleph 的最常见方式——从简单的前台进程到完全托管的系统服务，再到带有 TLS 的反向代理。
-
-## 本地开发
-
-运行 Aleph 最简单的方式是直接从命令行：
+## 前台运行
 
 ```bash
-# 前台运行（Ctrl+C 停止）
-cargo run --bin aleph-server
-
-# 或使用 just
-just dev
+aleph-server doctor
+aleph-server start
 ```
 
-网关默认监听 `ws://127.0.0.1:18790`。
+Gateway 默认监听 `127.0.0.1:18790`，WebSocket endpoint 为 `/ws`。
 
-### 作为系统服务（service 子命令）
+## 系统服务
 
-`aleph-server` 自带 `service` 子命令，可一键安装为系统服务：
+`service install` 会生成当前平台的用户级服务描述、启用服务并立即启动：
 
 ```bash
-# 安装并启动（launchd / systemd-user / Task Scheduler）
 aleph-server service install
-aleph-server service start
-
-# 查看状态 / 启用自启 / 卸载
 aleph-server service status
+```
+
+支持的管理动作：
+
+```bash
 aleph-server service enable
+aleph-server service disable
 aleph-server service uninstall
 ```
 
-`service install` 会在 macOS 上写 `~/Library/LaunchAgents/com.aleph.daemon.plist`、在 Linux 上写 `~/.config/systemd/user/aleph.service`、在 Windows 上注册一个 Task Scheduler 任务。默认开箱即用就是「登录时启动」。
+不存在 `aleph-server service start` 子命令。安装器使用当前可执行文件的绝对路径，并由系统服务管理器运行 `aleph-server start`。
 
-## macOS — launchd 服务
+| 平台 | 服务描述 |
+|------|----------|
+| macOS | `~/Library/LaunchAgents/ai.aleph.server.plist` |
+| Linux | `~/.config/systemd/user/aleph-server.service` |
+| Windows | 用户登录触发的 Task Scheduler 任务 |
 
-如果更喜欢手工创建 plist（与 `service install` 输出相同）：
-
-### 创建 plist
-
-创建 `~/Library/LaunchAgents/com.aleph.daemon.plist`：
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.aleph.daemon</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/aleph-server</string>
-        <string>start</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>RUST_LOG</key>
-        <string>info</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.aleph/logs/aleph.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.aleph/logs/aleph-error.log</string>
-</dict>
-</plist>
-```
-
-### 管理服务
+Linux 日志与状态：
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.aleph.daemon.plist
-launchctl start com.aleph.daemon
-launchctl list | grep com.aleph
-launchctl stop com.aleph.daemon
-launchctl unload ~/Library/LaunchAgents/com.aleph.daemon.plist
+systemctl --user status aleph-server.service
+journalctl --user -u aleph-server.service -f
 ```
 
-## Linux — systemd 服务
+在部分 Linux 发行版上，开机前无登录会话时需要启用 linger：
 
 ```bash
-mkdir -p ~/.config/systemd/user
+sudo loginctl enable-linger "$USER"
 ```
 
-```ini title="~/.config/systemd/user/aleph.service"
-[Unit]
-Description=Aleph AI Assistant Gateway
-After=network-online.target
-Wants=network-online.target
+优先使用 `service install`，不要复制包含固定二进制路径的手写 plist 或 systemd unit。
 
-[Service]
-Type=simple
-ExecStart=%h/.cargo/bin/aleph-server start
-Restart=on-failure
-RestartSec=5
-Environment=ALEPH_HOME=%h/.aleph
-Environment=RUST_LOG=info
+## 直接启用原生 TLS
 
-# 资源限制
-MemoryMax=1G
-MemoryHigh=512M
-CPUQuota=80%
+远程访问必须使用安全传输。无需反向代理时，可启用进程内 TLS：
 
-# 安全加固
-NoNewPrivileges=true
-ProtectHome=read-only
-ReadWritePaths=%h/.aleph
+```toml
+[gateway]
+host = "0.0.0.0"
+port = 18790
+allow_insecure_remote = false
 
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=default.target
+[gateway.tls]
+enabled = true
+# cert_path = "/path/to/cert.pem"
+# key_path = "/path/to/key.pem"
+# san = ["aleph.example.com"]
 ```
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable aleph
-systemctl --user start aleph
-systemctl --user status aleph
-sudo loginctl enable-linger $USER     # 即使没有活跃会话也运行
-journalctl --user -u aleph -f
-```
-
-## Docker 部署
-
-### Dockerfile
-
-```dockerfile title="Dockerfile"
-FROM rust:1.95-bookworm AS builder
-
-WORKDIR /build
-COPY . .
-
-RUN cargo install wasm-bindgen-cli
-RUN apt-get update && apt-get install -y npm
-
-RUN cargo build -p alephcore --bin aleph-server --release
-
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libsqlite3-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /build/target/release/aleph-server /usr/local/bin/aleph-server
-
-RUN useradd -m -s /bin/bash aleph
-USER aleph
-
-RUN mkdir -p /home/aleph/.aleph/logs
-
-EXPOSE 18790
-
-ENTRYPOINT ["aleph-server"]
-```
-
-### Docker Compose
-
-```yaml title="docker-compose.yml"
-services:
-  aleph:
-    build: .
-    container_name: aleph
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:18790:18790"
-    volumes:
-      - aleph-data:/home/aleph/.aleph
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - RUST_LOG=info
-
-volumes:
-  aleph-data:
-```
-
-```bash
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
-docker compose up -d
-docker compose logs -f aleph
-```
-
-## 环境变量
-
-| 变量 | 描述 | 默认 |
-|----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Anthropic API 密钥 | — |
-| `OPENAI_API_KEY` | OpenAI API 密钥 | — |
-| `GOOGLE_AI_API_KEY` | Google AI API 密钥 | — |
-| `OPENROUTER_API_KEY` | OpenRouter API 密钥 | — |
-| `ALEPH_HOME` | 覆盖配置目录 | `~/.aleph` |
-| `ALEPH_MASTER_KEY` | 加密密钥用于密钥保险库 | — |
-| `RUST_LOG` | 日志级别（`trace`/`debug`/`info`/`warn`/`error`） | `info` |
-
-API 密钥也可以通过配置文件设置。环境变量优先级更高。
+`cert_path` 与 `key_path` 为空时会生成自签名证书。远程客户端连接 `wss://<host>:18790/ws`，Panel 首次连接通过 TOFU 审批证书。
 
 ## 反向代理
 
-如果你将 Aleph 暴露在网络中，请将其放在反向代理后面以进行 TLS 终止和访问控制。网关使用 WebSocket，因此请确保你的代理支持 WebSocket 升级。
+反向代理需要转发 HTTP 页面和 `/ws` 的 WebSocket upgrade。Gateway 本身可以保持环回监听：
 
-> **真实客户端 IP**：在反向代理后面时，在 `[gateway] trusted_proxy` 中列出代理地址，让网关解析真实客户端 IP（容量限制、速率限制、审计、连接认证都依赖此）。详见 [网关协议](/docs/zh/gateway/protocol#trust-proxy--real-client-ip)。
+```toml
+[gateway]
+host = "127.0.0.1"
+port = 18790
+
+[gateway.trusted_proxy]
+enabled = true
+trusted_ips = ["127.0.0.1", "::1"]
+```
+
+只有 `trusted_ips` 中的直接对端才能提供可信的 `X-Forwarded-For` 与 `X-Forwarded-Proto`。
 
 ### Nginx
 
@@ -217,7 +95,7 @@ upstream aleph_gateway {
 }
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name aleph.example.com;
 
     ssl_certificate     /etc/letsencrypt/live/aleph.example.com/fullchain.pem;
@@ -226,24 +104,14 @@ server {
     location / {
         proxy_pass http://aleph_gateway;
         proxy_http_version 1.1;
-
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-
         proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
     }
 }
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/aleph /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ### Caddy
@@ -254,101 +122,46 @@ aleph.example.com {
 }
 ```
 
-Caddy 自动处理 TLS 与 WebSocket 升级——无需额外配置。
+## 容器
+
+当前源码树没有维护 Dockerfile 或 Compose 文件，因此本页不把示例容器配方声明为官方支持的部署产物。自建镜像时至少需要：
+
+1. 使用 Rust 1.95+ 构建 `aleph-server`；
+2. 持久化 `ALEPH_HOME`；
+3. 将容器内 `[gateway].host` 设为 `0.0.0.0`；
+4. 只在宿主机环回地址发布端口，或在前方部署 TLS 代理；
+5. 显式运行 `aleph-server start`。
+
+## 验证与监控
 
 ```bash
-sudo caddy reload --config /etc/caddy/Caddyfile
+aleph-server status
+aleph-server gateway call health
 ```
 
-## 自签名 TLS（无反向代理）
+文件日志位于 `~/.aleph/logs/`，实际文件名由当前日志配置决定。系统服务优先查看 launchd、journald 或 Task Scheduler 的状态与日志。
 
-Aleph 也可以不通过反向代理，直接在进程内终止 TLS：
+## 备份
 
-```toml
-[gateway]
-port = 18790
-bind = "0.0.0.0"
+最稳妥的方法是停止写入后备份整个 `ALEPH_HOME`。至少保留：
 
-[gateway.tls]
-# cert 与 key 留空 → 自动生成自签名证书
-# SAN 自动覆盖本机非环回接口 IP；漂移时原子 regen
-# cert = "/etc/letsencrypt/live/aleph.example.com/fullchain.pem"
-# key  = "/etc/letsencrypt/live/aleph.example.com/privkey.pem"
-```
+- `config.toml` 与 `defaults.toml`
+- `data/`、`memory/` 与 `artifacts/`
+- 用户安装的 `skills/` 与 `plugins/`
 
-配置后网关监听 `wss://`；远程客户端首次连接时 Panel 弹出 TOFU（指纹 + SAN）审批，审批后本地固定。
+不要依赖旧文档中的固定数据库文件名；以当前运行版本实际创建的目录为准。
 
-> **默认失败关闭**：在非环回绑定上，TLS 默认开启且 plaintext 拒绝。当 `allow_insecure_remote = false` 时，明文连接远程客户端会被网关拒绝。
+## 安全检查
 
-## HTTPS 和 TLS
-
-- **反向代理**：处理证书续期，允许同一主机提供其他服务；适合大多数部署
-- **原生自签名**：适合内部 / Tailnet / VPN；零基础设施依赖
-- **用户提供证书**：若已有企业 CA 颁发的证书，配置 `cert` + `key` 即可
-
-## 监控和健康检查
-
-### 健康端点
-
-```bash
-curl http://localhost:18790/health
-# HTTP 200 + 状态信息
-```
-
-在 Docker Compose、systemd 或监控工具中使用此端点。
-
-### 日志轮转
-
-在 systemd 中，journald 自动处理轮转。Aleph 自身也支持 day-boundary 自动轮转（在 `[logging]` 中调整）。对于其他部署，配置 logrotate：
-
-```txt title="/etc/logrotate.d/aleph"
-/home/aleph/.aleph/logs/*.log {
-    daily
-    rotate 14
-    compress
-    delaycompress
-    missingok
-    notifempty
-}
-```
-
-## 备份策略
-
-需要备份的关键数据位于 `~/.aleph/`：
-
-| 路径 | 内容 | 优先级 |
-|------|----------|-------|
-| `aleph.toml` | 所有配置 | 高 |
-| `memory/` | 记忆数据库 + 笔记 | 高 |
-| `sessions/` | 会话数据库 | 中 |
-| `plugins/` | 已安装插件 | 低（可重新安装） |
-| `artifacts/` | 工件存储（交付物） | 中 |
-| `ops.log` | 签名操作账本 | 高 |
-| `logs/` | 应用日志 | 低 |
-
-```bash
-# 每天备份配置与会话
-0 3 * * * tar -czf ~/backups/aleph-$(date +\%Y\%m\%d).tar.gz \
-    ~/.aleph/aleph.toml \
-    ~/.aleph/memory/ \
-    ~/.aleph/sessions/
-```
-
-## 安全检查清单
-
-在将 Aleph 暴露在网络之前：
-
-- [ ] **绑定地址** — 除非需要外部访问，否则将 `gateway.bind` 设置为 `"127.0.0.1"`
-- [ ] **认证** — 启用 `gateway.require_auth = true`
-- [ ] **TLS** — 远程访问始终使用 `wss://`（自签名 + TOFU，或反向代理）
-- [ ] **防火墙** — 只开放 443 端口（通过反向代理），永不要直接暴露 18790
-- [ ] **主密钥** — 设置 `ALEPH_MASTER_KEY` 以加密密钥保险库
-- [ ] **白名单** — 配置 `channels.telegram.allow_from` / `channels.discord.allow_guilds` 以限制访问
-- [ ] **执行等级** — 默认 `ask`；远程客户端连接建议保持 `ask`
-- [ ] **签名账本** — 启用 `agents.signing_keys = true` 以便操作可回放验证
+- 仅本机使用时保持 `gateway.host = "127.0.0.1"`
+- 远程访问使用原生 TLS 或可信 TLS 反向代理
+- 保持 `allow_insecure_remote = false`
+- 使用 `aleph-server pair` 生成单次配对票据，不在 URL 中传播共享 token
+- 保持 `[sandbox.command_policy]` 硬底，并按风险选择 `exec_tier`
+- 配置通道 allowlist 与配对策略
 
 ## 下一步
 
-- [配置](./configuration) — `aleph.toml` 的完整参考
-- [安全](/docs/zh/security/overview) — 深入的安全模型
-- [Gateway 协议](/docs/zh/gateway/protocol) — WebSocket JSON-RPC API
+- [配置](./configuration) —— 当前配置结构
+- [安全](/docs/zh/security/overview) —— 安全模型
+- [Gateway 协议](/docs/zh/gateway/protocol) —— WebSocket JSON-RPC API

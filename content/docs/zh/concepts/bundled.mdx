@@ -1,90 +1,160 @@
 ---
-title: "捆绑内容"
-description: "编译时嵌入的官方技能和插件，在启动时提取到磁盘，具有基于版本的更新检测。"
+title: "内置内容（bundled）"
+description: "编译时嵌入的官方技能 / 插件 / 模板，启动时按版本比较提取到 `~/.aleph/bundled/`，并拒绝 symlink 植入。"
 ---
 
-`bundled` 模块管理在编译时嵌入 Aleph 二进制文件的官方技能和插件。启动时，如果捆绑版本比已安装的版本更新，则将这些内容提取到 `~/.aleph/`。
+`bundled` 模块把官方技能、插件、模板在编译期嵌进 Aleph 二进制（`include_dir!`），启动时按 `bundled_version` 比较 `~/.aleph/bundled/manifest.json` 后再决定是否重提取。整个流程是「自包含分发 + 用户内容保护 + 启动期轻量检查」，不依赖外部下载。
 
 ## 设计理念
 
-1. **自包含分发** —— 官方内容与二进制文件一起发布，无需外部下载
-2. **版本感知更新** —— 仅当二进制文件的捆绑版本更新时才发生提取
-3. **用户内容保护** —— 捆绑提取跳过会覆盖用户自定义的文件
-4. **幂等提取** —— 多次运行安全；部分失败不会更新版本
+1. **自包含分发** — 官方内容与二进制一起发布，运行时**不联网**，离线 / 防火墙后也能完成安装。
+2. **版本感知更新** — 仅当 `manifest.bundled_version < BUNDLED_VERSION` 才重新提取，重复启动零代价。
+3. **用户内容保护** — `SkillOrigin::User / Local / Github` 在提取时被跳过，永远不会被二进制覆盖。
+4. **幂等** — 部分失败不更新 `manifest.bundled_version`，下次启动自动重试。
+5. **零网络** — `bundled.sync` RPC（CLI / 工具 / Hub 按钮）只把磁盘上已嵌入的内容与 `~/.aleph/bundled/` 对账。
 
-## 工作原理
+---
 
-```
-编译时                          启动时
-───────────                     ───────
+## 工作流程
+
+```text
+编译时                                  启动时
+──────────                             ───────
 skills/ ──► include_dir! ──► binary ──► extract_bundled_content()
 plugins/                                │
-                                        ▼
-                                  ~/.aleph/skills/
-                                  ~/.aleph/plugins/
+templates/                             ▼
+                                  ~/.aleph/bundled/manifest.json
+                                  ├── skills/<name>/SKILL.md
+                                  ├── plugins/<id>/
+                                  └── templates/<name>.md
 ```
+
+`bundled_version` 字符串与服务器发布版本绑死（`build.rs` 把 `ALEPH_VERSION` 写进 `BUNDLED_VERSION` 常量）。`extract_bundled_content` 是启动钩子，跑在 `bin/aleph-server/commands/start/helpers.rs:320` 的 `start` 命令里。
+
+---
 
 ## 嵌入内容
 
 ```rust
-/// 官方技能目录树，在编译时嵌入
-pub static BUNDLED_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills");
-
-/// 官方插件（市场），在编译时嵌入
+pub static BUNDLED_SKILLS: Dir  = include_dir!("$CARGO_MANIFEST_DIR/skills");
 pub static BUNDLED_PLUGINS: Dir = include_dir!("$CARGO_MANIFEST_DIR/plugins");
+pub const  BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
 
-/// 与服务器发布绑定的版本
-pub const BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
+pub const OFFICIAL_SKILLS_REPO:  &str = "https://github.com/rootazero/Aleph-skills";
+pub const OFFICIAL_PLUGINS_REPO: &str = "https://github.com/rootazero/Aleph-plugins";
 ```
 
-## 提取逻辑
+`include_dir!` 编译期把整个目录树压成二进制常量；启动时 `extract_bundled_content` 把它写到 `~/.aleph/bundled/skills/` 与 `~/.aleph/bundled/plugins/<id>/`。**首次启动额外做一次 first-run clone**：从 `OFFICIAL_SKILLS_REPO` / `OFFICIAL_PLUGINS_REPO` 拉 `main` 分支到 `~/.aleph/cache/aleph-skills-checkout` 与 `~/.aleph/cache/aleph-plugins-checkout`，优先以克隆结果为底，再以嵌入快照兜底 —— 克隆失败不阻塞启动。
 
-1. **检查清单** —— 从 `~/.aleph/skills/` 读取 `manifest.json`
-2. **比较版本** —— 如果 `manifest.bundled_version == BUNDLED_VERSION` 则跳过提取
-3. **提取技能** —— 将嵌入的技能复制到 `~/.aleph/skills/`
-4. **提取插件** —— 将嵌入的插件复制到 `~/.aleph/plugins/cache/aleph-official/`
-5. **更新清单** —— 仅在成功提取后写入新版本
+---
 
-### 用户内容保护
+## 提取流程（`src/bundled/extractor.rs`）
 
-提取技能时，系统检查 `SkillOrigin`：
+1. **读 manifest** — `~/.aleph/bundled/manifest.json`；不存在则新建空 manifest。
+2. **首轮 bootstrap** — manifest 为空时调 `sync_official_now(SyncKind::All)`，把官方仓库最新 `main` 拉下来，**`skills` 写成功且 `plugins` 失败也视为部分成功**，留下 `manifest.bundled_version` 与嵌入版本对齐。
+3. **版本比较** — `manifest.bundled_version == BUNDLED_VERSION` 跳过重新提取（节省时间）；否则进入 4。
+4. **目录 swap** —
+   - **skills**：逐个 `include_dir!` 子目录写到 `~/.aleph/bundled/skills/<name>/`；`SkillOrigin::User / Local / Github` 跳过（**`Official` 才覆盖**）。
+   - **plugins**：用 `swap_dir_into_place`（`temp → remove-if-exists → rename`）把临时目录原子替换 `~/.aleph/bundled/plugins/cache/aleph-official/`。Unix 上 `ENOTEMPTY` / Windows 上 `AlreadyExists` 都被吃掉。
+5. **更新 manifest** — 全成功后写 `manifest.bundled_version = BUNDLED_VERSION`；部分失败**不写**（下次启动自动重试）。
 
-- **Official** —— 可以通过捆绑提取更新
-- **Custom/User** —— 跳过以防止覆盖用户修改
+`sync_official_with_urls` 是可注入 URL 的纯函数变体（接收 `skills_url` / `plugins_url`），让测试可以挂本地 git 仓库，避开网络。
 
-## 清单格式
+---
 
-```json
-{
-  "bundled_version": "0.9.1",
-  "skills": [
-    {
-      "name": "git-commit",
-      "version": "1.0.0",
-      "origin": "official"
+## 用户内容保护（`SkillOrigin`）
+
+```rust
+pub enum SkillOrigin { Official, Local, Github }
+```
+
+`extract_skills` 遍历 `BUNDLED_SKILLS.dirs()` 时对每个子目录查 manifest：
+
+| `manifest[entry].source` | 行为 |
+|--------------------------|------|
+| `Official`（同 `BUNDLED_VERSION`） | 覆盖（更新官方内容） |
+| `Local`（用户手放 / `note_manage` 创建） | 跳过，绝不覆盖 |
+| `Github`（`skill_install` 从 GitHub URL 安装） | 跳过，绝不覆盖 |
+
+`reconcile(skills_dir)` 反向扫描磁盘：未在 manifest 里的目录视为 `Local`，**不会**因为本次二进制升级被升级成 `Official`。manifest 持久化是 `BTreeMap`（不是 `HashMap`），保证 JSON 输出字节确定。
+
+---
+
+## 拒绝 symlink 植入
+
+26.7.21+（commit `6e625c407` 合并的 hardening 系列）：所有「清理临时目录」与「删除过时文件」路径都改用 `symlink_metadata` 而非 `metadata`，避免 symlink TOCTOU：
+
+```rust
+// extract_plugins 的临时目录清理
+if let Ok(meta) = tmp_dir.symlink_metadata() {       // 不是 metadata()
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&tmp_dir)?;
     }
-  ]
+}
+
+// prune_stale_entries
+let ft = match entry.file_type() { /* 不调用 */ }   // 改用 symlink_metadata()
+// copy_tree_with_prune
+if !ft.is_symlink() {                                   // 显式排除 symlink
+    keep.insert(e.file_name());
 }
 ```
 
-## 安全
+攻击场景：恶意仓库写入一个指向 `~/.aleph/data/loop_graph.db` 的 symlink 进 skills 目录，下次 `extract_bundled_content` 把它 `remove_dir_all`（追到目标路径）会删掉图数据库。`symlink_metadata` 只看 symlink 自身属性，**不解析**目标，避开这种 TOCTOU 攻击载体。
 
-- **零 unwrap** —— 所有错误通过 `if let Err` / `match` / `?` 处理
-- **目录创建** —— `create_dir_all` 带错误日志记录
-- **BTreeMap** —— 确定性 JSON 输出（无 HashMap 排序问题）
-- **无锁** —— 纯文件系统操作，无并发问题
+---
+
+## `bundled.sync` RPC 与 CLI
+
+`bundled.sync` 是显式刷新入口（`src/gateway/handlers/bundled_sync.rs`）：
+
+| 参数 | 值 | 行为 |
+|------|------|------|
+| `kind = "skills"` | 仅 skills | clone `OFFICIAL_SKILLS_REPO` → 提取 |
+| `kind = "plugins"` | 仅 plugins | clone `OFFICIAL_PLUGINS_REPO` → 提取 |
+| `kind = "all"` | 默认 | 两者都 |
+
+响应：`{ ok: true, skills: bool, plugins: bool }`。返回 `Err` 是网络 / 提取 / manifest 写盘任一环节失败的细粒度原因，handler 把字符串原样 `INTERNAL_ERROR` 回给调用方。`cron_manage(action="list")` 配合 `run_count=0` 可作为「bundled 同步是否真的发生」的探针（`governance_metrics` 也读这一对）。
+
+`aleph skills sync` 与 `aleph plugin sync` CLI 子命令接 `SyncKind` 的两个非 `All` 变体，返回同样的 `(skills_ok, plugins_ok)` 元组打印到 stderr。
+
+---
+
+## 安全与提取路径
+
+| 路径 | 写时机 | 反 symlink 保护 |
+|------|--------|------------------|
+| `~/.aleph/bundled/manifest.json` | 每次提取后唯一可能写 | 写盘前 `read_to_string` → `serde_json::from_str` 校验；损坏 manifest 视为「首次启动」，走 bootstrap 路径 |
+| `~/.aleph/bundled/skills/<name>/` | 每次 `Official` 提取 | `remove_file` / `remove_dir_all` 之前用 `symlink_metadata` 确认是普通文件 / 目录 |
+| `~/.aleph/bundled/plugins/cache/aleph-official/` | 同上 | 同上 |
+| `~/.aleph/cache/aleph-{skills,plugins}-checkout/` | 首次启动或 `bundled.sync` 显式调用 | 已是临时目录，删除时仍走 `symlink_metadata` |
+
+`SKILL.md` 提取时按字节复制（`include_dir` 内的 `DirEntry::contents()`），**不**做 Markdown 解析 —— skill 解析是 LLM 读时的责任。`create_dir_all` 调用都先 `symlink_metadata` 检查父目录是否被换成了 symlink，避免 symlink-privesc 攻击。
+
+---
 
 ## 关键源文件
 
-- `src/bundled/mod.rs` —— 嵌入内容声明
-- `src/bundled/extractor.rs` —— 提取逻辑
-- `src/bundled/manifest.rs` —— 清单解析和序列化
+- `src/bundled/mod.rs` — 模块入口，`BUNDLED_SKILLS` / `BUNDLED_PLUGINS` / `BUNDLED_VERSION` / `OFFICIAL_*_REPO` 常量；re-export `extract_bundled_content` / `sync_official_now` / `SyncKind` / `SyncReport`
+- `src/bundled/extractor.rs` — 嵌入 + 磁盘两路：磁盘路径走 `extract_skill_tree_from_dir`（来自 git checkout），嵌入路径走 `extract_skills` / `extract_plugins`；`swap_dir_into_place` 原子替换
+- `src/bundled/sync.rs` — `clone_or_update`，libgit2 拉 / 硬重置 `main`；`update_existing` 调 `git fetch + reset --hard`
+- `src/bundled/manifest.rs` — `InstallRegistry` / `SkillEntry` / `SkillOrigin::{Official, Local, Github}`；`reconcile` 反向同步磁盘与 manifest
 
-## 另请参阅
+---
 
-- [技能系统](/docs/concepts/skill-system) —— 技能架构
-- [扩展系统](/docs/concepts/extension-system) —— 插件架构
-- [配置](/docs/concepts/configuration) —— 配置文件位置
+## 与 `skills.install` / `plugin.install` 的区别
+
+| 维度 | bundled（本文） | `skills.install` / `plugin.install` |
+|------|----------------|--------------------------------------|
+| 内容来源 | 编译时嵌入的官方仓库 / `OFFICIAL_*_REPO` | 用户提供的 GitHub URL / 本地路径 |
+| 写入路径 | `~/.aleph/bundled/{skills,plugins}/` | `~/.aleph/skills/`、用户级 `~/.aleph/plugins/<id>/` |
+| 升级触发 | 启动时版本比较 + 显式 `bundled.sync` | 显式 `install` 调用 |
+| 覆盖规则 | 仅 `Official` 覆盖 | 用户级；`Local` / `Github` 标记的内容只在该用户自己的层级覆盖 |
+| 用户接管 | 同名 `Local` 文件被跳过 | 同名 `Official` 文件**仍**被覆盖（用户显式选了这个） |
+| 删除 | 通过 `uninstall` / manifest 重写 | 通过 `uninstall` |
+| 离线 | 完全自包含 | 安装需联网拉仓库 |
+
+简单记：bundled = 编译期自带的、只读内置；install = 用户级、显式可控。
 
 ---
 
@@ -92,11 +162,11 @@ pub const BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
 
 ### `bundled.sync` RPC
 
-26.7.x 新增 `bundled.sync` RPC——把内置内容与磁盘同步，跨工作空间一致。
+26.7.x 新增 `bundled.sync` RPC —— 把内置内容与磁盘同步，跨工作空间一致。`SyncKind` 三态（`skills` / `plugins` / `all`，默认 `all`），`spawn_blocking` 包裹避免在 `gateway/execution_engine/run_loop` 主线程上拉 git（libgit2 全是阻塞 IO）。
 
 ### 符号链接拒收
 
-26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接——避免解压阶段植入的攻击载体。
+26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接 —— 避免解压阶段植入的攻击载体。所有 `remove_*` / `prune_*` 路径都改用 `symlink_metadata` 确认目标类型后才动手；`copy_*` 路径显式跳过 symlink 入口。
 
 ### 完整路径
 
@@ -104,6 +174,9 @@ pub const BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
 
 ### 见另请参阅
 
-- [技能](/docs/zh/concepts/skills) — 用户级技能
+- [技能](/docs/zh/concepts/skills) — 用户级技能（`SKILL.md` 形态）
 - [扩展](/docs/zh/concepts/extensions) — 用户级插件
+- [配置](/docs/zh/concepts/configuration) — `~/.aleph/` 目录布局
 - [网关 RPC `bundled.*`](/docs/zh/gateway/methods/skills) — 协议
+- [官方技能源仓库](https://github.com/rootazero/Aleph-skills) — `OFFICIAL_SKILLS_REPO`
+- [官方插件源仓库](https://github.com/rootazero/Aleph-plugins) — `OFFICIAL_PLUGINS_REPO`

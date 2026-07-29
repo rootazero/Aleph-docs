@@ -1,130 +1,162 @@
 ---
 title: "分发器"
-description: "工具注册表、风险评估和语义工具检索（水合）。"
+description: "编排器级 flow 分发——FlowSpec 解析、沙箱配置、HarnessRunner 生成、7 步生命周期。"
 ---
 
 # 分发器
 
-分发器管理工具注册、发现和风险评估。它聚合来自多个源的工具，评估其风险级别，并提供语义检索，以便思考器可以超越静态工具列表发现相关工具。
+分发器就是 `Orchestrator`——网关聊天入口与驱动每个 run 的工具链之间的缝。它**不**建模多步 DAG 计划：旧的 `TaskGraph` 概念已在第 6/7 阶段工具链迁移时退役。今天的编排器职责是：接受任意 channel 发来的 `FlowRequest`，解析正确的 `FlowSpec` + 沙箱 + 工具链，并生成产出 `FlowOutcome` 的 `HarnessRunner` 任务。
 
-**位置**: `src/dispatcher/`
+**位置**: `src/orchestrator/dispatch.rs`
+
+> **注意**：没有 `src/dispatcher/` 目录。历史上的 Dispatcher 模块——`ToolRegistry`、`RiskEvaluator`、`ToolIndex`、`HydrationResult`——已在第 6/7 阶段工具链迁移期间被解散。工具聚合现在位于 `src/tools/registry.rs`，执行器位于 `src/executor/`，工具调用护栏位于 `src/tools/scoped/`。
 
 ---
 
-## 架构
+## 拓扑
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    分发器                             │
-├──────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐│
-│  │ ToolRegistry │  │ RiskEvaluator│  │ ToolIndex    ││
-│  │• 原生        │  │• 风险级别    │  │• 语义        ││
-│  │• MCP         │  │• 评估        │  │  检索        ││
-│  │• 技能        │  │              │  │• 水合        ││
-│  │• 自定义      │  │              │  │              ││
-│  └──────────────┘  └──────────────┘  └──────────────┘│
-└──────────────────────────────────────────────────────┘
+网关（聊天入口、协议适配器）
+   │ FlowRequest { agent_id, input, tool_service, trace_sink, … }
+   ▼
+编排器（解析 AgentDef + FlowSpec，构建 HarnessDeps，分发）
+   │ HarnessRunner::run
+   ▼
+AgentHarness（Think → Act 循环、验证器、压缩）
+   │ 使用
+   ├── SessionService  （每个会话的仅追加事件日志）
+   ├── ToolService     （工具目录 + 执行）
+   ├── Sandbox         （执行环境、能力账本）
+   └── AiProvider      （LLM）
+   │
+   ▼
+FlowOutcome → 网关渲染响应
 ```
 
----
-
-## 工具注册表
-
-`ToolRegistry` 聚合来自多个源的所有可用工具：
-
-| 源 | 类型 | 示例 |
-|--------|------|---------|
-| **原生** | 内置 Rust 工具 | `memory_search`、`note_manage` |
-| **MCP** | 外部 MCP 服务器 | GitHub、filesystem |
-| **技能** | 动态注册的技能 | 自定义技能工具 |
-| **自定义** | 用户定义的工具 | 配置的扩展 |
+所有代理执行——包括子代理生成——都通过编排器 → 工具链路由。工具链内部没有独立的分发器；Think 阶段解析模型的工具调用，Act 阶段执行它们。
 
 ---
 
-## 风险评估
-
-`RiskEvaluator` 为每个工具分配 `RiskLevel`：
+## 编排器状态
 
 ```rust
-pub enum RiskLevel {
-    Safe,       // 只读，无副作用
-    Low,        // 轻微副作用（如文件读取）
-    Medium,     // 中等风险（如文件写入）
-    High,       // 重大风险（如代码执行）
-    Critical,   // 破坏性操作
+pub struct Orchestrator {
+    pub flow_registry: Arc<FlowRegistry>,
+    pub routing_overrides: Arc<RoutingOverrides>,
+    pub default_routing: Arc<HashMap<AgentId, FlowId>>,
+    pub session_service: Arc<dyn SessionService>,
+    pub sandbox_factory: SandboxFactory,
+    pub harness: Arc<dyn HarnessRunner>,
+    pub subagent_routing: Option<ProviderChain>,
+    pub agent_registry: Option<Arc<AgentRegistry>>,
+    active_sessions: Arc<Mutex<HashSet<String>>>,
+}
+
+#[async_trait]
+pub trait HarnessRunner: Send + Sync {
+    async fn run(
+        &self,
+        session_key: String,
+        spec: FlowSpec,
+        input: FlowInput,
+        sandbox: Arc<dyn Sandbox>,
+        event_tx: broadcast::Sender<FlowStreamEvent>,
+        cancel: CancellationToken,
+        tool_service: Option<Arc<dyn ToolService>>,
+        trace_sink: Option<Arc<dyn TraceSink>>,
+        interaction_manifest: Option<InteractionManifest>,
+        workspace_override: Option<PathBuf>,
+        max_iterations_override: Option<u32>,
+        transient_context: Option<String>,
+        think_level: Option<ThinkLevel>,
+        envelope: TurnEnvelope,
+        model_directive: Option<SessionModelPref>,
+    ) -> Result<FlowOutcome, FlowError>;
 }
 ```
 
+`Orchestrator::with_subagent_routing` 与 `with_agent_registry` 在启动时挂上 provider chain 与共享 agent registry，让生成的子代理看到用户自定义 agent 和故障转移链。
+
 ---
 
-## 工具索引（语义检索）
+## 七步分发
 
-`ToolIndex` 启用语义工具发现。系统不仅依赖工具名称和描述，还可以基于用户查询的语义含义检索工具。
+`Orchestrator::dispatch` 是固定序列（设计 §6）。每一步只做一件事；失败即短路调用。
+
+| # | 步骤 | 源码 |
+|---|------|------|
+| 1 | 由显式 `flow_id` 或按 agent 路由解析 `FlowSpec` | `flow_registry.resolve` / `resolve_flow_id` |
+| 2 | 强制深度闸门（`MAX_FLOW_DEPTH`） | `resolver::depth_guard` |
+| 3 | agent 查找下放到 `HarnessRunner`（它持有 `AgentRegistry`） | — |
+| 4 | 解析会话 key + 获取每个会话的锁 | `resolver::resolve_session` + `active_sessions` |
+| 5 | brain 选择下放到 `HarnessRunner`（`ProviderRegistry` 在它那里） | — |
+| 6 | 配置沙箱（per-request `sandbox_override` 短路工厂） | `sandbox_factory` |
+| 7 | 生成工具链任务；把 event / completion / cancel 接回调用方 | `tokio::spawn(harness.run(...))` |
+
+生成动作还在新任务内部重建 `current_project_root` 与 `current_agent_id` task-locals——`tokio::spawn` 不继承 task-locals，而 per-project 记忆缝（`note_manage`、检索汇编器、会话压缩）以及 agent 范围的技能发现（`~/.aleph/agents/<id>/skills`）都读取这些环境值。工具链显式接收 `workspace_override` 用于 CWD + 提示上下文，但 task-locals 必须重新设置，跨会话工具才能看到正确的作用域。
+
+---
+
+## FlowHandle
 
 ```rust
-pub struct HydrationResult {
-    pub tools: Vec<HydratedTool>,
-    pub level: HydrationLevel,
-}
-
-pub enum HydrationLevel {
-    None,       // 未执行水合
-    Partial,    // 部分工具水合
-    Full,       // 所有相关工具水合
+pub struct FlowHandle {
+    pub session_key: String,
+    pub events: broadcast::Receiver<FlowStreamEvent>,
+    pub completion: oneshot::Receiver<Result<FlowOutcome, FlowError>>,
+    pub cancel: CancellationToken,
 }
 ```
 
-`HydrationPipeline` 协调语义检索：
-1. **目的推断** — 从查询推断用户意图
-2. **工具检索** — 通过语义相似度检索候选工具
-3. **工具元丰富** — 用上下文元数据增强工具定义
+`FlowStreamEvent` 携带实时增量（`Delta`、`Reasoning`、`ToolCallStart`、`ToolCallDone { duration_ms }`、`ContextGauge`、`SafetyBlock`）以及终止事件 `Complete(FlowOutcome)`。`cancel` 把 `CancellationToken` 传播进工具链任务；取消表现为 `FlowError::Cancelled` 与 `TerminateReason::Cancelled`。
 
 ---
 
-## 关键类型
+## FlowOutcome
 
-| 类型 | 用途 | 位置 |
-|------|---------|----------|
-| `ToolRegistry` | 聚合所有工具源 | `src/dispatcher/registry/` |
-| `RiskEvaluator` | 评估工具风险级别 | `src/dispatcher/risk.rs` |
-| `ToolIndex` | 语义工具索引 | `src/dispatcher/tool_index/` |
-| `HydrationResult` | 语义检索结果 | `src/dispatcher/tool_index/` |
-| `ToolDefinition` | 统一工具元数据 | `src/dispatcher/types.rs` |
-| `ToolSource` | 工具来源 | `src/dispatcher/types.rs` |
+```rust
+pub struct FlowOutcome {
+    pub final_text: String,
+    pub iterations: u32,
+    pub tool_calls_made: u32,
+    pub total_tokens: u32,
+    pub hit_limit: bool,                  // TerminateReason 的向后兼容别名
+    pub terminate_reason: TerminateReason,
+    pub duration_ms: u64,
+    pub token_breakdown: TokenBreakdown,
+    pub tool_timeline: Vec<ToolInvocation>,
+    pub estimated_cost: Option<CostEstimate>,
+    pub context_tokens: u32,
+    pub context_window: u32,
+    pub serving_model: Option<String>,
+    pub serving_provider: Option<String>,
+}
+```
+
+`TerminateReason` 区分工具链退出的每一个上限位点：`Completed`、`HitMaxIterations`、`ContextBudgetExhausted`、`StallTimeout`、`TurnTimeout { phase }`、`ConsecutiveFailureCap`、`VerifierVeto`、`EmptyResponseExhausted`、`StopHookHalt`、`MaxOutputTokensExhausted`、`ReactiveCompactExhausted`、`Cancelled`，以及 `BudgetExhaustedPartialResult { reason, partial_summary }`——后者在预算上限触发时已经发出有用部分文本时升级（策略由 `escalate_partial_result` 守门）。
+
+`DiminishingReturns` 变体**仅为向后兼容保留**——收益递减的硬停在 R10 下被移除。
+
+---
+
+## Act 阶段并行组
+
+Act（位于 `AgentHarness::act`）按 **资源声明** 给工具调用分桶，**桶内**并发 / **桶间**串行。工具声明以下三种之一：
+
+| 声明 | 含义 |
+|------|------|
+| `Shared` | 与任何其他声明无冲突 |
+| `Exclusive { Global }` | 互斥整个执行 |
+| `Exclusive { Paths }` | 互斥一组特定的文件路径 |
+
+串行模式仅在单调用、并发被禁用、重复调用、或无并行组时回退。两个基于模型**原始**参数被判定为不相交的调用必须保持不相交；任何护栏改写（PII 掩码）会使整批串行化。
+
+跨批去重：在同一批或跨批中重复的 `(name, args)` 复用首次结果。
 
 ---
 
 ## 另请参阅
 
-- [执行器](./executor) — 工具执行引擎
-- [工具链](./harness) — Think→Act 循环
-- [工具架构](./tools) — 工具开发
-
----
-
-## 26.7.x 补充
-
-### 资源声明并发
-
-26.7.x Act 阶段按**资源声明**分桶并行：
-
-- 工具声明 `Shared` / `Exclusive{Global}` / `Exclusive{Paths}` 三态
-- **桶内**并发、**桶间**串行
-- 串行模式仅在单调用 / 并发禁用 / 重复调用 / 无并行组时回退
-
-### 跨批次去重
-
-相同 `(name, args)` 在一个批次或跨批次的二次调用复用首次结果。
-
-### 资源声明三态
-
-- `Shared` —— 不冲突
-- `Exclusive{Global}` —— 独占整个执行
-- `Exclusive{Paths}` —— 独占特定路径
-
-### 详见
-
-- [工具架构](/docs/zh/architecture/tools) — 工具生命周期
-- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 资源声明
-- [内置工具](/docs/zh/concepts/builtin-tools) — 工具集
+- [工具链](./harness) — Think→Act 循环 + `HarnessRunner::run` 实现
+- [工具架构](./tools) — 工具目录 + `ToolService` 契约
+- [团队](./teams) — 团队分发器把 loop-graph 治理节点与多代理分发融合

@@ -5,7 +5,7 @@ description: "AgentDef 和 FlowSpec 解析、HarnessDeps 组装，以及分发�
 
 # 编排器
 
-编排器是**网关**（聊天入口、协议适配器）和 **AgentHarness**（Think→Act 循环）之间的桥梁。它解析代理的配置，组装执行依赖项，并分发流程。
+编排器是**网关**（聊天入口、协议适配器）和 **AgentHarness**（Think→Act 循环）之间的桥梁。它接收 `FlowRequest`，组装执行上下文，并通过 `HarnessRunner` trait 分发到 Phase 4 的 `AgentHarness`。编排器把"路由"和"执行"切开：网关只关心前者，`AgentHarness` 只关心后者。
 
 ## 在架构中的角色
 
@@ -16,91 +16,127 @@ description: "AgentDef 和 FlowSpec 解析、HarnessDeps 组装，以及分发�
 ┌─────────────┐
 │  编排器      │
 │              │
-│ • 解析       │
-│ • 构建       │
-│ • 分发       │
+│ • 解析 FlowSpec / FlowInput │
+│ • 构造 SessionLock + 频道事件 │
+│ • 分发到 HarnessRunner::run  │
 └──────┬───────┘
-       │ HarnessRunner::run
+       │ HarnessRunner::run (返回 FlowOutcome)
        ▼
 ┌─────────────┐
-│   工具链     │
+│   AgentHarness (Think→Act) │
 └─────────────┘
 ```
 
 **位置**: `src/orchestrator/`
 
+- `mod.rs` —— 公共重导出 + 模块声明
+- `dispatch.rs` —— `Orchestrator` / `FlowRequest` / `FlowHandle` / `FlowOutcome` / `HarnessRunner` trait
+- `harness_bridge/` —— `AgentHarnessRunner`（生产 `HarnessRunner` 实现）
+- `flow_spec.rs` —— 声明式 `FlowSpec` / `FlowInput` / `BrainRef` / `SandboxKind` / `SessionStrategy` / `FlowOverrides`
+- `flow_registry.rs` / `resolver.rs` —— 路由解析 + session 解析
+- `sandbox_factory.rs` —— `WorkspaceSandbox` / `DenyAllSandbox` / `WorkspaceBuilder`
+- `deps_builder.rs` —— 启动期 provider chain / context budget / strategy planner 等依赖装配
+- `loader.rs` / `presets/` / `errors.rs` / `flow_run_tool.rs` / `summary_format.rs`
+
 ---
 
-## AgentDef 解析
+## 边界：编排器 ≠ 工具链
 
-`AgentDef` 定义代理的行为——其模型、可用工具、系统提示和个性。编排器从以下位置解析它：
+编排器只负责：
 
-- **静态配置** — `aleph.toml` 或 `.aleph/agent.toml`
-- **动态覆盖** — 每个请求的参数（如 `model`、`thinking`）
-- **身份上下文** — 所有者与访客权限
+1. **解析** —— `FlowSpec`（TOML 声明式）+ `FlowInput`（`Prompt` / `Messages` / `History` / `Multimodal` / `Resume`）+ 来自 `FlowRequest` 的运行时覆盖。
+2. **装配** —— 选 `Arc<dyn AiProvider>`（按 `BrainRef::Default` / `Preferred` / `Strict`）、构造 `Arc<dyn Sandbox>`（按 `SandboxKind::Workspace` / `None`）、注册 `SessionLockGuard`（防同 session 并发）。
+3. **分发** —— 调用 `HarnessRunner::run(...)`，把执行结果包成 `FlowHandle { session_key, events, completion, cancel }` 返回给网关。
 
-解析后的 `AgentDef` 作为 `FlowSpec` 的一部分传递到流程中。
+编排器**不做**推理、不调 LLM、不调工具；这些都是 `AgentHarness`（Phase 4）的工作。`HarnessDeps` 把这些能力以 `Arc<dyn Trait>` 形式注入工具链，但**结构定义与字段组装都在 `src/harness/deps.rs`**，编排器只持有引用并按需创建 `AgentHarness`。
 
 ---
 
 ## FlowSpec 解析
 
-`FlowSpec` 定义单个请求的执行流程：
+`FlowSpec`（声明式，TOML 加载）是单个流程的执行规格：
 
 | 字段 | 说明 |
 |-------|-------------|
-| `agent_id` | 目标代理标识符 |
-| `input` | 用户消息或命令 |
-| `identity` | IdentityContext（所有者 / 访客 / 匿名） |
-| `abort_signal` | 取消令牌 |
-| `tool_filter` | 可选工具白名单 / 黑名单 |
-| `context_budget` | 令牌预算覆盖 |
+| `id` | 流程 ID |
+| `description` | 流程用途说明 |
+| `agent` | 目标 `AgentId` |
+| `brain` | `BrainRef`：`Default` / `Preferred { provider }` / `Strict { provider, model }` |
+| `sandbox_kind` | `None` / `Workspace` |
+| `session_strategy` | `Reuse` / `Fresh` / `Child { parent_session_key? }` |
+| `priority` | 调度优先级（0-255，默认 128） |
+| `overrides` | `FlowOverrides { max_iterations, context_mode, extra_system_prompt }` |
 
-编排器将请求级覆盖与解析后的 `AgentDef` 合并以生成最终的 `FlowSpec`。
+`FlowRequest`（运行时）把请求级覆盖与声明式 `FlowSpec` 合并，并携带 `tool_service` / `trace_sink` / `interaction_manifest` / `sandbox_override` / `workspace_override` / `max_iterations_override` / `transient_context` / `think_level` / `envelope` / `model_directive` 等可空字段，供 `HarnessRunner` 实现按需覆盖默认行为。
 
 ---
 
-## HarnessDeps 组装
+## HarnessDeps（Phase 4 注入）
 
-解析 `AgentDef` 和 `FlowSpec` 后，编排器构建 `HarnessDeps` —— 工具链运行时的完整依赖包：
+`HarnessRunner` 实现把 `Arc<dyn HarnessRunner>::run(...)` 的入参转换为 `HarnessDeps`（定义见 [`src/harness/deps.rs`](../../../../../../../Aleph/src/harness/deps.rs)），再交给 `AgentHarness::new`。当前所有依赖字段的形态（仅展示选项类，强制字段如 `session` / `tools` / `llm` 在源码中）：
 
 ```rust
 pub struct HarnessDeps {
-    pub session: Arc<dyn SessionService>,       // 仅追加历史
-    pub tools: Arc<dyn ToolService>,            // 工具目录 + 执行
-    pub sandbox: Arc<dyn Sandbox>,              // 执行环境、能力账本
-    pub llm: Arc<dyn AiProvider>,               // LLM 提供商
-    pub stop_hooks: Option<Arc<Vec<Arc<dyn StopHookHandler>>>>, // 可选停止钩子
-    pub context_budget: Option<Arc<Mutex<ContextBudget>>>,      // 可选压力传感器
-    pub context_compactor: Option<Arc<ContextCompactor>>,       // 可选基于 LLM 的压缩器
-    pub skill_prefetcher: Option<Arc<SkillPrefetcher>>,         // 可选技能发现
-    pub trace_sink: Option<Arc<dyn TraceSink>>,                 // 可选可观察性接收器
-    pub system_prompt: Option<String>,          // 可选系统提示覆盖
-    pub max_iterations: Option<usize>,          // 可选硬迭代上限
-    pub power: Option<Arc<dyn PowerCapability>>, // 可选睡眠抑制器 (macOS)
+    pub session: Arc<dyn SessionService>,
+    pub tools: Arc<dyn ToolService>,
+    pub llm: Arc<dyn AiProvider>,
+    pub robustness_profile: ModelRobustnessProfile,
+
+    pub verifier_chain: Option<Arc<VerifierChain>>,     // Think→Act 之间验证
+    pub context_budget: Option<Arc<Mutex<ContextBudget>>>,
+    pub context_compactor: Option<Arc<ContextCompactor>>,
+    pub preflight_pipeline: Option<Arc<PreflightPipeline>>,
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
+    pub system_prompt: Option<String>,
+    pub system_prompt_parts: Option<Vec<SystemPromptPart>>, // 稳定/动态分片
+    pub recall_context: Option<String>,                  // 仅本轮的尾部 recall
+    pub chain_context: ChainContext,                     // 子代理深度
+
+    pub guardrails: Option<Arc<GuardrailRegistry>>,      // 输入/输出/工具守卫
+    pub max_iterations: Option<usize>,
+    pub power: Option<Arc<dyn PowerCapability>>,         // macOS 睡眠抑制
+    pub stall_config: Option<StallConfig>,
+    pub consecutive_failure_cap: Option<usize>,
+    pub turn_timeout: Option<Duration>,
+    pub turn_budget: Option<Arc<TurnResultBudget>>,      // 工具结果三层预算
+    pub result_store: Option<Arc<ToolResultStore>>,
+    pub session_epoch_registrar: Option<Arc<dyn SessionEpochRegistrar>>,
+    pub tool_signal_sink: Arc<dyn ToolSignalSink>,
+    pub in_flight_tool_calls: Option<Arc<InFlightToolCalls>>,
+    pub parallel_tool_concurrency: Option<usize>,
 }
 ```
 
-所有依赖项都注入为 `Arc<dyn Trait>`（或 `Option<Arc<...>>` 用于可选功能），允许测试替身和运行时交换。
+`Arc<dyn Trait>`（或 `Option<Arc<...>>`）模式让测试替身和热重载（`default_provider`）成为可能：`AgentHarnessRunner` 持有 `Arc<dyn DefaultProviderHandle>`，每次 `run()` 都重新解析当前默认 provider，UI 切换立即生效。
 
 ---
 
 ## 分发流程
 
 ```
-FlowRequest { agent_id, input, identity, ... }
+FlowRequest { agent_id, input, channel, ...overrides... }
      │
      ▼
-解析 AgentDef + FlowSpec
+Orchestrator::dispatch
+   • 解析 FlowSpec (TOML) + FlowInput
+   • 选 AiProvider (BrainRef) + Sandbox (SandboxKind)
+   • SessionLockGuard 进入
      │
      ▼
-构建 HarnessDeps
+HarnessRunner::run(session_key, spec, input, sandbox, events,
+                   cancel, tool_service_override?, trace_sink?,
+                   interaction_manifest?, workspace_override?,
+                   max_iterations_override?, transient_context?,
+                   think_level?, envelope?, model_directive?)
      │
      ▼
-HarnessRunner::run(flow, deps) → FlowOutcome
+FlowHandle { session_key, events, completion, cancel }
+     │
+     ▼
+FlowOutcome → 网关渲染响应
 ```
 
-`HarnessRunner::run` 函数取得 `FlowRequest` 和 `HarnessDeps` 的所有权，驱动 Think→Act 循环完成，并返回包含最终响应、流事件和任何错误的 `FlowOutcome`。
+`HarnessRunner` trait 接受以上 13 个参数（`src/orchestrator/dispatch.rs::HarnessRunner::run`），把控制权交给 Phase 4 的 `AgentHarness`；`AgentHarness::run` 返回结构化的 `FlowOutcome`，包含最终文本、token 拆解（cache hit / reasoning）、工具时间线、定价估算（`pricing::CostEstimate`）、`terminate_reason`（精确退出原因，已取代旧的 `hit_limit: bool`）等字段。
 
 ---
 
@@ -108,10 +144,13 @@ HarnessRunner::run(flow, deps) → FlowOutcome
 
 | 类型 | 用途 | 位置 |
 |------|---------|----------|
-| `FlowRequest` | 来自网关的传入请求 | `src/orchestrator/` |
-| `HarnessDeps` | 组装的依赖包 | `src/orchestrator/` |
-| `FlowOutcome` | 执行结果（响应、事件、错误） | `src/orchestrator/` |
-| `HarnessRunner` | 工具链执行的入口点 | `src/harness/` |
+| `FlowRequest` | 来自网关的传入请求 | `src/orchestrator/dispatch.rs` |
+| `FlowSpec` / `FlowInput` / `BrainRef` / `SessionStrategy` | 声明式流程规格 | `src/orchestrator/flow_spec.rs` |
+| `FlowHandle` | 返回给网关的 spawn handle（events / completion / cancel） | `src/orchestrator/dispatch.rs` |
+| `FlowOutcome` / `FlowStreamEvent` / `TerminateReason` | 执行结果（含精确退出原因） | `src/orchestrator/dispatch.rs` |
+| `HarnessRunner` | 执行入口 trait | `src/orchestrator/dispatch.rs` |
+| `AgentHarnessRunner` | 生产 `HarnessRunner` 实现 → `AgentHarness` | `src/orchestrator/harness_bridge/` |
+| `HarnessDeps` | 工具链依赖包（结构定义） | `src/harness/deps.rs` |
 
 ---
 
@@ -136,6 +175,10 @@ HarnessRunner::run(flow, deps) → FlowOutcome
 ### 子代理 scoped tool output
 
 26.7.15+：子 harness 拿到一个**被父会话 scope 的 `ToolResultStore`**——之前 process-wide 导致 silent zero-hit recall。
+
+### 工具链 ratchet 下调到 5008 行
+
+26.7.21+：`DiminishingReturnsDetector` 硬停止被移除（R10 禁止在循环内做完成度判断）；卡住的运行由 `max_iterations` / `ToolLoopVerifier` / 模型自身停手来兜底。当前线预算 ratchet = 5008 行。
 
 ### 详见
 

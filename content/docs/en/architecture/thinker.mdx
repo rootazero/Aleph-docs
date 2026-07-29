@@ -1,15 +1,13 @@
 ---
 title: "Thinker"
-description: "LLM interaction layer, PromptBuilder with 29 layers, section caching, and thinking levels."
+description: "Prompt assembly with 36 layers (19 Stable / 17 Dynamic), cache-zone split, scaffold-byte ratchet, and UnifiedMessage streaming."
 ---
 
 # Thinker
 
-The Thinker is responsible for all LLM interactions and decision making. It is the brain of the Think→Act loop.
+The Thinker owns all LLM interactions and prompt assembly. The sole public entry point is `thinker::PromptBuilder`, which wraps a `PromptPipeline`. The old `agent_loop::PromptBuilder` was deleted during the harness migration (Phase 6/7).
 
 **Location**: `src/thinker/`
-
-The sole public entry point is `thinker::PromptBuilder`, which wraps a `PromptPipeline`. The old `agent_loop::PromptBuilder` was removed during the Harness migration (Phase 6/7).
 
 ---
 
@@ -17,103 +15,109 @@ The sole public entry point is `thinker::PromptBuilder`, which wraps a `PromptPi
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `ProviderRegistry` | `mod.rs` | Model routing and provider resolution |
-| `PromptBuilder` | `prompt_builder/` | Construct prompts from context |
-| `PromptPipeline` | `prompt_pipeline.rs` | Composable prompt assembly engine |
-| `PromptLayer` | `prompt_layer.rs` | Trait for individual prompt layers |
-| `InteractionManifest` | `interaction.rs` | Channel capability awareness |
+| `PromptBuilder` | `prompt_builder/` | Build system prompts for sub-agent and main-loop paths |
+| `PromptPipeline` | `prompt_pipeline.rs` | Composable prompt-assembly engine over a sorted layer list |
+| `PromptLayer` | `prompt_layer.rs` | Trait for individual layers; declares priority / paths / stability |
+| `PromptConfig` | `prompt_builder.rs` | User-tunable prompt knobs (`language`, `extra_files`, …) |
+| `InteractionManifest` | `interaction.rs` | Channel capability awareness (paradigm + capabilities + constraints) |
 | `SecurityContext` | `security_context.rs` | Policy-driven permissions |
-| `ContextAggregator` | `context.rs` | Reconcile interaction and security |
-| `SoulManifest` | `soul.rs` | Identity/personality definition |
-| `IdentityResolver` | `identity.rs` | Layered identity resolution |
-| `MemoryContextProvider` | `memory_context_provider.rs` | Memory retrieval for context injection |
-| `TokenBudget` | `prompt_budget.rs` | Prompt budget enforcement |
+| `ContextAggregator` | `context.rs` | Reconcile interaction + security into `ResolvedContext` |
+| `PromptMode` | `prompt_mode.rs` | `Full` / `Compact` / `Minimal` mode filter |
+| `IdentityFiles` | `identity_files.rs` | Loaded `SOUL.md` / `IDENTITY.md` / `AGENTS.md` / `TOOLS.md` / `HEARTBEAT.md` |
+| `SoulManifest` | `soul.rs` | `SOUL.md` structured parser (used by `identity.get` preview) |
+| `MemoryContextProvider` | `memory_context_provider.rs` | Memory envelope + orientation + recall-message builder |
+| `UnifiedMessage` / `ProviderDelta` | `src/providers/message.rs` | LLM-agnostic message + streaming delta |
+| `MessageAssembler` | `src/providers/message_assembler.rs` | Single reducer that owns the assembled message + strips inline `<think>` live |
 
 ---
 
 ## PromptBuilder
 
 ```rust
-// Standard usage
-let builder = PromptBuilder::new(config);
+// Sub-agent inline prompt (flat string, no cache split)
 let prompt = builder.build_system_prompt(&tools);
 
-// With soul identity
-let prompt = builder.build_system_prompt_with_soul(&tools, &soul, profile);
+// Main-loop prompt split into cacheable Stable prefix + Dynamic suffix
+let prompt = builder.build_system_prompt_cached_with_mode(&tools, &soul, profile, PromptMode::Full);
 
-// Sub-agent usage (replaces old prompt_sections::resolve())
+// Agent definition (sub-agent role header + protocol blocks)
 let prompt = builder.build_for_agent(&agent_def, &tools, &soul);
-
-// Mode + budget control
-let result = builder.build_with_budget(&tools, &soul, profile, PromptMode::Compact, &budget);
 ```
+
+The main-loop path emits a `SystemPromptPart` Stable prefix (cacheable by the LLM provider) and a marker-free Dynamic tail. The Cached path is the production entry point; the Basic path is for inline sub-agent prompts.
 
 ---
 
-## 33 Layers
+## 36 Layers
 
-The prompt system assembles prompts from 33 ordered layers. Layers are split into two zones based on caching eligibility.
+`PromptPipeline::default_layers()` registers **36 layers** in priority order, anchored by `test_default_layers_count` (`assert_eq!(pipeline.layer_count(), 36)`). 19 sit in the **Stable** prefix zone (priority `< 1700`, eligible for section-level caching) and 17 sit in the **Dynamic** suffix zone (priority `>= 1700`, never cached). The split is locked by `stable_layers_come_before_dynamic`.
 
-### Stable Zone (Priorities 50–1600)
+### Stable Zone (Priority < 1700)
 
-Content rarely changes — eligible for section-level caching.
+Content rarely changes — eligible for provider section-level caching.
 
 | Priority | Layer | Notes |
 |----------|-------|-------|
-| 50 | `SoulLayer` | Identity / personality |
+| 50 | `SoulLayer` | `~/.aleph/agents/{id}/SOUL.md` |
 | 55 | `AgentRoleLayer` | Sub-agent role header + protocol blocks |
-| 75 | `ProfileLayer` | Workspace profile overlay |
-| 100 | `RoleLayer` | Base assistant role |
-| 300 | `EnvironmentLayer` | OS, date, working directory |
-| 400 | `RuntimeCapabilitiesLayer` | Python, Node.js, FFmpeg, etc. |
-| 500 | `ToolsLayer` | Tool definitions (text schema) |
-| 501 | `HydratedToolsLayer` | Semantic-retrieval tool definitions |
-| 550 | `ToolUsageGrammarLayer` | Data-driven tool usage conventions |
-| 600 | `SecurityLayer` | Safety / security guidelines |
-| 700 | `ProtocolTokensLayer` | JSON-RPC protocol tokens |
-| 710 | `HeartbeatLayer` | Session keep-alive instructions |
-| 800 | `OperationalGuidelinesLayer` | Operational rules |
-| 900 | `CitationStandardsLayer` | Citation formatting |
-| 1000 | `GenerationModelsLayer` | Available image/video/audio models |
+| 60 | `CuratedMemoryLayer` | Pre-rendered `<CuratedMemory>` + `<UserProfile>` envelope |
+| 70 | `StrategyLayer` | Active StraTA strategy (welded `<strategy>` envelope) |
+| 75 | `ChainContextLayer` | Subagent delegation depth (root ⇒ silent) |
+| 100 | `ProfileLayer` | `AGENTS.md` workspace overlay |
+| 200 | `RoleLayer` | Base assistant role |
+| 300 | `EnvironmentLayer` | Process-invariant half (Stable facts: machine / OS) |
+| 400 | `RuntimeCapabilitiesLayer` | Detected Python / Node / FFmpeg runtimes |
+| 502 | `ToolRuntimeStateLayer` | Snapshot of the 30s-TTL tool-health cache |
+| 600 | `SecurityLayer` | Cross-tool safety posture (Static zone facts only) |
+| 605 | `ProtocolTokensLayer` | Background-paradigm JSON-RPC protocol tokens |
+| 700 | `OperationalGuidelinesLayer` | Background operational rules |
+| 800 | `MultiStepConductLayer` | Autonomous scratchpad planning + interactive progress narration |
+| 810 | `ProviderGuidanceLayer` | `model_behaviors/{family}.md` baseline + delta |
+| 900 | `SessionBudgetLayer` | Resolved per-run `iteration_cap` |
+| 950 | `CitationStandardsLayer` | Citation formatting |
 | 1050 | `SkillInstructionsLayer` | Active skill instructions |
-| 1100 | `SpecialActionsLayer` | Special action syntax |
-| 1200 | `ResponseFormatLayer` | Response structure |
+| 1100 | `SpecialActionsLayer` | Self-correction logging + flagging |
 | 1300 | `GuidelinesLayer` | General guidelines |
-| 1350 | `ThinkingGuidanceLayer` | Structured reasoning guidance |
-| 1400 | `SkillModeLayer` | Strict skill workflow enforcement |
-| 1500 | `CustomInstructionsLayer` | User custom instructions |
-| 1600 | `LanguageLayer` | Response language |
+| 1600 | `LanguageLayer` | `[general] language` configured response language |
 
-### Dynamic Zone (Priorities 1700–1760)
+### Dynamic Zone (Priority ≥ 1700)
 
-Per-request, never cached.
+Per-request content — never cached. 17 layers (pinned by `dynamic_names.len() == 17`).
 
 | Priority | Layer | Notes |
 |----------|-------|-------|
-| 1700 | `InboundContextLayer` | Sender, channel, session metadata |
-| 1704 | `AgentCatalogLayer` | Available sub-agent catalog |
-| 1705 | `McpInstructionsLayer` | MCP server instructions |
-| 1706 | `McpToolIndexLayer` | MCP tool index entries |
-| 1710 | `VoiceModeLayer` | Voice-specific response instructions |
-| 1720 | `RuntimeContextLayer` | Current time, session info |
-| 1730 | `IdentityFilesLayer` | SOUL.md, IDENTITY.md workspace files |
-| 1740 | `MemoryAugmentationLayer` | Dual-path memory injection |
-| 1750 | `SessionContextGuideLayer` | Compressed session context guidance |
-| 1760 | `SessionResumeLayer` | Session resume context |
+| 1701 | `RuntimeContextLayer` | Per-run varying half (cwd, time) — separate from `EnvironmentLayer` |
+| 1702 | `ToolRuntimeStateLayer` was 502; moved to Dynamic so probe flips don't invalidate the cached prefix |
+| 1715 | `DoctorRepairHintLayer` | WebRich paradigm + failing doctor check |
+| 1720 | `VoiceModeLayer` | Voice-transcribed turn |
+| 1725 | `McpInstructionsLayer` | Connected MCP server instructions |
+| 1730 | `IdentityFilesLayer` | `IDENTITY.md` / `TOOLS.md` / `HEARTBEAT.md` |
+| 1735 | `ExtraFilesLayer` | `[prompt.extra_files]` |
+| 1740 | `MemoryProtocolLayer` | Cross-tool memory-write guidance |
+| 1750 | `TimerLoopLayer` | Active watch loop status |
+| 1753 | `GraphTopologyLayer` | Loop-graph governance topology |
+| 1754 | `StandingGoalLayer` | Active standing goal |
+| 1755 | `ExecutionPlanLayer` | Active scratchpad plan with at least one item |
+| 1756 | `StrategyPointerLayer` | Strategy guardrails echoed near the read head |
+| 1757 | `SessionContextGuideLayer` | History carrying compaction summaries |
+| 1758 | `OperatingEnvelopeLayer` | Approval tier + usage mode (Dynamic so a composer pill flip does not invalidate the prefix) |
+| 1760 | `AgentCatalogLayer` | Available sub-agent catalog |
+| 1799 | `ProviderGuidanceLayer` runtime delta | Per-request `behavior_name` resolution |
+
+Layers removed as dead injection surfaces: `ToolsLayer` (text-schema fallback; native `tool_use` always wins), `ToolUsageGrammarLayer`, `ThinkingGuidanceLayer`, `GenerationModelsLayer`, `CustomInstructionsLayer`, `InboundContextLayer`, `SessionResumeLayer`, `McpResourceIndexLayer`, `McpToolIndexLayer`, `HydratedToolsLayer`, `SkillModeLayer`, `HeartbeatLayer`, `ResponseFormatLayer`, `MemoryAugmentationLayer`. The three R9 ratchets (`reachable_layers`, `scaffold_bytes_ratchet`, `no_sentence_is_stated_twice`, `no_environment_fact_is_stated_twice`) pin the surviving set.
 
 ---
 
 ## Assembly Paths
 
-Each layer declares which paths it participates in. The pipeline filters by path at assembly time.
+`AssemblyPath` has exactly **two** variants — phantom paths are how layers go silently missing, so each variant has one entry point.
 
 | Path | Description |
 |------|-------------|
-| `Basic` | Minimal — config + tool list only |
-| `Hydration` | Tools come from semantic retrieval (`HydrationResult`) |
-| `Soul` | Soul-enriched — includes identity / personality |
-| `Context` | Context-aware — uses `ResolvedContext` |
-| `Cached` | Pre-cached stable prefix |
+| `Basic` | Inline sub-agent prompt — one flat string, no cache split. Entry point: `PromptBuilder::build_system_prompt` (subagent_spawner). |
+| `Cached` | Main-loop prompt — split into Stable cacheable prefix + Dynamic suffix. Entry point: `PromptBuilder::build_system_prompt_cached_with_mode` (harness_bridge::prompt_build). |
+
+The former `Hydration` / `Soul` / `Context` paths were retracted; their last real callers had moved out months earlier and the prompt-side code was unreachable.
 
 ---
 
@@ -121,21 +125,56 @@ Each layer declares which paths it participates in. The pipeline filters by path
 
 | Mode | Behavior |
 |------|----------|
-| `Full` (default) | All 33 layers participate |
-| `Compact` | Excludes 13 heavy layers (`RuntimeContextLayer`, `EnvironmentLayer`, `RuntimeCapabilitiesLayer`, `ProtocolTokensLayer`, `HeartbeatLayer`, `OperationalGuidelinesLayer`, `CitationStandardsLayer`, `GenerationModelsLayer`, `SkillInstructionsLayer`, `SpecialActionsLayer`, `GuidelinesLayer`, `ThinkingGuidanceLayer`, `SkillModeLayer`) |
-| `Minimal` | Only 5 core layers: `SoulLayer`, `ToolsLayer`, `HydratedToolsLayer`, `ResponseFormatLayer`, `LanguageLayer` |
+| `Full` (default) | All 36 layers participate |
+| `Compact` | Excludes 15 heavy Stable layers; keeps Dynamic facts per request |
+| `Minimal` | Only the configured response language + soul + curated memory |
 
 ---
 
-## Section-Level Caching
+## Scaffold-Byte Ratchet
 
-`execute_cached()` caches the output of every `LayerStability::Stable` layer after the first call. Dynamic layers always recompute. ~23 of 33 layers are Stable.
+`prompt_contract::scaffold_bytes_ratchet` measures the always-on prompt scaffold across all 5 paradigms and enforces `SCAFFOLD_CEILING_BYTES = 5_913` (2026-07-26, WebRich worst case). The ceiling is the max across paradigms rather than a single chosen one because no paradigm dominates:
 
-```rust
-pipeline.invalidate("soul");    // Invalidate one layer by name
-pipeline.invalidate_all();      // Clear all cached sections
-pipeline.cache_stats();         // CacheStats { hits, misses, entries }
 ```
+Background  4,904 B  (default daemon paradigm)
+CLI         ~5,140 B
+Messaging   ~5,200 B
+WebRich     5,913 B   ← ceiling (Background-only + MultiStepConductLayer + DoctorRepairHintLayer)
+Embedded    ~5,000 B
+```
+
+The byte budget is measured by `aleph-server prompt-size --path cached --paradigm <paradigm>` against a `production_shaped` `LayerInput` that fills the four always-present fields (`runtime_context`, `approval_tier`, `session_mode`, `sandbox_summary`) so the ratchet's view matches the bytes the gateway actually sends.
+
+---
+
+## Session Mode
+
+`chat` / `work` / `code` is a user-selected static partition of the tool **presentation** surface, orthogonal to permissions (approvals stay with the exec tier). Each mode adds one cache-stable prompt line at `OperatingEnvelopeLayer` so a mode flip moves the byte from the cached prefix into the Dynamic suffix.
+
+---
+
+## UnifiedMessage and ProviderDelta
+
+`UnifiedMessage` is the LLM-agnostic intermediate message representation; `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallDelta`). A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live. The harness bridge (`src/harness/agent/think.rs`) wraps a borrowed `HarnessCallback` into a `DeltaSink` so live token deltas reach the gateway callback as the provider streams them.
+
+---
+
+## `tool_search` Meta-Tool
+
+26.7.7+ progressive tool disclosure: the request carries a **static** core tool set + the full tool catalog name list, with `tool_search` as a meta-tool for on-demand schema loading. The model drives discovery 100%; the harness does no message-content-based tool filtering (R10 "5 don'ts" #2). The static partition also lives in `src/tools/scoped/` (allowlist / permission Deny / health-gate `retain` chains), which is in the tool layer, not the harness.
+
+---
+
+## R10's Three Ratchets
+
+| Test | File | Guards |
+|------|------|--------|
+| `reachable_layers` | `src/thinker/prompt_contract.rs` | Every registered layer either contributes under some paradigm or is on `CONDITIONALLY_SILENT` with the session content that wakes it |
+| `scaffold_bytes_ratchet` | `src/thinker/prompt_contract.rs` | Always-on prompt ≤ `SCAFFOLD_CEILING_BYTES` across all paradigms |
+| `no_sentence_is_stated_twice` | `src/thinker/prompt_contract.rs` | Cross-layer sentence-level duplication is forbidden |
+| `no_environment_fact_is_stated_twice` | `src/thinker/prompt_contract.rs` | The same environment fact (OS, cwd, time, …) must not be stated by two layers |
+
+`aleph-server prompt-size` reports the actual byte count and per-layer breakdown for any paradigm.
 
 ---
 
@@ -152,21 +191,7 @@ pub enum ThinkingLevel {
 }
 ```
 
----
-
-## Provider Fallback
-
-When a provider doesn't support extended thinking, Aleph falls back gracefully:
-
-```
-User requests: thinking = High
-    │
-    ├─▶ Claude Opus → ✓ Native extended thinking
-    │
-    ├─▶ GPT-4o → ✗ No support → Fallback to o1
-    │
-    └─▶ Gemini → ✗ No support → Use thinkingPreface prompt
-```
+The level travels on `FlowRequest::think_level` and is forwarded into `HarnessRunner::run`, which puts it on `HarnessDeps` so every `RequestPayload` carries it. Providers that lack native extended thinking degrade gracefully — OpenAI's o-series path takes the level natively, Gemini uses a `thinkingPreface` prompt nudge.
 
 ---
 
@@ -177,63 +202,28 @@ LLM Response Stream
     │
     ▼
 ┌─────────────────────────────────────────┐
-│ BlockStateManager                        │
-│   • Track current block type             │
-│   • Detect block boundaries              │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│ BlockReplyChunker                        │
-│   • Split into semantic chunks           │
-│   • Handle code blocks, lists, etc.      │
-└─────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│ BlockCoalescer                           │
-│   • Merge small chunks                   │
-│   • Emit complete blocks                 │
-└─────────────────────────────────────────┘
-    │
-    ▼
-Event: StreamChunk { content, block_type }
+│ Provider (HTTP / native SDK)            │
+│   • Stream chunks → ProviderDelta       │
+│   • TextDelta  → live preview           │
+│   • ThinkingDelta → reasoning channel   │
+│   • ToolCallDelta → fold in assembler   │
+└────────────────────┬────────────────────┘
+                     │
+                     ▼
+           MessageAssembler (single reducer)
+             • Owns the in-progress message
+             • Strips inline `<think>` live
+             │
+             ▼
+       AssistantMessage (SessionEvent)
 ```
+
+The harness `CallbackSink` bridges a borrowed `HarnessCallback` into the provider layer's `DeltaSink`; text and thinking deltas are forwarded for live preview, tool-call and bookkeeping deltas are folded by the provider's `DeltaCollector` and surface through the assembled `ProviderResponse`.
 
 ---
 
 ## See Also
 
 - [Harness](./harness) — Think→Act loop
-- [Dispatcher](./dispatcher) — Task orchestration
-- [Memory System](./memory) — Context augmentation
-
----
-
-## 26.7.x Addendum
-
-### Layers Reorganized
-
-26.7.x: ~28 finer layers replace the legacy 6-layer mental model (in `src/thinker/layers/`). See [Prompt System](/docs/en/concepts/prompt-system) and [Thinker (Concept)](/docs/en/concepts/thinker).
-
-### R9's Two Rulers
-
-`reachable_layers` / `scaffold_bytes_ratchet` / `no_sentence_is_stated_twice` — `aleph-server prompt-size` reports the actual byte count.
-
-### `session_mode` Lines
-
-Each session mode adds one cache-stable prompt line.
-
-### UnifiedMessage and ProviderDelta
-
-`UnifiedMessage` is the LLM-agnostic intermediate message representation; `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallDelta`). A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live.
-
-### `tool_search` Meta-Tool
-
-26.7.7+ progressive tool disclosure — static core tool set + full tool catalog + `tool_search` meta-tool for on-demand schema loading.
-
-### See Also
-
-- [Thinker (Concept)](/docs/en/concepts/thinker)
-- [Prompt System](/docs/en/concepts/prompt-system)
-- [Architectural Redlines R9](/docs/en/philosophy/redlines#r9-intelligence-lives-in-the-prompt)
+- [Dispatcher](./dispatcher) — Flow dispatch + harness runner
+- [Memory](./memory) — Memory envelope + recall-message injection

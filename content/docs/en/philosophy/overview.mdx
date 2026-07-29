@@ -91,9 +91,9 @@ This is not a philosophical stance — it is an architectural guarantee. No tele
 
 | Axis | Range | Default | Adjustable via |
 |------|-------|---------|---------------|
-| `exec_tier` (execution tier) | ask / auto / full | ask | Settings → Policies; `agents.defaults.exec_tier` |
-| `thinking` (thinking level) | off / minimal / low / medium / high / xhigh | medium | Settings → Policies; `agents.defaults.thinking` |
-| `session_mode` (session mode) | chat / work / code | work | composer pill; `agents.defaults.session_mode` |
+| `exec_tier` (execution tier) | ask / auto / full | auto | Settings → Policies; composer pill |
+| `thinking` (thinking level) | off / minimal / low / medium / high / xhigh | minimal | Settings → Policies |
+| `session_mode` (session mode) | chat / work / code | work | composer pill |
 
 The three are **orthogonal**:
 
@@ -111,7 +111,7 @@ But autonomy has boundaries. The three-tier execution permissions (Ask / Auto / 
 
 ### Security
 
-Security is not an afterthought — it is baked into the execution pipeline (R1–R7 are its concrete form). Every tool call goes through guards that check the configurable allowlist and approval rules. The default posture is **fail-closed**: if a tool execution isn't explicitly allowed, it requires human approval; if a policy file is missing, the system refuses authorization.
+Security is not an afterthought — it is baked into the execution pipeline (R1–R7 are its concrete form). Every tool call goes through guards that check the configurable allowlist and approval rules. The default posture is **fail-closed**: if a tool execution isn't explicitly allowed, it requires human approval. The `[sandbox.command_policy]` hard floor cannot be disabled by any tier — it is an independent hard filter (see the EXEC_TIER section of [CLAUDE.md](https://github.com/rootazero/Aleph/blob/main/CLAUDE.md) for details).
 
 See [Security](/docs/en/security/overview).
 
@@ -126,7 +126,7 @@ Aleph supports multiple extension mechanisms:
 
 ### Many-Channel Presence
 
-The Gateway protocol (~265 JSON-RPC methods) provides a unified control plane for every interface:
+The Gateway protocol — defined by the handler registry in `src/gateway/handlers/mod.rs` — provides a unified control plane for every interface:
 
 - CLI for development workflows
 - Desktop app for focused work sessions

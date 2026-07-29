@@ -1,188 +1,260 @@
 ---
-title: "Markdown Parsing"
-description: "Markdown code fence parsing and text formatting utilities for streaming output processing."
+title: "Markdown Parsing & Text Utilities"
+description: "Streaming-safe Markdown code-fence parser and shared UTF-8-safe text utilities across modules."
 ---
 
-The `markdown` and `utils` modules provide parsing utilities for Markdown content and general-purpose text formatting functions used across the codebase.
+`src/markdown` and `src/utils` provide two kinds of pure-function capabilities: the former splits a streaming / incomplete Markdown block at a safe chunking point; the latter provides shared string, JSON, path, and config-deserialization helpers. Both are lock-free, IO-free, and free of business judgment (R4/R7/R10 pure functions).
 
 ## Design Philosophy
 
-1. **Streaming-friendly** — Fence parsing handles incomplete Markdown from streaming LLM output
-2. **Lightweight** — Minimal dependencies, focused scope
-3. **UTF-8 safe** — All string operations respect character boundaries
+1. **Streaming-friendly** — `parse_fence_spans` uses a `str::lines()`-style per-line scan; half-written / closing-fence-missing input stays stable.
+2. **UTF-8 safe** — every char-bounded truncation uses `char_indices().nth()` / `chars().take()`; never slice by bytes.
+3. **Light dependencies** — no `nom` / `pulldown-cmark`; a single `regex::Regex` cached in a `LazyLock` covers the needs.
 
 ---
 
-## Markdown Fence Parsing
+## Code-Fence Parser (`src/markdown/fences.rs`)
 
-The `markdown::fences` module parses code fence blocks in Markdown:
+`markdown::fences` parses code fence blocks (`` ``` `` and `~~~`), returning a `FenceSpan` list with byte-accurate start/end offsets:
 
 ```rust
 pub struct FenceSpan {
-    pub start_line: usize,
-    pub end_line: usize,
-    pub fence_char: char,  // '`' or '~'
-    pub info_string: String,
+    start: usize,    // opening fence line start byte offset (private)
+    end:   usize,    // closing fence line start byte offset (text.len() when unclosed)
+    marker: String,  // "```" / "~~~~" etc.
+    indent: String,  // 0–3 spaces of indentation
+    language: Option<String>,  // first whitespace-delimited token
+    info: String,    // whole info string
 }
 ```
 
-### Parsing Functions
+API:
 
-```rust
-pub fn parse_fence_spans(text: &str) -> Vec<FenceSpan>
-```
+| Function | Behavior | Streaming scenario |
+|----------|----------|-------------------|
+| `parse_fence_spans(text)` → `Vec<FenceSpan>` | Full parse; unclosed fences get `end = text.len()`, info preserved whole | One-shot full parse |
+| `find_fence_at(text, line)` → `Option<&FenceSpan>` | Find the fence containing a given line number | Line-indexed lookup |
+| `is_safe_fence_break(text, pos)` → `bool` | Is `pos` outside every fence (note: `contains` is open-interval) | Decide whether a chunk point is safe |
+| `get_fence_split(text, pos)` → `Option<FenceSplit>` | Returns the close / reopen lines needed to split at `pos` | Returns `FenceSplit { close_line, reopen_line }` |
 
-Parses all code fence blocks in the text, handling:
-- Backtick fences (```)
-- Tilde fences (~~~)
-- Info strings (language identifiers)
-- Nested fences (longer closing fence than opening)
-- Unclosed fences (extends to end of text)
+### Key boundaries
 
-```rust
-pub fn find_fence_at(
-    text: &str,
-    line: usize,
-) -> Option<&FenceSpan>
-```
+- **Closing fence longer than opening**: ````js` ... ````...` ` is a valid closure; the `equals` count is not the test.
+- **Backticks inside text bodies**: a literal `` ` `` inside a string body does **not** open a new fence; only the line start (0–3 spaces + fence marker) counts.
+- **Indent matching**: the closing fence's indent must be **no greater** than the opener's; deeper indent = invalid closure.
+- **Half-character rejection**: a partial multi-byte character in CJK paths will not be padded with a space (uses the same `char_indices` truncation as `utils/text_format::truncate_text`).
+- **Empty string and empty fence**: returns `[]`, never errors.
 
-Finds the fence span containing a specific line.
+### Practical hints for streaming boundaries
 
-```rust
-pub fn is_safe_fence_break(
-    text: &str,
-    pos: usize,
-) -> bool
-```
-
-Checks whether it's safe to break the text at a given position (not inside a fence).
-
-```rust
-pub fn get_fence_split(
-    text: &str,
-) -> FenceSplit
-```
-
-Splits text at a safe boundary, preferring fence boundaries.
+- Chunk at any byte offset where `is_safe_fence_break` returns `true`. When it returns `false`, call `get_fence_split` to get the close / reopen lines and rebuild as `before[..pos] + close_line + "\n\n" + reopen_line + "\n" + after[pos..]`.
+- Both `\n` and `\r\n` are recognized as newlines; bare `\r` (legacy Mac) is treated as a single-line document — `parse_fence_spans("foo\r```\r")` returns `[]`. This is a documented degradation path; R7 does not fix it.
 
 ---
 
-## Text Formatting
+## Text Formatting (`src/utils/text_format.rs`)
 
-The `utils::text_format` module provides text manipulation utilities:
+`utils::text_format` provides three pure functions + one timestamp:
 
 ```rust
-pub fn truncate_text(
-    text: &str,
-    max_chars: usize,
-) -> String
+#[must_use]
+pub fn format_timestamp(ts: i64) -> String;          // → "2024-01-15 00:00:00 UTC"
+#[must_use]
+pub fn truncate_text(text: &str, max_chars: usize) -> String;
+#[must_use]
+pub fn escape_markdown(text: &str) -> String;
 ```
 
-Truncates text to a maximum character count using `char_indices().nth()` for UTF-8 safety.
+`truncate_text` uses `char_indices().nth(max_chars)` to hit a character boundary; 0 chars → empty, longer than input → returned unchanged. `escape_markdown` backslash-escapes `[`, `]`, `(`, `)`, `*`, `_`, `~`, `` ` ``, `\` and the `![` image prefix — **and backslash-escapes literal NUL bytes** so content is never dropped. An older implementation used `\0` as a "no-prefix" sentinel then filtered, which silently dropped literal NULs; that was fixed.
 
 ---
 
-## JSON Extraction
+## JSON Extraction (`src/utils/json_extract.rs`)
 
-The `utils::json_extract` module extracts JSON from text:
+`utils::json_extract` uses **real brace matching** (a `}` / `{` inside a string does not count) to mine a top-level JSON object out of arbitrary text — for LLM outputs that mix prose with block JSON:
 
 ```rust
-pub fn extract_json_objects(
-    text: &str,
-) -> Vec<&str>
+#[must_use]
+pub fn extract_json_robust(response: &str) -> Option<serde_json::Value>;
 ```
 
-Finds top-level JSON objects in arbitrary text (useful for parsing LLM output that may contain Markdown + JSON).
+Four strategies are tried in order:
+1. Whole response is valid JSON (direct parse).
+2. First ```` ```json ```` fence block.
+3. First generic ```` ``` ```` fence block (only when the body starts with `{` or `[`).
+4. Brace-match the outermost `{...}` block in the prose and parse it.
+
+Strategy 4's `find_matching_brace` explicitly tracks the string state (any character inside `"..."` is treated literally, including `\"`), so stray `}` / `{` inside JSON strings does not break matching.
 
 ---
 
-## Path Utilities
+## Path Utilities (`src/utils/paths.rs`)
 
-The `utils::paths` module provides path manipulation:
-
-```rust
-pub fn get_agent_config_dir(
-    agent_id: &str,
-) -> Result<PathBuf>
-```
-
-Returns the configuration directory for a specific agent, with validation against path traversal (`/`, `\`, `..`, empty strings).
+`utils::paths` is the largest module under `src/utils` (≈700 lines), providing five resolution + validation layers: user home, config / data dirs, agent dir, SQLite paths, skill / plugin dirs:
 
 ```rust
-pub fn expand_tilde(
-    path: &str,
-) -> PathBuf
+#[must_use]
+pub fn get_config_dir() -> Result<PathBuf>;                       // ~/.aleph (ALEPH_HOME override)
+#[must_use]
+pub fn get_data_dir() -> Result<PathBuf>;                        // ~/.aleph/data
+#[must_use]
+pub fn get_memory_db_path() -> Result<PathBuf>;                  // ~/.aleph/memory (auto-created)
+#[must_use]
+pub fn get_note_memory_dir() -> Result<PathBuf>;                 // ~/.aleph/memory/note
+#[must_use]
+pub fn get_agent_config_dir(agent_id: &str) -> Result<PathBuf>;  // ~/.aleph/agents/{id}
+#[must_use]
+pub fn get_skills_dir() -> Result<PathBuf>;                      // ~/.aleph/skills
+#[must_use]
+pub fn get_runtimes_dir() -> Result<PathBuf>;                    // ~/.aleph/runtimes
 ```
 
-Expands `~` to the user's home directory.
+`get_agent_config_dir` explicitly rejects `..` / `/` / `\` / empty strings / NUL bytes before joining; an invalid `agent_id` returns `Err` rather than reaching `create_dir_all` with `../../etc` in the path.
+
+`expand_tilde` only handles the leading `~`; `equivalent` uses `Path::canonicalize` for same-path judgment (falls back to literal comparison when canonicalization fails, TOCTOU-safe); `migrate_legacy_db_files` is a one-shot `~/.aleph/*.db` → `~/.aleph/data/*.db` migration introduced after Spec C, not called proactively.
+
+`get_all_skills_dirs(project_dir)` follows the OpenCode-compatible four-tier priority:
+0. **Agent level** (`~/.aleph/agents/{id}/skills`, only during a run)
+1. **Project level** (`.aleph/skills/`, `.claude/skills/`, walking up to the git root from `project_dir`)
+2. **User level** (`~/.aleph/skills`, `~/.claude/skills`)
+3. **Plugin-shipped** (`~/.aleph/plugins/{p}/skills` + `<plugin_root>/skills` published by `ExtensionManager`)
+
+A same id in a higher-priority directory shadows lower-priority ones. The returned `Vec<PathBuf>` is sorted by priority; the caller uses the first match.
 
 ---
 
-## PII Scrubbing
-
-The `utils::pii` module provides log-safe PII scrubbing (less strict than the gateway `pii` module):
+## PII Scrubbing (`src/utils/pii.rs`)
 
 ```rust
-pub fn scrub_pii(text: &str) -> String
+#[must_use]
+pub fn scrub_pii(text: &str) -> String;
 ```
 
-Accepts false positives (safe for logs, not for LLM API calls).
+`utils::pii` is more aggressive than the gateway-side PII (`src/gateway/pii`): it accepts false positives and is intended for log / telemetry paths where the only requirement is "no raw token leaks into logs". The gateway-side PII is the final pre-LLM filter and is more conservative (a double-false-positive would pollute the prompt). **They are not the same module** — choose by call site, not by appearance.
 
 ---
 
-## OneOrMany
-
-The `utils::one_or_many` module handles serialization of single values or arrays:
+## Config Field Deserialization (`src/utils/one_or_many.rs`)
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum OneOrMany<T> {
     One(T),
     Many(Vec<T>),
 }
 ```
 
-Useful for deserializing config fields that can be either `"value"` or `["value1", "value2"]`.
+No `tag` attribute — single value deserializes to `T`, an array to `Vec<T>`. The intent is to make `voice = "deepgram"` and `voice = ["deepgram", "elevenlabs"]` both legal in the same field.
+
+`Default` is `Many(vec![])` (`is_empty() = true`), so "omitted" and "empty array" behave the same.
+
+---
+
+## SQLite Open (`src/utils/sqlite_open.rs`)
+
+```rust
+#[must_use]
+pub fn open_sqlite_safe(path: &Path) -> rusqlite::Result<Connection>;
+#[must_use]
+pub fn open_sqlite_readonly(path: &Path) -> rusqlite::Result<Connection>;
+```
+
+`open_sqlite_safe` automatically `create_dir_all(parent)` and applies four pragmas:
+- `journal_mode = WAL` (concurrent reads + writer)
+- `busy_timeout = 5000` (5 s wait on lock contention)
+- `synchronous = NORMAL` (safe under WAL)
+- `foreign_keys = ON`
+
+Every `goal_store.db`, `memory.db`, `hub/cache.sqlite`, `loop_graph.db`, and `strategies/` in the daemon goes through this helper; the Spec C lock-safety entry point is **the only** place that constructs a `Connection`.
+
+`open_sqlite_readonly` only sets `busy_timeout`, opens with `SQLITE_OPEN_READ_ONLY`, and is used by doctor / lint paths. **Fail-fast**: a missing file returns `Err`; the doctor treats this as "no graph yet", not a fault.
+
+---
+
+## Atomic I/O (`src/utils/atomic_io.rs` + `src/utils/atomic_write.rs`)
+
+```rust
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()>;     // sync
+pub async fn atomic_write_file(path: &Path, content: &str) -> Result<(), AlephError>;  // async
+```
+
+Both follow the "write to `*.tmp.<rand>` → fsync → rename" three-step pattern, so `read(consumer)` either sees a complete file or the old one, never a half-write. `atomic_write_file` additionally preserves the target's mode bits: atomic overwrite of an existing `0755` file does not silently downgrade it to `0600`. The vault (`secrets.vault`) uses `atomic_io` + `with_file_lock` (an `fs2::FileExt::lock_exclusive` advisory lock) as double protection.
+
+---
+
+## Process Liveness (`src/utils/process_alive.rs`)
+
+```rust
+#[must_use]
+pub fn is_pid_alive(pid: u32) -> bool;
+```
+
+A POSIX `kill(pid, 0)` wrapper (Windows uses `OpenProcess`). The instance-lock guard uses it like this: after acquiring the `flock`, write your pid to the `aleph.lock` sidecar; on release, clear it. Another process reading the sidecar sees "lock held by pid X" and calls `is_pid_alive(X)` to tell whether X is still running — a crashed process's `flock` is released by the OS, so the sidecar's pid is stale; `kill 0` against a dead pid returns `ESRCH`, distinguishing a real holder from a stale entry.
+
+---
+
+## Subprocess Init (`src/utils/no_window.rs`)
+
+```rust
+pub fn no_window(cmd: &mut tokio::process::Command);
+```
+
+When a Windows or macOS GUI app launches, tokio child processes silently inherit a hidden console window (macOS `LSUIElement`, Windows subsystem). Shell scripts in those children that `pause` / `prompt` would block. `no_window` adds `CREATE_NO_WINDOW` (Windows) or `setsid` (Unix) so daemon-spawned children run as pure background processes.
+
+---
+
+## One-Shot Path Check
+
+```rust
+pub fn is_path_within(base: &Path, target: &Path) -> bool;
+```
+
+Pure lexical, no IO (does not call `canonicalize`, avoiding symlink TOCTOU). After normalising `target` (collapsing `..` / `.`), it checks the prefix is a *component-level* prefix of `base`; `Path::strip_prefix` returns `Err` when `base` is not a true prefix — exactly the rejection signal wanted. Is `/skills/demo` a prefix of `/skills/demo2`? **No** — component-level check, not string-prefix substring matching.
 
 ---
 
 ## Safety Properties
 
-- **UTF-8 safe** — `char_indices()` for truncation, `.get(..n)` for slicing
-- **No lock issues** — No Mutex/RwLock in these modules
-- **No `static mut`** — Uses `OnceLock` and `LazyLock`
-- **Path traversal protection** — `get_agent_config_dir` validates against `..` and separators
-- **TOCTOU safety** — `create_dir_all` called directly (idempotent, no existence check)
+- **UTF-8 safe** — `truncate_text` / `char_indices` / `chars().take(n)`, no byte slicing
+- **Path traversal protection** — `get_agent_config_dir` rejects `..` / `/` / `\` / empty / NUL; `is_path_within` rejects string-prefix substring matches
+- **TOCTOU safe** — `open_sqlite_safe` calls `create_dir_all` without an `exists` pre-check; `atomic_write` uses temp + rename; `migrate_legacy_db_files` only moves when source exists and target does not
+- **Lock-poison recovery** — `unwrap_or_else(|e| e.into_inner())` used everywhere; never propagates poison upward
+- **Allow-list** — `is_path_within` is allow-list-shaped (returns `true` to permit), not deny-list
 
 ---
 
-## Code Location
+## Code Locations
 
 **Markdown:**
-- `src/markdown/mod.rs` — Module entry point
-- `src/markdown/fences.rs` — Fence parsing
+- `src/markdown/mod.rs` — module entry, re-exports `fences::{parse_fence_spans, find_fence_at, is_safe_fence_break, get_fence_split, FenceSpan, FenceSplit}`
+- `src/markdown/fences.rs` — `FenceSpan` + `FenceSplit` + the four parser functions
 
 **Utils:**
-- `src/utils/mod.rs` — Module entry point
-- `src/utils/text_format.rs` — Text truncation
-- `src/utils/json_extract.rs` — JSON extraction
-- `src/utils/paths.rs` — Path utilities
-- `src/utils/pii.rs` — Log-safe PII scrubbing
-- `src/utils/one_or_many.rs` — Single/array serialization
-
-## See Also
-
-- [Builtin Tools](./builtin-tools) — Tools that use markdown parsing
-- [PII Protection](./pii-protection) — Gateway-level PII filtering
+- `src/utils/mod.rs` — module entry, re-exports `OneOrMany`
+- `src/utils/text_format.rs` — `format_timestamp` / `truncate_text` / `escape_markdown`
+- `src/utils/json_extract.rs` — `extract_json_robust` + four strategies + `find_matching_brace`
+- `src/utils/paths.rs` — `get_config_dir` / `get_data_dir` / `get_memory_db_path` / `get_note_memory_dir` / `get_agent_config_dir` / `get_skills_dir` / `get_runtimes_dir` / `expand_tilde` / `equivalent` / `get_all_skills_dirs` / `migrate_legacy_db_files`
+- `src/utils/pii.rs` — `scrub_pii`
+- `src/utils/one_or_many.rs` — `OneOrMany<T>` + `OneOrManyIter`
+- `src/utils/sqlite_open.rs` — `open_sqlite_safe` / `open_sqlite_readonly`
+- `src/utils/atomic_io.rs` — `write_atomic` + `with_file_lock` (fs2 exclusive lock)
+- `src/utils/atomic_write.rs` — `atomic_write_file` (async, mode-bit-preserving)
+- `src/utils/process_alive.rs` — `is_pid_alive` + instance lock
+- `src/utils/instance_lock.rs` — `acquire_instance_lock` / `release_instance_lock` + stale detection
+- `src/utils/no_window.rs` — `no_window` (Windows CREATE_NO_WINDOW / Unix setsid)
+- `src/utils/path_within.rs` — `is_path_within` (allow-list, lexical)
+- `src/utils/vault_io.rs` — `VaultIo::new` / `read` / `write` (atomic + locked)
 
 ---
 
 ## 26.7.x Addendum
 
-### `[[wikilink]]` Lifecycle
+### `[[wikilink]]` Lifecycle (complements `memory.mdx`)
 
-26.7.7+ note layer wikilinks:
+26.7.7+ note-layer wikilinks:
 
-- Parse `[[wikilinks]]` (with aliases)
+- Parse `[[wikilinks]]` (with aliases `[Note|alias]`)
 - Resolve through a strategy chain recording provenance (`resolved_by` / `status` / `label`)
 - Rename cascades (including typed relations)
 - Tombstone delete semantics with targeted inbound back-fill
@@ -190,22 +262,26 @@ Useful for deserializing config fields that can be either `"value"` or `["value1
 
 ### CJK Trigram Full-Text Search
 
-26.7.15+ crash-safe index + CJK trigram full-text search.
+26.7.15+ crash-safe index + CJK trigram FTS. `notes_fts` uses `unicode61` tokenization, which treats a contiguous CJK run as a single token; `notes_fts_trigram` uses `trigram` (overlapping 3-char windows) for substring/phrase recall on CJK and other scripts. The two indexes are written / deleted in lockstep.
 
-### Wikilink Supersession
+### `wikilink` Supersession
 
-26.7.15+: `[[wikilink]]` supersession force-surfaces a correcting note — when an outdated note is recalled, the model sees the correct one.
+26.7.15+: a recalled outdated note is superseded — when the model recalls a stale note, the supersession field redirects it to the corrected version (`NoteDrift` writes `stale: true` + `NoteConsolidate` triggers `MERGE` / `ABSORB`).
 
 ### Note-Layer Leiden Refinement
 
-26.7.15+: connected communities via Leiden refinement — clustering, relation-kind edge tinting, contradiction→supersession closure.
+26.7.15+: a Leiden-refined connectivity pass over communities (clustering, relation-kind edge tinting, contradiction→supersession closure) — adds a second community-quality pass on top of the existing Louvain layer.
 
 ### `MARKDOWN_SKILL_AUTHORING.md`
 
-26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM.
+26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM. `utils/markdown.rs` provides the fence parser so a streaming skill description can be safely chunked.
 
 ### See Also
 
-- [Memory System](/docs/en/concepts/memory) — the note layer
-- [Skill System](/docs/en/concepts/skill-system) — `SKILL.md` form
+- [Memory System](/docs/en/concepts/memory) — note layer (complementary to `[[wikilink]]` / Leiden / trigram here)
+- [Skill System](/docs/en/concepts/skill-system) — `SKILL.md` format + tool invocation
 - [Memory Evolution](/docs/en/concepts/memory-evolution) — note layer + dreaming
+- [Builtin Tools](/docs/en/concepts/builtin-tools) — builtin tools that use markdown parsing
+- [PII Protection](/docs/en/concepts/pii-protection) — gateway-level PII filter (vs `utils::pii`: conservatism differs)
+- [Official skills repo](https://github.com/rootazero/Aleph-skills) — Aleph official skills
+- [Official plugins repo](https://github.com/rootazero/Aleph-plugins) — Aleph official plugins

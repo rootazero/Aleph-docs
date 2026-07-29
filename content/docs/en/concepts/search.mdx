@@ -26,7 +26,9 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
-    pub source: String,      // Provider name
+    pub relevance_score: Option<f32>,   // 0.0–1.0, native for Tavily; computed elsewhere
+    pub full_content: Option<String>,   // Tavily deep search only
+    pub provider: Option<String>,
 }
 ```
 
@@ -36,12 +38,17 @@ Configuration for search behavior:
 
 ```rust
 pub struct SearchOptions {
-    pub max_results: usize,
-    pub include_images: bool,
-    pub time_range: Option<TimeRange>,
-    pub safe_search: bool,
+    pub language: Option<String>,        // ISO 639-1
+    pub region: Option<String>,          // ISO 3166-1 alpha-2
+    pub date_range: Option<String>,      // "day" / "week" / "month" / "year"
+    pub safe_search: bool,               // default true
+    pub max_results: usize,              // default 5, capped at 50
+    pub timeout_seconds: u64,            // default 10, validated to ≥ 1
+    pub include_full_content: bool,      // Tavily only
 }
 ```
+
+`SearchOptions` also carries the per-provider canonical mappings (`language` / `region` / `date_range` / `safe_search` → provider-native parameters); adding a provider only extends this mapping table.
 
 ### SearchProvider Trait
 
@@ -55,8 +62,11 @@ pub trait SearchProvider: Send + Sync {
     ) -> Result<Vec<SearchResult>>;
 
     fn name(&self) -> &str;
-    fn test_connection(&self,
-    ) -> Pin<Box<dyn Future<Output = ProviderTestResult> + Send>>;
+    fn is_available(&self) -> bool;
+
+    async fn get_quota(&self) -> Result<QuotaInfo> {
+        Ok(QuotaInfo::unlimited())
+    }
 }
 ```
 
@@ -64,11 +74,15 @@ pub trait SearchProvider: Send + Sync {
 
 ## SearchRegistry
 
-Manages multiple providers with failover:
+Manages multiple providers by named `default_provider` + ordered `fallback_providers`:
 
 ```rust
 pub struct SearchRegistry {
-    providers: Vec<Box<dyn SearchProvider>>,
+    providers: HashMap<String, Arc<dyn SearchProvider>>,
+    default_provider: String,
+    fallback_providers: Vec<String>,
+    test_cache: Arc<Mutex<HashMap<String, (ProviderTestResult, Instant)>>>,
+    web_fetch_fallback: Option<Arc<WebFetchSerpFallback>>,
 }
 
 impl SearchRegistry {
@@ -77,25 +91,19 @@ impl SearchRegistry {
         query: &str,
         options: &SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        // Try each provider in order until one succeeds
-        for provider in &self.providers {
-            match provider.search(query, options).await {
-                Ok(results) => return Ok(results),
-                Err(e) => {
-                    tracing::warn!(
-                        provider = provider.name(),
-                        error = %e,
-                        "Search provider failed, trying next"
-                    );
-                }
-            }
-        }
-        Err(SearchError::AllProvidersFailed)
+        // 1. Try the default_provider
+        // 2. Walk fallback_providers in declared order
+        // 3. If everything failed, try the WebFetch SERP fallback (armed by default)
+        // 4. Still failing: aggregate the error trail
     }
 }
 ```
 
-**Privacy note:** User queries are not included in error messages to prevent accidental logging of sensitive search terms.
+**Error classification:** `classify_search_error()` collapses `AlephError` into `auth` / `rate-limit` / `timeout` / `network` / `cancelled` / `config` / `provider` / `other` so ops can grep the log by kind.
+
+**Aggregated error trail:** when every configured provider fails (including the last-resort WebFetch branch), the final error string is prefixed with `All search providers failed:` and lists each step's `kind` + message — so the operator can see the fallback was actually attempted.
+
+**Privacy note:** the user query text is not included in registry failure messages; per-provider failures are still logged in structured `provider=... kind=...` form for ops grep.
 
 ---
 
@@ -103,12 +111,17 @@ impl SearchRegistry {
 
 | Provider | Self-hosted | API Key | Notes |
 |---|---|---|---|
-| **Tavily** | — | ✅ | AI-optimized search, recommended default |
+| **Tavily** | — | ✅ | AI-optimized search, recommended default; native relevance + deep-search `full_content` |
 | **SearXNG** | ✅ | — | Privacy-first, fully self-hosted |
 | **Brave** | — | ✅ | Privacy + quality balance |
 | **Google CSE** | — | ✅ | Comprehensive coverage |
 | **Bing** | — | ✅ | Cost-effective |
 | **Exa.ai** | — | ✅ | Semantic/neural search |
+| **Jina** | — | ✅ | Neural search |
+| **DuckDuckGo** | ✅ | — | HTML scrape, no key required |
+| **Firecrawl** | — | ✅ | Search + full-content scraping; shares config with fetch |
+
+The `SearchProviderType` enum is the single source of truth; `from_config` uses the `ProviderFactoryRegistry` to instantiate each configured backend, skipping unknown / missing-credential entries with a WARN.
 
 ---
 
@@ -118,14 +131,14 @@ Test configuration without saving credentials:
 
 ```rust
 pub struct SearchProviderTestConfig {
-    pub provider_type: String,  // "tavily", "brave", "searxng", etc.
+    pub provider_type: SearchProviderType,
     pub api_key: Option<String>,
     pub base_url: Option<String>,      // Required for SearXNG
-    pub engine_id: Option<String>,    // Required for Google CSE
+    pub engine_id: Option<String>,     // Required for Google CSE
 }
 ```
 
-Returns `ProviderTestResult` with latency, error type, and success status.
+Returns `ProviderTestResult` with latency, error type, and success status; results are cached for 5 minutes, with failed results never cached.
 
 ---
 
@@ -151,11 +164,12 @@ for result in results {
 
 ## Safety Properties
 
-- **No query leakage** — Error messages use fixed strings, not user queries
-- **Safe truncation** — Latency uses `.min(u32::MAX as u128)` for saturation
-- **No duplicate headers** — `reqwest` handles `Content-Type` automatically
-- **No lock issues** — Uses `unwrap_or_else(|e| e.into_inner())`
-- **No SQL injection** — No database queries
+- **Aggregated errors carry a stable kind label** — `classify_search_error` collapses `AlephError` into a stable kind string so logs can be grepped by kind without parsing free-form messages (never includes the user query text)
+- **Safe truncation** — `latency_ms = elapsed.min(u32::MAX as u128) as u32` saturates latency to `u32`
+- **No lock poisoning** — every `lock()` call uses `unwrap_or_else(|e| e.into_inner())`
+- **max_results cap** — `validated_max_results()` clamps `max_results` to `[1, 50]`
+- **timeout validation** — `validated_timeout()` floors `timeout_seconds` at 1
+- **Test cache only stores successes** — failed results are not cached and are retried on the next call
 
 ---
 
@@ -179,35 +193,27 @@ for result in results {
 
 ### Memory `memory.retrieve_with_trace`
 
-26.7.21+: new `memory.retrieve_with_trace` — real scoring-pipeline trace for the debug panel.
+26.7.x: `memory.retrieve_with_trace` exposes a per-stage scoring trace (implemented at `src/gateway/handlers/memory_config.rs::handle_retrieve_with_trace`), consumed by the debug panel and the governance views.
 
 ### Knowledge Graph
 
-26.7.15+ `note_graph_query`:
+26.7.15+ `note_graph_query` (implemented under `src/memory/notes/`):
 
 - Bidirectional BFS path finding
 - Typed relation edges
 - `[[wikilink]]` supersession that force-surfaces a correcting note
 - CJK trigram full-text search
 - Crash-safe index
-
-### 26.7.27 Vault Panel
-
-- Card view (replaces the old table)
-- Batch-action bar
-- Deep-link anchors
-- Evidence chain (sequence of other notes that cite this note)
-- Cross-agent selection (atomic consistency)
-- Provenance (writer / timestamp / source event)
-- Batch export as a deliverable
-
-### Real Scoring and Hybrid Retrieval
-
-26.7.15+: `ScoringPipeline` wired into the `HybridRetrieval` search flow; `NoiseFilter` integrated into the ingestion pipeline; adaptive retrieval and backup settings added to `MemoryConfig`.
+- Community detection (hand-rolled Louvain, no external crate)
+- Associative memory: 4-signal community-aware recall on the primary retrieval path, plus graph snapshot / cache / insights tables and graph-health insights (isolated / sparse / bridge / surprising) exposed to the LLM
 
 ### Web Fetch
 
-26.6.29+ class of `crawl4ai` / `firecrawl` providers (URL → markdown), vault-stored keys; automatically falls back to the built-in fetch on failure.
+26.6.29+ a category of `crawl4ai` / `firecrawl` fetch providers (URL → markdown), vault-stored keys; automatically falls back to the built-in fetch on failure. The `Firecrawl` search provider reuses its `/v2/search` configuration (date-range mapping + Test Connection).
+
+### Live WebFetch Fallback
+
+26.7.x: `SearchRegistry` may arm a `WebFetchSerpFallback` (DDG mirror scrape) after the default + fallback chain is fully exhausted, controlled by `[search].web_fetch_fallback` (default true). `from_config` skips backends with missing credentials or unknown `provider_type` instead of aborting the load.
 
 ### See Also
 

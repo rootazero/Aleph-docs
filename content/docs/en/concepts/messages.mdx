@@ -7,52 +7,28 @@ Messages are the fundamental unit of communication in Aleph. Whether a user send
 
 ## Message Types
 
-Aleph uses a role-based message model inspired by the LLM chat completion standard, extended with additional types for tool interactions:
+Aleph uses three related but distinct message representations at different boundaries:
 
-| Role | Direction | Description |
-|------|-----------|-------------|
-| `user` | Inbound | Messages from the human user |
-| `assistant` | Outbound | Responses from the AI agent |
-| `system` | Internal | System prompts, environment contracts, identity directives |
-| `tool_call` | Agent to Tools | The agent's request to invoke a specific tool |
-| `tool_result` | Tools to Agent | The output returned by a tool execution |
+1. **`UnifiedMessage`** (`src/providers/message.rs`) — the LLM-agnostic intermediate representation; protocol adapters convert it to OpenAI / Anthropic / Gemini / Ollama native shapes. Three variants: `User { content }`, `Assistant { content }`, `ToolResult { tool_call_id, tool_name, content, is_error }`.
+2. **`MessageContent`** (`src/session/events.rs`) — a message's body inside the `session_events` log; `text` plus optional `blocks: Vec<serde_json::Value>` plus optional `thinking` / `thinking_signature`.
+3. **`AlephEvent`** (`src/event/types.rs`) — the system-wide event-bus payload, covering `InputReceived` / `ToolCallRequested` / `ToolCallStarted` / `ToolCallCompleted` / `ToolCallFailed` / `ToolCallRetrying` / `LoopContinue` / `LoopStop` / `SessionCreated` / `SessionUpdated` / `SessionResumed` / `SessionCompacted` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `AiResponseGenerated` / `PartAdded|Updated|Removed` / `Team*`.
 
-### Message Structure
+### Content Blocks (`UnifiedMessage`)
 
-Each message in a session carries metadata beyond its content:
-
-```rust
-pub struct Message {
-    pub role: Role,
-    pub content: MessageContent,    // Text, structured blocks, or tool payloads
-    pub metadata: MessageMetadata,
-}
-
-pub struct MessageMetadata {
-    pub timestamp: i64,
-    pub source_channel: String,     // "telegram", "cli", "discord", etc.
-    pub session_key: String,        // Session this message belongs to
-    pub run_id: Option<String>,     // Agent run that produced this message
-    pub token_count: Option<u32>,   // Token count for budget tracking
-}
-```
-
-### Content Blocks
-
-Assistant messages can contain multiple content blocks, supporting rich multi-modal responses:
+Assistant messages may carry multiple `ContentBlock`s, supporting rich multimodal responses (`src/providers/message.rs`):
 
 ```json
 {
   "role": "assistant",
   "content": [
-    { "type": "thinking", "text": "Let me analyze this code..." },
+    { "type": "thinking", "thinking": "Let me analyze this code...", "signature": "..." },
     { "type": "text", "text": "Here is the refactored version:" },
-    { "type": "tool_use", "id": "call_1", "name": "file_write", "input": { "path": "main.rs", "content": "..." } }
+    { "type": "tool_call", "id": "call_1", "name": "file_write", "arguments": { "path": "main.rs", "content": "..." }, "thought_signature": null }
   ]
 }
 ```
 
-The `thinking` block type is used for Chain-of-Thought transparency, allowing clients to display the agent's reasoning process when extended thinking is enabled.
+`ContentBlock` has five variants: `Text { text, cache_control? }`, `Json { value }`, `Thinking { thinking, signature? }`, `ToolCall { id, name, arguments, thought_signature? }`, `Image { data, mime_type }`. The `thinking` and `thought_signature` fields are used by providers like Anthropic and Gemini 3 to replay signed blocks verbatim to subsequent turns; providers without signing leave them empty.
 
 ## Message Routing
 
@@ -62,125 +38,124 @@ When a message arrives from any interface, it follows a precise routing path thr
 User sends message (e.g., Telegram)
     │
     ▼
-Interface Layer (Telegram Bot)
-    │ Normalizes to ChannelMessage
+Channel Layer (Telegram Bot → InboundMessage)
+    │ Normalize to InboundMessage { id, channel_id, conversation_id, sender_id, text, attachments, ... }
     ▼
-Gateway: Inbound Router
-    │ Parses JSON-RPC, validates auth
+Gateway: Inbound Router (inbound_router)
+    │ Parse JSON-RPC; auth, pairing, DM/group policy gate
     ▼
-Session Key Resolution
-    │ Determines which session this message belongs to
+SessionKey resolution (src/routing/session_key.rs)
+    │ SessionKey::Main | DirectMessage | Group | Task | Subagent | Ephemeral
     ▼
-Session Manager
-    │ Loads session history, appends new message
+Session Manager (SessionActor)
+    │ Load session_events history, append the new message
     ▼
-Agent Loop
+Orchestrator::dispatch(FlowRequest)
+    │ FlowRequest { agent_id, input, channel, session_hint?, parent_session?, depth, tool_service?, trace_sink?, interaction_manifest?, ... }
+    ▼
+HarnessRunner::run(session_key, spec, input, sandbox, events, cancel, ...)
     │ Observe → Think → Act → Feedback
     ▼
-Gateway: Outbound Emitter
-    │ Streams events back through EventBus
+Gateway: Outbound Emitter (GatewayEventBus)
+    │ Subscribe FlowStreamEvent and broadcast to clients
     ▼
-Interface Layer
-    │ Formats response for the platform
+Channel Layer
+    │ OutboundMessage / Channel::send / NativeStreamHandler
     ▼
 User receives response
 ```
 
 ### Channel Abstraction
 
-Every interface implements the `Interface` trait, which normalizes platform-specific messages into a common format:
+Each interface implements the `Channel` trait (`src/gateway/channel.rs`), normalizing platform-specific messages into a common format:
 
 ```rust
 #[async_trait]
-pub trait Interface: Send + Sync {
-    fn name(&self) -> &str;
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn send_message(
-        &self,
-        target: &InterfaceTarget,
-        message: &str,
-    ) -> Result<()>;
-    fn is_running(&self) -> bool;
+pub trait Channel: Send + Sync {
+    fn info(&self) -> &ChannelInfo;
+    fn state(&self) -> &ChannelState;
+    async fn start(&mut self) -> ChannelResult<()>;
+    async fn stop(&mut self) -> ChannelResult<()>;
+    async fn send(&self, message: OutboundMessage) -> ChannelResult<SendResult>;
+    // ...
 }
 ```
 
-This means the agent never needs to know whether a message came from Telegram, Discord, or the CLI. It receives the same normalized message structure regardless of the source.
+Core data structures on the channel side: `ChannelId` / `ConversationId` / `UserId` / `MessageId` (newtype strings), `InboundMessage` / `OutboundMessage`, `ChannelCapabilities` (attachments / images / audio / video / reactions / replies / editing / deletion / typing_indicator / read_receipts / rich_text / max_message_length / max_attachment_size / stream_protocol), `ChannelStatus`, and `StreamProtocol::{None, EditBased, Native}`.
 
 ### Interaction Manifests
 
-Each channel declares its capabilities through an `InteractionManifest`:
+Each channel declares its capabilities to the Thinker (`src/thinker/interaction.rs`):
 
 ```rust
-InteractionManifest {
-    paradigm: InteractionParadigm::Messaging,
-    capabilities: [RichText, ImageInline],
-    constraints: { max_output_chars: Some(4096), supports_streaming: false }
-}
+InteractionManifest::new(InteractionParadigm::Messaging)   // defaults: RichText + ImageInline
+    .with_capabilities(my_set)                              // override the default set
+    .with_constraints(
+        InteractionConstraints::new()
+            .max_output_chars(4096)
+            .supports_streaming(true)
+            .prefer_compact(false)
+    );
 ```
 
 Available paradigms:
 
-| Paradigm | Description | Typical Capabilities |
+| Paradigm | Description | Default Capabilities |
 |----------|-------------|---------------------|
 | `CLI` | Terminal interface | RichText, CodeHighlight, Streaming |
-| `WebRich` | Full web interface | All capabilities including Canvas |
-| `Messaging` | Chat platforms (Telegram, Discord) | RichText, ImageInline |
+| `WebRich` | Full web interface | RichText, CodeHighlight, MultiGroupUI, Streaming, MermaidCharts, ImageInline, Canvas |
+| `Messaging` | Chat platforms (Telegram, Discord, iMessage) | RichText, ImageInline |
 | `Background` | Scheduled/cron tasks | SilentReply |
-| `Embedded` | Constrained environments | None |
+| `Embedded` | Constrained environments | Empty set |
 
-The Thinker uses these manifests to adapt its output format. For example, it avoids Mermaid diagrams when the channel does not support them, and it keeps responses shorter for platforms with message length limits.
+The full `Capability` set: `RichText` / `InlineButtons` / `MultiGroupUI` / `Streaming` / `ImageInline` / `MermaidCharts` / `CodeHighlight` / `FileUpload` / `Canvas` / `SilentReply` / `NativeIdentity`. `paradigm_for_channel_type` at the bottom of `src/gateway/channel.rs` gives the channel-string → paradigm lookup (`cli → CLI`, `telegram|feishu|slack|whatsapp|discord|irc|msteams|wechat|line → Messaging`, `webchat|webrich|web|webhook → WebRich`, unknown falls back to `Background`).
 
 ## Session Threading
 
-Aleph uses a hierarchical session key system to isolate conversations across channels, users, and contexts:
+Aleph uses a hierarchical `SessionKey` enum (`src/routing/session_key.rs`) to isolate conversations across channels, users, and contexts — not free-form strings, but a structured enum.
 
-### Session Key Variants
-
-| Variant | Format | Use Case |
-|---------|--------|----------|
-| **Main** | `agent:main:main` | Cross-channel shared session |
-| **DirectMessage** | `agent:main:telegram:dm:user123` | Per-user DM on a specific platform |
-| **Group** | `agent:main:discord:group:guild-id` | Group/channel chat |
-| **Task** | `agent:main:cron:daily-summary` | Cron jobs, webhooks |
-| **Subagent** | `subagent:agent:main:translator` | Sub-agent delegation |
-| **Ephemeral** | `agent:main:ephemeral:uuid` | Temporary session, no persistence |
-
-### DM Scope Strategies
-
-For direct messages, Aleph supports three isolation strategies:
+### SessionKey Variants
 
 ```rust
-pub enum DmScope {
-    Main,           // All DMs share the main session
-    PerPeer,        // Isolated per user (default)
-    PerChannelPeer, // Isolated per channel + user
+pub enum SessionKey {
+    Main { agent_id, main_key, epoch },
+    DirectMessage { agent_id, channel, peer_id, dm_scope, epoch },
+    Group { agent_id, channel, peer_kind: PeerKind, peer_id, thread_id? },
+    Task { agent_id, task_type, task_id },
+    Subagent { parent_key: Box<Self>, subagent_id },
+    Ephemeral { agent_id, ephemeral_id },
 }
 ```
 
-The default `PerPeer` strategy means each person chatting with Aleph gets their own conversation history, regardless of which platform they use. Switching to `Main` lets all DMs share a single session -- useful when you want continuity across platforms.
+`SessionKey::Display` serializes each variant to a path-style string for human reading and persistence:
+
+| Variant | Serialized Form Example | Use Case |
+|---------|--------|----------|
+| **Main** | `agent:main:main` | Cross-channel shared session |
+| **DirectMessage** | `agent:<id>:<channel>:dm:<peer>` | Per-user DM |
+| **Group** | `agent:<id>:<channel>:group:<peer>[:thread:<id>]` | Group/channel chat |
+| **Task** | `agent:<id>:task:<type>:<id>` | Cron, webhooks |
+| **Subagent** | `subagent:<parent>:<id>` | Sub-agent delegation |
+| **Ephemeral** | `agent:<id>:ephemeral:<uuid>` | Temporary session |
+
+### DM Scope Strategies
+
+```rust
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum DmScope {
+    Main,             // All DMs share the main session
+    #[default]
+    PerPeer,          // Isolated per user (default)
+    PerChannelPeer,   // Isolated per channel + user
+}
+```
+
+The default `PerPeer` strategy means each person chatting with Aleph gets their own conversation history, regardless of which platform they use. `SessionKey::dm` collapses to `Main` when `dm_scope == Main`, so all DMs share a single session.
 
 ## Message Persistence
 
-Sessions and their messages are persisted in SQLite:
-
-```sql
-CREATE TABLE sessions (
-    session_key TEXT PRIMARY KEY,
-    messages TEXT,           -- JSON array of Message objects
-    created_at INTEGER,
-    updated_at INTEGER,
-    message_count INTEGER,
-    token_count INTEGER
-);
-
-CREATE TABLE session_metadata (
-    session_key TEXT PRIMARY KEY,
-    agent_id TEXT,
-    channel TEXT,
-    last_compaction INTEGER
-);
-```
+Session events are appended as `SessionEventRecord { seq, event, created_at_ms }` (`src/session/events.rs`) into the `session_events` table. `MessageProjector` (`src/gateway/session_projector.rs`) observes the event stream and materializes the `messages` table; at boot, `ProjectionReconciler` back-fills legacy sessions. **Both tables are no longer dual-written** — `session_events` is the single source of truth (SSOT); `messages` is a read-only projection.
 
 ### Session Compaction
 
@@ -195,7 +170,7 @@ This process is transparent to the user. The agent retains awareness of the full
 
 ## Event Streaming
 
-As the agent processes a message, it emits real-time events through the Gateway's EventBus. Clients subscribe to event topics using glob patterns:
+As the agent processes a message, it emits `FlowStreamEvent` (`src/orchestrator/dispatch.rs`) in real time via `GatewayEventBus`. Clients subscribe over JSON-RPC `events.subscribe`:
 
 ```json
 {
@@ -206,22 +181,23 @@ As the agent processes a message, it emits real-time events through the Gateway'
 }
 ```
 
-Key event topics:
+`FlowStreamEvent` variants (the subset the panel/client primarily consumes):
 
-| Topic | Payload |
+| Topic / Event | Payload |
 |-------|---------|
-| `stream.chunk` | Incremental text content from the agent's response |
-| `stream.tool_start` | Notification that a tool execution has begun |
-| `stream.tool_end` | Tool execution result |
-| `agent.started` | Agent run has begun processing |
-| `agent.completed` | Agent run has finished |
-| `agent.error` | An error occurred during processing |
+| `Delta(text)` | Incremental assistant text |
+| `Reasoning(text)` | Thinking fragment (when the provider returns one) |
+| `ToolCallStart { id, name, args }` | Tool call started |
+| `ToolCallDone { id, result?, error?, duration_ms }` | Tool call finished (completion order, not input order) |
+| `ContextGauge { context_tokens, context_window, total_tokens }` | Live context-window occupancy |
+| `SafetyBlock { reason }` | Safety gate blocked the turn |
+| `Complete(FlowOutcome)` | Terminal event, always last |
 
-This streaming model enables responsive UIs across all interfaces -- the CLI can display tokens as they arrive, the desktop app can show a typing indicator, and Telegram can send chunked messages.
+The underlying `AlephEvent` bus also carries `InputReceived` / `ToolCallRequested` / `ToolCallRetrying` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `Team*` for monitors and cross-agent routing.
 
 ## Security Context
 
-Each message carries an identity context that flows through the entire execution chain:
+Each message carries an identity context that flows through the entire execution chain (`shared/protocol/src/auth.rs`):
 
 ```rust
 pub struct IdentityContext {
@@ -235,13 +211,12 @@ pub struct IdentityContext {
 }
 ```
 
-The identity context is immutable once created and determines what tools the agent can invoke on behalf of the user. Owner sessions have unrestricted access, while Guest sessions are limited to the tools specified in their `GuestScope`. See the [Security section](/docs/en/security/overview) for details on the permission model.
+The identity context is immutable once created and determines what tools the agent can invoke on behalf of the user. Owner sessions have unrestricted access, while Guest sessions are limited to the tools listed in their `GuestScope`. See the [Security section](/docs/en/security/overview) for details on the permission model.
 
 ## JSON-RPC Protocol
 
-All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebSocket:
+All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebSocket. The actual `chat.send` parameter shape (`src/gateway/handlers/chat.rs`):
 
-**Sending a message:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -250,11 +225,21 @@ All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebS
   "params": {
     "message": "Explain the Rust borrow checker",
     "session_key": "agent:main:main",
-    "thinking": "medium",
-    "session_mode": "work"
+    "channel": "cli:term1",
+    "stream": true,
+    "thinking": null,
+    "attachments": [],
+    "agent_id": null,
+    "project_root": null,
+    "model_override": null,
+    "exec_tier": null,
+    "mode": null,
+    "voice_input": false
   }
 }
 ```
+
+Field notes: `stream` defaults to `true`; `thinking` / `mode` / `exec_tier` are all `Option<String>` (no inline defaults, and the field is `mode` rather than a separate `session_mode`); `mode` is picked in the Panel composer as `chat` / `work` / `code` and carried on the first message to prevent overrides from being silently reverted.
 
 **Receiving a streamed response:**
 ```json
@@ -287,16 +272,16 @@ All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebS
 
 - `MessageProjector` materializes `SessionEvent` records into the `messages` table
 - A boot-time `ProjectionReconciler` back-fills transcripts
-- Messages carry `tool_call_id` / `tool_name` + an `AssistantRunMeta` stamp
-- Legacy sessions are back-filled and read behind a locked invariant
+- Messages carry `tool_call_id` / `tool_name` + an `AssistantMessage` token stamp
+- Legacy sessions are back-filled and read behind a locked invariant; the `messages` table is no longer dual-written
 
 ### UnifiedMessage and ProviderDelta
 
 26.7.7+ in `src/providers/` introduces `UnifiedMessage` and `ProviderDelta`:
 
-- `UnifiedMessage` is an LLM-agnostic intermediate message representation (OpenAI / Anthropic / Gemini / Ollama all adapt to it)
-- `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallDelta` / ...)
-- A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live
+- `UnifiedMessage` is the LLM-agnostic intermediate message representation (OpenAI / Anthropic / Gemini / Ollama all adapt to it), with three variants: `User` / `Assistant` / `ToolResult`
+- `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ThinkingSignatureDelta` / `ToolCallStart` / `ToolCallArgDelta` / `ToolCallArgsComplete` / `ToolCallEnd` / `Usage` / `Done` / `Error`)
+- A single `DeltaCollector` reducer owns the assembled message and stitches thinking signatures live
 - Streaming and final text both route through one shared sanitize atom
 
 ### Chat Stream
@@ -306,7 +291,7 @@ All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebS
 - Compact single-line tool rows (status glyphs, live elapsed)
 - `✓N steps` summary line once done
 - The workspace pane becomes a tool-detail viewer that live-follows the foreground conversation (with pin)
-- Tool events are emitted in completion order (not input order)
+- Tool events are emitted in completion order (not input order) via the `buffer_unordered` completion-driven loop
 
 ### Mid-Stream Steering
 
@@ -318,10 +303,10 @@ All message exchange between clients and the Gateway uses JSON-RPC 2.0 over WebS
 
 ### iMessage Tapback
 
-26.7.21+: inbound iMessage add-tapbacks (add-reactions) are surfaced to the model as context rather than dropped.
+26.7.21+: inbound iMessage add-tapbacks (add-reactions) are surfaced to the model as context (carried via `InboundMessage::metadata`) rather than dropped.
 
 ### See Also
 
 - [Gateway Protocol](/docs/en/gateway/protocol) — JSON-RPC and the event bus
-- [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode) — the `session_mode` field
+- [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode) — the `mode` field
 - [Thinker](/docs/en/concepts/thinker) — where `UnifiedMessage` → `ProviderDelta` actually lives

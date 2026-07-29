@@ -79,9 +79,9 @@ L1 表现为为思考器组件提供动力的 LLM 提供商（OpenAI、Anthropic
 
 ### 在 Aleph 中
 
-L2 通过意图检测系统和记忆系统的上下文锚定表现出来。当用户发送消息时，意图系统将其分类为领域并适当地路由它。记忆系统使用 `ContextAnchor` 值对象为事实标记领域上下文，实现相关检索。
+L2 的领域分类由 LLM 一次推理自然完成（R7/R9），不设置独立的意图分类中间件。结构性的领域标注由记忆系统的 `ContextAnchor` 值对象（`src/memory/context/mod.rs`）承担：事实携带上下文锚点，检索时可据此过滤。
 
-领域分类还驱动代理选择适当工具的能力。编码问题路由到代码执行工具；调度问题路由到日历工具；研究问题路由到网络搜索工具。
+工具路由同样由 LLM 一次推理决定——编码问题路由到代码执行工具，研究问题路由到网络搜索工具，调度问题路由到日历工具；模型在 prompt 中已经看到完整工具 schema 与记忆上下文，按需选择即可（受 R10 的 5 个「不」约束）。
 
 ## L3：原子技能
 
@@ -98,17 +98,9 @@ L2 通过意图检测系统和记忆系统的上下文锚定表现出来。当�
 
 ### 在 Aleph 中
 
-L3 通过经验固化系统表现出来。当代理成功完成任务时，结果作为经验条目记录在向量数据库中。当类似任务重复出现时，检索和应用这些经验：
+L3 的「知变为行」由 `src/memory/dreaming/` 承担，而不是某个独立的「经验固化器」。dreaming 管线按 [SkillOpt](https://arxiv.org/abs/2605.23904) 纪律运行：每次成功执行被记录，四道门（`evolution gate` / `edit budget` / `recall-evidence gate` / `health score`）约束晋升——`src/memory/dreaming/evolution/{gate,budget,evidence,score}.rs`，以及 `stages/{note_consolidate,skill_distill,skill_lifecycle,feedback_distill,note_review}.rs`。被拒编辑进入 rejected-edit buffer，作为负反馈回喂给 distill prompt（参考 [DREAM_DAEMON.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/memory/DREAM_DAEMON.md)）。
 
-```
-单次成功        -->  经验条目（存储在向量数据库中）
-3+ 类似成功     -->  候选技能（检测到模式）
-5+ 成功         -->  永久技能（提升为可重用）
-```
-
-技能提升管道将临时成功转化为可靠、可重用的能力。这就是 Aleph 真正学习的方式 —— 不仅通过积累聊天历史，而是通过将成功模式固化为可执行技能。
-
-技能也通过扩展系统暴露，开发人员可以在其中注册自定义技能，绕过固化过程直接提供能力。
+技能也通过 `src/extension/` 暴露——开发者可注册自定义技能绕过 dreaming 直接提供能力，由 core 通过其工具系统调度。
 
 ## L4：功能模块
 
@@ -125,13 +117,13 @@ L3 通过经验固化系统表现出来。当代理成功完成任务时，结�
 
 ### 在 Aleph 中
 
-L4 通过调度器的任务图系统表现出来。调度器将复杂请求分解为 DAG（有向无环图）子任务，其中每个节点都是原子技能或工具调用。`TaskGraph` 聚合根管理这些组合工作流的执行顺序、依赖项和状态。
+L4 由 `src/teams/dispatcher/` 承担——`TeamDispatcher` 把复杂请求分解为子任务并发执行，`handoff.rs` / `runner.rs` / `schedule/{select,settle,reclaim,failure}.rs` 管理依赖、超时与失败回收。并行调度由 `src/tools/concurrency.rs` 的 `ConcurrencyClaim` 与 `partition_parallel_groups` 按资源冲突声明分桶：桶内并发、桶间串行，Act 阶段据此调度（详见 [代理思维模型](./agent-thinking)）。
 
 ```
 用户请求："审查此 PR 并修复任何问题"
                     │
         ┌───────────┴───────────┐
-        │     TaskGraph (L4)    │
+        │   TeamDispatcher (L4) │
         ├───────────────────────┤
         │  1. 读取 PR diff      │ ─── L3 技能
         │  2. 分析更改          │ ─── L3 技能
@@ -141,7 +133,7 @@ L4 通过调度器的任务图系统表现出来。调度器将复杂请求分�
         └───────────────────────┘
 ```
 
-MCP（模型上下文协议）集成也在 L4 运行，允许外部工具和服务作为功能模块组合到 Aleph 的工作流中。
+MCP（模型上下文协议）集成也在 L4 运行——`src/mcp/` 下的 client / preflight / manager 配合 `src/tools/tool_search.rs` 元工具按需发现 schema；外部工具和服务作为功能模块组合到 Aleph 的工作流中。
 
 ## L5：多态代理
 
@@ -159,14 +151,14 @@ MCP（模型上下文协议）集成也在 L4 运行，允许外部工具和服�
 
 ### 在 Aleph 中
 
-L5 是协同工作的完整系统：Gateway 管理多通道连接，代理循环编排观察-思考-行动-反馈循环，记忆系统提供持久上下文，调度器将技能组合到工作流中，安全系统确保安全的自主操作。
+L5 是协同工作的完整系统：Gateway（`src/gateway/`）管理多通道连接与 JSON-RPC；`src/harness/` 编排 Think→Act 循环（薄 Harness + 笨循环，R10）；记忆系统（`src/memory/`）提供持久上下文；`src/teams/dispatcher/` 把技能组合成并发工作流；安全系统（`src/{security,sandbox,approval,pii}/`）确保自主操作的硬底线。
 
 ```
-L5 多态代理 = Gateway + 代理循环 + 记忆 + 调度器 + 安全
-             (I/O)    (认知)    (状态)   (行动)    (控制)
+L5 多态代理 = Gateway + Harness (Think→Act) + Memory + teams/dispatcher + Security
+             (I/O)   (协调)         (状态)  (并发行动)      (硬底线)
 ```
 
-这是 Think→Act 循环（带 prompt 级第一性原理锚定与双过程认知）在其最高级别运行的地方。代理不仅响应提示 —— 它有目的地追求目标，评估自己的性能，并从结果中学习。（历史的 POE（原则-操作-评估）架构在 26.5+ 退役；其「智慧」已迁移到 system prompt 模板（R9）。）
+这是 Think→Act 循环（带 prompt 级第一性原理锚定与双过程认知）在其最高级别运行的地方。代理不仅响应提示 —— 它有目的地追求目标，评估自己的性能，并从结果中学习。历史的 POE（Principle-Operation-Evaluation）运行时管线在 26.5+ 退役，其「智慧」已迁移到 system prompt 模板（R9）；`DiminishingReturnsDetector` 硬停作为循环内的确定性完成判断被 R10 删除。
 
 ## 实践中的涌现
 
@@ -174,21 +166,21 @@ L5 多态代理 = Gateway + 代理循环 + 记忆 + 调度器 + 安全
 
 | 层 | Aleph 组件 | 关键职责 |
 |-------|----------------|-------------------|
-| L1 | 思考器 + 记忆存储 | LLM 访问 + 原始事实存储 |
-| L2 | 意图系统 + 上下文锚点 | 领域分类 + 路由 |
-| L3 | 经验固化器 + 技能 | 模式提取 + 技能提升 |
-| L4 | 调度器 + TaskGraph + MCP | 任务组合 + 工作流编排 |
-| L5 | 工具链（Think→Act）+ Gateway | 自主行为 + 多通道存在 |
+| L1 | Thinker + Memory Store | LLM 访问 + 原始事实存储 |
+| L2 | LLM 一次推理 + `ContextAnchor` | 领域分类 + 路由（无独立子系统） |
+| L3 | `src/memory/dreaming/`（SkillOpt 纪律） | 模式提取 + 技能提升 |
+| L4 | `src/teams/dispatcher/` + `src/tools/concurrency.rs` | 任务组合 + 并行分桶调度 |
+| L5 | `src/harness/`（Think→Act）+ Gateway | 自主行为 + 多通道存在 |
 
 ### 反馈循环
 
 层不是单向栈。有一个连续的反馈循环，高层通知低层：
 
-1. L5 代理行为生成新经验
-2. L3 固化从那些经验中提取技能
-3. L2 分类由 L3 中发现的模式细化
+1. L5 代理行为生成新经验（`session_complete` + dreaming 管线）
+2. L3 dreaming 提炼这些经验，按 SkillOpt 四道门约束晋升
+3. L2 领域标注被新晋升技能细化（写入 `ContextAnchor` 与 notes 元数据）
 4. L1 记忆由成功操作中的新事实丰富
-5. 丰富的 L1 反馈到 L2，再次开始循环
+5. 丰富的 L1 反馈到 L5 的下一次推理，再次开始循环
 
 这个反馈循环是使 Aleph 真正自适应的原因。系统不仅执行 —— 它还改进。
 
@@ -200,7 +192,7 @@ L5 多态代理 = Gateway + 代理循环 + 记忆 + 调度器 + 安全
 
 在 L5 之外，模型承认一个渐近极限：**ℵ_omega**，AGI 地平线。这代表一个 AI 系统在所有领域和上下文中实现完全通用智能 —— 无限适应的理论终点。
 
-Aleph 不声称达到这个地平线。但通过构建涌现的基础设施 —— 固化管道、技能进化系统、多态架构、治理拓扑层 —— 它创建了一个基础，可以随着 AI 能力的发展攀登阿列夫数的阶梯。
+Aleph 不声称达到这个地平线。但通过构建涌现的基础设施 —— dreaming 管线（SkillOpt 纪律）、`src/teams/dispatcher/` 并发调度、多态架构、治理拓扑层 —— 它创建了一个基础，可以随着 AI 能力的发展攀登阿列夫数的阶梯。
 
 ```
 ℵ₀  -->  原始知识 (L1-L2)

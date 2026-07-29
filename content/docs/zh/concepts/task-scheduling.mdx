@@ -1,261 +1,253 @@
 ---
 title: "任务调度"
-description: "基于车道的子代理调度，具有资源隔离、反饥饿、递归限制、cron 作业和心跳监控。"
+description: "Cron 作业、心跳探测，以及由 Aleph 守护进程驱动的共享基础设施。"
 ---
 
-`scheduler` 和 `tasks` 模块处理 Aleph 中的任务执行调度。调度器管理具有资源约束的子代理执行，而 tasks 模块提供基于时间 (cron) 和健康检查 (heartbeat) 的作业调度。
+`tasks` 模块覆盖 Aleph 的时间调度：**cron** 用于周期性代理作业；**heartbeat** 用于周期性外部探测，并具备 L1→L2 升级；以及一个被两者共用的 **shared** 基础设施层（时钟抽象、投递、调度解析、持久化、reaper）。计时循环由 daemon 进程持有，cron 与 heartbeat 的 RPC 也是在该进程上落地。
 
 ## 设计理念
 
-调度系统遵循三个原则：
+任务调度系统遵循三个原则：
 
-1. **资源隔离** — 每个执行"车道"具有独立的配额和并发限制
-2. **反饥饿** — 长时间等待的作业获得优先级提升以防止无限阻塞
-3. **递归安全** — 跟踪子代理生成并限制以防止无限递归
-
----
-
-## 基于车道的调度器
-
-`LaneScheduler` 为子代理执行提供结构化并发：
-
-```
-┌─────────────────────────────────────────────┐
-│           LaneScheduler                      │
-├─────────────────────────────────────────────┤
-│                                             │
-│  车道 A (前台)  max=3, quota=100            │
-│    ├─ 运行 1 (运行中)                       │
-│    ├─ 运行 2 (排队中)                       │
-│    └─ 运行 3 (排队中)                       │
-│                                             │
-│  车道 B (后台)  max=1, quota=50             │
-│    └─ 运行 4 (运行中)                       │
-│                                             │
-│  全局限制: 5 个并发运行                     │
-└─────────────────────────────────────────────┘
-```
-
-### Lane
-
-具有自己配额和并发限制的隔离执行车道：
-
-```rust
-pub struct Lane {
-    name: String,
-    max_concurrent: usize,
-    quota: LaneQuota,
-}
-```
-
-### LaneScheduler
-
-```rust
-pub struct LaneScheduler {
-    lanes: Vec<Lane>,
-    global_max: usize,
-    recursion_tracker: RecursionTracker,
-}
-
-impl LaneScheduler {
-    pub async fn schedule(
-        &self,
-        run: QueuedRun,
-    ) -> Result<ScheduleGuard> { /* ... */ }
-
-    pub fn stats(&self,
-    ) -> SchedulerStats { /* ... */ }
-}
-```
-
-**ScheduleGuard** 使用 RAII — 当丢弃时，运行的许可自动释放。调度器使用 `std::mem::forget(permit)` + `ScheduleGuard` 进行手动控制，这是正确的但需要小心：`forget` 和 guard 构造之间的提前返回会泄漏许可。
-
-### 反饥饿
-
-```rust
-pub struct WaitTimeTracker;
-
-impl WaitTimeTracker {
-    pub fn sweep_anti_starvation(
-        &self,
-        lanes: &mut [LaneState],
-    ) { /* ... */ }
-}
-```
-
-等待时间超过阈值的作业获得优先级提升。注意：提升按车道应用，因此提升车道中的新作业也受益。
-
-### 递归跟踪
-
-```rust
-pub struct RecursionTracker {
-    max_depth: usize,
-}
-```
-
-跟踪子代理生成深度。如果子代理尝试生成另一个超出 `max_depth` 的子代理，请求会被阻止。
-
-### LaneState
-
-```rust
-pub struct LaneState {
-    queued: VecDeque<QueuedRun>,
-    running: HashMap<RunId, RunningRun>,
-}
-```
-
-**整数安全：** 等待时间计算使用 `.max(0)` 防止时钟偏差下溢，`.min(10)` 在 `as i8` 之前防止溢出。
+1. **时间可测** —— 每个时间相关模块都接受 `Clock` trait，测试注入 `FakeClock`，生产代码使用 `SystemClock`（`Utc::now()`）。
+2. **原子持久化** —— `CronStore` 与 `HeartbeatStore` 均为 SQLite 后端 + 内存缓存；变更在内存中应用并通过 `persist()` 落盘，使磁盘行始终与计时循环所见的实时视图一致。
+3. **推送而非轮询** —— 每次成功变更在网关事件总线上发布 `CronJobChanged` / `HeartbeatTaskChanged`，面板无需自刷新。
 
 ---
 
-## Cron 任务
+## Cron 作业
 
-`tasks::cron` 模块调度周期性作业：
+`tasks::cron` 模块调度周期性作业。`CronService` 包覆内部 `ServiceState`，对外暴露被网关 handler 与 CLI 工具调用的异步 API。
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     CronService                           │
+├──────────────────────────────────────────────────────────┤
+│  state: Arc<ServiceState<SystemClock>>                    │
+│    ├─ store:  Arc<Mutex<CronStore>>  (SQLite + 内存缓存)  │
+│    ├─ clock:  Arc<dyn Clock>                              │
+│    └─ config: CronConfig                                  │
+│  event_bus: Option<Arc<GatewayEventBus>>  (CronJobChanged)│
+└──────────────────────────────────────────────────────────┘
+            │                               ▲
+            ▼                               │
+   网关 handlers ◄─────handle_*─────────────┘
+   （cron.list、cron.get、cron.create、cron.update、
+    cron.delete、cron.status、cron.run、cron.runs、
+    cron.toggle）
+```
+
+### 调度类型
+
+`CronJob` 携带三种调度类型之一（`src/tasks/cron/config.rs`）：
 
 ```rust
-pub struct CronService {
-    db: Connection,
-    clock: Arc<dyn Clock>,
+pub enum ScheduleKind {
+    /// 在指定时间戳触发一次。
+    At { at: i64, delete_after_run: bool },
+    /// 每 N 毫秒触发（可指定 anchor）。
+    Every { every_ms: i64, anchor_ms: Option<i64> },
+    /// 标准 6 字段 cron 表达式，可指定时区与 stagger。
+    Cron { expr: String, tz: Option<String>, stagger_ms: Option<i64> },
 }
+```
 
+### 对外 API
+
+```rust
 impl CronService {
-    pub async fn create_job(
-        &self,
-        config: JobConfig,
-    ) -> Result<JobId> { /* ... */ }
+    pub fn new(config: CronConfig) -> Result<Self, String>;
+    pub fn with_event_bus(self, bus: Arc<GatewayEventBus>) -> Self;
 
-    pub async fn list_jobs(&self,
-    ) -> Result<Vec<Job>> { /* ... */ }
+    pub async fn list_jobs(&self) -> Result<Vec<CronJobView>, String>;
+    pub async fn get_job(&self, id: &str) -> Result<CronJobView, String>;
 
-    pub async fn delete_job(
-        &self,
-        id: JobId,
-    ) -> Result<()> { /* ... */ }
+    pub async fn add_job(&self, job: CronJob) -> Result<String, String>;
+    pub async fn update_job(&self, id: &str, updates: CronJobUpdates) -> Result<(), String>;
+    pub async fn delete_job(&self, id: &str) -> Result<(), String>;
+
+    pub async fn enable_job(&self, id: &str) -> Result<(), String>;
+    pub async fn disable_job(&self, id: &str) -> Result<(), String>;
+    pub async fn toggle_job(&self, id: &str) -> Result<bool, String>;
+    pub async fn run_job(&self, id: &str) -> Result<(), String>;
+
+    pub async fn reap_history(&self) -> Result<u64, String>;
 }
 ```
 
-**特性：**
-- Cron 表达式解析 (标准 Unix cron 语法)
-- 作业执行历史
-- 超时处理
-- 三阶段并发: schedule → execute → cleanup (最小化锁持有时间)
+### 特性
 
-**时钟抽象：** 使用带有 `FakeClock` 的 `Clock` trait 以提高可测试性。
+- **三种调度类型** —— 一次性（`At`）、间隔（`Every`）、标准 6 字段 cron 表达式，支持可选时区与每作业 stagger。
+- **JSON 原子持久化** + 内存缓存；每次变更通过 `persist()` 把内存工作副本写入 SQLite。
+- **并发执行** —— 可配置每进程上限；作业可固定 `SessionTarget::Main`（同一会话）或 `Isolated`（默认，独立会话）。
+- **作业串联** —— `on_success` / `on_failure` 触发器把作业串成 DAG；配置时即拒绝成环。
+- **失败告警** —— `FailureAlertConfig`（连续失败次数后告警、冷却、目标），加上全局 `notify_on_failure_default` 策略，对未显式配置的作业默认告警到发起通道。
+- **运行历史** —— 每次 run 落入 `cron_runs`，记录 `started_at`、`completed_at`、`status`（`Ok` / `Error` / `Skipped` / `Timeout`）、`ErrorReason::Transient|Permanent` 与触发来源（`Schedule` / `Chain` / `Manual` / `Catchup`）。
+- **模板渲染** —— `tasks::cron::template` 在调用代理前把变量代入作业 prompt。
+- **Webhook 投递** —— `tasks::cron::webhook_target` 允许作业把结果 POST 到任意 HTTP 端点。
+- **Carry-over sweeper** —— `tasks::cron::carryover` 运行进程级 sweep（`OnceLock` 守护，热重载下也不会双 spawn）以恢复被中断的作业。
 
-### JobRun
+### 时钟抽象
+
+cron 服务依赖 shared 的 `Clock` trait（`src/tasks/shared/clock.rs`）：
 
 ```rust
-pub struct JobRun {
-    started_at: i64,
-    completed_at: Option<i64>,
-}
-
-impl JobRun {
-    pub fn success(self) -> Self {
-        let now = self.clock.now();
-        let duration_ms = now
-            .saturating_sub(self.started_at)
-            .saturating_mul(1000);
-        // ...
-    }
+pub trait Clock: Send + Sync + 'static {
+    fn now_ms(&self) -> i64;
+    fn now_utc(&self) -> DateTime<Utc> { /* 默认由 now_ms 推导 */ }
 }
 ```
 
-**整数安全：** 使用 `saturating_sub` 和 `saturating_mul` 防止时钟偏差下溢。
+`SystemClock` 是生产实现；`FakeClock`（在 `testing` 子模块中）提供确定性的时间控制。
+
+### RPC（实化）
+
+所有在 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` 注册的 `cron.*` RPC 都由真实 handler 承载（`src/gateway/handlers/cron/real.rs`）。早期占位的 `*_stub` 实现（位于 `src/gateway/handlers/cron/stubs.rs`）已不再走热路径：
+
+| 方法 | Handler |
+|---|---|
+| `cron.list` | `cron::handle_list` |
+| `cron.get` | `cron::handle_get` |
+| `cron.create` | `cron::handle_create` |
+| `cron.update` | `cron::handle_update` |
+| `cron.delete` | `cron::handle_delete` |
+| `cron.status` | `cron::handle_status` |
+| `cron.run` | `cron::handle_run` |
+| `cron.runs` | `cron::handle_runs` |
+| `cron.toggle` | `cron::handle_toggle` |
 
 ---
 
-## 心跳任务
+## 心跳探测
 
-`tasks::heartbeat` 模块监控外部服务：
+`tasks::heartbeat` 模块运行周期性 L1 探测，并在探测触发时可选地升级到 L2 代理分析。其模式与 `CronService` 对称 —— `HeartbeatService` facade、`HeartbeatServiceState`、`HeartbeatStore` —— 让两个子系统保持一致。
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     HeartbeatService                          │
+├──────────────────────────────────────────────────────────────┤
+│  state: Arc<HeartbeatServiceState>                            │
+│    ├─ store: Arc<Mutex<HeartbeatStore>>                       │
+│    └─ config: HeartbeatConfig（tick 间隔、最大并发、          │
+│                                 per-job 超时、去重）           │
+│  wake_queue: Arc<WakeQueue>                                   │
+│  event_bus: Option<Arc<GatewayEventBus>>（HeartbeatTaskChanged）│
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 特性
+
+- **探测执行** —— `tasks::heartbeat::executor` 运行每个任务配置的 `ProbeConfig`（tool + params + trigger condition）。
+- **唤醒队列** —— `tasks::heartbeat::wake` 让外部调用者把 wake 信号塞进计时循环，且不阻塞 per-task mutex。
+- **去重** —— `tasks::heartbeat::dedup` 在 `DedupConfig { window_ms, similarity_threshold, max_history }` 窗口内折叠重复结果，避免噪声探测淹没模型。
+- **运行历史** —— `tasks::heartbeat::history` 持久化历史 run，可通过 `heartbeat.runs` 查询。
+- **可配置间隔与超时** —— `HeartbeatConfig::tick_interval_secs`、`max_concurrent`、`job_timeout_secs`。
+
+### 对外 API
 
 ```rust
-pub struct HeartbeatService {
-    intervals: Vec<HeartbeatInterval>,
-}
-
 impl HeartbeatService {
-    pub async fn check_all(
-        &self,
-    ) -> Vec<HeartbeatResult> { /* ... */ }
+    pub fn new(store: HeartbeatStore, config: HeartbeatConfig) -> Self;
+    pub fn with_event_bus(self, bus: Arc<GatewayEventBus>) -> Self;
+
+    pub async fn list_tasks(&self) -> Vec<HeartbeatTaskView>;
+    pub async fn get_task(&self, id: &str) -> Option<HeartbeatTaskView>;
+
+    pub async fn add_task<C: Clock>(&self, task: HeartbeatTask, clock: &C) -> Result<String, String>;
+    pub async fn update_task<C: Clock>(&self, id: &str, updates: HeartbeatTaskUpdates, clock: &C)
+        -> Result<(), String>;
+    pub async fn delete_task(&self, id: &str) -> Result<(), String>;
+    pub async fn toggle_task<C: Clock>(&self, id: &str, clock: &C) -> Result<bool, String>;
+
+    pub async fn reap_history(&self) -> Result<usize, String>;
+    pub fn request_shutdown(&self);
 }
 ```
 
-**特性：**
-- URL 健康检查
-- 响应时间跟踪
-- 去重 (避免冗余检查)
-- 可配置间隔和超时
+### RPC（实化）
+
+所有在 `agents.rs` 注册的 `heartbeat.*` RPC 都由真实 handler 承载（`src/gateway/handlers/heartbeat.rs`）；同文件中的旧 `*_stub` 定义保留为回归测试，但不再被注册表分派：
+
+| 方法 | Handler |
+|---|---|
+| `heartbeat.list` | `heartbeat::handle_list` |
+| `heartbeat.get` | `heartbeat::handle_get` |
+| `heartbeat.create` | `heartbeat::handle_create` |
+| `heartbeat.update` | `heartbeat::handle_update` |
+| `heartbeat.delete` | `heartbeat::handle_delete` |
+| `heartbeat.toggle` | `heartbeat::handle_toggle` |
+| `heartbeat.wake` | `heartbeat::handle_wake` |
+| `heartbeat.runs` | `heartbeat::handle_runs` |
 
 ---
 
 ## 任务基础设施
 
-`tasks::shared` 模块提供横切基础设施：
+`tasks::shared` 模块为 cron 与 heartbeat 提供共用基础设施：
 
-- `Clock` trait — 抽象时间以提高可测试性
-- `Schedule` — 计划解析和下次运行计算
-- `Delivery` — 任务结果交付机制
-- `Store` — 任务状态的持久化层
+- `clock` —— `Clock` trait、`SystemClock`、`FakeClock`（位于 `testing`）。
+- `schedule` —— 纯函数式的 schedule-kind 解析与下次运行时间计算。
+- `delivery` —— `DeliveryEngine` / `DeliveryPayload` / `DeliveryTarget`（cron 结果如何落到某个频道或 webhook）。
+- `store` —— 可复用的 SQLite 辅助（打开、schema 迁移、内存缓存）。
+- `targets` —— 投递目标类型定义（频道、webhook）。
+- `active_hours` —— 作业的静默时段与活跃时段门控。
+- `retry_hint` —— 重试策略原语（transient 与 permanent 分类）。
+- `reaper` —— 周期调用 `cron.reap_history` / `heartbeat.reap_history`，让 `cron_runs` / 心跳历史行不会无界增长。
 
 ---
 
 ## 安全属性
 
-- **无下溢** — 所有时间计算使用 `saturating_sub`/`saturating_mul`
-- **信号量安全** — `was_running` 检查防止许可膨胀
-- **无锁问题** — 使用 `unwrap_or_else(|e| e.into_inner())`
-- **无 SQL 注入** — 所有查询使用参数化 `params![]`
-- **UTF-8 安全** — `truncate_string()` 使用 `char_indices()`
-- **无 `static mut`** — 使用 `crate::sync_primitives::Arc`
+- **无下溢** —— 时间运算使用 `saturating_sub` / `saturating_mul`（`Clock::now_utc` 用 `from_timestamp_millis`，保证 epoch 之前的值能正确往返）。
+- **无 SQL 注入** —— 所有查询使用参数化 `params![]`。
+- **UTF-8 安全** —— 字符串截断使用 `char_indices()` 感知的辅助函数。
+- **无 `static mut`** —— 所有共享状态走 `crate::sync_primitives`。
 
 ---
 
 ## 代码位置
 
-**Scheduler:**
-- `src/scheduler/mod.rs` — 模块入口点
-- `src/scheduler/lane_scheduler.rs` — 主调度器
-- `src/scheduler/lane.rs` — Lane 定义
-- `src/scheduler/lane_config.rs` — 配额和配置
-- `src/scheduler/lane_state.rs` — 队列和运行状态
-- `src/scheduler/anti_starvation.rs` — 优先级提升
-- `src/scheduler/recursion_tracker.rs` — 深度跟踪
+**Cron：**
+- `src/tasks/cron/mod.rs` —— `CronService` facade
+- `src/tasks/cron/config.rs` —— `CronConfig`、`CronJob`、`ScheduleKind`、`RunStatus`、`ErrorReason`、`SessionTarget`、`TriggerSource`、`FailureAlertConfig`、`JobStateV2`、`JobRun`
+- `src/tasks/cron/store.rs` —— `CronStore`（SQLite + 内存缓存）
+- `src/tasks/cron/service/` —— `ServiceState`、`ops`（CRUD）、`timer`（next-due 循环）、`concurrency`、`catchup`
+- `src/tasks/cron/executor.rs` —— 作业执行
+- `src/tasks/cron/chain.rs` —— 作业串联（`on_success` / `on_failure`）
+- `src/tasks/cron/alert.rs` —— 失败告警
+- `src/tasks/cron/template.rs` —— Prompt 模板渲染
+- `src/tasks/cron/webhook_target.rs` —— Webhook 投递
+- `src/tasks/cron/stagger.rs` —— 基于哈希的 cron stagger
+- `src/tasks/cron/history.rs` —— `cron_runs` schema 与辅助
+- `src/tasks/cron/carryover.rs` —— Carry-over sweeper
 
-**Tasks:**
-- `src/tasks/mod.rs` — 模块入口点
-- `src/tasks/cron/` — Cron 作业调度
-- `src/tasks/heartbeat/` — 健康检查监控
-- `src/tasks/shared/` — Clock, schedule, delivery, store
+**Heartbeat：**
+- `src/tasks/heartbeat/mod.rs` —— `HeartbeatService` facade
+- `src/tasks/heartbeat/config.rs` —— `HeartbeatConfig`、`HeartbeatTask`、`HeartbeatTaskView`、`ProbeConfig`、`TriggerCondition`、`DedupConfig`
+- `src/tasks/heartbeat/store.rs` —— `HeartbeatStore`
+- `src/tasks/heartbeat/service/` —— `HeartbeatServiceState`、`ops`、`timer`
+- `src/tasks/heartbeat/executor.rs` —— 探测执行
+- `src/tasks/heartbeat/probe.rs` —— 探测分派器
+- `src/tasks/heartbeat/dedup.rs` —— 结果去重
+- `src/tasks/heartbeat/history.rs` —— 运行历史
+- `src/tasks/heartbeat/wake.rs` —— `WakeQueue`
+
+**Shared：**
+- `src/tasks/shared/clock.rs` —— `Clock` trait + `SystemClock` + `FakeClock`
+- `src/tasks/shared/schedule.rs` —— 纯调度计算
+- `src/tasks/shared/delivery.rs` —— `DeliveryEngine` 等
+- `src/tasks/shared/store.rs` —— SQLite 辅助
+- `src/tasks/shared/targets.rs` —— 投递目标类型
+- `src/tasks/shared/active_hours.rs` —— 活跃时段门控
+- `src/tasks/shared/retry_hint.rs` —— 重试分类
+- `src/tasks/shared/reaper.rs` —— 历史 reaper 守护
+
+**RPC：**
+- `src/gateway/handlers/cron/real.rs` —— 真实的 `cron.*` handler
+- `src/gateway/handlers/cron/stubs.rs` —— 旧 stub（保留为回归测试，不再分派）
+- `src/gateway/handlers/heartbeat.rs` —— 真实的 `heartbeat.*` handler（同文件包含旧 `*_stub` 定义，作为回归测试）
+- `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` —— 在网关注册 `cron.*` 与 `heartbeat.*`
 
 ## 另请参阅
 
-- [代理运行时](/docs/zh/concepts/agent-runtime) — 如何生成和管理子代理
-- [竞技场](/docs/zh/concepts/arena) — 多代理协作工作区
-
----
-
-## 26.7.x 补充
-
-### Cron 已实化（stubs → real）
-
-26.7.x：历史的 cron `*_stub` 占位 RPC（`cron.list_stub` / `cron.get_stub` / ...）已被**实化**。`cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` / `cron.status` / `cron.run` / `cron.runs` / `cron.toggle` 现在有真实实现（之前是 error-stubs）。
-
-### Heartbeat 已实化
-
-同样：`heartbeat.list` / `heartbeat.get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` 现在有真实实现。
-
-### 守护进程端完整链路
-
-Cron / Heartbeat 的真实实现由 [守护进程](/docs/zh/concepts/daemon) 驱动，包括：
-
-- Day-boundary 日志轮转
-- `ALEPH-BOOT` marker
-- 睡眠抑制剂静默
-- `Guardian Judge` 主动唤醒决策
-
-### 见另请参阅
-
-- [守护进程](/docs/zh/concepts/daemon) — Cron/Heartbeat 驱动
-- [自动化 / Cron 作业](/docs/zh/automation/cron-jobs) — 完整 RPC
-- [Heartbeat](/docs/zh/automation/heartbeat) — 完整 RPC
+- [守护进程](./daemon) —— 持有计时循环、Day-boundary 日志轮转、`ALEPH-BOOT` marker、睡眠抑制器静默，以及驱动 cron 与 heartbeat 的 `Guardian Judge` 主动唤醒决策。

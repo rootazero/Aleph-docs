@@ -1,159 +1,97 @@
 ---
 title: "快速上手"
-description: "让 Aleph 运行起来"
+description: "启动 Aleph 并连接本地或远程 Gateway"
 ---
 
-在 5 分钟内让 Aleph 运行起来。
+## 桌面应用
 
-## 选项 1：桌面应用（最快）
+从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) 下载当前版本实际提供的安装包。不同版本和平台的产物格式可能不同，请以 Release 附件为准。
 
-下载适合你平台的最新版本：
+桌面壳负责窗口、托盘、通知和系统集成；推理、工具与状态由 `aleph-server` 核心提供。
 
-| 平台 | 下载 |
-|------|------|
-| **macOS** | `.dmg` 从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
-| **Linux** | `.deb` 或 `.AppImage` 从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
-| **Windows** | `.msi` 从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
+## 从源码运行
 
-1. 安装并启动应用
-2. 完成设置向导（API 密钥、模型选择、**会话模式**、**执行等级**、**TLS**）
-3. 开始聊天
-
-桌面应用将核心服务器作为后台守护进程捆绑。壳停留在你的系统托盘中；关闭窗口**不会**停止服务器。
-
-**全局热键：** `CmdOrCtrl+Shift+A` 从任何地方召唤窗口。
-
-### 连接到远程核心
-
-桌面壳可以通过 Tailnet 或 VPN 连接到远程 `aleph-server`，**仅在**远程核心使用自签名 TLS 时（SAN 自动覆盖本机非环回接口 IP；Panel 端首次连接会弹出 TOFU 指纹 + SAN 审批面板）。
+从源码构建需要 Rust 1.95+。构建 Panel 或使用仓库开发任务时还需要 `just`、Node.js/npm 与 `wasm-bindgen-cli`。
 
 ```bash
-# 在远程机器上，启用自签名 TLS
-aleph-server start \
-  --gateway-bind 0.0.0.0 \
-  --gateway-port 18790 \
-  --gateway-tls-auto-cert
-```
-
-然后在本地壳中输入 `wss://remote-host:18790` 并审批 TOFU 提示。
-
----
-
-## 选项 2：从源代码（开发）
-
-### 1. 构建并运行
-
-```bash
-# 克隆仓库
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
-
-# 以开发模式运行（自动重建 WASM）
 just dev
+```
 
-# 或手动构建并运行
+只启动核心：
+
+```bash
 cargo run --bin aleph-server
 ```
 
-服务器默认在 `ws://127.0.0.1:18790` 启动。
+Gateway 默认使用 `127.0.0.1:18790`：
 
-### 2. 配置
+- Panel：`http://127.0.0.1:18790/`
+- WebSocket：`ws://127.0.0.1:18790/ws`
 
-在 `~/.aleph/aleph.toml` 创建配置文件：
+## 最小配置
 
-```bash
-mkdir -p ~/.aleph
-cat > ~/.aleph/aleph.toml << 'EOF'
-[agents.defaults]
-model = "anthropic/claude-sonnet-4"
-thinking = "medium"
-session_mode = "work"
-exec_tier = "ask"
+创建 `~/.aleph/config.toml`：
 
-[provider.claude]
-protocol = "anthropic"
+```toml
+[general]
+default_provider = "claude"
+
+[providers.claude]
+provider_type = "claude"
+enabled = true
 api_key = "${ANTHROPIC_API_KEY}"
+models = ["<当前模型目录中的模型 ID>"]
+
+[policies]
+mode = "work"
+exec_tier = "auto"
 
 [gateway]
+host = "127.0.0.1"
 port = 18790
-bind = "127.0.0.1"
-EOF
 ```
-
-设置你的 API 密钥：
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
+aleph-server doctor
+aleph-server start
 ```
 
-### 3. 通过 WebChat 连接
+`mode` 默认是 `work`，只影响工具呈现；`exec_tier` 默认是 `auto`，控制审批策略。两者保持正交。
 
-在 `http://localhost:18790` 打开 WebChat 界面（或在 `gateway.port` 中配置的端口）。
-
-WebChat 是一个基于 WASM 的 UI，连接到 Gateway WebSocket。
-
-### 4. 连接消息通道（可选）
-
-#### Telegram
-
-添加到 `~/.aleph/aleph.toml`：
-
-```toml
-[channels.telegram]
-enabled = true
-token = "YOUR_BOT_TOKEN"
-```
-
-重启服务器以接收新通道。
-
-#### Discord
-
-```toml
-[channels.discord]
-enabled = true
-token = "YOUR_BOT_TOKEN"
-```
-
-#### iMessage（BlueBubbles）
-
-```toml
-[channels.imessage]
-enabled = true
-server_url = "http://127.0.0.1:1234"
-password = "${BLUEBUBBLES_PASSWORD}"
-```
-
-### 5. 验证
-
-检查服务器是否正在运行：
+## 验证
 
 ```bash
-# 服务器日志显示 "Gateway listening on ws://127.0.0.1:18790"
-tail -f ~/.aleph/logs/aleph.log
-
-# 或通过 RPC 查询
-curl http://localhost:18790/health
+aleph-server status
+aleph-server gateway call health
 ```
 
-### 6. 会话模式与执行等级
+若以 systemd 用户服务运行，可查看：
 
-打开 WebChat 后可在右上角切换 **session mode**（chat / work / code）与 **exec tier**（Ask / Auto / Full）。也可在 Settings → Policies 中设置全局默认。
+```bash
+journalctl --user -u aleph-server.service -f
+```
 
----
+## 远程核心
 
-## 架构一览
+在远程机器的 `~/.aleph/config.toml` 中启用非环回监听和原生 TLS：
 
-> **一核多端，壳核分离；网关互通，权限控制；三对维度：exec_tier × thinking × session_mode。**
+```toml
+[gateway]
+host = "0.0.0.0"
+port = 18790
 
-- **一个核心**（`aleph-server`）驱动所有界面
-- **壳**（桌面应用）= 纯 OS 集成；**核心** = 所有业务逻辑
-- 所有终端使用相同的认证 WebSocket 协议
-- 桌面壳可以连接本地或远程核心（远程必须使用 `wss://` + TOFU）
-- 用户可调三对维度：`exec_tier`（权限）/ `thinking`（推理）/ `session_mode`（工具呈现）
+[gateway.tls]
+enabled = true
+```
+
+`cert_path` 与 `key_path` 留空时会生成自签名证书。远程 WebSocket 地址为 `wss://<host>:18790/ws`；Panel 首次连接时通过 TOFU 审批证书指纹与 SAN。
 
 ## 下一步
 
-- [配置](./configuration) —— 完整配置参考
+- [首次配置](./wizard) —— 当前 CLI 与配置流程
+- [配置](./configuration) —— 核心配置结构
 - [Gateway 协议](../gateway/protocol) —— WebSocket JSON-RPC API
-- [接口](../interfaces/overview) —— 连接更多平台
-- [架构](../architecture/overview) —— 深入了解壳核分离
+- [部署](./deployment) —— 服务、容器与 TLS

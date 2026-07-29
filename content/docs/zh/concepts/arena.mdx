@@ -1,136 +1,122 @@
 ---
-title: "竞技场"
-description: "SharedArena —— 多个代理在共享目标上协作的结构化工作空间。"
+title: "集群"
+description: "集群 —— 中心侧基础设施：节点注册 / 反向 RPC / 命令派发 / 文件沙箱，支持 LAN-trust 多节点联邦。"
 ---
 
-`arena` 模块实现 SharedArena，一个多个代理在共享目标上协作的结构化工作空间。它为协作代理会话提供生命周期管理、状态聚合、事件跟踪和持久化存储。
+`cluster` 模块实现 Aleph 的中心侧集群基础设施。它把入网节点视为受信 LAN 联邦成员，提供节点注册、生命周期 SSOT、反向 RPC、命令派发、文件命令沙箱与节点审批回环。中心侧 LLM 工具 `node_list` / `node_invoke` / `node_invoke_many` / `node_file` 通过这些原语驱动节点。
 
 ## 设计理念
 
-SharedArena 遵循三个原则：
+集群遵循三个原则：
 
-1. **显式生命周期** —— 竞技场通过具有验证转换的定义良好的状态转换
-2. **确定性排序** —— 所有集合都排序以确保可重现的行为
-3. **权限隔离** —— Handle 模式限制每个参与者可以访问的内容
+1. **生命周期 SSOT** —— 注册 / 注销 / 在线状态唯一来源为 `NodeRegistry`，避免重复行与残留状态
+2. **授权命令表** —— `CommandTable` 是节点可见命令的权威允许列表，未列入的命令被拒绝
+3. **失败关闭** —— 节点审批回环 (`CenterApprovalRequester`) 与文件沙箱默认拒绝，凭证不发给节点
 
 ---
 
 ## 核心组件
 
-### 竞技场状态机
+### NodeRegistry
 
-竞技场遵循严格的生命周期：
-
-```
-Created ──▶ Active ──▶ Settling ──▶ Archived
-```
-
-每次转换在继续之前验证当前状态。无效转换被拒绝。
-
-### ArenaManager
-
-所有竞技场的中央协调器：
+多级寻址 + tag fan-out + 断连 fail-fast 的中心侧节点注册表：
 
 ```rust
-pub struct ArenaManager {
-    arenas: RwLock<HashMap<ArenaId, Arena>>,
-}
+pub struct NodeRegistry { /* … */ }
 
-impl ArenaManager {
-    pub async fn create(
-        &self,
-        config: ArenaConfig,
-    ) -> Result<ArenaId> { /* ... */ }
-    
-    pub async fn active_arenas_for(
-        &self,
-        agent_id: &AgentId,
-    ) -> Vec<ArenaId> { /* ... */ }
+impl NodeRegistry {
+    pub fn maybe_register_node(/* … */) -> NodeMatch { /* … */ }
+    pub fn match_id(/* … */) -> Option<&NodeSession> { /* … */ }
+    pub fn environments_list(/* … */) -> Vec<Environment> { /* … */ }
 }
 ```
 
-**确定性：** `active_arenas_for` 返回排序的 `ArenaId` 向量（在 `ArenaId` 上派生 `Ord`）。
+`Environment` 是 `environments.list` 渲染的序列化外部视图（精简渲染契约）。
 
-### ArenaHandle
+### Cluster 生命周期
 
-参与者的竞技场受限视图：
+`NodeAdmission` 是注册入口；`enroll_node_device` 是操作员预注册（幂等）；`deregister_node` 把节点从 `environments.list` 与 `node_invoke` / `node_file` 寻址中移除。`DeregisterError` / `DeregisterOutcome` 显式表达粘住注销的语义。
+
+**确定性：** `environments_list()` 返回排序的 `Environment` 向量；节点键在归一化前先走 `normalize_node_key`（Unicode 归一化，CJK 节点名正确）。
+
+### CommandTable
+
+节点可见命令的权威允许列表：
 
 ```rust
-pub struct ArenaHandle {
-    arena_id: ArenaId,
-    permissions: HandlePermissions,
-}
+pub struct CommandTable { /* … */ }
+pub enum NodeCommand { /* … */ }
 ```
 
-Handle 模式通过隔离权限来强制执行 P1（低耦合）—— 参与者只能访问句柄允许的内容。
+未列入 `CommandTable` 的命令被拒绝——同一道闸门在 connect 时与 invoke 时都被检查。
 
-### Aggregate
+### FileReadCommand / FileWriteCommand
 
-用于协作进度跟踪的状态聚合：
+文件命令沙箱：
 
-```rust
-pub struct ArenaAggregate {
-    completed_steps: u32,
-    total_steps: u32,
-    participants: Vec<AgentId>,
-}
-```
+- `MAX_FILE_BYTES` 是单次读 / 写的硬上限
+- 路径限制由中心侧策略保证；写命令不再存在 check-then-write 的 TOCTOU 窗口
+- `sha256_hex` 用于一致性验证
 
-步骤计数使用 `saturating_add` 以防止整数溢出。
+### CenterApprovalRequester
+
+节点侧审批的回环（fail-closed）。中心发起的人审请求通过这条通道回到中心侧 LLM / 用户，`NODE_APPROVAL_TIMEOUT_MS` 是超时硬上限。
+
+### ReverseRpcChannel / PendingInvokes
+
+服务器 → 已连客户端 id-bearing 请求 / 响应通道。响应通过结构（不是 id）匹配请求，因此多个并发调用无需自管 id。
 
 ---
 
-## 事件
+## 事件与状态
 
-竞技场事件跟踪协作活动：
+节点侧通过 `cluster.*` RPC 报告状态；中心侧把节点连接 / 断连 / 离线状态广播给 Panel（实时舰队 feed）。
 
 ```rust
-pub enum ArenaEvent {
-    AgentJoined { agent_id: AgentId, timestamp: DateTime<Utc> },
-    AgentLeft { agent_id: AgentId, timestamp: DateTime<Utc> },
-    StepCompleted { step: u32, agent_id: AgentId },
-    GoalUpdated { new_goal: String },
-}
+pub struct NodeSession { /* 在线节点视图 */ }
+pub struct Environment { /* 序列化外部视图 */ }
 ```
 
-事件被持久化到存储以进行审计和重放。
+`environments.list` 是只读视图，Panel 集群面板消费。连接协议：节点的 connect 帧声明其命令表 + tag；中心在 connect 握手中完成 admit + 注册，避免单独的注册往返。
 
 ---
 
-## 存储
+## 持久化
 
-竞技场通过 `ArenaStorage` 持久化：
+`cluster.deregister` 把设备行撤销，Panel 的 `last_seen_at` 不再被当作"在线"信号：
 
-- 使用参数化 SQL 查询（无注入风险）
-- 使用 `unwrap_or_else(|e| e.into_inner())` 模式的锁安全
+- 参数化 SQL 查询（无注入风险）
+- 锁使用 `unwrap_or_else(|e| e.into_inner())` 模式
 - 所有查询使用 `params![]` 进行绑定
+- `cluster.file.write` 不再存在 check-then-write TOCTOU
 
 ---
 
 ## 安全属性
 
-- **状态机验证** —— 非法转换在编译/运行时拒绝
-- **无锁中毒** —— 所有锁使用恢复模式
-- **无 SQL 注入** —— 整个使用参数化查询
-- **无 UTF-8 切片** —— 没有字节级字符串操作
-- **溢出保护** —— 所有累积使用 `saturating_add`
+- **生命周期 SSOT** —— 注册 / 注销唯一来源；`cluster.enroll` 不再每次点击铸造重复行
+- **Unicode 节点键** —— `normalize_node_key` 做 Unicode 归一化，CJK 节点名不再被字节切片破坏
+- **授权命令表** —— `CommandTable` 权威允许列表
+- **文件沙箱** —— `MAX_FILE_BYTES` 硬上限 + 路径限制 + 无 TOCTOU 写
+- **LAN-trust** —— 节点不持 token，连接身份由 connect 帧的 `commands` + `tags` 形状声明
+- **审批回环失败关闭** —— `CenterApprovalRequester` 默认拒绝
 
 ---
 
 ## 代码位置
 
-- `src/arena/mod.rs` —— 模块入口点
-- `src/arena/manager.rs` —— 竞技场生命周期和协调
-- `src/arena/handle.rs` —— 权限受限的竞技场访问
-- `src/arena/aggregate.rs` —— 状态聚合
-- `src/arena/types.rs` —— 核心类型和状态机
-- `src/arena/events.rs` —— 事件定义
-- `src/arena/storage.rs` —— 持久化层
+- `src/cluster/mod.rs` —— 模块入口点
+- `src/cluster/registry.rs` —— `NodeRegistry` / `Environment` / 节点键归一化
+- `src/cluster/enrollment.rs` —— `NodeAdmission` / `enroll_node_device` / `deregister_node`
+- `src/cluster/node_runtime.rs` —— `CommandTable` / `NodeCommand` / 连接协议
+- `src/cluster/node_file_cmd.rs` —— `FileReadCommand` / `FileWriteCommand` / `MAX_FILE_BYTES`
+- `src/cluster/node_approval.rs` —— `CenterApprovalRequester` / `ApprovalSlot`
+- `src/cluster/reverse_rpc.rs` —— `ReverseRpcChannel` / `PendingInvokes`
 
 ## 另请参阅
 
-- [代理运行时](./agent-runtime) —— 代理如何生成和管理任务
-- [事件系统](./event-system) —— 事件分发模式
+- [代理运行时](/docs/zh/concepts/agent-runtime) —— 代理如何生成和管理任务
+- [事件系统](/docs/zh/concepts/event-system) —— 事件分发模式
 
 ---
 
@@ -142,25 +128,36 @@ pub enum ArenaEvent {
 
 ### Cluster 生命周期 SSOT
 
-26.7.x：集群注册 / 注销 / deregister 引入生命周期 SSOT：
+26.7.x：集群注册 / 注销 / 反向 RPC 引入生命周期 SSOT：
 
 - 死的冷启动注册已修复
-- 注销能粘住
+- 注销能粘住（`DeregisterError` / `DeregisterOutcome` 显式语义）
 - 反向 RPC 加固
-- `connect` 握手先于 `gateway call` 中的方法
+- `connect` 握手先于 `gateway call` 中的方法（注册随 admit 完成）
 - 节点键按 Unicode 归一化（CJK 节点名正确）
+- wedged 反向 RPC 拆解（slow-consumer eviction）
 
 ### `cluster.deregister` / `enroll` / `environments.list`
 
-26.7.x 完整 RPC。详见 [集群架构](/docs/zh/architecture/cluster)。
+26.7.x 完整 RPC。`environments.list` 是 `Environment` 的序列化外部视图，由 Panel 集群面板渲染。详见 [集群架构](/docs/zh/architecture/cluster)。
 
 ### 真实集群舰队视图
 
 - 实时舰队 feed
-- 节点身份持久化
-- 集群写入 R8 完整化（之前是半完成）
+- 节点身份持久化（连接 verdict 上的 `last_seen_at`）
+- 集群写入 R8 完整化（之前是半完成；`cluster.file.write` 不再有 TOCTOU）
+
+### 与 Dreaming / Insights 的关联
+
+集群并不直接驱动 Dreaming；关联是间接的：
+
+- Dreaming Daemon（`src/memory/dreaming/`）在夜间运行，不依赖集群；它的重试风暴已加边界（`should_skip_scheduled_run`），不再耗尽 provider 额度
+- `DreamReport` 字段（`links_purged`、`extra` 等）作为 dreaming 阶段的产物被下游 insights 消费（`src/memory/insights.rs`）
+- `insights.tools` 是按工具使用的只读聚合（从原始 `ToolInvocation` 行计算），与集群舰队并列显示在 Memory Hub / governance 视图
+- Memory Hub 把 graph canvas + vault table 合并为单一视图，新增 Dream Insights 与 Corrections 治理视图；`memory.retrieve_with_trace` 提供每阶段打分 trace
 
 ### 见另请参阅
 
-- [集群](/docs/zh/architecture/cluster) — 完整架构
+- [集群架构](/docs/zh/architecture/cluster) — 完整架构
 - [集群 R8 写入](/docs/zh/gateway/methods/cluster) — 协议
+- [记忆系统](/docs/zh/concepts/memory) — dreaming / insights 关联

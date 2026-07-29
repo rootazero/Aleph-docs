@@ -1,188 +1,260 @@
 ---
-title: "Markdown 解析"
-description: "用于流式输出处理的 Markdown 代码围栏解析和文本格式化工具。"
+title: "Markdown 解析与文本工具"
+description: "用于流式输出分块的 Markdown 代码围栏解析，以及跨模块共享的 UTF-8 安全文本工具。"
 ---
 
-`markdown` 和 `utils` 模块提供 Markdown 内容的解析工具以及在整个代码库中使用的一般用途文本格式化函数。
+`src/markdown` 与 `src/utils` 提供两类纯函数能力：前者把一段流式 / 不完整 Markdown 切到安全分块点；后者提供跨代码库共享的字符串、JSON、路径、配置反序列化工具。两者都是无锁 / 无 IO / 无业务判断（R4/R7/R10 纯函数）。
 
 ## 设计理念
 
-1. **流式友好** — 围栏解析处理来自流式 LLM 输出的不完整 Markdown
-2. **轻量** — 最小依赖，聚焦范围
-3. **UTF-8 安全** — 所有字符串操作尊重字符边界
+1. **流式友好** — `parse_fence_spans` 接受 `str::lines()` 风格的逐行扫描，对半写入 / 缺结尾围栏都能稳定处理。
+2. **UTF-8 安全** — 所有字符截断走 `char_indices().nth()` / `chars().take()`，永不按字节切片。
+3. **轻依赖** — 不引入 nom / pulldown-cmark 等重型 crate，自写 `regex::Regex` 一次缓存在 `LazyLock` 里。
 
 ---
 
-## Markdown 围栏解析
+## 代码围栏解析（`src/markdown/fences.rs`）
 
-`markdown::fences` 模块解析 Markdown 中的代码围栏块：
+`markdown::fences` 解析代码围栏块（` ``` ` 与 `~~~`），返回 `FenceSpan` 列表 + 字节级起止偏移：
 
 ```rust
 pub struct FenceSpan {
-    pub start_line: usize,
-    pub end_line: usize,
-    pub fence_char: char,  // '`' 或 '~'
-    pub info_string: String,
+    start: usize,    // 开口围栏行起点字节偏移（私有）
+    end:   usize,    // 闭口围栏行起点字节偏移（未闭合时 = text.len()）
+    marker: String,  // "```" / "~~~~" 等
+    indent: String,  // 0–3 空格缩进
+    language: Option<String>,  // 第一个空白前的 token
+    info: String,    // 整个 info 字符串
 }
 ```
 
-### 解析函数
+API 表：
 
-```rust
-pub fn parse_fence_spans(text: &str) -> Vec<FenceSpan>
-```
+| 函数 | 行为 | 流式场景 |
+|------|------|----------|
+| `parse_fence_spans(text)` → `Vec<FenceSpan>` | 全量解析；未闭合围栏 `end = text.len()`，info 完整保留 | 一次性处理整段 Markdown |
+| `find_fence_at(text, line)` → `Option<&FenceSpan>` | 找包含指定行号的围栏（用于 `prompt.rs` 等逐块渲染） | 行号定位 |
+| `is_safe_fence_break(text, pos)` → `bool` | `pos` 是否在某个围栏**之外**（`contains` 是开区间） | 决定分块切点是否安全 |
+| `get_fence_split(text, pos)` → `Option<FenceSplit>` | 给出在 `pos` 处分块需要的 close / reopen 行 | 拼接 `FenceSplit { close_line, reopen_line }` |
 
-解析文本中的所有代码围栏块，处理：
-- 反引号围栏 (```)
-- 波浪号围栏 (~~~)
-- 信息字符串（语言标识符）
-- 嵌套围栏（比开头更长的结尾围栏）
-- 未闭合围栏（延伸到文本末尾）
+### 关键边界
 
-```rust
-pub fn find_fence_at(
-    text: &str,
-    line: usize,
-) -> Option<&FenceSpan>
-```
+- **闭口围栏长于开口**：`````js` ... ````...` ` ` ` ` ` ` 等多 1 个字符合法；`equals` 不算数。
+- **围栏内的反引号**：` 字符串里的 \` 字符**不会**开新围栏；只有行首 0–3 空格 + 围栏标记才算。
+- **缩进匹配**：闭口围栏的缩进必须**不超过**开口的缩进，超过的视为无效闭口。
+- **半字符拒绝**：`push_needs_space` 之外的半个多字节字符在 CJK 路径上不会插空格（与 `utils/text_format::truncate_text` 共用同一套 `char_indices` 截断）。
+- **空字符串与空 fence**：返回 `[]`，不抛错。
 
-查找包含特定行的围栏跨度。
+### 流式边界的实用提示
 
-```rust
-pub fn is_safe_fence_break(
-    text: &str,
-    pos: usize,
-) -> bool
-```
-
-检查在给定位置中断文本是否安全（不在围栏内）。
-
-```rust
-pub fn get_fence_split(
-    text: &str,
-) -> FenceSplit
-```
-
-在安全边界处分割文本，优先选择围栏边界。
+- 分块在 `is_safe_fence_break` 报 `true` 的字节偏移做最简单；`false` 则 `get_fence_split` 拿到 close / reopen 字符串，调用方自己拼 `before[..pos] + close_line + "\n\n" + reopen_line + "\n" + after[pos..]`，重组成「先关后开」。
+- 新行（`\r\n` / `\n`）都算；`\r` 单字符（旧 Mac）整段当作一行处理 —— `parse_fence_spans("foo\r```\r")` 返回 `[]`，这是文档化的退化路径，R7 不修。
 
 ---
 
-## 文本格式化
+## 文本格式化（`src/utils/text_format.rs`）
 
-`utils::text_format` 模块提供文本操作工具：
+`utils::text_format` 提供 3 个纯函数 + 1 个时间戳：
 
 ```rust
-pub fn truncate_text(
-    text: &str,
-    max_chars: usize,
-) -> String
+#[must_use]
+pub fn format_timestamp(ts: i64) -> String;          // → "2024-01-15 00:00:00 UTC"
+#[must_use]
+pub fn truncate_text(text: &str, max_chars: usize) -> String;
+#[must_use]
+pub fn escape_markdown(text: &str) -> String;
 ```
 
-使用 `char_indices().nth()` 截断文本到最大字符数以确保 UTF-8 安全。
+`truncate_text` 用 `char_indices().nth(max_chars)` 取字符边界，0 字符 → 空串、超过原文 → 原样返回。`escape_markdown` 对 `[`、`]`、`(`、`)`、`*`、`_`、`~`、`` ` ``、`\` 与 `![` 图像前缀加反斜杠，**对字面 NUL 也加反斜杠**（不丢内容）—— 早期版本用 `\0` 哨兵再过滤，会把字面 NUL 误删，已修。
 
 ---
 
-## JSON 提取
+## JSON 提取（`src/utils/json_extract.rs`）
 
-`utils::json_extract` 模块从文本中提取 JSON：
+`utils::json_extract` 用**真正的 brace 匹配**（不算字符串内的 `}` / `{`）从任意文本里挖出顶层 JSON 对象，给 LLM 输出里「正文 + 块状 JSON」混排的场景用：
 
 ```rust
-pub fn extract_json_objects(
-    text: &str,
-) -> Vec<&str>
+#[must_use]
+pub fn extract_json_robust(response: &str) -> Option<serde_json::Value>;
 ```
 
-在任意文本中查找顶级 JSON 对象（对于解析可能包含 Markdown + JSON 的 LLM 输出很有用）。
+内部按 4 个策略依次尝试：
+1. 整段是合法 JSON（直接 parse）；
+2. 第一个 ```` ```json ```` 围栏块里；
+3. 第一个 ```` ``` ```` 通用围栏块里（`{` / `[` 开头才认）；
+4. 用 brace 匹配在正文里挖最外层 `{...}` 块并 parse。
+
+策略 4 的实现 `find_matching_brace` 显式跟踪字符串状态（`"` 内字符一律按字面量处理，包括 `\"`），所以 JSON 字符串里出现的孤立 `}` / `{` 不会破坏匹配。
 
 ---
 
-## 路径工具
+## 路径工具（`src/utils/paths.rs`）
 
-`utils::paths` 模块提供路径操作：
-
-```rust
-pub fn get_agent_config_dir(
-    agent_id: &str,
-) -> Result<PathBuf>
-```
-
-返回特定代理的配置目录，并针对路径遍历进行验证（`/`, `\`, `..`, 空字符串）。
+`utils::paths` 是 `src/utils` 体积最大的模块（≈700 行），给整个 daemon 提供「用户家目录、配置 / 数据目录、agent 目录、SQLite 路径、skill 插件目录」五个层级的解析与校验：
 
 ```rust
-pub fn expand_tilde(
-    path: &str,
-) -> PathBuf
+#[must_use]
+pub fn get_config_dir() -> Result<PathBuf>;                       // ~/.aleph（ALEPH_HOME 可覆盖）
+#[must_use]
+pub fn get_data_dir() -> Result<PathBuf>;                        // ~/.aleph/data
+#[must_use]
+pub fn get_memory_db_path() -> Result<PathBuf>;                  // ~/.aleph/memory（自动建）
+#[must_use]
+pub fn get_note_memory_dir() -> Result<PathBuf>;                 // ~/.aleph/memory/note
+#[must_use]
+pub fn get_agent_config_dir(agent_id: &str) -> Result<PathBuf>;  // ~/.aleph/agents/{id}
+#[must_use]
+pub fn get_skills_dir() -> Result<PathBuf>;                      // ~/.aleph/skills
+#[must_use]
+pub fn get_runtimes_dir() -> Result<PathBuf>;                    // ~/.aleph/runtimes
 ```
 
-将 `~` 扩展为用户的主目录。
+`get_agent_config_dir` 在拼接路径前显式拒 `..` / `/` / `\` / 空字符串 / NUL 字节；不合法的 `agent_id` 返回 `Err`，绝不落到 `create_dir_all` 上把 `../../etc` 当目录创建。
+
+`expand_tilde` 处理 `~` 开头（仅前导位）；`equivalent` 用 `Path::canonicalize` 做同路径判定（不可解析时回退按字面量比较，TOCTOU 安全）；`migrate_legacy_db_files` 把旧式 `~/.aleph/*.db` 一次性迁到 `~/.aleph/data/*.db`，是 Spec C 之后才上线的设备路径，不需要主动调用。
+
+`get_all_skills_dirs(project_dir)` 走 OpenCode 兼容的 4 段优先级：
+0. **Agent level**（`~/.aleph/agents/{id}/skills`，仅 run 中）
+1. **Project level**（`.aleph/skills/`、`.claude/skills/`，从 `project_dir` 向上到 git root）
+2. **User level**（`~/.aleph/skills`、`~/.claude/skills`）
+3. **Plugin-shipped**（`~/.aleph/plugins/{p}/skills` + ExtensionManager 发布的 `<plugin_root>/skills`）
+
+—— 同一 id 在优先级高的目录存在时，shadow 低优先级目录的同名 skill。返回的 `Vec<PathBuf>` 按优先级排序，调用方拿第一个匹配就用。
 
 ---
 
-## PII 清理
-
-`utils::pii` 模块提供日志安全的 PII 清理（不如网关 `pii` 模块严格）：
+## PII 清理（`src/utils/pii.rs`）
 
 ```rust
-pub fn scrub_pii(text: &str) -> String
+#[must_use]
+pub fn scrub_pii(text: &str) -> String;
 ```
 
-接受误报（对日志安全，不适用于 LLM API 调用）。
+`utils::pii` 比 `src/gateway/pii` 更激进：宁可误报也不漏报，专给日志/遥测这种「文本里出现的 token 不进 LLM API」的场景用。网关侧 PII 是给 LLM 输入前最后一道过滤，会更保守（双 false positive 会污染 prompt）。两者**不是同一个模块**，按调用点区分。
 
 ---
 
-## OneOrMany
-
-`utils::one_or_many` 模块处理单个值或数组的序列化：
+## 配置字段反序列化（`src/utils/one_or_many.rs`）
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum OneOrMany<T> {
     One(T),
     Many(Vec<T>),
 }
 ```
 
-对于反序列化可以是 `"value"` 或 `["value1", "value2"]` 的配置字段很有用。
+对 `toml` / `serde_json` 都不指定 tag：单值直接解 `T`，数组解 `Vec<T>`。意图是允许「`voice = "deepgram"`」与「`voice = ["deepgram", "elevenlabs"]`」在同一字段合法。
+
+`Default` 实现是 `Many(vec![])`（`is_empty() = true`），让「省略」与「空数组」行为一致。
+
+---
+
+## SQLite 打开（`src/utils/sqlite_open.rs`）
+
+```rust
+#[must_use]
+pub fn open_sqlite_safe(path: &Path) -> rusqlite::Result<Connection>;
+#[must_use]
+pub fn open_sqlite_readonly(path: &Path) -> rusqlite::Result<Connection>;
+```
+
+`open_sqlite_safe` 自动 `create_dir_all(parent)`，设上四个 pragma：
+- `journal_mode = WAL`（读写并发）
+- `busy_timeout = 5000`（冲突等 5 s）
+- `synchronous = NORMAL`（WAL 下足够安全）
+- `foreign_keys = ON`
+
+全 daemon 的 `goal_store.db`、`memory.db`、`hub/cache.sqlite`、`loop_graph.db`、`strategies/` 全部走这个 helper；不直连构造 `Connection::open`，就是 Spec C 锁安全的唯一入口。
+
+`open_sqlite_readonly` 只加 `busy_timeout`，挂 `SQLITE_OPEN_READ_ONLY`，给 doctor / lint 之类的只读诊断路径用。**失败 fast**：文件不存在直接返 `Err`，doctor 把它当作「图尚未建立」处理而不是故障。
+
+---
+
+## 原子 I/O（`src/utils/atomic_io.rs` + `src/utils/atomic_write.rs`）
+
+```rust
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()>;     // 同步版
+pub async fn atomic_write_file(path: &Path, content: &str) -> Result<(), AlephError>;  // async 版
+```
+
+两者都是「`*.tmp.<rand>` 写 → fsync → rename」三步，保证 `read(消费者)` 永远看到完整文件或旧文件，不存在半写状态。`atomic_write_file` 额外保留目标权限位：原子覆盖既有文件不会把 mode `0755` 错错错成 `0600`。vault（`secrets.vault`）走 `atomic_io` + `with_file_lock`（基于 `fs2::FileExt::lock_exclusive` 的 advisory lock）双重保险。
+
+---
+
+## 进程活性（`src/utils/process_alive.rs`）
+
+```rust
+#[must_use]
+pub fn is_pid_alive(pid: u32) -> bool;
+```
+
+POSIX `kill(pid, 0)` 实现（Windows 用 `OpenProcess`）。Instance-lock 守护用：`acquire_instance_lock` 拿到锁后写入自己的 pid 到 `aleph.lock` sidecar，`release_instance_lock` 时清；其他进程读 sidecar 看到「锁持有者 pid 是 X」就调 `is_pid_alive(X)` 判 X 是否还在（崩溃进程 OS 自动释放 flock，sidecar 的 pid 仍在但 `kill 0` 返 ESRCH），从而区分「真的锁持有中」与「stale lock file」。
+
+---
+
+## 集中初始化（`src/utils/no_window.rs`）
+
+```rust
+pub fn no_window(cmd: &mut tokio::process::Command);
+```
+
+Windows / macOS GUI app 启动时 tokio 子进程会偷偷继承一个隐藏 console 窗口（macOS 是 `LSUIElement`，Windows 是 subsystem），shell 脚本里的 `pause` / `prompt` 会卡住。`no_window` 给 tokio 的 `Command` 装上 `CREATE_NO_WINDOW`（Windows）或 `setsid`（Unix），确保 daemon 启动的子进程纯后台运行。
+
+---
+
+## 一次性路径检查
+
+```rust
+pub fn is_path_within(base: &Path, target: &Path) -> bool;
+```
+
+纯字面量、不触 IO（不走 `canonicalize`，避开 symlink TOCTOU）：在 `target` 归一化（处理 `..` / `.`）后，看其前缀是否以 `base` 组件为单位一致；`Path::strip_prefix` 在 `base` 不是真正前缀时返 `Err`，正是想要的拒答信号。`/skills/demo` 是 `/skills/demo2` 的前缀吗？否 —— 组件级比较，**不接受字符串前缀撞名**。
 
 ---
 
 ## 安全属性
 
-- **UTF-8 安全** — `char_indices()` 用于截断，`.get(..n)` 用于切片
-- **无锁问题** — 这些模块中无 Mutex/RwLock
-- **无 `static mut`** — 使用 `OnceLock` 和 `LazyLock`
-- **路径遍历保护** — `get_agent_config_dir` 针对 `..` 和分隔符进行验证
-- **TOCTOU 安全** — `create_dir_all` 直接调用（幂等，无需存在性检查）
+- **UTF-8 安全** — `truncate_text` / `char_indices` / `chars().take(n)`，无字节切片
+- **路径遍历保护** — `get_agent_config_dir` 校验 `..` / `/` / `\` / 空 / NUL；`is_path_within` 不接受字符串前缀撞名
+- **TOCTOU 安全** — `open_sqlite_safe` 直接 `create_dir_all` 不先 `exists`；`atomic_write` 走 temp + rename；`migrate_legacy_db_files` 用「源存 + 目标不存在才移动」单点判断
+- **锁中毒恢复** — `unwrap_or_else(|e| e.into_inner())` 处处使用，从不向上 propagate poison
+- **白名单** — `is_path_within` 是白名单形态（返回 `true` 才允许），不是黑名单
 
 ---
 
 ## 代码位置
 
-**Markdown:**
-- `src/markdown/mod.rs` — 模块入口点
-- `src/markdown/fences.rs` — 围栏解析
+**Markdown：**
+- `src/markdown/mod.rs` — 模块入口，re-export `fences::{parse_fence_spans, find_fence_at, is_safe_fence_break, get_fence_split, FenceSpan, FenceSplit}`
+- `src/markdown/fences.rs` — `FenceSpan` + `FenceSplit` + 4 个解析函数
 
-**Utils:**
-- `src/utils/mod.rs` — 模块入口点
-- `src/utils/text_format.rs` — 文本截断
-- `src/utils/json_extract.rs` — JSON 提取
-- `src/utils/paths.rs` — 路径工具
-- `src/utils/pii.rs` — 日志安全 PII 清理
-- `src/utils/one_or_many.rs` — 单/数组序列化
-
-## 另请参阅
-
-- [内置工具](/docs/zh/concepts/builtin-tools) — 使用 Markdown 解析的工具
-- [PII 保护](/docs/zh/concepts/pii-protection) — 网关级 PII 过滤
+**Utils：**
+- `src/utils/mod.rs` — 模块入口，re-export `OneOrMany`
+- `src/utils/text_format.rs` — `format_timestamp` / `truncate_text` / `escape_markdown`
+- `src/utils/json_extract.rs` — `extract_json_robust` + 4 策略 + `find_matching_brace`
+- `src/utils/paths.rs` — `get_config_dir` / `get_data_dir` / `get_memory_db_path` / `get_note_memory_dir` / `get_agent_config_dir` / `get_skills_dir` / `get_runtimes_dir` / `expand_tilde` / `equivalent` / `get_all_skills_dirs` / `migrate_legacy_db_files`
+- `src/utils/pii.rs` — `scrub_pii`
+- `src/utils/one_or_many.rs` — `OneOrMany<T>` + `OneOrManyIter`
+- `src/utils/sqlite_open.rs` — `open_sqlite_safe` / `open_sqlite_readonly`
+- `src/utils/atomic_io.rs` — `write_atomic` + `with_file_lock`（fs2 exclusive lock）
+- `src/utils/atomic_write.rs` — `atomic_write_file`（async 版，含权限保留）
+- `src/utils/process_alive.rs` — `is_pid_alive` + 实例锁
+- `src/utils/instance_lock.rs` — `acquire_instance_lock` / `release_instance_lock` / 死锁 stale 检测
+- `src/utils/no_window.rs` — `no_window`（Windows CREATE_NO_WINDOW / Unix setsid）
+- `src/utils/path_within.rs` — `is_path_within`（白名单、纯字面量）
+- `src/utils/vault_io.rs` — `VaultIo::new` / `read` / `write`（atomic + locked）
 
 ---
 
 ## 26.7.x 补充
 
-### `[[wikilink]]` 生命周期
+### `[[wikilink]]` 生命周期（与 `memory.mdx` 互补）
 
 26.7.7+ 笔记层 wikilink：
 
-- 解析 `[[wikilinks]]`（带别名）
+- 解析 `[[wikilinks]]`（带别名 `[Note|alias]`）
 - 通过策略链解析并记录来源（`resolved_by` / `status` / `label`）
 - 重命名级联（包括类型化关系）
 - tombstone 删除语义与定向的入站回填
@@ -190,22 +262,26 @@ pub enum OneOrMany<T> {
 
 ### CJK trigram 全文搜索
 
-26.7.15+ 抗崩溃索引 + CJK 三元组全文搜索。
+26.7.15+ 抗崩溃索引 + CJK 三元组全文搜索。`notes_fts` 走 `unicode61` 分词器索引 CJK 会把一整段中文当一个 token；`notes_fts_trigram` 走 `trigram` 索引重叠 3 字符窗口，召回时以 ≥ 3 字符的查询为主。两者字节同步，每次写 / 删双写。
 
-### wikilink supersession
+### `wikilink` supersession
 
-26.7.15+：`[[wikilink]]` supersession 强制浮现纠正笔记——召回过时笔记时模型会看到正确的笔记。
+26.7.15+：`[[wikilink]]` supersession 强制浮现纠正笔记 —— 召回过时笔记时，模型看到的是 supersession 后正确版（`NoteDrift` 写 `stale: true` + `NoteConsolidate` 触发 `MERGE` / `ABSORB`），不是直接淘汰旧笔记。
 
 ### 笔记层 Leiden 精炼
 
-26.7.15+：通过 Leiden 精炼的连通社区——聚类、关系边染色、矛盾→supersession 闭环。
+26.7.15+：通过 Leiden 精炼的连通社区 —— 聚类、关系边染色、矛盾→supersession 闭环。Louvain 之后又加了一道 Leiden refinement 层，提升社区质量。
 
 ### `MARKDOWN_SKILL_AUTHORING.md`
 
-26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md`——技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写。
+26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md` —— 技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写。`utils/markdown.rs` 提供围栏解析，让技能描述在流式输出里始终能被正确分块。
 
 ### 见另请参阅
 
-- [记忆系统](/docs/zh/concepts/memory) — 笔记层
-- [技能系统](/docs/zh/concepts/skill-system) — SKILL.md 形式
+- [记忆系统](/docs/zh/concepts/memory) — 笔记层（与本文 `[[wikilink]]` / Leiden / trigram 互补）
+- [技能系统](/docs/zh/concepts/skill-system) — `SKILL.md` 形式 + 工具调用
 - [记忆演化](/docs/zh/concepts/memory-evolution) — 笔记层 + 梦境
+- [内置工具](/docs/zh/concepts/builtin-tools) — 使用 Markdown 解析的 builtin 工具
+- [PII 保护](/docs/zh/concepts/pii-protection) — 网关级 PII 过滤（与 `utils::pii` 区别：保守度）
+- [技能源仓库](https://github.com/rootazero/Aleph-skills) — Aleph 官方技能
+- [Aleph-skills 官方插件](https://github.com/rootazero/Aleph-plugins) — Aleph 官方插件

@@ -1,282 +1,150 @@
 ---
 title: "Skills"
-description: "How Aleph's skill system enables reusable capabilities through SKILL.md definitions, prompt injection, and slash command integration."
+description: "Authoring and using Aleph skills through SKILL.md, model-visible triggers, progressive disclosure, and the shared SkillSystem."
 ---
 
-Skills are reusable capabilities defined by markdown-based `SKILL.md` files. Unlike static tool definitions, skills provide natural language instructions that guide the LLM's behavior for specific tasks.
+A **Skill** is a reusable set of Markdown instructions in `SKILL.md`. It gives the model a task-specific method rather than adding another hard-coded tool. In the unified Extensions model, `Skill` is one of three kinds alongside `Plugin` and `Mcp`.
 
-> A Skill is one of the three **Extension** kinds (`Skill`, `Plugin`, `Mcp`). For everyday use, browse and install skills alongside plugins and MCP servers by functional category in the **Extensions Store** ([/docs/en/concepts/extensions-store](/docs/en/concepts/extensions-store)). This page focuses on skill definitions and activation.
+For discovery and installation, use the [Extensions Store](/docs/en/concepts/extensions-store). This page is about the authoring contract and runtime behavior of `SKILL.md`.
 
-## What is a Skill?
+## Authoring contract
 
-A skill in Aleph consists of:
+A skill is a directory containing a required `SKILL.md`:
 
-- **SKILL.md** — A markdown file describing when and how the skill should be used, written in natural language for the LLM to interpret
-- **Manifest** — Structured metadata parsed from SKILL.md frontmatter (name, description, triggers)
-- **Optional tooling** — Skills can invoke built-in tools, WASM plugins, or Node.js extensions
-
-Skills are discovered from skill directories and loaded at runtime:
-
-```
-~/.aleph/skills/
-├── code-review/
-│   └── SKILL.md
-├── git-commit/
-│   └── SKILL.md
-└── translate/
-    └── SKILL.md
+```text
+~/.aleph/skills/code-review/SKILL.md
+.aleph/skills/project-review/SKILL.md
 ```
 
-## Skill System Architecture
+Project skills may also be discovered from `.claude/skills/`. Plugin-bundled skills live under a plugin's `skills/` directory and are folded into the same SkillSystem index.
 
-```
-SkillSystem (facade)
-  ├── SkillRegistry — Stores loaded skill manifests
-  ├── SkillSnapshot — Immutable view for prompt building
-  ├── EligibilityService — Determines which skills apply
-  └── Events — Broadcast skill system changes
-```
+The frontmatter must contain:
 
-## Core Components
+- `name` — the human-readable name and the basis for the runtime skill ID
+- `description` — one concise routing description
 
-### SkillSystem
+The Markdown body is the complete instruction set loaded after the model selects the skill. The parser derives an ID by lowercasing `name`, joining whitespace with hyphens, and resolving duplicates by source priority.
 
-The main entry point, cheaply cloneable via `Arc`:
+## Writing descriptions and trigger words
 
-```rust
-// src/skill/mod.rs
-pub struct SkillSystem {
-    inner: Arc<Inner>,
-}
+`description` is the primary router. It should say what the skill does, when it applies, the important input or output, and the boundaries that keep nearby requests out. Put the words and phrases users actually use in that sentence. There is no supported `triggers` frontmatter field in the current `SkillManifest`; do not maintain a separate keyword list.
 
-struct Inner {
-    registry: RwLock<SkillRegistry>,
-    snapshot: RwLock<SkillSnapshot>,
-    eligibility: EligibilityService,
-    config: RwLock<SkillsConfig>,
-    // ...
-}
-
-impl SkillSystem {
-    pub async fn init(&self, 
-        dirs: Vec<PathBuf>
-    ) -> Result<(), SkillSystemError>;
-    
-    pub async fn current_snapshot(&self
-    ) -> SkillSnapshot;
-}
-```
-
-### Skill Registry
-
-Maintains the collection of loaded skills:
-
-```rust
-// src/skill/registry.rs
-pub struct SkillRegistry {
-    skills: HashMap<SkillId, SkillManifest>,
-}
-
-impl SkillRegistry {
-    pub fn register(&mut self, 
-        manifest: SkillManifest
-    );
-    
-    pub fn get(&self, 
-        id: &SkillId
-    ) -> Option<&SkillManifest>;
-}
-```
-
-### Skill Manifest
-
-Parsed from SKILL.md frontmatter:
-
-```rust
-// src/domain/skill.rs
-pub struct SkillManifest {
-    pub id: SkillId,
-    pub name: String,
-    pub description: String,
-    pub triggers: Vec<String>,
-    pub tools: Vec<String>,
-    pub prompt: String,
-}
-```
-
-### Eligibility Service
-
-Determines which skills are relevant for a given context:
-
-```rust
-// src/skill/eligibility.rs
-pub struct EligibilityService;
-
-impl EligibilityService {
-    pub fn evaluate(
-        &self,
-        skills: &[SkillManifest],
-        context: &Context,
-    ) -> Vec<EligibilityResult>;
-}
-```
-
-### Prompt Builder
-
-Injects eligible skills into the system prompt:
-
-```rust
-// src/skill/prompt.rs
-pub fn build_skills_prompt_xml(
-    snapshot: &SkillSnapshot,
-    eligible: &[SkillId],
-) -> String;
-```
-
-Skills are formatted as XML in the prompt:
-
-```xml
-<skills>
-  <skill id="code-review">
-    <description>Review code for bugs and style issues</description>
-    <instructions>
-      When the user shares code, analyze it for:
-      - Logic errors
-      - Security vulnerabilities
-      - Performance issues
-    </instructions>
-  </skill>
-</skills>
-```
-
-## Skill Loading Flow
-
-1. **Scan** — Discover SKILL.md files in configured directories
-2. **Parse** — Extract frontmatter and body from each file
-3. **Register** — Add to SkillRegistry with unique IDs
-4. **Snapshot** — Build immutable SkillSnapshot for queries
-5. **Inject** — Eligible skills injected into LLM prompt
-
-## SKILL.md Format
+Use `when-to-use` when a concise proactive hint adds information that does not fit naturally in the description:
 
 ```markdown
 ---
-id: code-review
-name: Code Review
-description: Review code for bugs and improvements
-triggers:
-  - code review
-  - review this
-tools:
-  - file_read
+name: code-review
+description: Review changed source code for correctness, security, performance, and maintainability; use for code review, reviewing a patch, or checking a pull request.
+when-to-use: When code has been written or modified and needs an independent quality review
+scope: system
+user-invocable: true
+disable-model-invocation: false
 ---
 
-When the user shares code, analyze it systematically:
-
-1. Check for logic errors and edge cases
-2. Identify security vulnerabilities
-3. Suggest performance improvements
-4. Note style inconsistencies
-
-Always provide specific line references when possible.
+Review the changed code systematically and report concrete findings with file and line references.
 ```
 
-## Configuration
+`when-to-use` is emitted as `<when>` in the model's available-skill catalog. Matching is semantic and model-led; Aleph does not run a deterministic BM25 or edit-distance trigger engine. When the request matches the hint, the model is instructed to load the skill proactively rather than wait for the user to name it.
 
-Skills are configured in `~/.aleph/data/skills.toml`:
+## Optional frontmatter
 
-```toml
-[skills]
-enabled = true
-auto_match = false  # Require explicit activation
+The current SkillSystem parser accepts these optional fields:
 
-[[skills.directories]]
-path = "~/.aleph/skills"
-priority = 1
+| Field | Purpose |
+|---|---|
+| `scope` | `system`, `tool`, `standalone`, or `disabled` prompt scope |
+| `user-invocable` | Whether the user can invoke the skill directly |
+| `disable-model-invocation` | Keep the skill out of model-driven invocation |
+| `bound-tool` | Associate a tool-scoped skill with a tool |
+| `eligibility` | OS, binary, environment, configuration, and enablement checks |
+| `install` | Platform-specific dependency install specifications |
+| `primary-env` | The primary environment variable used by the skill |
+| `homepage` | External documentation or credential setup page |
+| `emoji` | Optional UI icon |
+| `automation` | A suggested schedule and prompt; it never creates a job by itself |
+
+Example dependency metadata:
+
+```yaml
+eligibility:
+  required-bins:
+    - git
+  required-env:
+    - GITHUB_TOKEN
+install:
+  - id: git
+    kind: brew
+    package: git
+    bins:
+      - git
 ```
 
-## Slash Commands
+`enabled: false` makes a skill ineligible. `always: true` skips the other eligibility checks, but does not override an explicit disable. Unknown prompt scopes fail closed to `disabled`.
 
-Skills can define slash commands for direct invocation:
+### Markdown CLI compatibility
 
-```rust
-// src/skill/commands.rs
-pub fn resolve_command(
-    input: &str,
-    skills: &SkillSnapshot,
-) -> Option<SkillCommandSpec>;
+The compatibility Markdown CLI reader also understands `metadata.requires.bins`, `metadata.aleph.security`, `metadata.aleph.input_hints`, and Docker settings. Those fields describe the legacy CLI execution path; new SkillSystem skills should use the top-level fields above for eligibility and dependency installation. A security declaration is not a replacement for Aleph's runtime approval and install gates.
+
+## Keep the body lean
+
+Use progressive disclosure:
+
+1. Keep `SKILL.md` focused on routing, rules, and the normal workflow.
+2. Put deep reference material in files such as `references/guide.md`.
+3. Put deterministic helper code in `scripts/` when appropriate.
+4. Ask the model to use `skill_read(skill_id, file_name=...)` for supporting text.
+
+The `skill_read` path is containment-checked, size-bounded, and expands the skill-relative context. Do not teach a skill to read its own Markdown resources with a raw absolute path or shell `cat`. The absolute location returned by `skill_read` is for executing a referenced script, not for bypassing the reader.
+
+A declared `automation` block is only a suggestion. After installation the model may ask for consent and create a job with `cron_manage`; installing a skill never schedules work silently.
+
+## Discovery and precedence
+
+The shared SkillSystem scans configured roots and plugin-published roots without a restart. Source priority is:
+
+1. Workspace
+2. Plugin
+3. Global
+4. Bundled
+
+A higher-priority skill replaces a lower-priority duplicate. Symlinked or duplicate paths are resolved by precedence rather than rejected as ambiguous. Installed-plugin skills appear in the same index and are readable through `skill_read`.
+
+## Prompt representation
+
+Model-visible skills are injected as compact XML:
+
+```xml
+<available_skills>
+  <skill>
+    <name>Code Review</name>
+    <description>Review changed source code for correctness and security</description>
+    <when>When code has been written or modified and needs quality review</when>
+    <version>sha256:a1b2c3d4</version>
+  </skill>
+</available_skills>
 ```
 
-Example: `/code-review` activates the code-review skill for the current session.
+`<when>` is omitted when no hint is declared. The version is a short digest of the instruction body. If it changes after a previous read, the model must call `skill_read` again. Prompt budgets may keep the name, trigger hint, and version while moving descriptions and bodies to deferred loading; `skill_list` remains the fallback for enumeration.
 
-## Module Structure
+## Install-time safety
 
-| Module | Purpose |
-|--------|---------|
-| `commands` | Slash command resolution |
-| `compat` | Backward compatibility |
-| `config` | Skills configuration |
-| `eligibility` | Context-based skill filtering |
-| `events` | Skill system events |
-| `installer` | Skill installation |
-| `manifest` | SKILL.md parsing |
-| `prompt` | Prompt XML generation |
-| `recaller` | Skill recall tracking |
-| `registry` | Skill registration |
-| `snapshot` | Immutable skill views |
-| `status` | Skill status tracking |
-| `tools` | Skill tool integration |
+Third-party skill bundles are scanned before registration. The guard covers prompt-injection phrases, invisible Unicode, credential paths, reverse shells, destructive commands, download-and-execute patterns, and oversized files. Community findings at the caution level are blocked; dangerous content is blocked for untrusted sources, while bundled content follows the built-in trust policy. The scan is a defense-in-depth check, not a general sandbox.
 
-## Code Location
+## Management surface
 
-- `src/skill/mod.rs` — SkillSystem facade
-- `src/skill/registry.rs` — SkillRegistry
-- `src/skill/eligibility.rs` — EligibilityService
-- `src/skill/prompt.rs` — Prompt XML builder
-- `src/skill/manifest.rs` — SKILL.md parser
-- `src/skill/commands.rs` — Slash command resolver
-- `src/domain/skill.rs` — Core skill types
+The built-in tools are:
 
-## See Also
+- `skill_list` — discover skill metadata and supporting files
+- `skill_read` — load `SKILL.md` or a contained supporting file
+- `skill_status` — inspect eligibility, missing requirements, source, and usage
+- `skill_install` — install a declared dependency
+- `skill_manage` — create, edit, configure, or remove skills
 
-- [Extensions](./extensions) — Plugin system integration
-- [Tool System](../tools/overview) — Built-in tools skills can invoke
+The corresponding gateway methods include `skills.status`, `skills.update`, `skills.install_dep`, and `skills.remove`. Extension installation routes a `Skill` entry through the same SkillSystem rather than a separate store-specific skill registry.
 
----
+## Related pages
 
-## 26.7.x Addendum
-
-### Markdown Skill Authoring Guide
-
-26.7.x ships `docs/reference/MARKDOWN_SKILL_AUTHORING.md` — skills are written as `SKILL.md` markdown descriptions readable by the LLM, with trigger words detected via BM25 + edit distance. The `tools.publish` tool publishes a work product to the artifact store.
-
-### Trigger-Word Enhancement
-
-26.7.x:
-
-- BM25 ranker
-- Edit-distance backstop
-- Trigger words come from Markdown frontmatter
-- See `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`
-
-### Plugin-Bundled Skills
-
-26.7.17+: installed-plugin skills are **folded into the skill index** and `skill_read`; the agent catalog is revived — previously plugin skills paralleled the skill mechanism with low model visibility.
-
-### `skill_read` Resolution Upgrade
-
-26.7.17 fix: `skill_read` previously **refused** symlinked/duplicate skills — now it resolves by precedence instead of reporting ambiguity.
-
-### SkillOpt Self-Evolution Discipline
-
-26.7.x (memory self-evolution) — the SkillOpt port:
-
-- "good-enough stop" principle embedded into the self-evolution pipeline
-- Bounded, validation-gated edit loop layered over LLM-proposed edits
-- See `docs/reference/memory/DREAM_DAEMON.md`
-
-### See Also
-
-- [Skill System](/docs/en/concepts/skill-system) — skill lifecycle
-- [Extensions Store](/docs/en/concepts/extensions-store) — user perspective
-- [Memory Dream Daemon](/docs/en/concepts/memory-evolution) — SkillOpt context
+- [Skill System](./skill-system) — runtime lifecycle and data model
+- [Extensions](./extensions) — plugin host and plugin-bundled skills
+- [Extensions Store](./extensions-store) — unified discovery and trust-gated installation
+- [Capability System](./capability-system) — extension declarations and runtime ledgers

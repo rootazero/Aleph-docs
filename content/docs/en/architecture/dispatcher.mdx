@@ -1,129 +1,162 @@
 ---
 title: "Dispatcher"
-description: "Tool registry, risk evaluation, and semantic tool retrieval (hydration)."
+description: "Orchestrator-level flow dispatch — FlowSpec resolution, sandbox provisioning, HarnessRunner spawn, and 7-step lifecycle."
 ---
 
 # Dispatcher
 
-The Dispatcher manages tool registration, discovery, and risk evaluation. It aggregates tools from multiple sources, assesses their risk levels, and provides semantic retrieval so the Thinker can discover relevant tools beyond the static tool list.
+The Dispatcher is the `Orchestrator` — the seam between the Gateway's chat ingress and the harness that drives each run. It does **not** model multi-step DAG plans: that earlier `TaskGraph` concept was retired with the Phase 6/7 harness migration. Today's orchestrator's job is to take a `FlowRequest` from any channel, resolve the right `FlowSpec` + sandbox + harness, and spawn the `HarnessRunner` task that produces a `FlowOutcome`.
 
-**Location**: `src/dispatcher/`
+**Location**: `src/orchestrator/dispatch.rs`
+
+> **Note**: There is no `src/dispatcher/` directory. The historical Dispatcher module — `ToolRegistry`, `RiskEvaluator`, `ToolIndex`, `HydrationResult` — was dissolved during the Phase 6/7 harness migration. Tool aggregation now lives in `src/tools/registry.rs`, the executor lives in `src/executor/`, and tool-call guardrails live in `src/tools/scoped/`.
 
 ---
 
-## Architecture
+## Topology
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    Dispatcher                        │
-├──────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐│
-│  │ ToolRegistry │  │ RiskEvaluator│  │ ToolIndex    ││
-│  │• Native      │  │• RiskLevel   │  │• Semantic    ││
-│  │• MCP         │  │• Assessment  │  │  retrieval   ││
-│  │• Skills      │  │              │  │• Hydration   ││
-│  │• Custom      │  │              │  │              ││
-│  └──────────────┘  └──────────────┘  └──────────────┘│
-└──────────────────────────────────────────────────────┘
+Gateway (chat ingress, protocol adapters)
+   │ FlowRequest { agent_id, input, tool_service, trace_sink, … }
+   ▼
+Orchestrator (resolves AgentDef + FlowSpec, builds HarnessDeps, dispatches)
+   │ HarnessRunner::run
+   ▼
+AgentHarness (Think → Act loop, verifiers, compaction)
+   │ uses
+   ├── SessionService  (append-only event log per session)
+   ├── ToolService     (tool catalog + execution)
+   ├── Sandbox         (exec environment, capability ledger)
+   └── AiProvider      (LLM)
+   │
+   ▼
+FlowOutcome → Gateway renders response
 ```
 
----
-
-## Tool Registry
-
-`ToolRegistry` aggregates all available tools from multiple sources:
-
-| Source | Type | Example |
-|--------|------|---------|
-| **Native** | Built-in Rust tools | `memory_search`, `note_manage` |
-| **MCP** | External MCP servers | GitHub, filesystem |
-| **Skills** | Dynamically registered skills | Custom skill tools |
-| **Custom** | User-defined tools | Configured extensions |
+All agent execution — including subagent spawning — routes through Orchestrator → Harness. There is no separate dispatcher inside the harness; the Think phase parses the model's tool calls and the Act phase executes them.
 
 ---
 
-## Risk Evaluation
-
-`RiskEvaluator` assigns a `RiskLevel` to each tool:
+## Orchestrator State
 
 ```rust
-pub enum RiskLevel {
-    Safe,       // Read-only, no side effects
-    Low,        // Minor side effects (e.g., file reads)
-    Medium,     // Moderate risk (e.g., file writes)
-    High,       // Significant risk (e.g., code execution)
-    Critical,   // Destructive operations
+pub struct Orchestrator {
+    pub flow_registry: Arc<FlowRegistry>,
+    pub routing_overrides: Arc<RoutingOverrides>,
+    pub default_routing: Arc<HashMap<AgentId, FlowId>>,
+    pub session_service: Arc<dyn SessionService>,
+    pub sandbox_factory: SandboxFactory,
+    pub harness: Arc<dyn HarnessRunner>,
+    pub subagent_routing: Option<ProviderChain>,
+    pub agent_registry: Option<Arc<AgentRegistry>>,
+    active_sessions: Arc<Mutex<HashSet<String>>>,
+}
+
+#[async_trait]
+pub trait HarnessRunner: Send + Sync {
+    async fn run(
+        &self,
+        session_key: String,
+        spec: FlowSpec,
+        input: FlowInput,
+        sandbox: Arc<dyn Sandbox>,
+        event_tx: broadcast::Sender<FlowStreamEvent>,
+        cancel: CancellationToken,
+        tool_service: Option<Arc<dyn ToolService>>,
+        trace_sink: Option<Arc<dyn TraceSink>>,
+        interaction_manifest: Option<InteractionManifest>,
+        workspace_override: Option<PathBuf>,
+        max_iterations_override: Option<u32>,
+        transient_context: Option<String>,
+        think_level: Option<ThinkLevel>,
+        envelope: TurnEnvelope,
+        model_directive: Option<SessionModelPref>,
+    ) -> Result<FlowOutcome, FlowError>;
 }
 ```
 
+`Orchestrator::with_subagent_routing` and `with_agent_registry` add the boot-time provider chain and shared agent registry so spawned subagents see user-defined agents and the failover chain.
+
 ---
 
-## Tool Index (Semantic Retrieval)
+## Seven-Step Dispatch
 
-The `ToolIndex` enables semantic tool discovery. Instead of relying solely on tool names and descriptions, the system can retrieve tools based on the semantic meaning of the user's query.
+`Orchestrator::dispatch` is a fixed sequence (design §6). Each step has one job; failure short-circuits the call.
+
+| # | Step | Source |
+|---|------|--------|
+| 1 | Resolve `FlowSpec` from explicit `flow_id` or route-by-agent | `flow_registry.resolve` / `resolve_flow_id` |
+| 2 | Enforce depth guard (`MAX_FLOW_DEPTH`) | `resolver::depth_guard` |
+| 3 | Defer agent lookup to `HarnessRunner` (it owns `AgentRegistry`) | — |
+| 4 | Resolve session key + acquire per-session lock | `resolver::resolve_session` + `active_sessions` |
+| 5 | Defer brain pick to `HarnessRunner` (`ProviderRegistry` lives there) | — |
+| 6 | Provision sandbox (per-request `sandbox_override` short-circuits the factory) | `sandbox_factory` |
+| 7 | Spawn harness task; plumb event/completion/cancel back to caller | `tokio::spawn(harness.run(...))` |
+
+The spawn also re-establishes `current_project_root` and `current_agent_id` task-locals inside the new task — `tokio::spawn` does not inherit task-locals, and per-project memory seams (`note_manage`, retrieval assembler, session compaction) plus agent-scoped skill discovery (`~/.aleph/agents/<id>/skills`) both read these ambient values. The harness receives `workspace_override` explicitly for CWD + prompt context, but the task-locals must be re-set so cross-session tools see the right scope.
+
+---
+
+## FlowHandle
 
 ```rust
-pub struct HydrationResult {
-    pub tools: Vec<HydratedTool>,
-    pub level: HydrationLevel,
-}
-
-pub enum HydrationLevel {
-    None,       // No hydration performed
-    Partial,    // Some tools hydrated
-    Full,       // All relevant tools hydrated
+pub struct FlowHandle {
+    pub session_key: String,
+    pub events: broadcast::Receiver<FlowStreamEvent>,
+    pub completion: oneshot::Receiver<Result<FlowOutcome, FlowError>>,
+    pub cancel: CancellationToken,
 }
 ```
 
-The `HydrationPipeline` coordinates semantic retrieval:
-1. **Purpose Inference** — Infer the user's intent from the query
-2. **Tool Retrieval** — Retrieve candidate tools via semantic similarity
-3. **Tool Meta Enrichment** — Augment tool definitions with contextual metadata
+`FlowStreamEvent` carries live deltas (`Delta`, `Reasoning`, `ToolCallStart`, `ToolCallDone { duration_ms }`, `ContextGauge`, `SafetyBlock`) and the terminal `Complete(FlowOutcome)`. `cancel` propagates a `CancellationToken` into the harness task; cancellation surfaces as `FlowError::Cancelled` and `TerminateReason::Cancelled`.
 
 ---
 
-## Key Types
+## FlowOutcome
 
-| Type | Purpose | Location |
-|------|---------|----------|
-| `ToolRegistry` | Aggregates all tool sources | `src/dispatcher/registry/` |
-| `RiskEvaluator` | Assesses tool risk levels | `src/dispatcher/risk.rs` |
-| `ToolIndex` | Semantic tool index | `src/dispatcher/tool_index/` |
-| `HydrationResult` | Result of semantic retrieval | `src/dispatcher/tool_index/` |
-| `ToolDefinition` | Unified tool metadata | `src/dispatcher/types.rs` |
-| `ToolSource` | Origin of a tool | `src/dispatcher/types.rs` |
+```rust
+pub struct FlowOutcome {
+    pub final_text: String,
+    pub iterations: u32,
+    pub tool_calls_made: u32,
+    pub total_tokens: u32,
+    pub hit_limit: bool,                  // Back-compat alias for TerminateReason
+    pub terminate_reason: TerminateReason,
+    pub duration_ms: u64,
+    pub token_breakdown: TokenBreakdown,
+    pub tool_timeline: Vec<ToolInvocation>,
+    pub estimated_cost: Option<CostEstimate>,
+    pub context_tokens: u32,
+    pub context_window: u32,
+    pub serving_model: Option<String>,
+    pub serving_provider: Option<String>,
+}
+```
+
+`TerminateReason` distinguishes every cap site the harness can exit on: `Completed`, `HitMaxIterations`, `ContextBudgetExhausted`, `StallTimeout`, `TurnTimeout { phase }`, `ConsecutiveFailureCap`, `VerifierVeto`, `EmptyResponseExhausted`, `StopHookHalt`, `MaxOutputTokensExhausted`, `ReactiveCompactExhausted`, `Cancelled`, and the `BudgetExhaustedPartialResult { reason, partial_summary }` escalation when a budget cap fires after useful partial text was emitted (policy-gated in `escalate_partial_result`).
+
+The `DiminishingReturns` variant is **retained for back-compat only** — the diminishing-returns hard stop was removed under R10.
+
+---
+
+## Act-Stage Parallel Groups
+
+Act (inside `AgentHarness::act`) partitions tool calls by **resource claim** and dispatches **intra-group** concurrently / **inter-group** serially. Tools declare one of three claim kinds:
+
+| Claim | Meaning |
+|-------|---------|
+| `Shared` | No conflict with any other claim |
+| `Exclusive { Global }` | Mutex over the entire execution |
+| `Exclusive { Paths }` | Mutex over a specific set of filesystem paths |
+
+Serial mode only falls back on single call, parallelism disabled, duplicate call, or no parallel group. Two calls admitted as disjoint on the model's **original** args stay disjoint; any guardrail rewrite (PII mask) serializes the batch.
+
+Cross-batch dedup: a duplicate `(name, args)` within or across batches reuses the first result.
 
 ---
 
 ## See Also
 
-- [Executor](./executor) — Tool execution engine
-- [Harness](./harness) — Think→Act loop
-- [Tool Architecture](./tools) — Tool development
-
----
-
-## 26.7.x Addendum
-
-### Resource-Claim Concurrency
-
-26.7.x the Act stage partitions by **resource claim** and dispatches **intra-group** concurrently / **inter-group** serially:
-
-- Tools declare `Shared` / `Exclusive{Global}` / `Exclusive{Paths}` three-state claims
-- Serial mode only falls back on single call / parallelism disabled / duplicate call / no parallel group
-
-### Cross-Batch Dedup
-
-A duplicate `(name, args)` within or across batches reuses the first result.
-
-### Three-State Claim
-
-- `Shared` — no conflict
-- `Exclusive{Global}` — exclusive over the whole execution
-- `Exclusive{Paths}` — exclusive over specific paths
-
-### See Also
-
-- [Tool Architecture](/docs/en/architecture/tools) — tool lifecycle
-- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — resource claims
-- [Built-in Tools](/docs/en/concepts/builtin-tools) — tool set
+- [Harness](./harness) — Think→Act loop + `HarnessRunner::run` implementation
+- [Tool Architecture](./tools) — Tool catalog + `ToolService` contract
+- [Teams](./teams) — Team dispatcher fuses the loop-graph governance node with multi-agent dispatch

@@ -1,0 +1,328 @@
+---
+title: "Voice Conversation Runtime"
+description: "Streaming ASR, TTS provider fallback, speech regularization, voice-as-context, Panel live captions, and the end-to-end conversation loop. Backed by portable_pty-embedded terminals and WhisperLive/Deepgram dual-protocol adapters."
+---
+
+The `gateway/voice` and `gateway/pty` modules together carry the 26.7.22+ voice stack: streaming ASR (Deepgram / WhisperLiveKit), TTS provider fallback, vocabulary biasing, voice-as-context signals into context aggregation, and end-to-end 4-reference gap-analysis hardening. The Round-2 / 2b voice stack is a "**streaming ASR + local self-host + cross-provider fallback**" composite architecture; "batch + single provider" is no longer supported.
+
+> **Current state (26.7.22+).** Pre-26.7.21 the voice stack was "batch + local + single provider". Round 2 / 2b rewrote it as **streaming ASR** (Deepgram / WhisperLiveKit), **TTS provider fallback**, **vocabulary biasing**, **Voice-as-Context** signal into context aggregation, and end-to-end **4-reference gap-analysis hardening** (2026-07-17 / 07-22).
+
+## Module Structure (`src/gateway/voice/`)
+
+```text
+voice/
+├── mod.rs             # module entry + public re-exports
+├── state.rs           # VoiceState state machine (Active / Idle / auto-disable counter)
+├── voice_mode.rs      # session → voice_mode pointer (process-global)
+├── inbound/
+│   ├── mod.rs
+│   ├── provider.rs    # SttSource resolution (Local { fallback } / Static)
+│   └── stt.rs         # Whisper-dialect HTTP core + local→cloud degradation
+├── outbound.rs        # TTS outbound; provider fallback chain (TTS_MAX_PROVIDERS = 2)
+├── format.rs          # voice.format: fast-model speech regularization (display polish)
+├── hallucination.rs   # shared protocol-layer hallucination filter (re-export aleph_protocol::voice_text::filter_transcript)
+├── sanitize.rs        # pre-TTS markdown / think-block / table / URL defensive stripping
+├── local_provider.rs  # BYO OpenAI-compatible STT/TTS provider implementation
+└── streaming/
+    ├── mod.rs         # provider-neutral streaming contract (TranscriptDelta + StreamRegistry)
+    ├── relay.rs       # WS relay; voice.stream.{start, audio, stop} RPC
+    ├── deepgram.rs    # Deepgram /v1/listen delta normalizer (cloud + WhisperLiveKit)
+    └── whisperlive.rs # collabora WhisperLive segments[].completed delta normalizer
+```
+
+> **Single join point**: `src/generation/voice_catalog.rs::GenerationProviderRegistry::get_voices_for_provider` — the only entry for TTS provider registration and discovery; the `speech_generate` failure path connects to it. `voice_catalog` is a thin wrapper over `GenerationProviderRegistry`.
+
+`streaming/{mod,relay,deepgram,whisperlive}.rs` is a brand-new module introduced in Round 2 (previously the only path was batch under `inbound/`). `relay.rs` is the voice-specific WS relay; `transcribe.rs` was removed (replaced by `streaming/deepgram.rs` etc.).
+
+---
+
+## Streaming Contract (`TranscriptDelta`)
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TranscriptDelta {
+    #[serde(default)] pub committed: String,   // locked, will not change
+    #[serde(default)] pub interim: String,      // floating hypothesis; may be rewritten next delta
+    #[serde(default)] pub utterance_end: bool,  // backend signaled EOU (best-effort; Panel VAD is authoritative)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,                  // backend fatal (busy / disconnect)
+}
+```
+
+- `committed` accumulation is controlled by `push_joined`: only insert a space at an ASCII boundary (CJK never gets a stray space)
+- Backend wire format is never exposed to Panel; only `TranscriptDelta` is pushed via the `voice.transcribe.delta` topic
+- `error` triggers a strike counter on the client side; at `STREAM_STRIKE_LIMIT = 2` the session latches `streaming_off` and every later utterance rides the batch path
+
+### `StreamingTranscriber` Trait
+
+```rust
+#[async_trait]
+pub trait StreamingTranscriber: Send + Sync {
+    async fn open(&self, cfg: StreamConfig) -> anyhow::Result<StreamHandles>;
+}
+
+pub struct StreamHandles {
+    pub audio_tx: mpsc::Sender<Vec<u8>>,    // s16le PCM, 16 kHz mono
+    pub delta_rx: mpsc::Receiver<TranscriptDelta>,
+}
+```
+
+`build_transcriber(t)` picks the adapter by `target.provider` — local self-host and cloud are just different `base_url` / `provider` values. An unknown provider value defaults to the Deepgram dialect and emits a one-time warn.
+
+---
+
+## Configuration (`config.toml`)
+
+```toml
+[voice]
+provider = "deepgram"            # deepgram / whisperlive / local / mock
+language = "en"
+sample_rate = 16000
+
+# Vocabulary biasing (per ASR backend):
+#   - whisperlive: hotwords + initial_prompt
+#   - OpenAI: /audio/transcriptions prompt
+#   - Deepgram: keywords + keyterms
+vocabulary = ["Aleph", "sqlite-vec", "loop_graph", "StrategyStraTA", ...]
+
+# Streaming (26.7.22+)
+[voice.streaming]
+enabled = true
+provider = "deepgram"            # deepgram / whisperlive
+base_url = "wss://api.deepgram.com"
+api_key = ""                     # LAN trust, user-controlled
+language = "en"                   # RPC may override
+model = ""                        # ASR model (whisperlive: "small" / Deepgram: server default)
+
+# Speech regularization (fast-model polish, 26.7.22+)
+[voice.format]
+enabled = true
+model = "claude-haiku-4-5"       # fast model dedicated to ASR transcript polish
+prompt = ""                       # empty → built-in default ("speech refiner" prompt)
+```
+
+> **`provider = "whisperlive"` with self-hosted WhisperLiveKit must be started with `--pcm-input`** — it bypasses FFmpeg decode and feeds PCM directly; without that flag, the server pipes headerless PCM into FFmpeg, which decodes nothing — **the stream connects, no transcript ever arrives, and the Panel silently strikes out to the batch path after two empty utterances**. The Aleph end fixed `audio_format = int16` in the handshake, so s16le / 16 kHz / mono frames flow straight to the backend.
+
+`pcm_input` is not a `StreamingConfig` field; it is a **server-side** WhisperLiveKit startup parameter. Aleph's audio config's `sample_rate` determines the Panel-side downsampling rate.
+
+---
+
+## TTS Outbound + Provider Fallback
+
+```rust
+const TTS_MAX_PROVIDERS: usize = 2;   // cap 2: guarantee single fallback, not "sweep every provider"
+const TTS_MAX_ATTEMPTS: u32 = 2;      // transient retry per provider (5xx / timeout)
+const TTS_RETRY_BACKOFF: Duration = Duration::from_millis(300);
+```
+
+**Candidate selection** (`tts_candidates`):
+
+1. User-explicit override (from `voice_state.provider` or the `voice.synthesize` RPC's `provider` parameter)
+2. Default provider (`generation.default_speech_provider`)
+3. At most 2
+
+**Call loop** (`speech_generate` failure path):
+
+```rust
+for (hop, provider_id) in candidates.iter().enumerate() {
+    match try_generate(provider_id).await {
+        Ok(audio) => return Ok(audio),
+        Err(e) if hop == 0 && is_invalid_parameter(&e) => continue,  // first hop misconfig → skip to fallback
+        Err(e) if hop == 0 => continue,                              // configured provider failed to construct → fallback hop
+        Err(e) => return Err(e),                                     // fallback also failed → propagate
+    }
+}
+```
+
+Each provider also runs `synth_with_retry`: 5xx / 429 / network timeouts are retried up to 2 times; **non-retryable** errors (auth / invalid params) fail fast. **Fallback hop side effect**: `voice_state.voice` is dropped (voice ID is provider-bound and meaningless across providers — a forced fallback hop **must** drop the voice). Pinned by `fallback_drops_the_primary_voice_id` regression test.
+
+`generate_tts` uses a length-aware timeout (`tts_timeout_ms`: 10 s baseline + 5 s / 100 chars, capped at 30 s) wrapped in `tokio::time::timeout`; the per-attempt deadline is the per-attempt cap, never a hidden 60 s default.
+
+---
+
+## WhisperLiveKit Hardening (Round 2b)
+
+- **`--pcm-input`** must be `true`, otherwise OS-level decode fails
+- **vocabulary biasing**: translates `[voice] vocabulary` into WhisperLiveKit's `hotwords` / `initial_prompt` (both fields are populated because WhisperLive's `faster-whisper` backend consumes both)
+- **segments[].completed delta normalization**: normalizes WhisperLiveKit "segment complete" events to `committed += chunk` + `interim = ""` (uses `push_joined` for CJK-safe joining)
+- **echo-aware barge-in**: detects TTS self-echo and interrupts TTS to avoid self-interruption (see Panel-side `vad.rs`)
+- **onset lead-in**: ~150 ms pre-roll silence before first audio to avoid swallowing the leading character
+
+---
+
+## Deepgram Adapter
+
+- **`/v1/listen`** delta normalization (cloud + WhisperLiveKit share the delta format — WhisperLiveKit exposes a Deepgram-compatible endpoint)
+- **`build_transcriber` factory**: picks the adapter by `voice.provider`; an unknown value falls back to the Deepgram dialect
+- **ASR-VAD turn segmentation**: Deepgram's built-in `UtteranceEnd` signal is cross-checked with Panel VAD (Panel VAD is authoritative; the `utterance_end` field is advisory only)
+- **Interim noise**: UTF-8 replacement chars `U+FFFD` are dropped from `interim` but kept on `committed` (a streaming decoder's multi-byte-character half-write)
+
+---
+
+## Error Handling & Degradation
+
+| Scenario | Behavior |
+|----------|----------|
+| Streaming broken (`utterance_end` missing) | Panel VAD fallback segmentation; `streaming_off` uses `null` latch |
+| Backend fatal (busy / disconnect) | `TranscriptDelta.error` carries it; adapter bridge task closes; strike count + 1; at `STREAM_STRIKE_LIMIT = 2` the session latches batch path |
+| TTS primary provider construct failed | Single fallback hop (drops voice_id) |
+| TTS fallback also failed | Propagate; UI degrades to "text reply" |
+| Capture tap unauthorized (macOS / Win) | Early return + friendly hint; doesn't pretend to record (decides between OS TCC deep-link and browser-permission hint by `is_native_shell()`) |
+
+---
+
+## Speech Regularization (`voice.format`)
+
+`format::format_text` is a fast-model polish pass: a separate LLM call cleans the ASR raw transcript (stripping "嗯/啊/那个/就是" filler, fixing punctuation, correcting homophones) into readable text. **Display-only** — it does not change what the main inference round has already received as raw transcript.
+
+P7 graceful degradation: provider errors, blank responses, or a disabled config all return the **raw text** (`unwrap_or(params.text)`), so this handler effectively **always succeeds**. The prompt defaults to `DEFAULT_PROMPT = "你是一个冷酷的语音实时格式化微型引擎..."` (Chinese "speech refiner" prompt that survived the 4-reference merge during the C5 hardening); users can override via `format.prompt`.
+
+---
+
+## TTS Pre-sanitize (`src/gateway/voice/sanitize.rs`)
+
+`sanitize_for_tts(text)` runs at the entry of `outbound::generate_tts` to clean the reply:
+
+- Strips `<think>…</think>` / `<thinking>…</thinking>` blocks (including unclosed blocks, to avoid half a chain-of-thought being read aloud)
+- Drops code fences (the fence marker lines themselves, plus everything inside the fences)
+- Folds table rows into a spoken comma list
+- Replaces bare URLs with the placeholder `(link)`
+- Strips markdown emphasis markers (`*` / `_` / `~` / `` ` ``)
+- Strips leading `#` / `>` / `-` / `*` line markers
+- Truncates to 4000 chars (`MAX_TTS_CHARS`) on sentence-end punctuation boundaries (`. ! ? 。 ！ ？`), with a whitespace-boundary fallback, then a hard cut
+
+`VoiceModeLayer` already **asks** the model in the prompt to avoid markdown / tables / raw URLs, but R7 / P7 forbid trusting compliance — `sanitize_for_tts` is the floor.
+
+---
+
+## Voice-as-Context (§2.4)
+
+ASR-transcribed signal is fed **directly into context aggregation**, not just dropped into the chat stream:
+
+- **`committed` segment** → submitted as `per-turn transient recall` context (not persisted as user message)
+- **`interim` segment** → **not** submitted (avoid polluting the context)
+- **`utterance_end` after** → full segment becomes a user message boundary, triggering a normal LLM inference round
+
+This closes the long-standing "live captions floating on top of the screen but the model can't hear them" issue. `TranscriptDelta.error` rides the same channel; Panel-side strike count → 2 latches `streaming_off` and the entire session rides the batch path.
+
+---
+
+## RPC Interface (`voice.*`)
+
+`src/gateway/handlers/voice.rs` (~620 lines) exposes:
+
+| Method | Purpose |
+|--------|---------|
+| `voice.transcribe` | Batch transcription (base64 audio → text; 25 MB cap; does not participate in `voice.transcribe.delta`) |
+| `voice.stream.start` | Open a streaming session (returns `stream_id` + delta topic; `null` means batch fallback) |
+| `voice.stream.audio` | Push one s16le PCM frame (**64 KB cap + `try_send` to prevent blocking**) |
+| `voice.stream.stop` | Close session |
+| `voice.format` | Fast-model speech regularization (display-only, error → raw text passthrough) |
+| `voice.synthesize` | One-shot synthesis (same source as `outbound.rs`) |
+| `voice.record_start` / `voice.record_stop` | macOS native capture (other platforms → `NotImplemented` → Panel browser fallback) |
+
+`streaming_off` uses a `stream_id: null` latch — the server doesn't pretend to listen after client disconnect.
+
+### Rate Limiting (`src/gateway/rate_limiter.rs`)
+
+```rust
+"voice.stream.audio" => RateLimitScope::RpcRealtime,
+```
+
+`RpcRealtime` is a dedicated bucket for realtime audio/video frames (separate from `RpcHeavy`) — a Panel pushing 5 frames/s all share one bucket and never compete with `chat.send` for capacity.
+
+---
+
+## Local Sidecar (`crates/aleph-voice`)
+
+26.7.x onwards Aleph does **not** ship a built-in local voice model server (R3 light-dependency — pulling in `sherpa-onnx` alone is several MB, and WhisperLiveKit deployment is heavier still). Users run a BYO OpenAI-compatible server such as mlx-audio, configured under `[voice.local]`:
+
+```toml
+[voice.local]
+enabled = true
+endpoint = "http://127.0.0.1:8000/v1"   # mlx-audio default port
+api_key = ""                              # most BYO servers are unauthenticated
+stt_model = "whisper-large-v3"
+tts_model = "qwen3-tts"
+tts_voice = "vivian"
+tts_format = "wav"                       # or "opus" (Telegram-native)
+```
+
+At startup `normalize_voice_local` injects a synthetic entry named `"local"` into both `generation.speech_providers` and `generation.transcription_providers` (with `provider_type = "local"`, `base_url` = endpoint, `api_key` from the config above), and sets `default_*_provider = "local"` unless a cloud one is explicit. On disable it reverses: removes the `"local"` entries from both provider maps and resets the defaults to nil.
+
+> **`local` provider_type is exclusive to `normalize_voice_local`**: user edits of the `"local"` entry are preserved on enable (via `or_insert_with`), but cleared on disable (an entry of type "local" without the configured endpoint is meaningless).
+
+---
+
+## Embedded Terminal + PTY (`src/gateway/pty/`)
+
+> Note: PTY is **not** voice-stack-specific; it is the `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list` set of gateway-level RPCs. The voice stack merely reuses the `portable-pty` crate. **Parallel to voice, not nested under it.**
+
+```rust
+pub struct PtySession {
+    master: Mutex<Box<dyn MasterPty + Send>>,  // portable-pty handle
+    writer: Mutex<Box<dyn Write + Send>>,       // stdin
+    killer:  Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    closed:  AtomicBool,
+}
+```
+
+`PtyManager` is a process-global singleton (`OnceLock<PtyManager>`), capped at 64 concurrent sessions with FIFO eviction + 10 min TTL; `pty.output` frames are base64-pushed on `events.subscribe("pty.output")` and `pty.exit` on `pty.exit`. **It has nothing to do with voice** — it's the terminal-embed primitive (a Rust port of the long-standing Hermes `pty_bridge.py`), and voice just reuses the `portable-pty` crate (`src/gateway/pty/` sits beside `src/gateway/voice/`, not under it).
+
+---
+
+## Panel Views (`interfaces/webchat/src/platform/wide/views/voice/`)
+
+10 submodules: `audio.rs` (16 kHz box-average resampling), `caption_state.rs`, `level.rs`, `machine.rs`, `mod.rs`, `orb.rs`, `sentence.rs`, `vad.rs`, `wav.rs`, `voice_playback.rs`.
+
+- **Two-stage caption reducer** (committed / interim / locked / formatted four-state)
+- **C-wave-wipe lock transition**: committed → locked wipes the screen with animation
+- **`voice.format` quiet swap on utterance-end**: committed segment → fast model polish → silent replace of display text (no visual jump)
+- **Capture tap early-arm + `Capture::pending` buffer**: 200 ms before the user presses record isn't lost
+- **Echo-aware barge-in**: while the reply is speaking, switch to `barge_step()` (skipping listening VAD) and interrupt TTS on detected TTS self-echo
+- **`chat.abort` lifecycle RPC**: barge-in or follow-up utterance sends `chat.abort` so the server-side superseded run is cancelled (avoids burned tokens on an abandoned run)
+
+---
+
+## API Client
+
+```ts
+// interfaces/webchat/src/api/typed/voice.ts
+const stream = await voice.stream.start({ language: "en", sample_rate: 16000 });
+voice.stream.audio({ stream_id: stream.stream_id, frame: pcm_s16le });
+voice.stream.on("delta", (d: TranscriptDelta) => { /* render */ });
+await voice.stream.stop({ stream_id: stream.stream_id });
+```
+
+The `TranscriptDelta` type is provided by `aleph_protocol::voice_text` (shared with the Panel caption reducer and the `voice.format` polish pass — both sides agree on the `committed` / `interim` semantics).
+
+---
+
+## Key Source Files
+
+- `src/gateway/voice/mod.rs` — module entry, re-exports `VoiceState`
+- `src/gateway/voice/state.rs` — `VoiceState` (per-channel, with `consecutive_failures` 3-strike auto-disable)
+- `src/gateway/voice/voice_mode.rs` — session → voice_mode pointer registry (process-global)
+- `src/gateway/voice/inbound/{mod,provider,stt}.rs` — STT resolution (`SttSource::Local { fallback }` / `Static`) + Whisper-dialect HTTP core + local→cloud degradation
+- `src/gateway/voice/outbound.rs` — TTS outbound + `tts_candidates` + `synth_with_retry` + provider fallback
+- `src/gateway/voice/format.rs` — fast-model speech regularization (`format_text`, P7 graceful degradation)
+- `src/gateway/voice/sanitize.rs` — pre-TTS markdown / think-block / table / URL defensive stripping + 4000-char truncation
+- `src/gateway/voice/local_provider.rs` — `LocalTranscription` + `LocalVoiceProvider` (BYO endpoint, OpenAI-compatible)
+- `src/gateway/voice/hallucination.rs` — re-exports `aleph_protocol::voice_text::filter_transcript`
+- `src/gateway/voice/streaming/{mod,relay,deepgram,whisperlive}.rs` — streaming contract + WS relay + dual-protocol adapters
+- `src/gateway/voice/streaming/relay.rs` — `StreamRegistry` (64-cap / 10-min TTL / FIFO) + `start_stream` + terminal `{closed:true}` event
+- `src/gateway/pty/{mod,session,manager}.rs` — embedded terminal (parallel to voice, **not** inside voice)
+- `src/gateway/handlers/voice.rs` — all voice RPCs (~620 lines)
+- `src/config/types/voice_local.rs` — `[voice]` / `[voice.streaming]` / `[voice.format]` config + `normalize_voice_local` (fill defaults / clear on disable)
+- `crates/aleph-voice` — local voice sidecar (sherpa-onnx backend + Ogg/Opus wrapper + manifest model declaration, but Aleph does **not** ship it by default)
+- `interfaces/webchat/src/platform/wide/views/voice/{audio,caption_state,level,machine,mod,orb,sentence,vad,wav,voice_playback}.rs` — 10 Panel submodules
+- `interfaces/webchat/src/api/typed/voice.ts` — Panel-side typed RPC client
+
+---
+
+## Related Pages
+
+- [Configuration `voice.*`](/docs/en/getting-started/configuration) — full fields
+- [Architecture `src/gateway/voice/`](/docs/en/architecture/overview#core-modules) — module inventory
+- [Changelog 26.7.22+ §D](/docs/en/changelog#d-voice-conversation-round-2--round-2b) — commit-level summary
+- [Embedded Terminal `src/gateway/pty/`](/docs/en/concepts/supervisor-verification) — sibling PTY facility

@@ -403,7 +403,7 @@ Aleph 使用带 `rt-multi-thread` 功能的 Tokio。所有公共异步 API 返�
 
 ### 模块清单
 
-`alephcore` crate 暴露 ~76 个 `src/<module>` 目录 + 几个顶层 `.rs` 文件（`alephcore::error` / `pricing` / `canvas_io` / `event_handler` / `sync_primitives`）。
+`alephcore` crate 暴露 ~84 个 `src/<module>` 目录 + 几个顶层 `.rs` 文件（`alephcore::error` / `pricing` / `canvas_io` / `event_handler` / `sync_primitives`）。26.7.22+ 新增 / 重组的顶层模块：`artifacts/`、`export/`、`hub/`、`looping/`、`goal/`、`strategy/`、`clipboard/`、`projects/`、`vision/`。
 
 ### 关键导出
 
@@ -411,9 +411,21 @@ Aleph 使用带 `rt-multi-thread` 功能的 Tokio。所有公共异步 API 返�
 use alephcore::identity::IdentityContext;
 use alephcore::session::events::{SessionEvent, SessionEventRecord, TurnId};
 use alephcore::providers::{UnifiedMessage, ProviderDelta, TextDelta, ThinkingDelta};
-use alephcore::looping::{LoopState, PauseReason};
-use alephcore::goal::{Goal, GoalStore};
-use alephcore::artifacts::ArtifactRecord;
+
+// Loop / Goal / Strategy（26.7.22+）
+use alephcore::looping::{LoopState, Cadence, LoopStatus, PauseReason};
+use alephcore::goal::{Goal, GoalStore, GoalStatus, GateOutcome, GateConfig};
+use alephcore::strategy::{Strategy, StrategyKey, StrategyStore, PlannerNode};
+
+// Artifacts / Hub（26.7.22+）
+use alephcore::artifacts::{ArtifactStore, ArtifactRecord, ArtifactOrigin, encode_session_key, MAX_ARTIFACT_BYTES};
+use alephcore::hub::{ALEPH_HUB_ID, ALEPH_HUB_URL, HubCatalogClient, ExtensionEntry, ExtensionKind, TrustTier, InstallSpec};
+use alephcore::routing::{SessionKey, DmScope, PeerKind, RouteBinding, MatchRule};
+
+// Voice 流式（26.7.22+）
+use alephcore::gateway::voice::streaming::{TranscriptDelta, StreamRegistry, StreamingTranscriber, StreamHandles};
+
+// 既有导出
 use alephcore::identity::signer::{SignerKey, OperationLedger};
 use alephcore::memory::note_layer::NoteRelation;
 use alephcore::loop_graph::{AuditRing, VictoryClaim, Watcher};

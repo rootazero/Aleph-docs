@@ -1,351 +1,391 @@
 ---
 title: "记忆系统"
-description: "Aleph 的长期记忆系统，采用原始记忆(raw_memories) + 笔记(notes) 双层架构，支持混合检索与梦境守护进程。"
+description: "Aleph 的长期记忆：raw_memories (L0) + notes (L1) 双层架构，混合检索与梦境守护进程；携带 SkillOpt 自我演化、wikilink 生命周期、Leiden 精炼与 [[wikilink]] supersession。"
 ---
 
-`memory` 模块为 Aleph 提供长期记忆能力。对话内容存储在临时的原始记忆缓冲区(L0)，并通过蒸馏转化为持久化的 Markdown 笔记(L1)，配合可重建的 SQLite 索引。
+`memory` 模块为 Aleph 提供长期记忆能力。L0 是一张可重建的 SQLite 表（对话原文 + 附件文本，按行消重去重），L1 是磁盘上的 Markdown 笔记 + 重建的索引/链接/向量/事件表。检索在 L1 上做（混合 FTS5 + sqlite-vec + RRF 融合），梦境守护进程在后台离线维护 L1 的去重 / 链接 / 社区。
 
 ## 设计哲学
 
-1. **Markdown 优先** — 笔记是磁盘上的 `.md` 文件；SQLite 索引可随时重建
-2. **混合检索** — FTS5 全文检索 + sqlite-vec 向量检索，通过 RRF 融合排序
-3. **LLM 主权** — 检索提供候选结果；由 LLM 决定哪些信息真正重要
-4. **事件溯源** — 每条笔记变更都被记录为不可变的 `MemoryEvent`
+1. **Markdown 优先** — L1 是磁盘上的 `.md` 文件 + SQLite 索引。L1 索引 100% 可由磁盘重建：删了 `memory.db` 不会丢任何笔记内容，重建即可。
+2. **混合检索** — `notes_fts`（`unicode61` + `trigram` 双 FTS 表）+ `notes_vec_{dim}`（sqlite-vec per-dim 虚拟表），RRF 融合 + 6 阶段评分（`cosine_rerank` / `recency_boost` / `length_normalization` / `time_decay` / `hard_min_score` / `mmr_diversity`）。
+3. **LLM 主权** — 检索给候选，模型自己判断哪些是真相；没有「记忆层替模型判定相关性」的认知判断。
+4. **事件溯源** — 每条笔记变更都记为不可变 `MemoryEvent`，重放可重建任意时点状态（默认 L0 全部 compress 完，事件不重放）。
+5. **持久 + 离线** — `Memory` 是 26.7.x 后唯一落盘位置；L0 `is_processed` 是消费标记，不动语义。
 
 ---
 
 ## 架构
 
-```
-Gateway / Agent 循环
+```text
+Gateway / Agent Loop
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ L0: raw_memories (SQLite)                                    │
 │   sessions · transcripts · attachment_text                   │
-│   由 CompressionService 消费 (is_processed 标记)              │
+│   consumed by CompoundIngestor (is_processed flag)            │
+│   Skips ToolInvocation telemetry rows (insights/dream signals) │
 └─────────────────────────────────────────────────────────────┘
-    │  CompressionService (实时)
+    │  CompoundIngestor (realtime, per-source groups)
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ L1: notes (Markdown 文件 + SQLite 索引)                       │
+│ L1: notes (Markdown files + SQLite index)                    │
 │   ~/.aleph/memory/note/{agent}/{category}/*.md               │
-│   notes_index · notes_links · notes_fts · notes_vec_{dim}    │
+│   notes_index · notes_links · notes_fts · notes_fts_trigram  │
+│   notes_vec_{768/1024/1536} · notes_vec_map                  │
+│   notes_sources · notes_provenance · notes_graph_cache       │
+│   notes_graph_insights · notes_graph_related                 │
 └─────────────────────────────────────────────────────────────┘
-    │  Dream Daemon (离线，仅空闲时运行)
+    │  DreamDaemon (offline, idle-only)
     ▼
    consolidate → drift → lint → decay → digest
     │
     ▼
-   查询: NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
+   NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
 ```
+
+`CompressionService` / `CompoundIngestor` 是写入 L1 的唯一途径；`NoteIndexer` 是 L1 索引、链接、FTS、向量、来源、去重、社区缓存的写者；`DreamDaemon` 后台维护 L1 的去重 / 链接 / 社区 / 蒸馏。
 
 ---
 
 ## 核心组件
 
-### 存储层 (SQLite)
-
-存储层使用**四个独立的 trait** — 而非单一的 `MemoryStore`。每个调用者只依赖其所需的能力。
+### 存储 trait（4 个独立 trait，无 `MemoryStore`）
 
 | Trait | 文件 | 用途 | 主要调用者 |
-|---|---|---|---|
-| `NoteStore` | `src/memory/notes/store.rs` | 笔记索引、维基链接、FTS、向量搜索 | `NoteFactRetrieval`, `NoteIndexer` |
-| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | 原始记忆 CRUD + `is_processed` 标记 | `CompressionService`, `SessionCompactor` |
-| `DreamStore` | `src/memory/store/mod.rs` | 梦境状态 + 每日洞察 | `DreamDaemon` |
-| `CompressionStore` | `src/memory/store/mod.rs` | 压缩运行审计元数据 | `CompressionService` |
+|-------|------|------|-------------|
+| `NoteStore` | `src/memory/notes/store.rs` | 笔记索引、wikilink、FTS、向量搜索、社区缓存、来源、邻近、图 | `NoteFactRetrieval`、`NoteIndexer`、`GoalLessonsPromote` |
+| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | 原始记忆 CRUD + `is_processed` 标记 + `find_by_path` / `get_raws_by_ids` / `get_raws_by_session` / `get_raw_by_source` | `CompoundIngestor`、`SessionCompactor`、dream `signal` 表 |
+| `DreamStore` | `src/memory/store/mod.rs` | 梦境状态 + 每日洞察 + `best_health` checkpoint | `DreamDaemon` |
+| `CompressionStore` | `src/memory/store/mod.rs` | 压缩运行审计元数据（含 `feedback_distill` 水位 / 课程管理） | `CompoundIngestor` |
 
-四个 trait 均由 `SqliteMemoryBackend` 实现，封装为：
-
-```rust
-pub type MemoryBackend = Arc<SqliteMemoryBackend>;
-```
+四个 trait 都由 `SqliteMemoryBackend` 实现，封装为 `MemoryBackend = Arc<SqliteMemoryBackend>`。`SqliteMemoryBackend::new(db_path)` 把 `db_path` 当目录（自动建 `memory.db`）或文件；测试用 `in_memory()`。
 
 ### sqlite-vec 集成
 
-使用 sqlite-vec 扩展进行向量存储，按维度创建虚拟表：
+向量按维度创建虚拟表（`db.exec_batch` 一并初始化）：
 
 | 表 | 维度 |
-|---|---|
+|----|------|
 | `notes_vec_768` | 768 |
 | `notes_vec_1024` | 1024 |
 | `notes_vec_1536` | 1536 |
 
-`notes_vec_map` 表将 `(path, agent_id)` 对映射到 vec0 表所需的数字 rowid。
+`notes_vec_map` 表把 `(path, agent_id)` 映射到 vec0 表的 `rowid`，JOIN 时按维度路由到对应 `notes_vec_{dim}` 表。embedder 维度必须与已建表匹配，否则检索时该向量会被 `Reranker` 跳过而非报错。
 
-### 知识笔记
-
-基于 Markdown 的笔记，支持维基链接：
+### Knowledge Note（`src/memory/notes/note.rs`）
 
 ```rust
-// src/memory/notes/note.rs
 pub struct KnowledgeNote {
     pub title: String,
     pub category: String,
     pub tags: Vec<String>,
     pub facts: Vec<String>,
     pub links: Vec<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
+    pub body: Option<String>,           // 完整 Markdown 正文（verbatim）
+    pub relations: Vec<Relation>,        // 类型化边 (Gap A 实体图)
+    pub source_notes: Vec<String>,      // 蒸馏来源
+    pub supersedes: Vec<String>,        // 取代的笔记
+    pub superseded_by: Vec<String>,     // 被谁取代
+    pub fact_provenance: Vec<FactProvenance>,
+    pub permanent: bool,                // 永久核心知识（不受 decay 侵蚀）
+    pub stale: bool,                    // NoteDrift 写入的过时标记
+    pub note_type: Option<String>,      // Obsidian / llm_wiki 兼容
+    pub aliases: Vec<String>,          // Obsidian 别名（wikilink 别名解析）
+    pub created_at: i64, pub updated_at: i64,
     pub content_hash: String,
+    pub confidence: f32, pub severity: Severity,
 }
 ```
 
-**特性：**
-- 维基链接语法：`[[笔记标题]]`
-- 通过 `notes_links` 表追踪双向链接
-- 按标题或内容检索笔记
-- 图遍历发现关联概念
+**obsidian 兼容**：vault frontmatter 字段（`type` / `title` / `aliases`）字节兼容，Reader 解析这些字段后剩下的 `body` 作为 `to_markdown()` 的 verbatim 段。`body` 是新字段；旧笔记只有 `facts` / `links` 两个 index 视图（拼成 `Related:` 行），`to_markdown` 走老路。
 
-### 对话索引器
+**生命周期**（`NoteStore::upsert_note` / `remove_note_index`）：
+- 写盘：先 `to_markdown` 写到临时文件，fsync，rename 原子替换
+- 删盘：先 `remove_note_index`（清 `notes_index` / `links` / FTS / `notes_vec_map`），再 `std::fs::remove_file`
+- `permanent: true` 或 `tags` 含 `permanent` / `pinned`（不区分大小写）→ 永久核心知识，跳过 `NoteDecay` 与 `NoteLint.relation_drift`
 
-为会话对话建立精确回忆索引：
+### Dream Daemon（`src/memory/dreaming/`）
 
-```rust
-// src/memory/transcript_indexer/indexer.rs
-pub struct TranscriptIndexer;
+`DreamDaemon` 是**唯一**被允许写 L1 的后台进程（在线 `CompoundIngestor` 除外）。调度循环（`tokio::time::interval(60s)`）每分钟检查一次：
+
+```text
+启动检查:
+  enabled? → in_window (config)? → idle ≥ 15 min? → is_running unlocked? →
+  should_skip_scheduled_run? (today cancelled ? no : yes run again)
+
+运行:
+  pick strategy (StrategySelector) →
+  pick pipeline (Consolidate | Synthesize | Conserve) →
+  build DreamContext (notes / report / provider / embedder / budget) →
+  run stages → emit DreamReport → update manifest + best_health
 ```
 
-配置：`max_tokens_per_chunk = 400`，`overlap_tokens = 80`，`enable_chunking = true`。
+#### Evolution gate（`src/memory/dreaming/evolution/`）
 
-### 梦境守护进程 (Dream Daemon)
+SkillOpt 移植（arXiv 2605.23904）的「textual learning rate」：**`EditBudget`** 默认 `32 edits / 256 KiB`/cycle，跨 `NoteConsolidate`（merge）、`NoteDecay`（archive）、`distill::Supersede` 三种**破坏性**阶段共享。**Additive 路径**（新笔记 / 链接 / 强化）**不**走 budget，永远不被早一步预算透支饿死。
 
-后台记忆处理，采用**5 阶段日常** / **6 阶段周度**流水线：
+`evaluate_gate(candidate, current, best, ε)` 是纯标量比较：`candidate > current + ε && candidate > best + ε` → `AcceptNewBest`；`candidate > current + ε` → `Accept`；否则 `Reject`。`AcceptNewBest` 持久化到 `dream_best_health__{agent}`（`SqliteMemoryBackend` 的 `DreamStore`），重启后从 `best_health > 0` 重建 — 否则每次重启都会让历史最佳值归零，让第一轮退化周期蒙混过关。
 
-**日常：** `[Consolidate] → [Drift] → [Lint] → [Decay] → [DailyDigest]`
-**周度：** `[Consolidate] → [Drift] → [Synthesis] → [Lint] → [Decay] → [DailyDigest]`
+`score_merge_candidate(keeper, absorbed)` 用 Jaccard fact 重叠度 + 唯一事实占比 + 共享前导 token 给出局部 merge-safety 分；`recall_support(hit_count) = hit / (hit + 3)`（饱和到 [0,1)）是 SkillOpt 的 held-out split 廉价替代。`gate_supersede_evidence(candidate_conf, target_hit_count)` 把 LLM 替换意见的置信度与目标笔记的「召唤支持度」做同标量比较 —— 召回支持度高的笔记（hot）必须以更高 LLM 置信度才能 supersede，避免「热门笔记被弱论据替换」。
 
-```rust
-// src/memory/dreaming/mod.rs
-pub fn ensure_dream_daemon();
-pub fn record_activity();
+`MutationGate` 检测三类病态：merge cycle（同对笔记连续 ≥ 3 周期合并）、synthesis oscillation（正则模式摇摆）、wasted distillation（成熟课程笔记召回率持续低于 10%）；任一命中即 `Conserve` 模式并进入 cooldown。
+
+#### Dream pipeline
+
+`DreamPipeline::from_strategy(strategy, dreaming_cfg, decay_policy)` 是**唯一**的阶段拼装点（曾经的 hand-maintained name list 漂移被删除，2026-07-24 修复）：
+
+| Strategy | 阶段顺序 | 频率 |
+|----------|----------|------|
+| `Consolidate`（默认） | `lint → review → consolidate → feedback_distill → drift → index_refresher → co_recall_edges → graph_recompute → weave → mention_weave → decay → skill_lifecycle → goal_lessons_promote` | 夜里跑 |
+| `Synthesize`（成长） | `lint → review → consolidate → synthesis → skill_distill → feedback_distill → workflow_proposal → corpus_narrative → daily_digest` | 少见 |
+| `Conserve`（保守） | `lint → review → index_refresher → co_recall_edges → graph_recompute` | 病态检测命中后兜底 |
+
+> 注意：`feedback_distill` 出现在 `Consolidate`（频繁）与 `Synthesize`（少见）两条路径 —— 但只有一条 strategy 在同一周期里跑，所以 LLM 蒸馏工作不重复执行。
+
+`consolidate` 用 `batch_consolidate_candidates`（同类别 ≤ 20 个用 LLM 一批决策；> 20 个走 `title_heuristic_candidates`，纯文件名启发式，不调 LLM），单对 `consolidate_pair` 给 LLM 一对 ≤ 600 字符，决策 `MERGE / COEXIST / ABSORB_A / ABSORB_B`；unknown 答案默认 `COEXIST` 保守。
+
+`CompoundIngestor::ingest_batch`（`src/memory/notes/ingest/ingestor.rs`）是 L0 → L1 的主写入路径：
+
+```text
+1. SkillExtension registry.pre_compress fires on_pre_compress（optional）
+2. Partition by source (ProfileSynthesizer 等按 source 拆组)
+3. ToolInvocation telemetry rows 直接 mark processed
+4. Per-source batches:
+   CompoundIngestor::ingest_batch(agent_id, raws, extra_context):
+     retrieve related (≤ N)
+     plan (LLM call: PROMPT)
+     apply (read-modify-write: write_note / delete_note / link / move)
+     record ApplyReport
+5. mark_raw_as_processed (per group, on success)
 ```
 
-### WorkingMemoryAssembler
+- `defer-on-empty-plan`：本组 LLM 没产出任何写入（ApplyReport 全 0），但组内 row 距离创建时间 < 6 h → **不 mark processed**，让下一周期再试（保护知识，避免因 LLM 临时抽风丢失 L0 内容）；过 6 h 才放弃。
+- `rearm_after_busy`：claim 了的延续因 AgentBusy 被 session slot 拒，按 `BUSY_RETRY_DELAY = 30s` 重新 arm pending marker，**不计新 iteration**，同 tick 30s 后重试。
 
-替代了传统的 `ContextComptroller::arbitrate` 路径。生成包含明确插槽的 `MemoryEnvelope`：
+#### Dream 阶段（详见 `src/memory/dreaming/stages/`）
 
-```rust
-// src/memory/assembler/mod.rs
-#[async_trait]
-pub trait WorkingMemoryAssembler: Send + Sync {
-    async fn assemble(
-        &self,
-        query: &str,
-        agent_id: &str,
-        session_id: Option<&str>,
-        budget: AssemblyBudget,
-    ) -> Result<MemoryEnvelope, AlephError>;
+| 阶段 | 行为 |
+|------|------|
+| `NoteLintStage` | 前置 matter 修正（缺 `category` / `tags` / `created` / `updated` 之一则补全、修正 frontmatter 格式） |
+| `NoteReviewStage` | 检 `notes_review_queue` / `notes_review_archive`（高风险 candidate 入队，LLM 异步 review） |
+| `NoteConsolidateStage` | 同类别 LLM 决策合并（详见上） |
+| `NoteDriftStage` | 走 wikilink 邻居，对每对调用 LLM 决 `CONSISTENT / CONTRADICTORY / STALE`；CONTRADICTORY 写 `## Superseded` section，STALE 写 `stale: true` |
+| `NoteSynthesisStage` | ≥ 5 笔记才跑；按类别聚类（`dbscan(eps=0.3, min_samples=2)` + Leiden refinement），跨类写 `synthesis/` 笔记 |
+| `NoteWeaveStage` | 把孤儿笔记（无入站链接）织进链接图 —— 关键修复：decay 的 link_weight 算分包含新织的链接，orphan→archived 恶性循环被切断 |
+| `MentionWeaveStage` | 物化未链接-提及软边（正文提到但无 wikilink 的标题） |
+| `NoteDecayStage` | 时间半衰期（默认 90 d）按 `recall_signals` 调整；低于阈值按 LRU 归档到 `archive/{category}/`；**`permanent: true` / tag `permanent/pinned` 跳过**；< 7 d 跳过（too-new） |
+| `GoalLessonsPromoteStage` | goal 课程（`Goal.lessons`）升级到 L1 长期笔记 —— ring 5 节，R2.2 |
+| `IndexRefresherStage` | 重写 `notes_index` |
+| `GraphRecomputeStage` | 4-signal 社区感知重算 + Leiden refinement，写 `notes_graph_cache` + `notes_graph_insights` |
+| `CoRecallEdgesStage` | 物化行为共召回边（同一 query 多次召回的笔记对之间加 typed edge） |
+| `SkillDistillStage` | 课程笔记 → `feedback/notes/` 技能 |
+| `FeedbackDistillStage` | 用户纠正 (`aleph://correction/`) → `feedback/notes/` 技能；高 / 严重 bypass quorum，bundled + scheduled 都跑 |
+| `WorkflowProposalStage` | 行为共召回挖掘 → `MetaSkill` 草稿（无 LLM，自动聚合） |
+| `CorpusNarrativeStage` | LLM 写当日记忆叙事 |
+| `DailyDigestStage` | LLM 写当日每日洞察 |
+| `SkillLifecycleStage` | 课程笔记 Active→Stale（rule-based，30 d 默认） |
+
+> `DailyInsight` 写盘 key 是日期 `(YYYY-MM-DD)`，同日重跑 upsert；D7 fetch_daily_insight 按「今天→昨天」回退。
+
+---
+
+## 检索（`src/memory/retrieval.rs` + `src/memory/note_retrieval/`）
+
+`NoteFactRetrieval::retrieve(query, agent_id, k)` 流程：
+
+```text
+1. FTS5 search notes_fts (or notes_fts_trigram for CJK) → score_f
+2. sqlite-vec KNN on notes_vec_{dim} (matching embedder dim) → score_v
+3. RRF fusion: rrf(d) = 1 / (k + rank), k = 60
+4. Stage pipeline:
+   cosine_rerank → recency_boost → length_normalization →
+   time_decay (exp(-age/half_life)) → hard_min_score (0.35) →
+   mmr_diversity (λ ~ 0.7, penalize near-duplicates)
+5. Return ScoredFact<MemoryFact> with provenance
+```
+
+`SessionManager::recall_recent_messages`（独立路径）召回当前 session 最近的 N 条消息，按 `recency_boost` 加权。两条路径在 `HybridAssembler::assemble`（`src/memory/assembler/`）合并为 `MemoryEnvelope`：
+
+```text
+MemoryEnvelope {
+  schema_version: "...",
+  query, agent_id, session_id,
+  slots: [
+    { kind: UserProfile,    items: [...] },  // 永久用户偏好
+    { kind: SessionRecent,  items: [...] },  // 当前会话近期
+    { kind: RelevantNotes,  items: [...] },  // 笔记检索结果
+    { kind: Feedback,       items: [...] },  // FeedbackFloorLoader（always-on）
+    { kind: RawFragments,   items: [...] },  // 原文片段
+    { kind: Nudges,         items: [...] },  // 提示
+  ],
+  meta: { ... }
 }
 ```
 
-### MemoryReflector
+`FeedbackFloorLoader` 把 `aleph://correction/{id}` 中的高 / 严重纠正永久提升到 `Feedback` slot，**不**被 rerank 丢弃 —— 与「UserProfile」同级，是 LLM 不能再忽视的硬信号。`UserProfileLoader` 同理（USER.md 的六段 + ProfileSynthesizer 增量合并）。
 
-构建于 `HybridAssembler` (Spec 2) 之上的综合层：
+`MemoryReflector::reflect(query, hits, agent_id)` 是 Speculation-mode 反思：LLM 一轮回答给用户。`MemoryContextProvider` 把 envelope 喂给 `thinker/layers/curated_memory.rs`，注入 SYSTEM prompt 的「Memory envelope」section。
+
+---
+
+## 知识图（`src/memory/notes/graph/`）
+
+`load_graph_snapshot(agent_id)` 在 `notes_index` + `notes_links` 上拉一帧（无 LLM，O(1) FTS/JOIN），字段含：
 
 ```rust
-// src/memory/reflector/mod.rs
-pub struct MemoryReflector;
+pub struct GraphSnapshot {
+    pub nodes: Vec<GraphNodeView>,   // path, category, title, tags, severity
+    pub edges: Vec<GraphEdgeView>,   // from, to, relation, confidence
+}
 ```
 
-通过 `memory_reflect` 内置工具返回连贯的、带引用来源的 LLM 综合答案。
+4-signal 召回加权（`src/memory/notes/graph/community.rs`）：① note hit rate、② skill recall、③ contradiction、④ duplication；Leiden refinement（`leidenalg` 算法包，作为纯 Rust 调入）产出 stable communities；`isolated` / `sparse` / `bridge` / `surprising` 四类洞察写 `notes_graph_insights`，可在 `note_manage` 中查到。
 
-### 检索流水线
+`note_graph_query` 工具：双向 BFS、typed-relation 边、wikilink 路径上 supersession 强制浮现正确版本（不走老版本）。`memo://note/<path>` URI 走 `notes_sources` 表追到原始 raw 记忆 / 蒸馏笔记，4 级 provenance（`USER.md section / synthesis / distillation / raw`）由 `memory_trace` 工具读 `notes_provenance` 与 `notes_sources` 暴露。
 
+---
+
+## 笔记层图扩展（§2.16 → §2.17）
+
+- **手写 Louvain 社区检测**（`src/memory/notes/graph/community.rs`）：无外部 crate（满足 R3 轻依赖），`note_hit_rate` / `skill_recall_rate` 4-signal 召回加权
+- **Leiden refinement**：替代早期 Louvain 单层（社区质量提升一层；保持 deterministic seed）
+- **`notes_sources` / `notes_provenance` / `notes_graph_cache` / `notes_graph_insights` 表**
+- **`notes_links` 生命周期**：`resolved_by` / `status` / `label` / `edge confidence`（带 schema + migration + write）
+- **图健康洞察**：`isolated` / `sparse` / `bridge` / `surprising` 4 类（暴露给 LLM via `note_manage insights` action）
+- **`GraphRecomputeStage`**：`spawn_blocking` 触发，零 LLM 调用
+
+---
+
+## SkillOpt 自我演化（梦境的 Discipline）
+
+26.7.x 梦境的课程/笔记层演化**受 SkillOpt 纪律约束** —— bounded、validation-gated edit loop 加在 LLM 提出的编辑之上。
+
+- **Strict-improvement gate**（`evolution/gate.rs::evaluate_gate`）：`candidate > current + ε` 且 `candidate > best + ε` 才接受，`ε` 默认 `0.01`（健康评分用，防浮点噪声）
+- **Best-checkpoint persistence**：每次 `AcceptNewBest` 把分数持久化到 `dream_best_health__{agent}`（`SqliteMemoryBackend` 的 `DreamStore`），**重启后从持久值重建** —— 否则每次重启都让历史最佳值归零，让第一次退化周期蒙混过关
+- **Edit budget（"textual learning rate"）**（`evolution/budget.rs::EditBudget`）：默认 `32 edits / 256 KiB`/cycle，跨 `NoteConsolidate`（merge）、`NoteDecay`（archival）、`distill::Supersede` 三种**破坏性**阶段共享 —— additive（new / link / strengthen）**不**走 budget，永远不被早一步预算透支饿死
+- **Recall-evidence gate**（`evolution/evidence.rs::gate_supersede_evidence`）：用 recall-support (`hits / (hits + 3)` 饱和到 [0,1)) 替代 SkillOpt 的 held-out split —— recall-support 高的笔记 supersede 时必须有更高 LLM 置信度
+- **Rejected-edit buffer**（`DistillRejectRecord`）：被拒 supersede 加指纹，replay 一次后**立刻**拒（防 LLM 重提同一提议）
+
+---
+
+## `[[wikilink]]` 生命周期
+
+26.7.7+ 笔记层 wikilink：
+
+- 解析 `[[wikilinks]]`（带别名 `[Note|alias]`）
+- 通过策略链解析并记录来源（`resolved_by` / `status` / `label`）
+- 重命名级联（包括类型化关系）
+- tombstone 删除语义与定向的入站回填
+- 梦境守护进程物化未链接-提及的软边
+
+`NoteDriftStage` 对每对（note, wikilink target）调用 LLM 决 `CONSISTENT / CONTRADICTORY / STALE`：CONTRADICTORY 写 `## Superseded` section，STALE 写 `stale: true`。`note_graph_query` 工具的 BFS 路径上 supersession **强制浮现正确版**（不返回过时版）。
+
+---
+
+## CJK trigram 全文搜索
+
+26.7.15+ 抗崩溃索引 + CJK trigram 全文搜索。`notes_fts` 走 `unicode61` 分词器（CJK 整段当一个 token，子串查询不能 match）；`notes_fts_trigram` 走 `trigram`（重叠 3 字符窗口）—— 后者以 ≥ 3 字符的查询召回，ASCII 不变。两者**字节同步**：每次写 / 删双写双删；CJK 走 trigram，其他走 unicode61。
+
+---
+
+## 笔记层 Leiden 精炼
+
+26.7.15+：通过 Leiden 精炼的连通社区 —— 聚类、关系边染色、矛盾→supersession 闭环。Louvain 之后又加了一道 Leiden refinement 层，提升社区质量。
+
+---
+
+## 检索 Score 流水线
+
+`NoteFactRetrieval::retrieve` 的 6 阶段评分（`src/memory/note_retrieval/`）：
+
+```text
+原始:  (cosine_sim, recency_age, fact_count)
+ ↓
+1. cosine_rerank   — 用 embedder 重算 cosine（vs FTS/vec 各自的近似）
+2. recency_boost    — 新笔记加分（线性）
+3. length_normalization — 长度归一（避免长笔记垄断）
+4. time_decay       — exp(-age/half_life)（默认 90 d 半衰期）
+5. hard_min_score   — 低于 0.35 一律丢
+6. mmr_diversity     — 惩罚近重复
+ ↓
+ScoredFact<MemoryFact>[]（带 provenance 链）
 ```
-查询 → 向量搜索 (sqlite-vec) → FTS 搜索 (FTS5) → RRF 融合 → 评分流水线 → 上下文注入
-```
 
-评分阶段（6 个阶段）：
-1. `cosine_rerank` — 混合向量搜索得分与实时余弦相似度
-2. `recency_boost` — 为最近创建的事实添加增量 boost
-3. `length_normalization` — 惩罚过长的内容
-4. `time_decay` — 按年龄的指数衰减，下限 0.5
-5. `hard_min_score` — 丢弃低于阈值的候选（默认 0.35）
-6. `mmr_diversity` — 将接近重复的嵌入推迟到尾部
+`hybrid_search_notes` 走 **RRF**（Reciprocal Rank Fusion，k=60）融合 FTS 与向量结果；融合后上述 6 阶段评分再作用。
 
 ---
 
-## 记忆中心 (Memory Hub)
+## 全局事件溯源（可选）
 
-桌面端的 **Memory** 顶层模式 (`/memory`) 即 **记忆中心 (Memory Hub)** —— 它将原先两个相互独立的界面
-统一到同一个宿主中：
-
-| 视图 | 原为 | 展示内容 |
-|---|---|---|
-| **图谱视图** | `/memory` 处的放射状"画布" | 笔记作为节点、维基链接作为边，对关联概念进行图遍历 |
-| **表格视图** | `/dashboard/memory` 处的分面"仓库" | 笔记作为行，按类别分面过滤/分页 |
-
-两个视图共用同一个工具栏：
-
-- **图谱 ↔ 表格切换** — 在不丢失上下文的情况下切换视图
-- **统一搜索** — 一个查询框同时驱动两个视图
-- **共享智能体选择器** — 将两个视图限定到同一智能体的记忆范围
-
-**节点标识即笔记路径。** 同一笔记路径同时标识一个图谱节点和一个表格行，因此导航是双向的：
-
-- 表格行的 **"在图谱中查看"** 会在图谱视图中高亮对应节点。
-- 图谱节点的 **"在列表中查看"** 会将表格视图跳转到该笔记的分面/页面，并打开其抽屉。
-
-> 旧的 `/dashboard/memory` 路由现在会重定向到 `/memory?view=table`。
-
----
-
-## 治理可见性
-
-记忆的**写入仍由 LLM 和工具驱动** —— 梦境守护进程与纠正生命周期会自行变更笔记。记忆中心在
-**Settings → Memory** 下新增了**只读可观测性**面板，让你能够看到系统*做了什么*，而无需从 LLM 手中夺走笔：
-
-| 面板 | 数据来源 | 展示内容 |
-|---|---|---|
-| **梦境洞察 (Dream Insights)** | `dreaming.list_insights` | 梦境守护进程最近的每日综合笔记 + 梦境运行历史 |
-| **纠正记录 (Corrections)** | `memory.list_corrections` | 纠正 → 蒸馏的生命周期 |
-
-两个面板都严格只读 —— 它们只观察，不写入。若要按需触发一次综合处理（而非等待空闲），守护进程
-暴露了 `dreaming.run_now`。
-
-为调试某条事实*为何*出现或未出现，`memory.retrieve_with_trace` 会运行真实的 `NoteFactRetrieval`
-评分流水线，并返回每阶段的遥测数据（query → candidate pool → BM25 + vector scores → RRF fusion →
-cutoff → ranked）。
-
----
-
-## 记忆演进规格
-
-Aleph 的记忆系统经历了一系列规格演进：
-
-| 规格 | 重点 | 状态 |
-|---|---|---|
-| **Spec 1** | 记忆捕获钩子 (PreCompress, Delegation, SessionEnd) | 已发布 |
-| **Spec 2** | MemoryReflector — HybridAssembler 之上的综合层 | 已发布 |
-| **Spec 3** | 上下文围栏 + 记忆模式 (Context/Tools/Hybrid) | 已发布 |
-| **Spec 4** | 可插拔记忆扩展 (`MemoryExtension` trait) | 已发布 |
-| **Spec A** | 精选热记忆 (`remember` 工具，冻结快照) | 已发布 |
-| **Spec B** | session_search 总结 | 已发布 |
-| **Spec C** | 跨进程安全 | 已发布 |
-
-详见 [记忆演进](../architecture/memory-evolution)。
-
----
-
-## 已删除概念
-
-以下概念在 **记忆主权清理** (2026-04-12) 中被移除：
-
-- `MemoryTier` (ShortTerm/LongTerm/Core) — 被结构区分替代（原始记忆 vs 笔记）
-- `MemoryFact.strength` / `confidence` — 按 LLM 主权原则 (R8) 删除确定性启发式
-- `importance_weight` 评分阶段 — 已删除
-- `ValueEstimator` — 完全删除
-
----
-
-## 模块结构
-
-| 模块 | 用途 |
-|--------|---------|
-| `ai_retrieval` | AI 驱动的记忆检索 |
-| `assembler` | 为上下文窗口组装记忆 (WorkingMemoryAssembler + HybridAssembler) |
-| `audit` | 记忆访问审计 |
-| `compression` | 记忆压缩与合并 |
-| `context` | 上下文锚点与事实元数据 |
-| `context_comptroller` | 上下文预算管理 |
-| `curated` | 精选热记忆 (Spec A) |
-| `dreaming` | 后台梦境守护进程 |
-| `embedding_manager` | 嵌入模型管理 |
-| `embedding_provider` | 远程嵌入提供商 |
-| `events` | 记忆事件溯源 |
-| `extensions` | 可插拔记忆扩展 (Spec 4) |
-| `ingestion` | 记忆摄取流水线 |
-| `namespace` | 有作用域的记忆命名空间 |
-| `noise_filter` | 过滤不相关记忆 |
-| `note_retrieval` | NoteFactRetrieval (混合搜索) |
-| `notes` | 知识笔记 (维基链接) |
-| `query_expander` | 检索查询扩展 |
-| `reembed` | 重新嵌入操作 |
-| `reflector` | 记忆反射 (Spec 2) |
-| `reranker` | 结果重排序 |
-| `ripple` | 涟漪搜索扩展 |
-| `scoring_pipeline` | 多因子评分 |
-| `scratchpad` | 临时工作记忆 |
-| `session_compactor` | 每会话压缩 |
-| `session_resume` | 会话恢复 |
-| `store` | SQLite 存储后端 |
-| `transcript_indexer` | 对话索引 |
-
----
-
-## 安全属性
-
-- **UTF-8 安全** — `chars().take(n)` 截断
-- **锁恢复** — `unwrap_or_else(|e| e.into_inner())`
-- **无 SQL 注入** — 通过 rusqlite 参数化查询
-- **向量边界** — 余弦相似度限制在 `[-1.0, 1.0]`
-
----
-
-## 代码位置
-
-- `src/memory/mod.rs` — 模块入口
-- `src/memory/assembler/` — WorkingMemoryAssembler + HybridAssembler
-- `src/memory/curated/` — 精选热记忆 (Spec A)
-- `src/memory/extensions/` — MemoryExtension trait + 注册表 (Spec 4)
-- `src/memory/note_retrieval/` — NoteFactRetrieval
-- `src/memory/reflector/` — MemoryReflector (Spec 2)
-- `src/memory/notes/` — 知识笔记
-- `src/memory/store/` — SQLite 存储后端
-- `src/memory/store/sqlite/` — SQLite + sqlite-vec 实现
-- `src/memory/retrieval/` — 搜索与排序
-- `src/memory/dreaming/` — 梦境守护进程
-- `src/memory/transcript_indexer/` — 对话索引
-- `src/memory/events/` — 事件溯源
-
-## 参见
-
-- [思考者](./thinker) — 记忆如何被注入提示词
-- [架构：记忆](../architecture/memory) — 存储实现深度解析
-- [记忆演进](../architecture/memory-evolution) — Spec 1-4 和 Spec A-C 详情
+26.7.x 之前，每个 `NoteConsolidate` / `NoteUpdate` 都写 `MemoryEvent`（skeleton / pulse 二态）。**默认 L0 全部 compress 后事件不重放**（重放是 P3 候选能力；当前未启用）。`MemoryCommandHandler` 仍在接受事件，但事件的 `is_processed` 标志决定是否在 retrieval 中体现 —— 复用了 L0 的同款消费机制。
 
 ---
 
 ## 26.7.x 补充
 
-### 笔记层第 2–4 轮
+### 笔记层 Rounds 2–4
 
 26.7.15+ 知识记忆笔记层成熟：
 
-- 类别名规范化（单/复数分裂脑修复）
+- 类别名规范化（单/复数分裂脑修复）：`reference` / `skills` / `personal` 等
 - 关系词汇清理实体名污染
 - 通过 Leiden 精炼的连通社区
 - 矛盾→supersession 闭环
 - 陈旧笔记归档
-- 默认关闭的治理门
+- 默认关闭的治理门（skill_gate L1 校验）
 
-### Vault 面板重构（26.7.27+）
+### Vault 面板重构（26.7.27+，13 个 `panel/memory` 提交）
 
-- 卡片视图（替代旧表格）
-- 批量操作栏
-- 深链锚点
-- **证据链**（引用本笔记的其他笔记序列）
-- 跨代理选择（原子一致性）
-- **来源**（writer / timestamp / source event）
-- 批量导出为**交付物**
+`platform/wide/views/memory/` 11 个子模块 + `platform/phone/memory/` 7 个子模块：
+
+- **卡片视图**（`cards.rs`，三态 shell：`Loading` / `Empty` / `Content`）
+- **批量操作栏**（`batch_bar.rs`）：跨多卡批量归档 / 导出 / 加标签
+- **双轨搜索**：`raw` 行 vs `notes` 行；`hits invalidate`；facets chip（`facets.rs`）
+- **Pager + page-size selector**（`pager.rs`）：`locate_note` 页码在切换后正确
+- **Loadable**（`data.rs` + `loader.rs`）：所有 4 个 fetch 路由走它，failed fetch 不可表示为空（带回归测试）
+- **Toast**（`toast.rs`）：per-push seq identity（**模块私有 slot**，避免反复 spam）
+- **Stats**（`stats.rs`）：scope 到单一 agent；`raw_rows_total = filtered_count`（带回归测试 pin）
+- **深链 / 锚点**：`locate_note` 页码在 page-size selector 后正确
+- **证据链 / `notes_citing`**：把反链渲染到 drawer
+- **来源**（`provenance.rs`）：writer / timestamp / source event 三元组
+- **跨代理选择**（`selection.rs`）：原子一致性，避免并发选择丢更新
+
+### Memory RPC 行为变更（26.7.27+）
+
+- **`memory.listFacts`**：返回 `total` + 携带 `tags` / `link_count` / `updated_at` 字段（**之前没有这些字段**）
+- **`memory.search total = filtered count`**（**不是** store total；带回归测试 pin）
+- **`memory.search`** 返回 raw rows only，**永不**返回 notes
+- **`memory.graph`**（`graph.query`）在 scoped fetch 失败时报告 `null` 而非 `0`
+- **Graph endpoints**：
+  - `graph.neighbors` 端点**已退役**（被切掉，`graph.search` 命中携带完整 note 行替代）
+
+### 笔记层图扩展（§2.16 → §2.17）
+
+- **手写 Louvain 社区检测**（无外部 crate，R3 合规）
+- **4-signal community-aware recall** + Leiden 精炼
+- **`notes_sources` / `notes_provenance` / `notes_graph_cache` / `notes_graph_insights` 表**
+- **`notes_links` 生命周期**：`resolved_by` / `status` / `label` / `edge confidence`（带 schema + migration + write）
+- **图健康洞察**：`isolated` / `sparse` / `bridge` / `surprising`（暴露给 LLM via `note_manage insights` action）
+- **`GraphRecomputeStage`**：`spawn_blocking` 触发，零 LLM
 
 ### SkillOpt 自我演化
 
-26.7.x：技能演化受 SkillOpt 纪律约束——bounded、validation-gated edit loop 加在 LLM 提出的编辑之上。
+26.7.x 技能/笔记层演化受 SkillOpt 纪律约束 —— bounded、validation-gated edit loop 加在 LLM 提出的编辑之上（strict-improvement gate + best-checkpoint + edit budget + recall-evidence gate + rejected-edit buffer）。
 
 ### `note_graph_query` + `memory.retrieve_with_trace`
 
 26.7.15/21+：
 
-- `note_graph_query` 只读工具——双向 BFS 路径、类型化关系边、`[[wikilink]]` supersession
-- `memory.retrieve_with_trace`——真实 scoring-pipeline trace 给 debug 面板
+- `note_graph_query` 只读工具 —— 双向 BFS 路径、类型化关系边、`[[wikilink]]` supersession
+- `memory.retrieve_with_trace` —— 真实 scoring-pipeline trace 给 debug 面板
 - CJK trigram 全文搜索
 - 抗崩溃索引
 
 ### `memory.list_corrections`
 
-26.7.x：列出纠正 → 蒸馏生命周期的纠正记录。
+26.7.x：列出纠正 → 蒸馏生命周期的纠正记录（梦境的 FeedbackDistillStage 消费）。
 
 ### `memory.appList`
 
@@ -353,11 +393,11 @@ Aleph 的记忆系统经历了一系列规格演进：
 
 ### 真实成本与 token 核算
 
-26.7.15+：记忆 Tier-3 硬化：代理范围召回信号、严重度门控的归档、成熟度队列、若干检索 bug 修复。
+26.7.15+：记忆 Tier-3 硬化 —— 代理范围召回信号、严重度门控的归档、成熟度队列、若干检索 bug 修复。`memory.session_recent_messages` 与 `context_compactor` 是两个 recall 路径，token 总数在 `MemoryBackend` 内累计。
 
 ### 见另请参阅
 
-- [记忆系统（架构）](/docs/zh/architecture/memory) — 完整检索架构
-- [记忆演化](/docs/zh/concepts/memory-evolution) — Dreaming + SkillOpt
-- [笔记层 wikilink](/docs/zh/concepts/markdown-utils) — `[[wikilinks]]`
-- [网关 RPC `memory.*`](/docs/zh/gateway/methods/memory) — 协议
+- [思考者](/docs/zh/concepts/thinker) — 记忆如何被注入提示词
+- [Dream Daemon 参考](/docs/zh/reference/memory-system) — 详细阶段 + 调度
+- [笔记层 Rounds 2–4 提交](https://github.com/rootazero/Aleph/blob/main/src/memory/notes) — 关键 PR
+- [Dream Daemon 源码](https://github.com/rootazero/Aleph/blob/main/src/memory/dreaming) — 完整阶段 + evolution gate

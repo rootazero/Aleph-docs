@@ -1,497 +1,198 @@
 ---
 title: "扩展"
-description: "Aleph 的插件运行时 —— 三种 Extension 类型之一 —— 支持 WASM 和 Node.js 运行时、清单驱动配置、钩子系统、后台服务和频道/提供商插件。"
+description: "Plugin 类型扩展：Claude Code 兼容清单、静态组件、MCP 插件、WASM 插件、钩子与生命周期管理。"
 ---
 
-本页文档介绍**插件运行时** —— Aleph 在统一的、面向用户的 **Extension（扩展）** 概念下整合的三种 Extension 类型（`Skill`、`Plugin`、`Mcp`）之一。插件是 Aleph 通过代码超越其内置能力的方式：清单驱动的架构让第三方开发人员（或您）可以添加新工具、拦截系统事件、定义自定义 AI 提供商、暴露 HTTP 端点，甚至创建全新的消息频道。插件在沙箱运行时中运行 —— 要么是快速的 WebAssembly 模块，要么是功能齐全的 Node.js 进程 —— 具有声明式权限控制。如需跨全部三种类型进行统一发现和一键安装，请参阅扩展商店。
+本页介绍 Aleph 统一 Extension 模型中的 **Plugin** Kind。Plugin 可以打包技能、代理、命令、钩子、MCP 服务器配置、WASM 能力与后台服务。Skill 与 Mcp 是同级 Kind；[扩展商店](/docs/zh/concepts/extensions-store) 在同一个目录中呈现三者。
 
-> 想了解如何按类别浏览和安装扩展？请参阅[扩展商店](/docs/zh/concepts/extensions-store) —— 用于发现、审核和安装技能、插件和 MCP 服务器的单一面板。本页介绍支撑 `Plugin` 类型的底层插件宿主。
-
-## 架构概览
-
-```
-Extension Manager
-├── Loader           ── 发现、清单解析、验证
-├── Registry         ── 插件注册、工具查找、状态跟踪
-├── Watcher          ── 文件更改时热重载
-└── Plugin Runtimes
-    ├── WASM Runtime (Extism)  ── 沙箱、快速启动、有限 I/O
-    └── Node.js Runtime (IPC)  ── 完整 Node.js API、stdio 通信
-```
-
-Extension Manager 协调所有插件的加载、生命周期和通信。每个插件在清单文件中声明其能力，管理器将工具调用、钩子事件和服务命令路由到适当的运行时。
+插件宿主位于 `src/extension/`，不是 Hub 目录，也不是模型提供商注册表。
 
 ## 插件结构
 
-每个插件都存在于自己的目录中，并带有一个清单文件：
+Aleph 推荐 Claude Code 兼容清单 `.claude-plugin/plugin.toml`：
 
+```text
+my-plugin/
+├── .claude-plugin/
+│   └── plugin.toml
+├── skills/
+│   └── code-review/SKILL.md
+├── agents/
+│   └── reviewer.md
+├── commands/
+│   └── check.md
+├── hooks/
+│   └── hooks.json
+└── .mcp.json
 ```
-~/.aleph/plugins/my-plugin/
-├── aleph_plugin.toml    # 插件清单（必需）
-├── dist/
-│   └── index.js         # 入口点（Node.js）
-├── src/
-│   └── index.ts         # 源代码
-├── SKILL.md             # 可选提示文件
-└── docs/
-    └── INSTRUCTIONS.md  # 可选工具特定说明
-```
+
+组件路径可在清单里覆盖；不写时使用上面的默认路径。没有清单的插件只要包含被识别的组件目录或文件，也可以被自动发现。
 
 ## 清单格式
 
-清单文件（`aleph_plugin.toml`）是插件与 Aleph 运行时之间的契约。它声明插件提供的一切和需要的一切。
-
-### 完整示例
+`.claude-plugin/plugin.toml` 使用 Claude Code 风格的扁平字段，并提供可选的 `[aleph]` 扩展段：
 
 ```toml
-[plugin]
-id = "my-plugin"                    # 唯一标识符
-name = "My Plugin"                  # 显示名称
-version = "1.0.0"                   # SemVer 版本
-description = "Does something useful"
-author = "Your Name"
-kind = "nodejs"                     # nodejs | wasm | static
-entry = "dist/index.js"            # nodejs/wasm 的入口点
+name = "diagnostics"
+version = "1.0.0"
+description = "系统诊断"
+repository = "https://example.com/diagnostics"
+skills = "./skills"
+agents = "./agents"
+commands = "./commands"
+hooks = "./hooks/hooks.json"
+mcp-servers = "./.mcp.json"
 
-[permissions]
-network = ["connect:https://*"]     # 网络访问规则
-filesystem = ["read:./data", "write:./output"]
-env = ["API_KEY", "DEBUG"]          # 允许的环境变量
+[author]
+name = "Example"
 
-[prompt]
-file = "SKILL.md"                   # 提示文件路径
-scope = "system"                    # system | tool | standalone | disabled
+[aleph]
+runtime = "mcp"
+entry = ".mcp.json"
 
-[[tools]]
-name = "my_tool"
-description = "Performs a specific task"
-handler = "handleMyTool"
-instruction_file = "docs/INSTRUCTIONS.md"
+[aleph.permissions]
+network = true
+filesystem = "read"
+env = true
+shell = false
+background = false
 
-[[tools]]
-name = "another_tool"
-description = "Another useful tool"
-handler = "handleAnotherTool"
-
-[[hooks]]
-event = "before_tool_call"
-kind = "interceptor"                # interceptor | observer | resolver
-priority = "normal"                 # system | high | normal | low
-handler = "onBeforeTool"
-
-[[hooks]]
-event = "after_tool_call"
-kind = "observer"
-priority = "low"
-handler = "onAfterTool"
-```
-
-### 插件种类
-
-| 种类 | 说明 | 入口点 | 用例 |
-|------|-------------|-------------|----------|
-| `nodejs` | 通过 JSON-RPC over stdio 通信的 Node.js 进程 | JavaScript/TypeScript 文件 | 具有网络访问的全功能插件 |
-| `wasm` | 加载到 Extism 运行时的 WebAssembly 模块 | `.wasm` 二进制 | 快速、沙箱计算 |
-| `static` | 无可执行代码，仅提示和配置 | 无 | 编码标准、风格指南、知识库 |
-
-### 清单优先级
-
-当存在多种清单格式时，Aleph 使用此解析顺序：
-
-1. `aleph_plugin.toml` (V2 TOML) -- 首选
-2. `aleph_plugin.json` (V2 JSON)
-3. 带有 `alephPlugin` 部分的 `package.json`
-4. 旧版清单格式
-
-## WASM 运行时
-
-WASM 运行时使用 [Extism](https://extism.org/) 在沙箱环境中执行 WebAssembly 插件。WASM 插件适用于不需要文件系统或网络访问的计算密集型操作。
-
-```rust
-pub struct WasmRuntime {
-    plugins: HashMap<String, ExtismPlugin>,
-}
-
-impl WasmRuntime {
-    pub fn load(&mut self, path: &Path) -> Result<()>;
-    pub fn call(&self, plugin: &str, function: &str, input: &[u8])
-        -> Result<Vec<u8>>;
-}
-```
-
-### 编写 WASM 插件（Rust）
-
-```rust
-use extism_pdk::*;
-
-#[plugin_fn]
-pub fn my_tool(input: String) -> FnResult<String> {
-    let args: serde_json::Value = serde_json::from_str(&input)?;
-    let result = process(args);
-    Ok(serde_json::to_string(&result)?)
-}
-```
-
-### WASM 沙箱限制
-
-| 资源 | 约束 |
-|----------|-----------|
-| 文件系统 | 无访问（完全沙箱） |
-| 网络 | 无访问（完全沙箱） |
-| 内存 | 可配置限制（默认：256 MB） |
-| CPU 时间 | 可配置超时（默认：30 秒） |
-
-这些限制在扩展设置中配置：
-
-```toml
-[extensions.runtimes.wasm]
-enabled = true
-memory_limit = "256MB"
-timeout_ms = 30000
-```
-
-## Node.js 运行时
-
-Node.js 插件作为子进程运行，并通过 JSON-RPC over stdio 与 Aleph 通信。它们可以访问完整的 Node.js API，使其适用于需要网络访问、文件 I/O 或复杂依赖的插件。
-
-```rust
-pub struct NodejsRuntime {
-    processes: HashMap<String, Child>,
-}
-
-impl NodejsRuntime {
-    pub async fn start(&mut self, plugin: &PluginManifest) -> Result<()>;
-    pub async fn call(&self, plugin: &str, method: &str, args: Value)
-        -> Result<Value>;
-}
-```
-
-### 编写 Node.js 插件
-
-```typescript
-import { createServer } from '@aleph/plugin-sdk';
-
-const server = createServer({
-  name: 'my-plugin',
-  tools: {
-    my_tool: async (args: { input: string }) => {
-      return { result: `Processed: ${args.input}` };
-    },
-    another_tool: async (args: { query: string }) => {
-      const response = await fetch(`https://api.example.com?q=${args.query}`);
-      return response.json();
-    }
-  }
-});
-
-server.start();
-```
-
-`@aleph/plugin-sdk` 自动处理所有 JSON-RPC 通信。您只需将工具处理程序定义为异步函数。
-
-## 插件发现和注册
-
-### 发现
-
-`PluginDiscovery` 组件扫描三个目录以查找插件：
-
-1. `~/.aleph/plugins/` -- 用户插件
-2. `/usr/local/share/aleph/plugins/` -- 系统插件
-3. `./plugins/` -- 项目本地插件
-
-### 注册流程
-
-```
-插件目录找到
-    │
-    ▼
-1. 解析清单 (aleph_plugin.toml)
-    │
-    ▼
-2. 验证清单
-   • 存在必填字段
-   • 版本兼容性
-   • 无工具名称冲突
-    │
-    ▼
-3. 选择运行时
-   WASM → WasmRuntime
-   Node.js → NodejsRuntime
-   Static → 无需运行时
-    │
-    ▼
-4. 在 ToolServer 中注册工具
-    │
-    ▼
-插件就绪
-```
-
-### 插件状态
-
-```rust
-pub enum PluginStatus {
-    Loaded,      // 清单已解析，尚未启动
-    Running,     // 运行时活动，工具可用
-    Stopped,     // 手动停止
-    Error(String), // 启动失败或崩溃
-}
-```
-
-## 钩子系统
-
-钩子允许插件在执行流程中定义的点上拦截和响应系统事件。
-
-### 钩子类型
-
-| 类型 | 执行 | 行为 |
-|------|-----------|----------|
-| **Interceptor** | 顺序 | 可以修改上下文或阻止执行。每个钩子接收前一个的输出。 |
-| **Observer** | 并行 | 即发即弃。错误被记录但不影响执行。用于遥测和日志。 |
-| **Resolver** | 顺序 | 先到先赢竞争。当钩子返回非空结果时执行停止。 |
-
-### 可用事件
-
-| 事件 | 说明 |
-|-------|-------------|
-| `before_tool_call` | 在调用任何工具之前 |
-| `after_tool_call` | 工具执行完成后 |
-| `on_message` | 当收到用户消息时 |
-| `on_response` | 在将响应发送给用户之前 |
-| `on_error` | 当发生错误时 |
-
-### 钩子优先级
-
-| 优先级 | 值 | 用例 |
-|----------|-------|----------|
-| `system` | -1000 | 核心系统钩子（最先运行） |
-| `high` | -100 | 安全检查、验证 |
-| `normal` | 0 | 默认优先级 |
-| `low` | 100 | 日志、遥测、清理 |
-
-值越低越先执行。在同一优先级内，钩子按注册顺序执行。
-
-### 钩子示例
-
-```typescript
-// Interceptor: 可以修改或阻止
-async function onBeforeTool(context: HookContext): Promise<HookContext> {
-  if (context.toolName === 'dangerous_tool') {
-    throw new Error('安全策略阻止的工具');
-  }
-  context.args.timestamp = Date.now();
-  return context;
-}
-
-// Observer: 即发即弃
-async function onAfterTool(context: HookContext): Promise<void> {
-  console.log(`工具 ${context.toolName} 在 ${context.duration}ms 内执行`);
-}
-
-// Resolver: 先到先赢
-async function resolveConfig(context: HookContext): Promise<Config | null> {
-  if (context.key in myConfigs) {
-    return myConfigs[context.key];  // 获胜，停止链
-  }
-  return null;  // 继续到下一个解析器
-}
-```
-
-## 提示范围
-
-插件可以注入具有精细控制的提示到代理上下文中：
-
-| 范围 | 行为 |
-|-------|----------|
-| `system` | 插件激活时始终注入 |
-| `tool` | 仅当绑定工具在当前上下文中可用时注入 |
-| `standalone` | 用户必须显式调用（例如 `/my-plugin`） |
-| `disabled` | 从不注入（用于临时禁用提示） |
-
-## 直接命令
-
-直接命令绕过 LLM，当用户调用时立即执行插件函数：
-
-```toml
-[[commands]]
-name = "ping"
-description = "检查插件是否响应"
-handler = "handlePing"
-
-[[commands]]
-name = "status"
-description = "获取当前插件状态"
-handler = "handleStatus"
-```
-
-直接命令速度快（无 LLM 往返），确定性（相同输入始终产生相同输出），显式（用户必须显式调用它们）。它们通过网关 RPC 方法 `plugins.executeCommand` 调用。
-
-## 后台服务
-
-插件可以运行独立于请求/响应周期的长期后台进程：
-
-```toml
-[[services]]
-name = "file-watcher"
-description = "监视文件系统更改"
-start_handler = "startFileWatcher"
-stop_handler = "stopFileWatcher"
+[[aleph.services]]
+name = "metrics"
+start_handler = "start_metrics"
+stop_handler = "stop_metrics"
 auto_start = true
-
-[[services]]
-name = "sync-daemon"
-description = "后台同步服务"
-start_handler = "startSync"
-stop_handler = "stopSync"
-auto_start = false
 ```
 
-服务遵循状态机：`Stopped` -> `Starting` -> `Running` -> `Stopping` -> `Stopped`。`ServiceManager` 协调所有后台服务并通过网关 RPC 方法（`services.start`、`services.stop`、`services.list`、`services.status`）暴露它们。
+清单解析顺序：
 
-## 频道插件
+1. `.claude-plugin/plugin.toml`
+2. `.claude-plugin/plugin.json`
+3. `aleph.plugin.toml`，仅作兼容格式保留，会打印警告
+4. 兼容适配器与对已识别组件布局的自动发现
 
-频道插件启用新的消息集成。它们是外部平台和 Aleph 之间的双向桥接：
+当前清单不再包含模型 provider 配置段。模型提供商仍由 Aleph 核心 provider 配置管理，不会通过插件能力声明。
 
-```toml
-[[channels]]
-name = "slack"
-description = "Slack 工作区集成"
-connect_handler = "connectSlack"
-disconnect_handler = "disconnectSlack"
-send_handler = "sendSlack"
+## Runtime 类型
+
+| Runtime | 加载方式 | 用途 |
+|---|---|---|
+| `static` | 纯 Markdown 组件，无需可执行 runtime | 技能、代理、命令 |
+| `mcp` | `.mcp.json` 通过 `McpManager` 加载 | Node.js、Python 等使用 MCP 的外部进程 |
+| `wasm` | Extism WASM runtime | 沙箱计算与声明的 WASM 能力 |
+
+当前宿主不再保留独立的直连 Node.js 插件 runtime。Node.js 插件一般就是由 MCP 子系统启动的 MCP server。
+
+## ExtensionManager 流程
+
+```text
+作用域发现
+    ↓
+清单适配与校验
+    ↓
+来源冲突解决
+    ↓
+PluginRegistry 注册
+    ├── tools
+    ├── hooks
+    ├── services
+    ├── skills 与 commands
+    └── agents
+    ↓
+PluginLoader
+    ├── Static
+    ├── MCP
+    └── WASM
 ```
 
-频道插件实现三个处理程序：
-- **connect** -- 建立与外部平台的连接并注册消息回调。
-- **disconnect** -- 清理连接和资源。
-- **send** -- 格式化并将消息传递到平台上的特定聊天。
+管理器同时共享进程级 `SkillSystem`，发布插件技能根，刷新代理目录，并把已启用的 MCP 插件同步到 MCP 管理器。
 
-## 提供商插件
+## 发现与优先级
 
-提供商插件向 Aleph 添加自定义 AI 后端：
+作用域目录在存在 agent 与 project 时按以下顺序解析：
 
-```toml
-[[providers]]
-name = "local-llama"
-description = "本地 Llama.cpp 服务器"
-list_models_handler = "listModels"
-chat_handler = "handleChat"
-stream_handler = "handleStream"
-embed_handler = "handleEmbed"
-```
+1. agent-level：`~/.aleph/agents/<id>/plugins/`
+2. local：`<project>/.aleph/plugins.local/`
+3. project：`<project>/.aleph/plugins/`
+4. user：`~/.aleph/plugins/installed/`
 
-`PluginProviderAdapter` 将插件提供商与 Aleph 的 `AiProvider` trait 桥接，使插件提供的模型与内置提供商一起可用。
+插件源在出现重复 ID 时按 `Config > Workspace > Global > Bundled` 排序。最高优先级候选项被激活，较低优先级条目保留为 `overridden`。`.disabled` 标记会让目录被跳过。
 
-## HTTP 路由
+## 命名与注册
 
-插件可以暴露 REST 端点用于 webhook、集成和自定义 API：
+插件组件使用 `plugin:component` 限定名，内置组件保持短名。注册表同时保留短名兼容键；短名冲突不会移除任一限定组件，且先注册者保留短名 key。
 
-```toml
-[[http_routes]]
-method = "POST"
-path = "/webhooks/github"
-handler = "handleGithubWebhook"
+`CapabilityDeclaration` 是统一的注册模型：
 
-[[http_routes]]
-method = "GET"
-path = "/api/status"
-handler = "handleStatus"
-```
+- `Tool`
+- `Hook`
+- `Service`
+- `Skill`
+- `Agent`
+- `McpServer`
 
-HTTP 路由在网关 HTTP 服务器上的 `/plugins/{plugin_name}/` 下提供。
+插件的 `commands/` Markdown 在技能注册表中以命令型技能存放，不再有独立 capability 枚举。
 
-## 热重载
+## MCP 插件接线
 
-`PluginWatcher` 监视插件目录的更改并自动重新加载插件：
+MCP 类型插件由加载器读取 `.mcp.json`，替换 `${CLAUDE_PLUGIN_ROOT}` 与 `${ALEPH_PLUGIN_ROOT}`，并把每个 server 限定为 `plugin:<plugin-id>/<server-name>`。
 
-```rust
-pub struct PluginWatcher {
-    watcher: RecommendedWatcher,
-    registry: Arc<RwLock<PluginRegistry>>,
-}
-```
+已启用插件的 server 通过 `McpManager::add_transient_server` 注册。它们是仅运行时、由插件生命周期管理的：不会被写入用户持久化 MCP 配置；卸载插件时其瞬态 server 与工具注册也会被清理。
 
-当文件更改时，监视器：
-- **Create/Modify** -- 重新加载受影响的插件（重新解析清单，重新启动运行时）。
-- **Remove** -- 卸载插件并从注册表中移除其工具。
+## 钩子
 
-## 扩展配置
+钩子系统有两种执行形态：
 
-`config.toml` 中的全局扩展设置：
+| 形态 | 执行 | 作用 |
+|---|---|---|
+| `interceptor` | 顺序、阻塞等待 | 可改写输入、追问、阻止、拒绝或改写输出 |
+| `observer` | 并行、非阻塞 | 仅做记录或反应，不影响被保护操作 |
 
-```toml
-[extensions]
-enabled = true
-search_paths = ["~/.aleph/plugins", "./plugins"]
-hot_reload = true
+第三种「resolver / 先得者胜出」形态未在生产中提供。事件触发点决定哪些形态可用。matcher 仅基于 `tool_name` 匹配，所以在没有工具名的事件上加 matcher 永远不会触发；运行时清单会把这种配置报告为 `reachable: false` 并附 issue。
 
-[extensions.runtimes.wasm]
-enabled = true
-memory_limit = "256MB"
-timeout_ms = 30000
+命令与 HTTP 钩子输出限制为 64 KiB；钩子超时上限 300 秒；命令与 HTTP 动作按需走 operator 同意闸。
 
-[extensions.runtimes.nodejs]
-enabled = true
-node_version = "20"
-```
+## WASM 与权限
 
-## 网关 RPC 方法
+WASM 由 Extism 加载，使用声明的能力描述工作区、HTTP、凭证、速率限制、工具调用与密钥。插件权限声明覆盖网络、文件系统、环境、shell 与后台服务。`[[aleph.services]]` 声明要求 `background = true`。
 
-| 方法 | 说明 |
-|--------|-------------|
-| `plugins.list` | 列出所有已安装插件及其状态 |
-| `plugins.install` | 从路径或 URL 安装插件 |
-| `plugins.uninstall` | 移除插件 |
-| `plugins.enable` | 启用已禁用的插件 |
-| `plugins.disable` | 禁用插件而不移除它 |
-| `plugins.reload` | 强制重新加载特定插件 |
-| `plugins.executeCommand` | 执行直接命令 |
+这些声明描述插件可以注册或请求的内容。工具执行仍会经过共享的 scoped-tool、审批与沙箱强制点。
+
+## 热重载与生命周期
+
+Watcher 监听清单与组件变更。`reload` 在 load guard 下串行化，并发重载不会互相覆盖状态。插件卸载在删除前会停止其服务、移除运行时注册、清理瞬态 MCP server。
+
+## 网关与 CLI 命名空间
+
+规范的 Claude Code 兼容网关命名空间是单数形式：
+
+| 方法族 | 用途 |
+|---|---|
+| `plugin.list` | 列出插件 |
+| `plugin.install` | 统一安装来源分类 |
+| `plugin.update` | 原子升级并比对版本 |
+| `plugin.enable` / `plugin.disable` | 启用或禁用插件 |
+| `plugin.reload` | 重新加载插件 |
+| `plugin.uninstall` | 卸载插件 |
+| `plugin.marketplace.*` | 维护插件市场后端 |
+
+复数 `plugins.*` 方法保留为兼容别名。市场安装会先暂存一份、校验可选的 SHA-256，然后原子重命名；插件的持久数据目录位于安装树之外。
+
+## 代码位置
+
+- `src/extension/mod.rs` — `ExtensionManager`
+- `src/extension/manifest/` — 清单适配与解析
+- `src/extension/discovery/` — 扫描与冲突解决
+- `src/extension/registry/` — 插件组件注册表
+- `src/extension/loader.rs` — Static / MCP / WASM 加载
+- `src/extension/mcp_config.rs` — `.mcp.json` 解析与限定
+- `src/extension/hooks/` — 钩子执行与同意
+- `src/extension/runtime/wasm/` — WASM runtime
+- `src/extension/watcher.rs` — 热重载
 
 ## 相关页面
 
-- [扩展商店](/docs/zh/concepts/extensions-store) -- 按类别统一发现和安装技能、插件和 MCP 服务器
-- [技能](/docs/zh/concepts/skills) -- 技能如何与扩展系统集成
-- [模型提供商](/docs/zh/concepts/model-providers) -- 自定义 AI 后端的提供商插件
-- [工作区](/docs/zh/concepts/workspaces) -- 插件目录结构和发现路径
-- [架构概览](/docs/zh/architecture/overview) -- 扩展层的系统级视图
-
----
-
-## 26.7.x 补充
-
-### `plugin.install` 统一入口
-
-26.7.21+：`plugin.install` 不再猜测来源——按源（市场 / 压缩包 / 路径）分类统一处理。`plugin.update` / `plugin.reload` / `plugin.marketplace.list` / `plugin.marketplace.add` 共同支撑。
-
-### 双名空间
-
-- **`plugins.*`**（复数，旧名空间，向后兼容）—— `plugins.list` / `install` / `installFromZip` / `uninstall` / `enable` / `disable` / `load` / `unload` / `callTool` / `executeCommand`
-- **`plugin.*`**（单数，规范 CC-兼容名空间）—— `plugin.list` / `install` / `installFromZip` / `uninstall` / `update` / `enable` / `disable` / `load` / `unload` / `reload` / `callTool` / `executeCommand` / `marketplace.list` / `marketplace.add`
-
-### 生命周期竞态修复
-
-26.7.21+：
-
-- 并发 `reload` 现在在 load guard 下**串行化**
-- 格式错误的插件结果不再被掩盖为 `ServiceResult::ok`
-- `AuthorInfo` 解析使用最左分隔符
-
-### Capability Ledger
-
-26.7.x：每次安装时从磁盘**重建**的可见能力清单（`plugin.install` 提交给披露面板）。重建于 `make_runtime_ledger()`。
-
-### 安装前披露
-
-强制的安装前摘要：
-
-- `command+args`
-- 网络 / 文件系统触达
-- 固定版本 + SHA256
-- 信任层级
-- 密钥
-
-### 见另请参阅
-
-- [扩展系统](/docs/zh/concepts/extension-system) — 加载器
-- [扩展商店](/docs/zh/concepts/extensions-store) — 用户视角
-- [能力系统](/docs/zh/concepts/capability-system) — 能力声明
-- [网关 RPC `extensions.*`](/docs/zh/gateway/methods/extensions) — 协议
+- [扩展系统](./extension-system) — 跨 Kind 架构
+- [技能](./skills) — SKILL.md 编写
+- [扩展商店](./extensions-store) — Hub 目录与安装
+- [能力系统](./capability-system) — 能力声明与运行时账本

@@ -1,240 +1,71 @@
 ---
-title: Protocol Adapters
-description: "3-layer protocol system: built-in, configurable YAML, and extension adapters with hot-reload support."
+title: "Protocol Adapters"
+description: "The boundary between provider protocols and messaging-channel adapters, including registration and runtime capabilities."
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
+Aleph separates model-provider HTTP protocols from messaging-channel I/O. Protocol adapters build model requests and parse streaming deltas; channel adapters handle inbound events, access prefilters, session routing, and outbound capabilities. Telegram, Discord, and iMessage are not model protocols and do not share the provider protocol registry.
 
-## Overview
+## Provider Protocol Layer
 
-Aleph decouples **vendors** from **protocols**. Multiple providers can share the same protocol adapter — for example, DeepSeek, Moonshot, and Groq all use the `openai` protocol. Adding a new OpenAI-compatible vendor requires only a preset entry, not a new adapter.
+Provider configuration names a protocol, which the registry resolves from dynamic YAML or compiled-in implementations. OpenAI-compatible vendors can reuse the `openai` protocol instead of duplicating an adapter; native Messages, Gemini, OpenAI Responses, Codex/ChatGPT, and Ollama retain their own request and stream-parsing differences.
 
-This design means:
+Dynamic protocols live under `~/.aleph/protocols/`. File changes are debounced, parsed, and atomically registered before taking effect. Dynamic names take priority over built-ins; an unknown name returns an error with the available protocols. This layer does not own Telegram/Discord/iMessage pairing, allowlists, conversation IDs, or message limits.
 
-- **One adapter, many vendors** — The `openai` protocol handles OpenAI, DeepSeek, Moonshot, and 20+ others
-- **Runtime extensibility** — Custom protocols via YAML without recompiling
-- **Fast iteration** — YAML protocols reload in under 600ms
+## Channel Adapter Layer
 
-## Three-Layer System
+Every channel implements the `Channel` trait in `src/gateway/channel.rs` and exposes `ChannelCapabilities` through `ChannelInfo`. Capability flags are promises: an adapter that declares a feature must implement the corresponding method; otherwise the default returns `UnsupportedFeature` rather than claiming success.
 
-```
-User config.protocol
-    │
-    ▼
-ProtocolRegistry.get(name)
-    │
-    ├── Dynamic protocols (YAML-loaded) ──▶ ConfigurableProtocol
-    │   ├── Minimal mode: base protocol + differences
-    │   └── Custom mode: full template rendering
-    │
-    ├── Built-in protocols ──▶ OpenAI / Anthropic / Gemini / Ollama
-    │
-    └── Not found ──▶ Error with available protocol list
-```
+Configurable channels are registered through `ChannelFactory` in `src/gateway/interfaces/plugin.rs`. `register_channel_plugins` currently registers Telegram, Discord, and other configurable channels. iMessage is the exception: the channel initialization path constructs it directly, so it does not depend on the plugin table.
 
-The registry resolves a protocol name in priority order: dynamic protocols first, built-in protocols fallback, error if neither exists.
+## Telegram Boundary
 
-## Built-in Protocols
+The current Telegram adapter uses teloxide long polling. It handles messages, attachments, replies, edit-based streaming, status reactions, stickers, and inline callbacks. At the interface edge it only classifies DM/group policy and static allowlists:
 
-These are compiled Rust adapters registered at startup:
+- `open`, `allowlist`, `pairing`, and `disabled` are DM/group policy outcomes.
+- A non-allowlisted DM under pairing returns `NeedsPairing` and is forwarded to the inbound router.
+- Pairing state, approval, and the final access decision are single-sourced by the router's `check_permission` and `pairing_store`.
+- The channel no longer owns a local pairing-code store, runtime paired-user set, webhook server, session manager, or draft API.
 
-| Protocol | Adapter | Use Case |
-|----------|---------|----------|
-| `openai` | `OpenAiProtocol` | OpenAI and OpenAI-compatible APIs |
-| `anthropic` | `AnthropicProtocol` | Claude API (native Messages API) |
-| `gemini` | `GeminiProtocol` | Google Gemini API |
-| `openai-responses` | `OpenAiResponsesProtocol` | OpenAI `/v1/responses` API, OpenRouter |
-| `codex` / `chatgpt` | `OpenAiResponsesProtocol` (Codex variant) | ChatGPT subscription via OAuth |
-| `ollama` | `OllamaProvider` | Local Ollama (native implementation) |
+Telegram declares attachments, images, audio, video, reactions, replies, editing, and Markdown/HTML support. Its message limit is 4096 and its stream protocol is edit-based. It is not a webhook adapter.
 
-Each built-in adapter implements two methods:
+## Discord Boundary
 
-- `build_request(payload, config)` — constructs an HTTP request builder (stream-first: always sets `stream: true`)
-- `stream_deltas(response)` — parses SSE/streaming response into fine-grained `ProviderDelta` events
+Discord enters through the registered `DiscordChannelFactory` and handles guild/DM messages, slash commands, component buttons, embeds, attachments, edit-based streaming, replies, and reactions. Regular messages, slash commands, and approval buttons enforce the same DM, guild, and channel allowlists:
 
-## Configurable Protocols
+- `dm_allowed` controls direct messages.
+- `allowed_guilds` restricts servers.
+- `allowed_channels` restricts channels inside servers.
+- A component click is converted into an inbound message with a `cb_` prefix and forwarded to the router's `ApprovalCallbackSink`; the Discord adapter stores no approval state.
 
-YAML-defined protocols live in `~/.aleph/protocols/` and are hot-reloadable. The system watches this directory and reloads definitions automatically.
+Discord declares attachments, media, reactions, replies, editing, deletion, typing indicators, and Markdown. Its message limit is 2000 and the normal attachment limit is 25 MB. Bot permission auditing is a separate bitfield check and is not the same as Gateway channel allowlisting.
 
-<Callout type="info">
-Reload latency is ~600ms from file change to active (500ms debounce + parse/register overhead).
-</Callout>
+## iMessage Boundary
 
-### Hot Reload Mechanism
+iMessage is one channel type with two transports:
 
-1. `notify-debouncer-full` watches `~/.aleph/protocols/`
-2. File change detected (Create / Modify / Delete)
-3. YAML parsed into `ProtocolDefinition`
-4. `ConfigurableProtocol` adapter created
-5. Registry updated atomically
-6. New requests use updated protocol immediately
+| Transport | Inbound | Outbound | Platform boundary |
+| --- | --- | --- | --- |
+| Local | macOS `chat.db` polling | AppleScript | macOS only; requires Full Disk Access and Automation; cannot send tapbacks, so `reactions` is false |
+| BlueBubbles | REST + webhook, with optional catch-up polling | BlueBubbles REST | Any OS; attachments, replies, and reactions; reactions require private-api; editing and deletion are not declared |
 
-## Minimal vs Custom Mode
+Local iMessage polling turns add-tapbacks into inbound context carrying `MessageMeta::Reaction` and filters remove-tapbacks. Therefore, surfacing a user's new reaction to the model does not mean the local transport can send reactions. BlueBubbles also validates the tapback name and private-api availability.
 
-### Minimal Mode
+## Addressing and Routing
 
-Extend an existing protocol and override only the differences:
+`ChannelId` identifies a transport, `ConversationId` identifies a platform conversation, and `ChannelCapabilities` describes supported operations. Gateway's `channel_directory` reads routing metadata while `channel_message` performs sends; DM/group policy, pairing, and allowlists remain inbound-router constraints that channel adapters cannot bypass.
 
-```yaml
-# ~/.aleph/protocols/my-proxy.yaml
-name: my-proxy
-extends: openai
-base_url: https://proxy.example.com/v1
-differences:
-  auth:
-    header: X-API-Key
-    prefix: "Bearer "
-```
+## Code Location
 
-Minimal mode inherits the base protocol's request building and response parsing, applying only the specified overrides.
+- `src/providers/protocols/` — provider protocols and registry
+- `src/gateway/channel.rs` — channel trait, addressing, and capabilities
+- `src/gateway/interfaces/plugin.rs` — channel factory table
+- `src/gateway/interfaces/telegram/` — Telegram polling, policy prefilter, and router handoff
+- `src/gateway/interfaces/discord/` — Discord messages, components, and access prefilter
+- `src/gateway/interfaces/imessage/` — Local and BlueBubbles transports
+- `src/gateway/inbound_router/` — unified inbound authorization, pairing, and session routing
 
-### Custom Mode
+## See Also
 
-Define a full protocol from scratch with template rendering:
-
-```yaml
-# ~/.aleph/protocols/exotic-ai.yaml
-name: exotic-ai
-base_url: https://api.exotic.ai
-custom:
-  auth:
-    type: header
-    header: Authorization
-    prefix: "Bearer "
-  endpoints:
-    chat: /v2/completions
-    stream: /v2/completions/stream
-  request_template: |
-    {"model": "{{config.model}}", "messages": [{"role": "user", "content": "{{input}}"}]}
-  response_mapping:
-    content: "$.choices[0].message.content"
-    error: "$.error.message"
-```
-
-Custom mode provides full control over request templates and JSONPath response mapping.
-
-## ProtocolRegistry
-
-The `ProtocolRegistry` maps protocol name strings to adapter implementations:
-
-```rust
-pub struct ProtocolRegistry {
-    dynamic: RwLock<HashMap<String, Arc<dyn ProtocolAdapter>>>,  // YAML-loaded
-    builtin: RwLock<HashMap<String, ProtocolFactory>>,           // Compiled Rust
-}
-```
-
-Lookup order:
-
-1. **Dynamic protocols first** — loaded from `~/.aleph/protocols/*.yaml`
-2. **Built-in protocols fallback** — factory functions instantiate adapters on demand
-
-Registry access:
-
-```rust
-let registry = ProtocolRegistry::global();
-let adapter = registry.get("openai")?;
-```
-
-## Adding a Custom Protocol
-
-Three steps to add a custom protocol:
-
-**Step 1 — Create YAML:**
-
-```yaml
-name: my-custom-api
-base_protocol: openai
-base_url: https://api.example.com/v1
-headers:
-  Authorization: Bearer ${API_KEY}
-```
-
-**Step 2 — Place in protocols directory:**
-
-```bash
-mv my-custom-api.yaml ~/.aleph/protocols/
-```
-
-**Step 3 — Reference in provider config:**
-
-```toml
-[providers.my-provider]
-protocol = "my-custom-api"
-models = ["my-model"]
-api_key = "sk-..."
-enabled = true
-```
-
-## YAML Format Example
-
-```yaml
-name: my-custom-api          # Protocol identifier (referenced in config.protocol)
-base_protocol: openai        # Base protocol for minimal mode
-base_url: https://api.example.com/v1
-
-# Optional: custom headers applied to every request
-headers:
-  Authorization: Bearer ${API_KEY}
-  X-Custom-Header: my-value
-
-# Minimal mode: override specific fields
-differences:
-  auth:
-    header: X-API-Key
-    prefix: "Bearer "
-
-# Or custom mode: full control
-custom:
-  auth:
-    type: header
-    header: Authorization
-  endpoints:
-    chat: /v1/chat/completions
-    stream: /v1/chat/completions/stream
-  request_template: |
-    {"model": "{{config.model}}", "messages": {{messages}}, "stream": true}
-  response_mapping:
-    content: "$.choices[0].delta.content"
-    error: "$.error.message"
-```
-
-## Related Pages
-
-- [Providers](./providers) — Provider presets, failover, and health monitoring
-- [Gateway](./gateway) — How the Gateway routes requests to providers
-
----
-
-## 26.7.x Addendum
-
-### Telegram Parallel-Layer Cleanup
-
-26.7.21 major change: the Telegram adapter shed **~2.6k lines of dead code** — previously it contained an **uncompiled** webhook server, an **unconstructed** session manager, a **dead** draft API, and duplicated status reactions. Access / pairing / allowlists are now **single-sourced on the inbound router** — the channel-local pairing store never took effect.
-
-### Discord Parallel-Layer Cleanup
-
-26.7.21: Discord's parallel nested-config / account-pool / resolver layers were removed. **Only** the router-aligned entry path remains.
-
-### Cross-Channel Reachability / Addressability
-
-26.7.x: configured channels are now **truly reachable and addressable** — previously some configurations never took effect. `gateway.credentials` / `channels.set_agent` / `channel.pairing_data` provide the full addressing + credentials.
-
-### iMessage
-
-26.7.21+ enhancement: inbound iMessage add-tapbacks (add-reactions) are surfaced to the model as context, not dropped.
-
-### Unified Channel Calls
-
-`channels.*` / `channel.*` namespace aggregation:
-
-- `channel.create` / `delete` / `health` / `list` / `start` / `status` / `stop` / `send` / `pairing_data`
-- `channels.set_agent` / `channels.list` / `channels.status` / `channels.dead_letters` / `channels.redrive_dead_letters`
-- `channel.pairing.approve` / `approved` / `list` / `reject` / `revoke`
-
-### See Also
-
-- [Interfaces Overview](/docs/en/interfaces/overview) — channels at a glance
-- [Telegram](/docs/en/interfaces/telegram) — after the big cleanup
-- [Discord](/docs/en/interfaces/discord) — after the big cleanup
-- [iMessage](/docs/en/interfaces/imessage) — new channel
+- [Gateway](/docs/en/concepts/gateway) — WebSocket, routing, and channel control plane
+- [MCP Integration](/docs/en/concepts/mcp-integration) — MCP transports and capability broadcasts
+- [Extension System](/docs/en/concepts/extension-system) — plugin tools and channel extensions

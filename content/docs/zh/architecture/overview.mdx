@@ -185,64 +185,75 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 
 ## 核心模块
 
+> 26.7.22+ 当前 `aleph-server` 进程内有 **70 个 `src/<module>` 目录 + 6 个顶层 `.rs` 文件**（`canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`）。下面的清单按用途分组，与 `src/` 目录树同步。
+
 | 模块 | 路径 | 用途 |
 |--------|------|---------|
-| **gateway** | `src/gateway/` | WebSocket 服务器、JSON-RPC 路由、接口 |
-| **orchestrator** | `src/orchestrator/` | 解析 FlowSpec、构建 HarnessDeps、分发 |
-| **harness** | `src/harness/` | Think→Act 循环、停止钩子、上下文预算、压缩 |
-| **agents** | `src/agents/` | 代理运行时、子代理生成、团队协调 |
-| **thinker** | `src/thinker/` | LLM 交互、提示构建、流式传输 |
-| **dispatcher** | `src/dispatcher/` | 任务编排、工具过滤 |
-| **engine** | `src/engine/` | 工具执行引擎 |
-| **providers** | `src/providers/` | AI 提供商实现 |
-| **tools** | `src/tools/` | AlephTool trait、工具服务器 |
-| **builtin_tools** | `src/builtin_tools/` | 内置工具实现 |
+| **gateway** | `src/gateway/` | WebSocket 服务器、JSON-RPC 路由、频道适配器、TLS、OpenAI 兼容 API |
+| **orchestrator** | `src/orchestrator/` | FlowSpec / FlowRequest 解析、`HarnessRunner` trait、`AgentHarnessRunner` |
+| **harness** | `src/harness/` | Think→Act 循环、停止钩子、上下文预算、压缩、`HarnessDeps` 结构 |
+| **agents** | `src/agents/` | 代理运行时、子代理生成、`think_level` 解析、模型绑定 |
+| **thinker** | `src/thinker/` | LLM 交互、提示构建（`PromptBuilder` / `PromptPipeline`）、层注册 |
+| **tool_metadata** | `src/tool_metadata/` | 工具元数据 + risk + unified 索引 + slash 别名（取代旧 `src/dispatcher/`） |
+| **providers** | `src/providers/` | AI 提供商实现 + 故障转移链 + MoA 聚合器 |
+| **tools** | `src/tools/` | `AlephTool` trait、工具服务器、scoped 工具服务、turn 预算 |
+| **builtin_tools** | `src/builtin_tools/` | 内置工具（`hub/` 收敛 `store/`，`skill_reader/`、`browser_tools/` 按动作拆分） |
 | **memory** | `src/memory/` | Facts DB、混合检索 (SQLite + sqlite-vec + markdown 笔记 + wikilink 图) |
 | **extension** | `src/extension/` | 插件系统 (WASM, Node.js) |
 | **exec** | `src/exec/` | Shell 执行、审批系统、OS 原生沙箱 |
-| **sandbox** | `src/sandbox/` | Sandbox trait + WorkspaceSandbox — 每会话工作空间、能力账本 |
-| **mcp** | `src/mcp/` | MCP 客户端实现 |
-| **routing** | `src/routing/` | 会话键解析 |
-| **config** | `src/config/` | 配置管理 |
+| **sandbox** | `src/sandbox/` | Sandbox trait + WorkspaceSandbox — 每会话工作空间、能力账本、`ApprovalGate` 升级 |
+| **mcp** | `src/mcp/` | MCP 客户端实现 + 按需发现工具 |
+| **routing** | `src/routing/` | 会话键解析 + binding rules |
+| **config** | `src/config/` | 配置管理 + `reloader` + 类型化 policy |
 | **runtimes** | `src/runtimes/` | 能力账本 — 探测、引导、持久化外部工具状态 |
-| **session** | `src/session/` | 仅追加会话事件日志 + 进程中 actor |
+| **session** | `src/session/` | 仅追加会话事件日志（`session_events` 是单一源）+ 进程内 actor |
+| **loop_graph** | `src/loop_graph/` | 治理拓扑 store + 服务 + 模板（叠加在核心之上） |
+| **looping** | `src/looping/` | Loop 子系统（进程内 `LoopRegistry` + 状态机） |
+| **goal** | `src/goal/` | Goal 子系统（持久化 `GoalStore` + 客观 gate + TreeBudget） |
+| **strategy** | `src/strategy/` | Strategy 子系统（composite-keyed `StrategyStore` + planner + renderer） |
+| **hub** | `src/hub/` | **Aleph Hub 单一源**（取代旧 `src/store/`）— `primer` / `catalog_client` / `official_*` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
+| **artifacts** | `src/artifacts/` | 工件存储（`ArtifactStore` + `MAX_ARTIFACT_BYTES = 50 MB` + 4 个 `ArtifactOrigin`） |
+| **export** | `src/export/` | session HTML / Markdown 导出 + CSS + collect + page + document |
+| **clipboard** | `src/clipboard/` | 剪贴板上下文（10 秒） + 多模图片提取 |
+| **projects** | `src/projects/` | 项目存储（`projects.json` + lock） |
+| **vision** | `src/vision/` | 视觉子系统（claude / OpenAI-compat / 多模） |
 | **a2a** | `src/a2a/` | A2A 协议适配器 |
 | **acp** | `src/acp/` | ACP 协议实现 |
-| **approval** | `src/approval/` | 审批系统 |
-| **arena** | `src/arena/` | 竞技场功能 |
-| **browser** | `src/browser/` | 浏览器自动化 |
-| **capability** | `src/capability/` | 能力系统 |
-| **clawhub** | `src/clawhub/` | ClawHub 集成 |
-| **components** | `src/components/` | 共享组件 |
-| **compressor** | `src/compressor/` | 上下文压缩 |
+| **approval** | `src/approval/` | 审批系统 + action-aware grant |
+| **browser** | `src/browser/` | 浏览器自动化（secret guard / PII 单一源） |
+| **cluster** | `src/cluster/` | 单中心节点联邦 — reverse RPC、节点注册、`node_invoke` / `node_file` |
+| **command** | `src/command/` | 轻量命令补全聚合（顶层 `mod.rs` / `parser.rs`） |
+| **components** | `src/components/` | 共享域类型（仅 `types`，原 EventHandler 链路已于 Harness 迁移期间删除） |
+| **context** | `src/context/` | 上下文管理（`ContextBudget` / `ContextCompactor` / `PreflightPipeline`） |
 | **core** | `src/core/` | 核心类型和原语 |
-| **daemon** | `src/daemon/` | 后台守护进程 |
+| **diagnostics** | `src/diagnostics/` | 诊断工具 |
 | **discovery** | `src/discovery/` | 服务发现 |
+| **domain** | `src/domain/` | 共享领域类型 |
 | **event** | `src/event/` | 事件系统 |
-| **generation** | `src/generation/` | 媒体生成 |
+| **fetch** | `src/fetch/` | HTTP 抓取（用于工具） |
+| **generation** | `src/generation/` | 媒体生成（图像 / 视频 / 语音） |
 | **group_chat** | `src/group_chat/` | 群聊管理 |
-| **intent** | `src/intent/` | 意图识别 |
+| **guardrails** | `src/guardrails/` | Guardrail 注册表（输入 / 输出 / 工具调用） |
+| **identity** | `src/identity/` | 代理身份与签名 |
+| **init_unified** | `src/init_unified/` | 一次性安装协调（5 阶段：目录 / 配置 / 数据库 / 运行时 / 技能） |
 | **logging** | `src/logging/` | 日志基础设施 |
 | **markdown** | `src/markdown/` | Markdown 处理 |
 | **media** | `src/media/` | 媒体处理 |
 | **metrics** | `src/metrics/` | 指标收集 |
-| **permission** | `src/permission/` | 权限系统 |
 | **pii** | `src/pii/` | PII 检测和处理 |
-| **prompt** | `src/prompt/` | 提示管理 |
+| **pricing** | `src/pricing.rs`（顶层） | 核心端定价 + cost 估算 |
 | **resilience** | `src/resilience/` | 状态管理 (SQLite) |
-| **scheduler** | `src/scheduler/` | 作业调度 |
 | **search** | `src/search/` | 搜索提供商 |
 | **secrets** | `src/secrets/` | 密钥管理 |
-| **security** | `src/security/` | 安全工具 |
-| **skill** | `src/skill/` | 技能系统 |
-| **supervisor** | `src/supervisor/` | 执行监督 |
-| **tasks** | `src/tasks/` | 任务管理 |
+| **security** | `src/security/` | 安全工具（SSRF、unicode guard） |
+| **skill** | `src/skill/` | 技能系统（v2 `SkillSystem` + eligible-skill 注入） |
+| **tasks** | `src/tasks/` | 任务管理（cron / heartbeat / dreaming / reaper） |
 | **teams** | `src/teams/` | 团队协调 |
 | **workflow** | `src/workflow/` | 声明式工作流模板、编译和执行 |
 | **tool_output** | `src/tool_output/` | 工具输出处理 |
 | **utils** | `src/utils/` | 工具函数 |
-| **vision** | `src/vision/` | 视觉处理 |
-| **wizard** | `src/wizard/` | 向导流程 |
+| **verification** | `src/verification/` | Verifier 链（`StopHookVerifier` / `ToolLoopVerifier` / 模型 robustness profile） |
+| **wizard** | `src/wizard/` | 向导流程（RPC 驱动的 `wizard.next` 会话，非 CLI `aleph wizard` 子命令） |
 
 ---
 
@@ -413,7 +424,7 @@ loom = ["dep:loom"]       # 并发测试
 test-helpers = []          # 集成测试辅助
 ```
 
-频道通过 `aleph.toml` 配置在运行时启用或禁用。
+频道通过 `config.toml` 配置在运行时启用或禁用。
 
 ---
 
@@ -644,14 +655,43 @@ Aleph 通过分层协议适配器架构支持多个 AI 提供商：
 
 ### 完整 RPC 计数
 
-26.7.x 网关暴露 **~265 个 RPC 方法**——详见 [网关方法参考](/docs/zh/gateway/methods)。
+26.7.22+ 网关暴露 **~265 个 RPC 方法**（详见 [网关方法参考](/docs/zh/gateway/methods)）。26.7.22+ 之后新增的大类：`artifacts.*`（3 RPC）、`voice.*`（6 RPC + 1 delta topic）、`hub.*`（5 RPC）、`strategy.*`、`goals.*`、`loop.*` 等。
 
 ### 完整模块清单
 
-`aleph-server` 进程内 ~76 个 `src/<module>` 目录 + 几个顶层 `.rs` 文件。详见 `src/` 目录树。
+`aleph-server` 进程内 ~70 个 `src/<module>` 目录 + 6 个顶层 `.rs` 文件。26.7.22+ 之后**新增** / **重组**的顶层模块：
+
+| 模块 | 路径 | 用途 |
+|------|------|------|
+| **artifacts** | `src/artifacts/` | 工件存储（`ArtifactStore` + `MAX_ARTIFACT_BYTES = 50 MB` + 4 个 `ArtifactOrigin`） |
+| **export** | `src/export/` | session HTML / Markdown 导出 + CSS + collect + page + document |
+| **hub** | `src/hub/` | **Aleph Hub 单一源**（替代旧 `src/store/`）——`primer` / `catalog_client` / `official_{mcp,plugins,skills}` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
+| **looping** | `src/looping/` | Loop 子系统（进程内 `LoopRegistry` + 状态机 Active/Paused/Stopped） |
+| **goal** | `src/goal/` | Goal 子系统（持久化 `GoalStore` + 客观 gate + TreeBudget） |
+| **strategy** | `src/strategy/` | Strategy 子系统（composite-keyed `StrategyStore` + planner + renderer） |
+| **clipboard** | `src/clipboard/` | 剪贴板上下文（10 秒） + 多模图片提取 |
+| **projects** | `src/projects/` | 项目存储（`projects.json` + lock） |
+| **vision** | `src/vision/` | 视觉子系统（claude / OpenAI-compat / 多模） |
+
+**重组 / 重命名**（路径变化但概念延续）：
+
+| 旧路径 | 新路径 | 说明 |
+|--------|--------|------|
+| `src/store/` | `src/hub/` | Hub 收敛：`SourceProvider` trait 退役；改为直接 HTTP 客户端 + `primer` 冷启动投影 |
+| `src/dispatcher/` | `src/tool_metadata/` | 工具元数据 + loom 并发 + risk + unified 索引 |
+| `src/tasks/goal_pursuit.rs` | `src/goal/pursuit.rs` | goal 子系统独立 |
+| `src/gateway/voice/voice_mode.rs` | `src/gateway/voice/session_mode.rs` | 与 `policies/session_mode` 命名对齐 |
+| `src/builtin_tools/store/` | `src/builtin_tools/hub/` | Hub 内置工具：`hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify` |
+| `src/builtin_tools/skill_reader.rs` | `src/builtin_tools/skill_reader/{mod,list,read,tests}.rs` | 技能读取子目录化 |
+| `src/builtin_tools/browser_tools.rs` | `src/builtin_tools/browser_tools/{cookies,dialog,drag,emulate,hover,network,pdf,resize,scroll,session,upload}.rs` | 浏览器工具按动作拆开 |
+
+**新增顶层文件**：`src/canvas_io.rs`、`src/pricing.rs`、`src/command/{mod,parser}.rs`（轻量命令补全聚合）。
 
 ### 详见
 
 - [架构 1-2-3-4 模型](/docs/zh/architecture/1-2-3-4-model) — 稳定骨架
 - [架构红线 R1–R10](/docs/zh/philosophy/redlines) — 硬约束
 - [网关协议](/docs/zh/gateway/protocol) — 协议
+- [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy) — 三个独立子系统
+- [工件与可交付物](/docs/zh/concepts/artifacts-deliverables) — artifact store
+- [扩展商店](/docs/zh/concepts/extensions-store) — `aleph-hub` 单一源

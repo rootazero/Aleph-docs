@@ -1,0 +1,328 @@
+---
+title: "语音对话运行时"
+description: "流式 ASR、TTS provider fallback、语音正则化、voice-as-context、Panel 实时字幕与端到端对话循环；底层使用 portable_pty 嵌入式终端与 WhisperLive/Deepgram 双方言适配。"
+---
+
+`gateway/voice` 与 `gateway/pty` 共同承担 26.7.22+ 后的语音栈：流式 ASR（Deepgram / WhisperLiveKit）、TTS provider fallback、域词偏置、voice-as-context 信号接入上下文聚合，以及端到端 4-reference gap-analysis hardening。Round 2 / 2b 后的语音栈是「**流式 ASR + 本地自托管 + 跨 provider fallback**」的复合架构，**不再**支持「按批 + 单 provider」。
+
+> **当前状态（26.7.22+）。** 26.7.21 之前的语音栈是「按批 + 本地 + 单 provider」。Round 2 / 2b 把它重写为**流式 ASR**（Deepgram / WhisperLiveKit）、**TTS provider fallback**、**域词偏置**、**Voice-as-Context** 信号接入上下文聚合，以及**端到端的 4-reference gap-analysis hardening**（2026-07-17 / 07-22）。
+
+## 模块结构（`src/gateway/voice/`）
+
+```text
+voice/
+├── mod.rs             # 模块入口 + 公共 re-export
+├── state.rs           # VoiceState 状态机（Active / Idle / 自动-disable 计数）
+├── voice_mode.rs      # session → voice_mode 指针（process-global）
+├── inbound/
+│   ├── mod.rs
+│   ├── provider.rs    # SttSource 解析（Local { fallback } / Static）
+│   └── stt.rs         # Whisper-dialect HTTP 核心 + local→cloud 退化
+├── outbound.rs        # TTS 出站；provider fallback 链（TTS_MAX_PROVIDERS = 2）
+├── format.rs          # voice.format：fast-model 语音正则化（fast-model polish）
+├── hallucination.rs   # 共享协议层幻觉过滤（re-export `aleph_protocol::voice_text::filter_transcript`）
+├── sanitize.rs        # TTS 前的 markdown / think-block / 表格 / URL 防御剥离
+├── local_provider.rs  # BYO OpenAI 兼容 STT/TTS provider 实现
+└── streaming/
+    ├── mod.rs         # provider-neutral 流式契约（TranscriptDelta + StreamRegistry）
+    ├── relay.rs       # WS relay；voice.stream.{start, audio, stop} RPC
+    ├── deepgram.rs    # Deepgram /v1/listen delta 正常化（cloud + WhisperLiveKit）
+    └── whisperlive.rs # collabora WhisperLive segments[].completed delta 正常化
+```
+
+> **单一 join point**：`src/generation/voice_catalog.rs::GenerationProviderRegistry::get_voices_for_provider` —— TTS provider 注册与发现唯一入口；`speech_generate` 失败路径接到该 join point。`voice_catalog` 是 `GenerationProviderRegistry` 的薄包装。
+
+`streaming/{mod,relay,deepgram,whisperlive}.rs` 是 Round 2 引入的**全新模块**（之前只有 batch 路径 `inbound/`）。`relay.rs` 是 voice 专属的 WS relay，`transcribe.rs` 已删除（被 `streaming/deepgram.rs` 等取代）。
+
+---
+
+## 流式契约（`TranscriptDelta`）
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TranscriptDelta {
+    #[serde(default)] pub committed: String,   // 已锁定，不再变
+    #[serde(default)] pub interim: String,      // 漂浮假设，下次 delta 可能重写
+    #[serde(default)] pub utterance_end: bool,  // 后端显式 EOU（best-effort；Panel VAD 权威）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,                  // 后端致命错误（busy / disconnect）
+}
+```
+
+- `committed` 累积由 `push_joined` 控制：只在 ASCII 边界插空格（CJK 永不插空格）
+- 后端 wire format 永不暴露给 Panel；只通过 `voice.transcribe.delta` topic 推 `TranscriptDelta`
+- `error` 携带：客户端 strike 计数器加 1，到 `STREAM_STRIKE_LIMIT = 2` 时 latch `streaming_off`，后续会话走 batch 路径
+
+### `StreamingTranscriber` trait
+
+```rust
+#[async_trait]
+pub trait StreamingTranscriber: Send + Sync {
+    async fn open(&self, cfg: StreamConfig) -> anyhow::Result<StreamHandles>;
+}
+
+pub struct StreamHandles {
+    pub audio_tx: mpsc::Sender<Vec<u8>>,    // s16le PCM, 16 kHz mono
+    pub delta_rx: mpsc::Receiver<TranscriptDelta>,
+}
+```
+
+`build_transcriber(t)` 按 `target.provider` 选 adapter —— 本地自托管和云端只是不同的 `base_url` / `provider` 值。`unknown_provider` 字段值默认 fallback 到 Deepgram dialect 并 warn 一次。
+
+---
+
+## 配置（`config.toml`）
+
+```toml
+[voice]
+provider = "deepgram"            # deepgram / whisperlive / local / mock
+language = "en"
+sample_rate = 16000
+
+# 域词偏置（按 ASR 后端差异）：
+#   - whisperlive: hotwords + initial_prompt
+#   - OpenAI: /audio/transcriptions prompt
+#   - Deepgram: keywords + keyterms
+vocabulary = ["Aleph", "sqlite-vec", "loop_graph", "StrategyStraTA", ...]
+
+# 流式传输（26.7.22+）
+[voice.streaming]
+enabled = true
+provider = "deepgram"            # deepgram / whisperlive
+base_url = "wss://api.deepgram.com"
+api_key = ""                     # LAN 信任，user-controlled
+language = "en"                   # 可被 RPC 覆盖
+model = ""                        # ASR 模型（whisperlive: "small" / Deepgram: server default）
+
+# 语音正则化（fast-model 抛光，26.7.22+）
+[voice.format]
+enabled = true
+model = "claude-haiku-4-5"       # 专用于 ASR 转写的快模型
+prompt = ""                       # 空 → 内置默认（"言语精炼师" prompt）
+```
+
+> **`provider = "whisperlive"` 配自托管 WhisperLiveKit 必须带 `--pcm-input`**——它跳过 FFmpeg 解码、直接吃 PCM；该标志缺失会触发 OS 层解封装错误，**首句即空**。Aleph 端 `PCM = s16le, 16 kHz, mono` 字节直送。
+
+`pcm_input` 不是 `StreamingConfig` 字段；它属于 WhisperLiveKit **服务端**启动参数。`Aleph` 在握手时固定 `audio_format = int16`，客户端 s16le / 16 kHz / mono 直送，**不**走 FFmpeg 重采样（`audio` 配置的 `sample_rate` 决定 Panel 端的下采样率）。
+
+---
+
+## TTS 出站 + Provider Fallback
+
+```rust
+const TTS_MAX_PROVIDERS: usize = 2;   // 上限 2：保证 fallback 一次，不"扫所有 provider"
+const TTS_MAX_ATTEMPTS: u32 = 2;      // 单 provider 内的瞬态重试（5xx / 超时）
+const TTS_RETRY_BACKOFF: Duration = Duration::from_millis(300);
+```
+
+**选 candidate 的算法**（`tts_candidates`）：
+
+1. 用户显式 override 的 provider 放首位（来自 `voice_state.provider` 或 RPC `voice.synthesize` 的 `provider` 参数）
+2. 默认 provider（`generation.default_speech_provider`）次之
+3. 至多 2 个
+
+**调用循环**（`speech_generate` 失败路径）：
+
+```rust
+for (hop, provider_id) in candidates.iter().enumerate() {
+    match try_generate(provider_id).await {
+        Ok(audio) => return Ok(audio),
+        Err(e) if hop == 0 && is_invalid_parameter(&e) => continue,  // 首次 hop 错配 → 跳到 fallback
+        Err(e) if hop == 0 => continue,                              // 配置的 provider 构造失败 → fallback hop
+        Err(e) => return Err(e),                                     // fallback 也失败 → 上抛
+    }
+}
+```
+
+每个 provider 内部还走 `synth_with_retry`：5xx / 429 / 网络超时等可重试错误最多 2 次，**不可重试**错误（auth / invalid params）直接放弃。**fallback hop 副作用**：丢弃 `voice_state.voice`（voice ID 与 provider 绑定，跨 provider 无意义，**强行 fallback hop 必丢 voice**——已带 `fallback_drops_the_primary_voice_id` 回归测试）。
+
+`generate_tts` 长度感知超时（`tts_timeout_ms`：10 s 基线 + 5 s / 100 chars，上限 30 s），wrap `tokio::time::timeout`；不重试超过 30 s 的 per-attempt deadline。
+
+---
+
+## WhisperLiveKit 硬化（Round 2b）
+
+- **`--pcm-input`** 必须为 `true`，否则 OS 层解封装失败
+- **vocabulary biasing**：把 `[voice] vocabulary` 列表翻译成 WhisperLiveKit 的 `hotwords` / `initial_prompt`（两个字段都填，因为 WhisperLive 的 `faster-whisper` 后端会同时消费）
+- **segments[].completed delta 正常化**：把 WhisperLiveKit 的"段完成"事件归一为 `committed += chunk` + `interim = ""`（用 `push_joined` 拼，避免 CJK 串接时插入空格）
+- **echo-aware barge-in**：检测到 TTS 自身回声时打断 TTS，避免自中断（详见 Panel 端 `vad.rs`）
+- **onset lead-in**：发声前 ~150 ms 前置静音填充，避免"吞首字"
+
+---
+
+## Deepgram 适配
+
+- **`/v1/listen`** delta 正常化（cloud + WhisperLiveKit 共享 delta 格式——WhisperLiveKit 暴露了 Deepgram 兼容端点）
+- **`build_transcriber` factory**：按 `voice.provider` 选 adapter；`unknown` 字段值默认 fallback 到 Deepgram dialect
+- **ASR-VAD 对话回合切分**：Deepgram 自带 `UtteranceEnd` 信号，与 Panel VAD 互校验（Panel VAD 权威；`utterance_end` 字段只作 advisory）
+- **interim 噪声**：`UTF-8 替换字符 U+FFFD` 在 interim 上被丢弃，committed 上保留（流式解码常见的多字节字符半写入）
+
+---
+
+## 错误与降级
+
+| 场景 | 行为 |
+|------|------|
+| 流式断流（`utterance_end` 缺失） | Panel VAD 兜底切分；`streaming_off` 用 `null` latch |
+| 后端 fatal（busy / disconnect） | `TranscriptDelta.error` 携带；adapter bridge 任务关闭；客户端 strike 计数 + 1；2 次后 latch batch 路径 |
+| TTS 主 provider 构造失败 | 单次 fallback hop（丢弃 voice_id） |
+| TTS fallback 也失败 | 上抛；UI 退化为"文字回复" |
+| capture tap 未授权（macOS / Win） | 早返回 + 友好提示；不假装录音（`is_native_shell()` 决定走 OS TCC deep-link 还是 browser permission hint） |
+
+---
+
+## 语音正则化（`voice.format`）
+
+`format::format_text` 是 fast-model 抛光 pass：调用一个独立 LLM 把 ASR 原始转写（带"嗯/啊/那个/就是"等口语冗余、缺标点、错别字）润色成干净的书面文字。**Display-only** —— 不影响 LLM 主推理轮拿到的原始转写（已经发到那里了）。
+
+P7 优雅降级：provider 错误、空白输出、config 关闭时**返回原文**（`unwrap_or(params.text)`），所以这个 handler 实际上**永远成功**。prompt 走 `DEFAULT_PROMPT = "你是一个冷酷的语音实时格式化微型引擎..."`（C5 hardening 期间的 4-reference 合并后留下的中文 prompt），用户可通过 `format.prompt` 覆盖。
+
+---
+
+## TTS 前 sanitize（`src/gateway/voice/sanitize.rs`）
+
+`sanitize_for_tts(text)` 在 `outbound::generate_tts` 入口先把 reply 清理一遍：
+
+- 剥离 `<think>…</think>` / `<thinking>…</thinking>` 块（含 unclosed 兜底，避免半截 chain-of-thought 被读出来）
+- 去掉代码围栏（含 fence 标记行本身 + 围栏内全部内容）
+- 表格行折叠成口语逗号列表
+- bare URL 替换成 `(link)` 占位符
+- markdown 强调标记（`*` / `_` / `~` / `` ` ``）直接剥除
+- 行首 `#` / `>` / `-` / `*` 标记剥除
+- 4000 字符（`MAX_TTS_CHARS`）按句末标点（`. ! ? 。 ！ ？`）边界截断（无句末标点回退到空白边界，再不行就硬切）
+
+`VoiceModeLayer` 已在 prompt 里**要求**模型避免 markdown / 表格 / raw URL，但 R7 / P7 禁止信任合规 —— `sanitize_for_tts` 是保底。
+
+---
+
+## Voice-as-Context（§2.4）
+
+ASR 转写信号**直接接到上下文聚合**，不只落到聊天流：
+
+- **`committed` 段** → 立刻作为 transient recall 上下文提交给模型（`per-turn transient recall`，**不**持久化到用户消息）
+- **`interim` 段** → **不**提交（避免污染上下文）
+- **`utterance_end` 后** → 整段作为用户消息边界，触发正常的 LLM 推理轮
+
+这避免一个老问题：实时字幕漂在屏幕上方但模型听不见。`TranscriptDelta.error` 也通过同一通道上报（Panel 端 strike 计数到 2 后 latch `streaming_off`，整会话走 batch 路径）。
+
+---
+
+## RPC 接口（`voice.*`）
+
+`src/gateway/handlers/voice.rs`（≈620 行）暴露：
+
+| 方法 | 用途 |
+|------|------|
+| `voice.transcribe` | 批式转写（base64 audio → text；25 MB 上限；`voice.transcribe.delta` 不参与） |
+| `voice.stream.start` | 打开一个流式会话（返回 `stream_id` + delta topic；`null` = 走 batch 路径） |
+| `voice.stream.audio` | 推 s16le PCM 帧（**64 KB cap + `try_send` 防阻塞**） |
+| `voice.stream.stop` | 关闭会话 |
+| `voice.format` | fast-model 语音正则化（display-only，错误回退原文） |
+| `voice.synthesize` | 一次性合成（与 `outbound.rs` 同源） |
+| `voice.record_start` / `voice.record_stop` | macOS 原生录音（其他平台走 `NotImplemented` → Panel 走 browser fallback） |
+
+`streaming_off` 状态用 `stream_id: null` latch —— 客户端断流后 server 不会"假装还在听"。
+
+### 速率限制（`src/gateway/rate_limiter.rs`）
+
+```rust
+"voice.stream.audio" => RateLimitScope::RpcRealtime,
+```
+
+`RpcRealtime` 是 realtime 音视频帧专用桶（独立于 `RpcHeavy`）—— Panel 全速推 5 帧/s 都共享一个桶，不会与 `chat.send` 抢容量。
+
+---
+
+## 本地 sidecar（`crates/aleph-voice`）
+
+26.7.x 起 Aleph **没有**自带的语音模型本地服务（违反 R3 轻依赖 —— 一个 `sherpa-onnx` 就几 MB，加 WhisperLiveKit 部署更重）。用户用 BYO 模式跑 mlx-audio 等 OpenAI 兼容服务，`[voice.local]` 配置：
+
+```toml
+[voice.local]
+enabled = true
+endpoint = "http://127.0.0.1:8000/v1"   # mlx-audio 默认端口
+api_key = ""                              # 大多数 BYO 服务无认证
+stt_model = "whisper-large-v3"
+tts_model = "qwen3-tts"
+tts_voice = "vivian"
+tts_format = "wav"                       # 或 "opus"（Telegram-native）
+```
+
+启动时 `normalize_voice_local` 在 `generation.speech_providers` / `transcription_providers` 注入一条名为 `"local"` 的合成 entry（`provider_type = "local"`，`base_url` = endpoint，`api_key` = 上面配置），并把 `default_*_provider` 设为 `"local"`（除非显式 cloud）。Disable 时反操作：从两张 provider 表里移除 `"local"`，把默认指回 nil。
+
+> **`local` provider_type 是 normalize_voice_local 独占的语义**：用户编辑的 `"local"` entry 在 enable 时不会被覆盖（`or_insert_with`），但在 disable 时会被清除（"local" 离开该 entry 就没有意义了）。
+
+---
+
+## 嵌入式终端 + PTY（`src/gateway/pty/`）
+
+> 注：PTY **不**专属于语音栈；它是 `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list` 一组 gateway 级 RPC，语音栈仅借用 `portable_pty` 设施。**与 voice 并列**，不嵌套。
+
+```rust
+pub struct PtySession {
+    master: Mutex<Box<dyn MasterPty + Send>>,  // portable-pty handle
+    writer: Mutex<Box<dyn Write + Send>>,       // stdin
+    killer:  Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    closed:  AtomicBool,
+}
+```
+
+`PtyManager` 是 process-global 单例（`OnceLock<PtyManager>`），最多 64 个并发会话，FIFO 淘汰最老 + 10 min TTL 兜底；`pty.output` 帧 base64 推上 `events.subscribe("pty.output")`，`pty.exit` 推 `pty.exit`。**与 voice 无关** —— 这是终端嵌入（Hermes 时代就有的 `pty_bridge.py` 移植），语音栈只借用 `portable-pty` 这个 crate（`src/gateway/pty/` 与 `src/gateway/voice/` 平级）。
+
+---
+
+## Panel 视图（`interfaces/webchat/src/platform/wide/views/voice/`）
+
+10 个子模块：`audio.rs`（16 kHz box-average resampling）、`caption_state.rs`、`level.rs`、`machine.rs`、`mod.rs`、`orb.rs`、`sentence.rs`、`vad.rs`、`wav.rs`、`voice_playback.rs`。
+
+- **两阶段字幕 reducer**（committed / interim / locked / formatted 四态）
+- **C-wave-wipe 锁转换**：committed → locked 时清屏动画
+- **`voice.format` 在 utterance-end 静默切换**：committed 段 → 快模型抛光 → 静默替换显示文本（无视觉跳变）
+- **Capture tap 提前 arm + `Capture::pending` 缓冲**：用户按下录音键之前的 200 ms 不会丢
+- **Echo-aware barge-in**：TTS 播放期间切到 `barge_step()` 路径（不走 listening VAD），检测到 TTS 自身回声时打断 TTS
+- **`chat.abort` lifecycle RPC**：打断或追加 utterance 时调，server-side 取消 superseded run（避免被抛弃的 run 继续烧 token）
+
+---
+
+## API 客户端
+
+```ts
+// interfaces/webchat/src/api/typed/voice.ts
+const stream = await voice.stream.start({ language: "en", sample_rate: 16000 });
+voice.stream.audio({ stream_id: stream.stream_id, frame: pcm_s16le });
+voice.stream.on("delta", (d: TranscriptDelta) => { /* render */ });
+await voice.stream.stop({ stream_id: stream.stream_id });
+```
+
+类型 `TranscriptDelta` 由 `aleph_protocol::voice_text` 提供（共享给 Panel 端 caption reducer 与 voice.format 抛光 pass，两边不会对 `committed` / `interim` 字段的语义起分歧）。
+
+---
+
+## 关键源文件
+
+- `src/gateway/voice/mod.rs` — 模块入口，re-export `VoiceState`
+- `src/gateway/voice/state.rs` — `VoiceState`（per-channel，含 `consecutive_failures` 3-strike 自动 disable）
+- `src/gateway/voice/voice_mode.rs` — session → voice_mode 指针注册表（process-global）
+- `src/gateway/voice/inbound/{mod,provider,stt}.rs` — STT 解析（`SttSource::Local { fallback }` / `Static`）+ Whisper-dialect HTTP 核心 + local→cloud 退化
+- `src/gateway/voice/outbound.rs` — TTS 出站 + `tts_candidates` + `synth_with_retry` + provider fallback
+- `src/gateway/voice/format.rs` — fast-model 语音正则化（`format_text`，P7 优雅降级）
+- `src/gateway/voice/sanitize.rs` — TTS 前的 markdown / think-block / 表格 / URL 防御剥离 + 4000 字符截断
+- `src/gateway/voice/local_provider.rs` — `LocalTranscription` + `LocalVoiceProvider`（BYO endpoint，OpenAI 兼容）
+- `src/gateway/voice/hallucination.rs` — re-export `aleph_protocol::voice_text::filter_transcript`
+- `src/gateway/voice/streaming/{mod,relay,deepgram,whisperlive}.rs` — 流式契约 + WS relay + 双方言适配
+- `src/gateway/voice/streaming/relay.rs` — `StreamRegistry`（64 容量 / 10 min TTL / FIFO）+ `start_stream` + 终局 `{closed:true}` 事件
+- `src/gateway/pty/{mod,session,manager}.rs` — 嵌入式终端（与 voice 平级，**非** voice 内部）
+- `src/gateway/handlers/voice.rs` — voice 全部 RPC（~620 行）
+- `src/config/types/voice_local.rs` — `[voice]` / `[voice.streaming]` / `[voice.format]` 配置 + `normalize_voice_local`（填 default / disable 时清理）
+- `crates/aleph-voice` — 本地语音 sidecar（sherpa-onnx 后端 + Ogg/Opus 封装 + manifest 模型声明，**但** Aleph **不**默认 ship 它）
+- `interfaces/webchat/src/platform/wide/views/voice/{audio,caption_state,level,machine,mod,orb,sentence,vad,wav,voice_playback}.rs` — 10 个 Panel 子模块
+- `interfaces/webchat/src/api/typed/voice.ts` — Panel 端类型化 RPC 客户端
+
+---
+
+## 相关页面
+
+- [配置 `voice.*`](/docs/zh/getting-started/configuration) — 完整字段
+- [架构 `src/gateway/voice/`](/docs/zh/architecture/overview#核心模块) — 模块清单
+- [更新日志 26.7.22+ §D](/docs/zh/changelog#d-语音对话-round-2--round-2b) — 提交级摘要
+- [嵌入式终端 `src/gateway/pty/`](/docs/zh/concepts/supervisor-verification) — 与 voice 平级的 PTY 设施

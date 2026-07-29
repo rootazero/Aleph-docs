@@ -1,172 +1,124 @@
 ---
-title: "World Model"
-description: "World model for proactive agent behavior, context inference, and action planning."
+title: "loop_graph Governance Topology"
+description: "The loop_graph governance topology layered over the core, and its relationship with the graph_topology prompt layer."
 ---
 
-The `worldmodel` module provides a world model for the daemon's proactive behavior, enabling the agent to infer context, predict needs, and plan actions autonomously.
+> **This page replaces the older "World Model" section.** The source tree does **not** contain `src/daemon/worldmodel/`, nor types named `WorldModel` / `CoreState` / `EnhancedContext` / `PendingAction` / `ActivityType`. Those concepts were retired by the 26.7.x governance-topology refactor and replaced by the `loop_graph` layer and `graph_topology` prompt layer described below.
 
 ## Overview
 
-The World Model enables:
-- **Context inference** — Infer user intent and context from observations
-- **State tracking** — Maintain a model of the current system and user state
-- **Action prediction** — Predict what actions might be needed
-- **Proactive planning** — Generate plans for anticipated needs
+`loop_graph` is the **governance topology layer** layered over the Aleph core. It provides a closed set of topology edges that answer the four single-loop failure modes topologically (Goodhart, reference blindness, ring conflict, measurement decay):
 
-## Architecture
+- **anchor** — irrefutable measurements
+- **frozen** — rules enforced elsewhere
+- **root** — human-supplied definitions of "better" (`origin=human` enforced by the store)
+- **watches** — pairing / supervision edges
+- **owns_reference** — reference ownership
+- **arbitrates** — conflict adjudication
+- **audits** — closed-set audit action log
 
-```
-WorldModel
-  ├── CoreState — Current system state
-  ├── EnhancedContext — Enriched context with inferences
-  ├── InferenceCache — Cached inference results
-  └── PendingAction — Queued proactive actions
-```
+Source: `src/loop_graph/` (`mod.rs` / `service.rs` / `store.rs` / `templates.rs` / `types.rs`). The store is installed once at boot via `init_global(Arc<LoopGraphStore>)` (`OnceCell`); an uninitialized process reads as "no graph subsystem" (fail-soft).
 
-## Core Components
+Boundary (R7/R9/R10): this module is scaffolding only -- topology storage, structural lint, fact rendering. Every **semantic verdict** ("is this win cheap?" / "is this reference wrong?" / "which side of a conflict yields?") is an ordinary LLM turn steered by `templates.rs` and the `loop-governance` skill. It lives OUTSIDE `src/harness/` and adds zero per-turn cost when the graph is empty. Dreaming and every other optimizer have no write path here -- the topology is the held-out layer that watches them.
 
-### WorldModel
+## graph_topology Prompt Layer
 
-Central world model facade:
+`graph_topology` is **not** a standalone module -- it is a `PromptLayer` in `src/thinker/layers/graph_topology.rs`:
 
 ```rust
-// src/daemon/worldmodel/mod.rs
-pub struct WorldModel {
-    state: CoreState,
-    inference_cache: InferenceCache,
-    config: WorldModelConfig,
-}
+pub struct GraphTopologyLayer;
 
-impl WorldModel {
-    pub fn update_state(
-        &mut self,
-        event: SystemEvent,
-    );
-    
-    pub fn infer_context(
-        &self,
-        raw_context: &Context,
-    ) -> EnhancedContext;
-    
-    pub fn predict_actions(
-        &self,
-    ) -> Vec<PendingAction>;
-    
-    pub fn get_state(&self,
-    ) -> &CoreState;
+impl PromptLayer for GraphTopologyLayer {
+    fn name(&self) -> &'static str { "graph_topology" }
+    fn priority(&self) -> u32 { 1754 }                  // sits before standing_goal
+    fn paths(&self) -> &'static [AssemblyPath] {
+        &[AssemblyPath::Basic, AssemblyPath::Cached]
+    }
+    fn stability(&self) -> LayerStability { LayerStability::Dynamic }
+    fn supports_mode(&self, mode: PromptMode) -> bool { mode != PromptMode::Minimal }
+
+    fn inject(&self, output: &mut String, input: &LayerInput) {
+        let Some(ctx) = input.context else { return };
+        let Some(topology) = ctx.graph_topology.as_deref() else { return };
+        if topology.is_empty() { return };
+        output.push_str("<loop_graph_context>\n");
+        output.push_str(&crate::thinker::xml_util::escape_xml(topology));
+        output.push_str("</loop_graph_context>\n\n");
+    }
 }
 ```
 
-### CoreState
+A governed session is TOLD its place in the governance topology every turn -- who watches it, who owns its reference (and the proposal-note path for changing it), which anchors ground it, and the human root reference verbatim. The model never has to "remember" the graph.
 
-Represents the current system state:
+Cache discipline: the rendered content comes from graph rows **only** -- no clocks, no counters -- so an unchanged graph leaves the prompt byte-identical. Ungoverned sessions (`None`) emit nothing: zero cost for everyone outside the graph.
 
-```rust
-// src/daemon/worldmodel/mod.rs
-pub struct CoreState {
-    pub system_load: SystemLoad,
-    pub active_sessions: Vec<SessionId>,
-    pub recent_events: Vec<SystemEvent>,
-    pub user_presence: PresenceStatus,
-}
-```
-
-### EnhancedContext
-
-Context enriched with inferences:
-
-```rust
-pub struct EnhancedContext {
-    pub raw: Context,
-    pub inferred_intent: Option<Intent>,
-    pub predicted_needs: Vec<Need>,
-    pub confidence: f32,
-}
-```
-
-### PendingAction
-
-Actions queued for execution:
-
-```rust
-pub struct PendingAction {
-    pub id: ActionId,
-    pub action_type: ActionType,
-    pub priority: Priority,
-    pub scheduled_at: DateTime<Utc>,
-    pub confidence: f32,
-}
-```
-
-## Activity Types
-
-The world model tracks different activity types:
-
-```rust
-pub enum ActivityType {
-    UserMessage,
-    SystemEvent,
-    ScheduledTask,
-    ExternalTrigger,
-}
-```
-
-## Integration with Dispatcher
-
-The World Model feeds the proactive Dispatcher:
+## Relationship with the 1-2-3-4 Model
 
 ```
-Observation → WorldModel.update_state() → infer_context()
-                                              │
-                                              ▼
-                                       predict_actions()
-                                              │
-                                              ▼
-                                       Dispatcher.dispatch()
+┌─────────────────────────────────────────────────────────────────┐
+│   1. Core (alephcore)                                            │
+│      ├── harness/        Think→Act loop                          │
+│      ├── thinker/        Prompt assembly (includes              │
+│      │                   GraphTopologyLayer)                     │
+│      └── ...                                                       │
+│                                                                   │
+│   ▲ loop_graph layered on top of 1 (does NOT change 1-2-3-4)    │
+│   │   - topology storage + lint + fact rendering                 │
+│   │   - semantic verdicts delegated to an LLM turn               │
+│   ▼                                                               │
+│   loop_graph/  (src/loop_graph/)                                  │
+│      ├── store.rs       LoopGraphStore (SQLite)                   │
+│      ├── service.rs     GraphService                              │
+│      ├── templates.rs   Template prompts                          │
+│      └── types.rs       NodeKind / EdgeKind / Origin             │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+The graph does **not** participate in completion judgment -- it only describes relationships; it never tells the harness when to stop. `AgentHarness` still decides to stop on `TurnState::Done` / `max_iterations` / `ToolLoopVerifier` / the consecutive-failure cap.
+
+## Multi-Agent × Graph Fusion
+
+- **Team nodes** (`NodeKind::Team`) -- fuse the multi-agent system into the graph
+- **Audit ring** -- closed-set audit action log
+- **Objective ACLs** -- authorized by graph node identity (with `origin=human` not bypassable)
+- **Victory-claim watchers** -- triggered on team / loop completion
+- **Built-in `loop-auditor` agent** -- audit / supervision default to independent-context evidence
 
 ## Configuration
 
-```toml
-[daemon.worldmodel]
-enabled = true
-inference_timeout = 5000  # ms
-max_pending_actions = 20
-confidence_threshold = 0.7
-```
+The graph is a **process-global** singleton (`OnceCell<Arc<LoopGraphStore>>`) and is not configured via TOML. Its lifecycle follows the store database:
+
+- **Boot**: `LoopGraphStore::open(&dir)` is installed via `init_global(...)`.
+- **Runtime**: any process code reads via `loop_graph::global()`.
+- **Tests**: `loop_graph::set_global_for_test(store)`.
 
 ## Code Location
 
-- `src/daemon/worldmodel/mod.rs` — WorldModel facade and types
-- `src/daemon/mod.rs` — Daemon module entry
+- `src/loop_graph/mod.rs` -- `LoopGraphStore` + `NodeKind` / `EdgeKind` / `Origin` re-exports + `init_global` / `global`.
+- `src/loop_graph/store.rs` -- SQLite persistence (nodes / edges / `origin=human` enforcement).
+- `src/loop_graph/service.rs` -- `GraphService` (writes / lint).
+- `src/loop_graph/templates.rs` -- template prompts (for the LLM turn).
+- `src/thinker/layers/graph_topology.rs` -- `GraphTopologyLayer` injecting the topology into the system prompt.
 
 ## See Also
 
-- [Dispatcher](./dispatcher) — Proactive action dispatching
-- [Daemon](../concepts/daemon) — Background service management
+- [Architecture Overview](./overview) -- the 1-2-3-4 model and where loop_graph fits
+- [Prompt Builder](/docs/en/concepts/prompt-builder) -- prompt layer registry
+- [Loop / Goal / Strategy](/docs/en/concepts/looping-goal-strategy) -- three independent subsystems
 
 ---
 
 ## 26.7.x Addendum
 
-### Sibling of the Loop-Graph Governance Layer
+### `loop_graph` Is a Layer, Not a Replacement
 
-26.7.21+: `worldmodel` sits next to `loop_graph` — the former tracks environmental state (for proactive behavior), the latter tracks graph nodes / governance events. Neither participates in completion judgment.
+26.7.21+: `loop_graph` does not change the 1-2-3-4 model -- it layers on top of the core, adding governance topology (team nodes / audit ring / objective ACL / victory-claim watchers) to the multi-agent system. The harness does not know the graph exists.
 
-### System State Bus
+### graph_topology -- The Only Form Into the Prompt
 
-`SystemStateBus` integration:
-
-- PII filtering
-- Robustness and privacy layer
-- Action dispatcher
-- Platform abstraction layer (PAL) with macOS-specific sensors
-
-### Heartbeat Proactive Wake
-
-Proactive tasks driven by world state + `Guardian Judge` decisions.
+26.7.21+: the graph is never "queried" by the harness (that would break cache discipline); instead, `GraphTopologyLayer` renders the current topology into a `<loop_graph_context>` segment every turn, and the model reads it.
 
 ### See Also
 
-- [Proactive Dispatcher](/docs/en/architecture/proactive-dispatcher)
-- [Daemon](/docs/en/concepts/daemon)
+- [Architecture 1-2-3-4 Model](/docs/en/architecture/1-2-3-4-model) -- stable skeleton
+- [Architectural Redlines R1-R10](/docs/en/philosophy/redlines) -- hard constraints

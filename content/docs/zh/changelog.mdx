@@ -239,7 +239,121 @@ Harness 可靠性与抛光发布。头条是**上下文"永不破"保证**——
 
 ---
 
-## 历史里程碑
+## 26.7.22+ 滚动更新（截至 VERSION 26.7.21 之后）
+
+> **未发布到 release tag。** 26.7.21 release 之后的提交密集滚动至下一个 release tag —— 当前 `VERSION` 仍为 `26.7.21`，但 `main` 分支已累积 ~12,500 次提交。本节是从 26.7.21 起点的滚动摘要，覆盖 7 条主要工作线。
+
+### A. Aleph Hub 单一源（`aleph-hub`，替代旧 `src/store/`）
+
+**新增 `src/hub/` 模块**（14 个文件）：`cache.rs`、`catalog_client.rs`、`hub_catalog.rs`、`install.rs`、`official_mcp.rs`、`official_plugins.rs`、`official_skills.rs`、`primer.rs`、`reconcile.rs`、`secrets.rs`、`trust.rs`、`types.rs`、`verify.rs`、`mod.rs`。
+
+- **`hub::primer` 冷启动投影**：启动时把官方 MCP 预设、官方插件与官方技能统一投影进同一份 `ExtensionEntry` 缓存（`~/.aleph/hub_catalog.db`）
+- **`hub::catalog_client` 直接 HTTP 客户端**：拉取 `https://hub.heyaleph.com/catalog.json`，做 schema-version 校验、注入扫描、条目归一化与缓存同步
+- **官方 MCP 预设随 `aleph-hub` 自动可见**，无需手动 `mcp.add`
+- **退役**：`mcp.list_presets` / `mcp.install_preset`；Settings → MCP 「推荐」段；旧 `src/store/` 模块
+
+**Hub 内置工具**注册在主工具注册表中，不属于独立的 Hub Agent：
+
+| 工具 | 用途 |
+|------|---------|
+| `hub_catalog_sync` | 同步 Aleph Hub 目录到本地缓存 |
+| `hub_fetch_docs` | 在 SSRF、注入扫描与字节上限约束下获取文档 |
+| `hub_resolve_spec` | 读取并校验缓存的 `InstallSpec` |
+| `hub_install_run` | 执行信任与用户同意关卡后安装 |
+| `hub_install_verify` | 安装后验证 |
+
+### B. Artifacts / Deliverables 系统
+
+**新增 `src/artifacts/` + `src/export/` 模块**（artifact store + session HTML 导出 + markdown 导出 + page + collect + CSS）。
+
+- **`artifact_publish` 工具**：让模型把完成的工作产物发布为 `Deliverable`
+- **`artifacts.*` RPC**（`handlers/artifacts.rs`，~650 行）：`read_text` / `export_html` / `list`，512 KB cap + UTF-8 边界
+- **`session.export_html` + `artifacts.read_text`**：纯读路由走 Lane 修复（不应进 Mutate lane）
+- **Telegram / CLI / TUI** 上 `artifact_publish` 必须按 `turn.channel_id` 分支 carry 实质，否则降级为 banner + 自动打开 pane
+- **Panel "Deliverables" 面板**（`interfaces/webchat/src/components/artifacts/`）：替代原 inspector；4 个 round review 后达到 text preview + artifact-driven badge + 可见 fallbacks
+- **Gateway capability byte route**（`src/gateway/server/artifact_route.rs`）暴露 artifacts 给远端
+
+### C. Vault 面板重构（panel/memory 深度）
+
+13 次 `panel/memory:` 提交 + `platform/wide/views/memory/` 11 个子模块 + `platform/phone/memory/` 7 个子模块。
+
+- **卡片视图**（`cards.rs`，三态 shell：`Loading` / `Empty` / `Content`）
+- **批量操作栏**（`batch_bar.rs`）：跨多卡批量归档 / 导出 / 加标签
+- **双轨搜索**：`raw` 行 vs `notes` 行；`hits invalidate`；facets chip
+- **深链 / 锚点**：`locate_note` 页码在 page-size selector 后正确
+- **证据链 / `notes_citing`**：把反链渲染到 drawer
+- **来源**（`provenance.rs`）：writer / timestamp / source event 三元组
+- **跨代理选择**（`selection.rs`）：原子一致性，避免并发选择丢更新
+- **Pager**（`pager.rs`，带 page-size selector）
+- **Loadable**（`data.rs` + `loader.rs`）：所有 4 个 fetch 路由走它，failed fetch 不可表示为空
+- **Toast**（`toast.rs`）：per-push seq identity（模块私有 slot）
+- **Stats**（`stats.rs`）：scope 到单一 agent；`raw_rows_total = filtered_count`（带回归测试 pin）
+
+**Memory RPC 行为变更**（`memory.listFacts` / `memory.search`）：
+
+- `listFacts` 返回 `total` + 携带 `tags` / `link_count` / `updated_at` 字段
+- `memory.search total = filtered count`（**不是** store total）
+- `memory.search` 返回 raw rows only，**永不**返回 notes
+- `memory.graph`（`graph.query`）在 scoped fetch 失败时报告 `null` 而非 `0`
+
+### D. 语音对话 Round 2 / Round 2b
+
+**新增 `src/gateway/voice/` 子模块**：`format.rs`、`hallucination.rs`、`inbound/{provider,stt}.rs`、`outbound.rs`、`sanitize.rs`、`state.rs`、`streaming/{mod.rs,whisperlive.rs,deepgram.rs,relay.rs}`、`voice_mode.rs`、`local_provider.rs`。
+
+- **`[voice] vocabulary` 配置**：域词偏置，按 ASR 后端差异（whisperlive `hotwords` / `initial_prompt`、OpenAI `/audio/transcriptions prompt`）
+- **`[voice.streaming] pcm_input`**：WhisperLiveKit 必须设 `true` 才能跳过 FFmpeg 解码
+- **`[voice.format]` 配置**：fast-model 语音正则化（显示抛光）
+- **`voice.stream.{start,audio,stop}` RPC** + delta topic，64 KB cap + `try_send` 防阻塞
+- **新增 TTS provider fallback**（`TTS_MAX_PROVIDERS = 2`）；hop 丢弃 `voice_state.voice`
+- **`GenerationProviderRegistry::get_voices_for_provider`**：接到 `speech_generate` 失败路径（**单一 join point**：`src/generation/voice_catalog.rs`）
+- **WhisperLiveKit 硬化**：`--pcm-input` 前置条件；`vocabulary biasing`；stream 完成/段切分正常化
+- **Panel capture tap 提前 arm** + `Capture::pending` 缓冲；`streaming_off` 用 `stream_id: null` latch
+- **`shared/protocol/src/voice_text.rs`**：幻觉过滤 + 语句组装单一源
+- **Voice-as-Context**：ASR 转写信号接到上下文聚合（§2.4）
+- **Interfaces `platform/wide/views/voice/`**（10 个子模块）：16 kHz box-average resampling、caption_state、level、orb、sentence、vad、wav、voice_playback
+
+### E. Loop / Goal / Strategy 子系统
+
+**新增 `src/looping/`、`src/goal/`、`src/strategy/` 三个独立子系统**，每个有自己的状态机、暂停/恢复、跨会话 kill switch、tree-budget 单轨约束。
+
+| 子系统 | 模块 | 工具 |
+|--------|------|------|
+| **Loop**（持续循环） | `src/looping/`（`types.rs` / `pursuit.rs` / `mod.rs`） | `loop`（start/stop/status/update，9 动作 + token_budget） |
+| **Goal**（自主目标追求） | `src/goal/`（`pursuit.rs` / `store.rs` / `types.rs`） | `goal`（含 cross-session list action） |
+| **Strategy**（团队/裸循环策略） | `src/strategy/`（`planner.rs` / `render.rs` / `store.rs` / `types.rs`） | `strategy`（revise/show，dumb-write） |
+
+- **LoopState** 状态机（`Active` / `Paused` / `Stopped`）+ 跨会话 kill switch
+- **GoalStore + TreeBudget 单轨约束**：end-to-end 测试守
+- **StrategyStraTA 模式**：`goal_key` / `loop_key` / `session_key` / `team_key` 四个 composite key 命名空间；`objective + approach + phases + guardrails + success_criteria + goal_id`
+- **`[strategy] plan_team`** + **`plan_naked_loop`** config 开关（默认 on）
+- **团队 run mode pin**（队长把 `usage_mode` 盖戳并向子成员继承；`session_set_mode` 在 team run 中被拒）
+- **`task_review` grounding 验收元数据**（`GroundingVerdict`）
+- **`team_chat` strategy 与成员 `/loop` / `/goal` 优先级**：loop > session
+- **团队聊天中 `planner` fire-once `atomic put_if_absent`**
+- **`/loop` 与 `/goal` 暂停 / 恢复通道**
+
+### F. Memory Graph 扩展（§2.16 → §2.17）
+
+- **手写 Louvain 社区检测**（无外部 crate，R3 合规）
+- **4-signal community-aware recall**：节点相关性 + Leiden 精炼
+- **`notes_sources` / `notes_provenance` / `notes_graph_cache` / `notes_graph_insights` 表**
+- **graph-health insights**：`isolated` / `sparse` / `bridge` / `surprising`
+- **`notes_links` 生命周期**：resolved_by / status / label / edge confidence
+- **`[[wikilink]]` supersession 闭环 + tombstone 删除**
+- **`GraphRecomputeStage`**：spawn_blocking 触发，零 LLM
+
+### G. 其它（节选）
+
+- **iOS Panel Phase 1 / Phase 2 fixes**：默认 pairing 切到 HTTPS + ATS；Keychain trust store；phone/tablet 平台视图 7 个子模块
+- **Settings UI `UnifiedSaveBar`** 统一保存条（`ProviderEditPanel` 迁移到此条）
+- **Search Registry + Phase 3 / Phase 4 Settings UI**（PII migration + provider presets Swift UI）
+- **Behavior `[behavior]`** 段：cut / copy / halo 三输入模式 + CGEventTap hotkey + clipboard context（10 秒）
+- **Multimodal providers**：Gemini / Ollama / custom endpoints 多模；clipboard 图片提取
+- **Routing 规则重构**：`command + keyword` 两阶段匹配；`context-aware` 路由；`strip_prefix`；`routing_rules.move` / `intent_type` / `preferred_model`
+- **Tool registry 增强**：`glob` 模式权限覆写；`tool_search` 折叠到请求核心集；`plugin.marketplace.*` 收纳到 `extensions.*`
+- **跨模块 review**：gateway、providers、extensions、tasks、teams、sessions、skills、resilience、metrics、pii、orchestrator、memory、pii 等多模块对抗性审查修复
+
+---
 
 26.6 之前的所有重大变更请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
 

@@ -46,8 +46,8 @@ The Act stage executes the plan through the tool system:
 - **Resource-scope concurrency claims**: tools declare fs/network/process conflict scopes; Act partitions a batch into groups that are internally resource-disjoint, dispatches intra-group concurrently and inter-group serially
 - **Deduplication and memo**: a duplicate `(name, args)` within or across batches reuses the first result
 - **Response generation**: emit text, code, or structured output for the user
-- **State modification**: update memory, session state, the signed operation ledger
-- **Subtask orchestration**: spawn child agents via FlowRunTool / Teams
+- **State modification**: update memory, session state, the command signing ledger (`src/builtin_tools/command_ledger.rs`)
+- **Subtask orchestration**: spawn child agents via `FlowRunTool` / Teams
 
 All actions go through the security guard system. Potentially-dangerous operations require explicit approval (Ask / Auto / Full three-tier exec permissions + the `[sandbox.command_policy]` hard floor).
 
@@ -90,8 +90,8 @@ Aleph has three user-adjustable dimensions that form the core axes for classifyi
 
 | Axis | Range | Default | What it controls |
 |------|-------|---------|------------------|
-| `exec_tier` (execution tier) | ask / auto / full | ask | permissions |
-| `thinking` (thinking level) | off → xhigh | medium | inference budget |
+| `exec_tier` (execution tier) | ask / auto / full | auto | permissions |
+| `thinking` (thinking level) | off / minimal / low / medium / high / xhigh | minimal | inference budget |
 | `session_mode` (session mode) | chat / work / code | work | tool presentation |
 
 The three are **orthogonal**. `session_mode` only statically partitions the tool **presentation** surface (progressive-disclosure core set + deferred-tool tier); it **never** affects permissions — those are still controlled by `exec_tier` and the approval gate. Switchable at runtime via the `session_set_mode` tool.
@@ -108,13 +108,7 @@ The Harness does not classify intent, does not judge completion, does not modera
 
 ## Self-Learning
 
-The thinking model is not static. Every successful task completion feeds back into the system through the experience-crystallization pipeline (self-evolution discipline ported from SkillOpt):
-
-1. **Record**: the full execution trace is stored as an experience entry
-2. **Detect**: when enough similar experiences accumulate, the system detects a repeated pattern and creates a candidate skill
-3. **Promote**: when the candidate skill has been successfully reused enough times with high reliability, it's promoted to a permanent skill
-
-Permanent skills become part of the System 1 pattern library, allowing the model to handle formerly-complex tasks at faster thinking levels. This is how agents become faster and more capable over time.
+The thinking model is not static. The system's self-evolution is carried by the SkillOpt-discipline dreaming pipeline at `src/memory/dreaming/`: every successful execution is logged and gated by four SkillOpt primitives — `evolution gate` / `edit budget` / `recall-evidence gate` / `health score` — before any promotion (see [DREAM_DAEMON.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/memory/DREAM_DAEMON.md) for the full pipeline). Promoted skills become part of the System 1 pattern library, allowing the model to handle formerly-complex tasks at faster thinking levels. This is how agents become faster and more capable over time.
 
 ## Putting It All Together
 
@@ -131,6 +125,6 @@ The result is an agent that doesn't just respond to prompts — it **pursues goa
 
 - [Design Philosophy](./overview) — the principles behind Aleph
 - [Five Layers of Emergence](./five-layers) — how the thinking model fits the L1–L5 stack
-- [Domain Modeling](./domain-modeling) — DDD patterns for POE contexts
+- [Domain Modeling](./domain-modeling) — the DDD foundation of Aleph's codebase
 - [Architectural Redlines](./redlines) — the ten non-negotiable hard constraints
 - [Architecture](/docs/en/architecture) — the technical implementation of the agent loop

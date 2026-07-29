@@ -1,142 +1,239 @@
 ---
 title: "代理组件"
-description: "代理循环的核心事件处理程序组件：意图分析、任务规划、工具执行、循环控制、会话记录和压缩。"
+description: "Think→Act 循环的模块地图——12 个 Harness 模块各自的家，以及为什么没有大一统的 `components` 目录。"
 ---
 
-`components` 模块提供 Aleph 代理循环的 6 个核心组件。每个组件都是一个独立的事件处理程序，订阅特定事件类型并将结果发布到事件总线。
+Aleph 的 Think→Act 循环**不是**「一个事件总线挂着 6 个 typed handler」。
+这个心智模型在 codebase 里不存在——没有 `src/components/` 目录。每个子系统
+各自持有自己的 crate 模块；它们通过 `AgentHarness` 边界协同，不通过共享的
+事件总线。这种拆分是有意为之，源自 2026-04 到 2026-07 的 harness-dissolution
+工作，并在设计哲学里固化为 R3 / R10 / R11。
 
-## 设计理念
+| # | 模块                  | Aleph 中的家                                  | 备注 |
+|---|-------------------------|---------------------------------------------|-------|
+| 1 | Orchestration Loop      | `src/harness/`                              | **薄核心**——12 文件 / 棘轮行数预算 |
+| 2 | Tools                   | `src/tools/` + `src/builtin_tools/`         | 吸收了原 harness 的 exec_context |
+| 3 | Memory                  | `src/memory/`                               | 不动（最干净的一块） |
+| 4 | Context Management      | `src/context/{budget,compact}/`             | 5 处合并到 1 处 |
+| 5 | Prompt Assembly         | `src/thinker/`                              | 历史名保留，不强行改名 |
+| 6 | Tool Calling            | `src/tools/calling/` + `src/providers/bridge.rs` | |
+| 7 | State & Checkpointing   | `src/session/`                              | `SessionEventStore` + `replay()` 已经是事件溯源框架 |
+| 8 | Error Handling          | `HarnessError` + 各域 typed error            | 跨模块，无单一容身处 |
+| 9 | Guardrails              | `src/{security,sandbox,approval,pii}/`      | 4 域分立，不强搞 facade |
+| 10 | Verification & Feedback | `src/verification/`                         | 新建，吸收 stop_hooks |
+| 11 | Subagent Orchestration  | `src/{agents,teams,orchestrator,group_chat}/` | 4 域职责正交，不合并 |
+| 12 | Initialization & Env    | `src/init_unified/` + `src/bin/aleph-server/commands/start/` | 见 `docs/reference/BOOT_ASSEMBLY.md` |
 
-1. **事件驱动组合** — 每个组件都是一个具有类型化订阅的 `EventHandler`
-2. **干净分离** — 组件仅通过事件通信，无直接耦合
-3. **可恢复状态** — 会话记录将状态持久化到 SQLite 以进行崩溃恢复
-4. **Token 感知** — 会话压缩管理上下文窗口限制
+## 薄核心 —— `src/harness/`
 
-## 组件概览
+编排循环目录被限制为 **12 个文件**和棘轮测试的行数天花板
+（`src/harness/CLAUDE.md`、`src/harness/tests/budget.rs`）。新增文件必须通过
+三问门控才能落地。
 
+| 文件                          | 职责 |
+|-------------------------------|------|
+| `mod.rs`                      | 重新导出 `AgentHarness` |
+| `agent.rs`                    | `AgentHarness` 结构体 + 顶层 `run()` + stalled-turn grace slot |
+| `deps.rs`                     | `HarnessDeps` DI 容器 + `StallConfig` / `StallTracker` |
+| `trait_def.rs`                | `HarnessError`、`TurnState`、`TurnStep` |
+| `callback.rs`                 | `HarnessCallback` + `NoopHarnessCallback` |
+| `chain_context.rs`            | 子代理调用链位置接力 |
+| `trace.rs`                    | 循环 `LoopTraceEvent` 收集 |
+| `trace_sink.rs`               | `TraceSink` 输出抽象 |
+| `agent/think.rs`              | Think：LLM 调用 + 守护 + 验证器通过 |
+| `agent/act.rs`                | Act：工具执行 + 资源域并行调度 |
+| `agent/guardrails.rs`         | 输入/输出/工具调用护栏挂载点 |
+| `agent/prompt.rs`             | 逐回合消息组装 |
+
+harness **不**持有：意图分类、工具相关度打分、完成度判断、内容审查、错误
+恢复策略、provider failover（后两者包在 `providers::FailoverProvider` 里面，
+对 loop 而言只剩一个 provider）。这些都是 LLM 的责任。
+
+### 循环状态
+
+`src/harness/trait_def.rs` 中的两类型状态机：
+
+```rust
+#[must_use]
+pub enum TurnState { Continue, Done }
+
+#[must_use]
+pub struct TurnStep {
+    pub state: TurnState,
+    pub executed: usize,
+    pub vetoed: bool,
+    pub split_child: Option<SessionId>,
+}
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      代理循环                                │
-├──────────────────────────────────────────────────────────────┤
-│  InputReceived                                               │
-│       │                                                      │
-│       ▼                                                      │
-│  ┌──────────────┐   多步？    ┌──────────────┐              │
-│  │IntentAnalyzer│ ──────────► │ TaskPlanner  │              │
-│  │              │   简单      │              │              │
-│  │  复杂度      │ ──────────► │ 分解为步骤   │              │
-│  │  检测        │             │              │              │
-│  └──────────────┘             └──────────────┘              │
-│                                          │                   │
-│                                          ▼                   │
-│  ┌──────────────┐   成功      ┌──────────────┐              │
-│  │LoopController│ ◄────────── │ ToolExecutor │              │
-│  │              │   失败      │              │              │
-│  │  保护        │ ◄────────── │ 重试逻辑     │              │
-│  │  机制        │             │ 超时         │              │
-│  └──────────────┘             └──────────────┘              │
-│       │                                                      │
-│       ▼                                                      │
-│  ┌──────────────┐   持久化    ┌──────────────┐              │
-│  │SessionRecorder│ ────────── │SessionCompactor│             │
-│  │              │             │              │              │
-│  │  SQLite      │             │  Token 限制  │              │
-│  │  持久化      │             │  管理        │              │
-│  └──────────────┘             └──────────────┘              │
-└──────────────────────────────────────────────────────────────┘
-```
 
-## IntentAnalyzer
+`TurnState` **只有两个**变体，不是五变体。某些草稿里更复杂的
+`Restart | Act | Finalize` 拆分在发现 `restart` 支只有一处调用点之后被收起；
+现在那条路径以 `HarnessError` 早返回表示，不再是单独的状态。
 
-检测输入复杂度以进行路由决策。使用基于规则的关键词匹配（中文和英文多步关键词）来识别请求是否需要多步规划。
+## 提示词组装 —— `src/thinker/`
 
-**订阅：** `InputReceived`
-**发布：** `PlanRequested`（多步）或 `ToolCallRequested`（简单）
+分层系统提示词构建器。详见 [提示词系统](/docs/zh/concepts/prompt-system)——层
+管线、两个入口点（`Basic` / `Cached`）、可缓存/瞬态边界。harness 的
+`agent/prompt.rs` 每回合恰好调用一次
+`PromptBuilder::build_system_prompt_cached_with_mode`。
 
-## TaskPlanner
+## 工具 —— `src/tools/` + `src/builtin_tools/`
 
-将多步请求分解为可执行的任务。识别并行组和依赖链以获得最佳执行顺序。
+`ToolService` 是注册表也是分派入口点。三个子系统：
 
-**关键特性：** 传递性深度计算以进行正确的并行组识别。顺序链 A→B→C 产生深度 0, 1, 2（不是 1, 1, 1）。
+- **Scoping**（`src/tools/scoped/`）——每次请求运行时的 allowlist / deny /
+  健康过滤。机械的 `retain` 操作，不受 LLM 影响。
+- **资源 claim**（`src/tools/resource_claim.rs`）——每个工具自声明 `Shared` /
+  `Exclusive{Global}` / `Exclusive{Paths}` 之一，Act 阶段据此判定哪些可并行。
+  声明间串行，声明内并发。
+- **结果溢出**（`src/tools/{turn_budget, result_store}.rs`）——Layer 3 把超大
+  工具输出溢出到磁盘；按会话作用域的 `ToolResultStore`。
+- **Calling**（`src/tools/calling/`）——schema 约束的工具调用 parse /
+  serialize；harness 的 `act` 通过 provider 适配器消费 `NativeToolCall`。
 
-## ToolExecutor
+并发工具批在 harness 的 `act` 步骤内部完成，不在独立的 dispatcher 里；见
+`HarnessDeps.parallel_tool_concurrency`。
 
-使用重试逻辑和超时处理执行工具。包装工具调用并带有错误恢复和结果格式化。
+## 会话 —— `src/session/`
 
-**重试策略：** 可配置的最大尝试次数，带有指数退避。
+仅追加的事件日志。框架是**事件溯源**，不是快照——
+`SqliteEventStore` 加 `InProcessActorSessionService`，通过
+`get_events(session, Some(seq), None)` 构造 replay。harness 用
+`from: watermark+1` 读，`last_prompt_seq` 记录当前回合 prompt 覆盖到的最后
+一个事件 seq。没有独立的 checkpoint 子系统：Git 风格的 checkpoint trait 草稿
+作为死抽象被（P5 retraction）撤回。
 
-## LoopController
+## 记忆 —— `src/memory/`
 
-使用保护机制控制代理循环：
+三种存储，各自分离：
 
-- **最大迭代次数** — 防止无限循环
-- **超时** — 每次迭代的时间限制
-- **错误预算** — N 次连续失败后停止
-- **让步点** — 允许在步骤之间取消
+- **Facts DB / 向量检索** — `src/memory/` 核心
+- **Curated memory envelope** — 预渲染的 `<CuratedMemory>` 块
+  （`CuratedMemoryLayer` @60，Stable），thread 到每个 `LayerInput` 里，让
+  prompt-cache 保持暖。
+- **Recall message** — 每次查询的语义 recall 以**瞬态尾部 user message**
+  形式传输（`HarnessDeps::recall_context`），从不进 system prompt。放进
+  system prompt 会让每次 run 都 re-key 整个会话前缀 cache；放在 message
+  尾部只让自己开销自己。
 
-## SessionRecorder
+## 上下文管理 —— `src/context/`
 
-将会话状态持久化到 SQLite：
+两个互补子系统：
 
-- 带有时间戳的代理事件
-- 任务执行记录
-- 工具调用历史
-- Token 使用统计
+- **`src/context/budget/`** ——`ContextBudget`、`PreflightPipeline`、
+  `pressure::*`。抛出 `LoopDirective`（`CompactToFit`、`SplitSession` 等），
+  harness 机械执行。
+- **`src/context/compact/`** ——`ContextCompactor`、`directive.rs`（分派器）、
+  `rescue.rs`（反应式救援宿主）、`pipeline.rs`、`plan_carry.rs`。反应式
+  救援用 `context/compact/rescue.rs` 的 `MAX_REACTIVE_COMPACT_ATTEMPTS`
+  限定，harness 里的救援 slot 走一个 52 行的适配器读这个常量——
+  `rg "crate::harness" src/context/` 返回空（缝在 context、state 在 harness）。
 
-**错误处理：** 数据库错误通过 `RecorderError` 传播，而非静默吞咽。
+## 编排器 —— `src/orchestrator/`
 
-## SessionCompactor
+为每次 run 装配 `AgentHarness`：
 
-通过压缩管理上下文窗口限制：
+- `resolver.rs` ——`RoutingOverrides`、`MAX_FLOW_DEPTH`
+- `flow_spec.rs` ——`FlowSpec`、`FlowOverrides`、`SessionStrategy`
+- `flow_registry.rs` ——按 `agent_id` 注册 `FlowSpec`
+- `dispatch.rs` ——`Orchestrator`、`FlowHandle`、`FlowOutcome`、
+  `FlowRequest`、`FlowStreamEvent`、`HarnessRunner`、`TerminateReason`
+- `harness_bridge/` ——`AgentHarnessRunner`（从 flow dispatch 下到 harness
+  构造的桥）
+- `deps_builder/` ——装配 `HarnessDeps` 的 helper
+- `sandbox_factory.rs` ——每 flow 的 sandbox 策略
 
-- **Token 跟踪** — 监控累积的 token 使用
-- **模型限制** — 每个模型的上下文窗口限制，带有最长前缀匹配
-- **剪枝** — 接近限制时移除最旧的轮次
-- **摘要** — 用紧凑的摘要替换剪枝的内容
+orchestrator 是 **DI 装配器**，不是协调器。每个 run 它只做一个决定（honour
+哪个 `AgentDef` + 哪个 `FlowSpec`）；之后控制流进 harness。
 
-## 关键源文件
+## 子代理平面 —— 故意保留分离
 
-- `src/components/mod.rs` — 组件重新导出
-- `src/components/intent_analyzer.rs` — 复杂度检测
-- `src/components/task_planner.rs` — 任务分解
-- `src/components/tool_executor.rs` — 带有重试的工具执行
-- `src/components/loop_controller.rs` — 循环保护
-- `src/components/session_recorder/` — SQLite 持久化
-- `src/components/session_compactor/` — Token 管理
+原本计划搞一个 `SubagentOrchestrator` trait，带 `Fork` / `Handoff` / `Graph`
+模式。因为零消费者被（P5 retraction）撤回——没有任何调用点要这个 trait。今天
+四个平面正交共存：
+
+- `src/agents/` ——`SubagentTool`、`AgentRuntime`、注册表、subagent spawner
+- `src/teams/` ——team 协调器
+- `src/orchestrator/` ——多代理 dispatch（上文已述）
+- `src/group_chat/` ——群聊 shared-nothing 广播
+
+每个持有不同职责。**没有** facade。
+
+## 验证 & 反馈 —— `src/verification/`
+
+`VerifierChain` 在每次迭代的 Think 和 Act 之间被 consult
+（`src/harness/agent/think.rs::run_verifiers`）。组成：
+
+- `StopHookVerifier` ——保持 Stage 6a 之前「veto 前于 Done」的语义
+- `ToolLoopVerifier` ——侦测 `tool_use` 死循环
+
+`Veto` 强制额外一次 Continue，让模型可以反应；不是硬停。还有按 model id 的
+`ModelRobustnessProfile`，通过 `HarnessDeps.robustness_profile` 传递，让
+验证器灵敏度按模型行为伸缩。
+
+## 护栏 —— 4 域分离
+
+`src/{security, sandbox, approval, pii}/` ——四个独立域，不是 `Guardrail`
+facade。harness 在合适的缝上挂载：
+
+- **输入护栏** ——`agent/guardrails.rs` 挂 `GuardrailRegistry::screen_session_input`；
+  对历史消息也跑（`Block` 决定降级为 redaction，因为不可变历史不能砖一个
+  会话）。
+- **输出护栏** ——`agent/think.rs`，流式 finalize 之后但在 commit 之前；
+  max-output-tokens 续跑拼接各段。
+- **工具调用护栏** ——`agent/guardrails.rs::apply_tool_call_guardrail`，outcome
+  为 `Pass | Sanitize(Value) | Block`。在 `act` 的 PASS 0 顺序应用，
+  然后才进 parallel `join_all`（Pi 风格的先 validate 再 execute）。
+
+`safety.rs`、`truncation_recovery.rs`、`streaming_bridge.rs` 也是 harness
+安全面的一部分，但留在 `src/harness/agent/` 里。
+
+## 初始化 & 环境 —— `src/init_unified/`
+
+见 [启动装配](/docs/zh/architecture/boot-assembly)。`InitializationCoordinator`
+跑 5 阶段 setup（`src/init_unified/coordinator.rs`，从 `src/lib.rs:99` 重新
+导出）；运行时 boot 通过 `src/bin/aleph-server/commands/start/`（5 个
+sub-builder，总计约 6,194 LOC）。
+
+## 哪些东西**不存在**（且这份名单很短）
+
+遗产的 `src/components/{intent_analyzer, task_planner, tool_executor,
+loop_controller, session_recorder, session_compactor}.rs` 目录和它的 5（或者
+6）个 `EventHandler` 风格订阅者，在 2026-04 → 2026-07 的 harness dissolution
+浪潮里被解散：
+
+- 意图分类是 LLM 的活（R8），不是基于规则的分析器。
+- 在循环里搞任务 DAG 规划破坏 ReAct（R8 / R10 第 1 不）。
+- 工具执行住在 `src/tools/scoped/dispatch.rs::execute_inner`——loop 只知道
+  `act(call)`。
+- 循环保护（`max_iterations`、`consecutive_failure_cap`、每工具超时、
+  验证器 veto）是 `HarnessDeps` 上的配置，不是一个组件。
+- 会话记录是 `src/session/SqliteEventStore`，一个事件日志——换了个名字的
+  同一个东西。
+
+删掉 `src/components/` facade 移除了约 3,000 行死订阅者，没改任何外部
+行为。
+
+## 代码位置
+
+- `src/harness/` ——Think→Act driver（12 文件；行数棘轮）
+- `src/thinker/` ——PromptBuilder + PromptPipeline 层
+- `src/tools/`、`src/builtin_tools/` ——`ToolService`、scoping、资源 claim
+- `src/session/` ——`SessionService`、`SqliteEventStore`
+- `src/memory/` ——facts DB、向量检索、recall 消息组装
+- `src/context/{budget,compact}/` ——压力传感器 + 压缩器 + 反应式救援
+- `src/verification/` ——`VerifierChain`、`StopHookVerifier`、`ToolLoopVerifier`
+- `src/{security,sandbox,approval,pii}/` ——护栏域
+- `src/orchestrator/` ——`Orchestrator`、`AgentHarnessRunner`、`HarnessDeps` builders
+- `src/agents/` ——`SubagentTool`、`AgentRuntime`、注册表
+- `src/teams/`、`src/group_chat/` ——多代理平面
+- `src/init_unified/` ——`InitializationCoordinator` + 启动期连线
 
 ## 另请参阅
 
-- [事件系统](/docs/zh/concepts/event-system) — 事件总线架构
-- [代理运行时](/docs/zh/concepts/agent-runtime) — 运行时配置
-- [思考器](/docs/zh/concepts/thinker) — 提示词构建
-- [任务调度](/docs/zh/concepts/task-scheduling) — 任务队列
-
----
-
-## 26.7.x 补充
-
-### Act 阶段并行组
-
-26.7.x 之前的顺序执行被**资源声明**分桶并行取代：
-
-- 工具声明 `Shared` / `Exclusive{Global, Paths}` 三态资源 claim
-- 资源群分并行（**桶内**并发、**桶间**串行）—— 不是任务依赖图
-- `batch_parallelizable` 检查调用是否可并行
-- 串行模式仅在单调用 / 并发禁用 / 重复调用 / 无并行组时回退
-
-### Guardrail + 并行
-
-26.7.x：串行回退不再因 wired guardrail 触发。工具调用 guardrail（Block / Sanitize / Pass）在 `act_parallel` 的 PASS 0 中串行应用，与 Pi 的串行 validate + approval 模式一致。
-
-### 合作 steering 断点
-
-每个串行组（并行组）前 Act 重检 `has_unanswered_user_message`；若有用户消息则让模型先回应。
-
-### 工具循环验证器
-
-26.7.15+：工具循环验证器（`src/verification/`）对每个 Turn 的工具调用做后置校验；只有模型显式 stop 才会结束一个 Turn（**R10「5 个不」之 3**）。`max_iterations` 仍是安全上限。
-
-### 见另请参阅
-
-- [Harness 架构](/docs/zh/architecture/harness) — Think→Act 实现
-- [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop) — 5 个「不」
+- [代理运行时](/docs/zh/concepts/agent-runtime) ——运行时端到端路径
+- [Harness 架构](/docs/zh/architecture/harness) ——薄 harness 哲学
+- [提示词系统](/docs/zh/concepts/prompt-system) ——层管线 + 缓存
+- [工具系统](/docs/zh/concepts/tool-infrastructure) ——资源 claim
+- [启动装配](/docs/zh/architecture/boot-assembly) ——启动期模块连线
+- [架构红线 R3 / R10 / R11](/docs/zh/philosophy/redlines) ——harness 边界

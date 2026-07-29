@@ -1,156 +1,143 @@
 ---
 title: "ACP Protocol"
-description: "Agent Control Protocol (ACP) implementation for standardized agent command and control."
+description: "ACP (Agent Client Protocol) bridge that manages external CLI agents (Claude Code, Codex, Gemini) as Aleph subagents."
 ---
 
-The `acp` module implements the ACP (Agent Control Protocol), a standardized interface for controlling and monitoring agent behavior. ACP provides a common language for external systems to interact with Aleph's agent runtime.
+The `acp` module implements the **Agent Client Protocol** (ACP) bridge — Aleph acts as an ACP *client* that spawns and drives external ACP-capable CLI tools (Claude Code, Codex, Gemini CLI) as subagents. The bridge runs each external agent as a child process and talks to it over NDJSON-encoded JSON-RPC 2.0 on stdin/stdout.
 
 ## Design Philosophy
 
-ACP serves as the "remote control" for Aleph agents:
+ACP integration follows three principles:
 
-1. **Standardized commands** — Start, stop, pause, resume, inspect — all via uniform protocol
-2. **Observable state** — Real-time visibility into agent status, progress, and resource usage
-3. **Secure by default** — All ACP commands require authentication and respect permission boundaries
-
----
-
-## Protocol Commands
-
-### Lifecycle Commands
-
-| Command | Description | Required Permission |
-|---|---|---|
-| `start` | Start a new agent with given configuration | `agent:write` |
-| `stop` | Gracefully terminate a running agent | `agent:write` |
-| `pause` | Pause agent execution (preserves state) | `agent:write` |
-| `resume` | Resume a paused agent | `agent:write` |
-| `inspect` | Get detailed agent status and metrics | `agent:read` |
-| `logs` | Stream agent log output | `agent:read` |
-
-### State Inspection
-
-```rust
-pub struct AgentStatus {
-    pub agent_id: AgentId,
-    pub state: AgentState,
-    pub progress: f32,           // 0.0 to 1.0
-    pub current_task: Option<String>,
-    pub metrics: AgentMetrics,
-}
-
-pub struct AgentMetrics {
-    pub cpu_time_ms: u64,
-    pub memory_kb: u64,
-    pub tokens_used: u64,
-    pub tool_calls: u32,
-}
-```
+1. **Subprocess isolation** — Each ACP harness runs in its own OS process, owned by Aleph. A misbehaving agent cannot affect peers.
+2. **Two execution modes** — `NativeAcp` for agents that speak full persistent ACP (Gemini CLI `--acp`); `Oneshot` for agents that complete in a single CLI invocation (Claude Code `--print`, Codex `exec`).
+3. **Crash-recoverable sessions** — Active sessions are snapshotted to `~/.aleph/data/acp_sessions.json` and restored at boot via `wire_persistence`.
 
 ---
 
-## ACP Server
+## Protocol Overview
 
-The ACP server exposes a JSON-RPC interface over WebSocket:
+ACP is JSON-RPC 2.0 framed as newline-delimited JSON. Aleph sends requests on the child's stdin and reads responses on stdout:
 
-```rust
-pub struct AcpServer {
-    handlers: HashMap<String, Box<dyn AcpHandler>>,
-}
-
-impl AcpServer {
-    pub async fn handle_command(
-        &self,
-        cmd: AcpCommand,
-        auth: &IdentityContext,
-    ) -> Result<AcpResponse, AcpError> {
-        // Verify permission
-        if !auth.can(&cmd.required_permission()) {
-            return Err(AcpError::Forbidden);
-        }
-        
-        // Dispatch to handler
-        let handler = self.handlers.get(&cmd.name)
-            .ok_or(AcpError::UnknownCommand)?;
-        handler.execute(cmd.params).await
-    }
-}
+```
+┌─────────────┐           NDJSON / JSON-RPC 2.0           ┌─────────────┐
+│   Aleph     │  ──────────────────────────────────────▶  │  External   │
+│  ACP client │  initialize → session/new → session/...  │  CLI agent  │
+│             │  ◀──────────────────────────────────────  │  (claude,   │
+│             │  responses + session/update notifications │   codex,    │
+│             │                                          │   gemini)   │
+└─────────────┘                                          └─────────────┘
 ```
 
-**Authentication:**
-- ACP commands use the same `IdentityContext` flow as Gateway requests
-- Owner sessions have full ACP access
-- Guest sessions can only inspect their own agents
+### Core methods Aleph sends
+
+| Method | Purpose |
+|---|---|
+| `initialize` | Negotiate protocol version + capabilities (Aleph advertises `fs.readTextFile`, `fs.writeTextFile`, `session.requestPermission`). |
+| `session/new` | Open a new ACP session bound to a `cwd`. |
+| `session/prompt` | Send a prompt; streams chunks via `AcpChunkCallback`. |
+| `session/cancel` | Cooperative cancel; written to stdin via `CancelHandle` so it does not block on the per-session mutex held by an in-flight prompt. |
+| `fs/read_text_file`, `fs/write_text_file` | Bidirectional — the agent can ask Aleph to read/write files under the project root. |
+| `session/request_permission` | Bidirectional — the agent can ask the user for permission before a sensitive action. |
+
+The transport (`src/acp/transport.rs`) wraps the child's stdin/stdout in a background reader task that demultiplexes responses and notifications onto an mpsc channel, and services inbound `fs/*` + `session/request_permission` requests through `IncomingHandler` (`src/acp/incoming.rs`).
 
 ---
 
-## Event Streaming
-
-ACP supports real-time event streaming for monitoring:
+## Execution Modes
 
 ```rust
-pub enum AcpEvent {
-    StateChange {
-        agent_id: AgentId,
-        old_state: AgentState,
-        new_state: AgentState,
-    },
-    ProgressUpdate {
-        agent_id: AgentId,
-        progress: f32,
-    },
-    LogLine {
-        agent_id: AgentId,
-        level: LogLevel,
-        message: String,
-    },
+pub enum AdapterMode {
+    /// Persistent stdio ACP subprocess (e.g. Gemini CLI `--acp`).
+    NativeAcp,
+    /// One CLI invocation per prompt (e.g. Claude `--print`, Codex `exec`).
+    Oneshot,
 }
 ```
 
-Clients subscribe to events via the Gateway's WebSocket event bus.
+- **`NativeAcp`** — Aleph keeps the child alive across prompts in a slot keyed by `(harness_id, cwd)` (`SessionKey`). Lazy-start, auto-respawn on death. Persistent stdio means a long session can stream incremental chunks and surface `fs/*` requests mid-prompt.
+- **`Oneshot`** — Each prompt spawns a fresh process; Aleph reads its full stdout and tears down. Cheaper setup, but no incremental streaming and no mid-prompt inbound requests.
+
+A `TieredAuthenticator`-style tier system does not apply at the Aleph side; authentication to the external CLI is whatever the harness itself enforces.
+
+---
+
+## Preset Adapters
+
+The `acp` module ships built-in presets for the most common external CLIs (`src/acp/adapters/`):
+
+| Preset id | Display name | Default mode | Notes |
+|---|---|---|---|
+| `claude-code` | Claude Code | `Oneshot` | Uses `claude --print ...`. |
+| `codex` | Codex | `Oneshot` | Uses `codex exec ...`. |
+| `gemini` | Gemini CLI | `NativeAcp` | Uses `gemini --acp`. |
+
+Additional custom harnesses can be registered through `acp.create` and persist alongside the presets in the same config store.
+
+---
+
+## Harness Lifecycle RPCs
+
+The gateway exposes a full CRUD + ops surface for harnesses and live sessions (`src/gateway/handlers/acp_config.rs`):
+
+### Harness configuration
+
+| Method | Description |
+|---|---|
+| `acp.list` | List all ACP harnesses (presets + custom). |
+| `acp.get` | Get a single harness by id. |
+| `acp.create` | Register a new custom harness. |
+| `acp.update` | Update an existing harness configuration. |
+| `acp.delete` | Remove a custom harness (presets cannot be deleted). |
+| `acp.test` | Probe the harness executable (`executable --version`, 5s timeout) and report success + duration. |
+| `acp.set_enabled` | Enable or disable a harness. |
+| `acp.presets` | List all built-in harness presets. |
+| `acp.presets_meta` | Static metadata for the preset catalogue (display name, executable, supported modes). |
+
+### Live session pool
+
+| Method | Description |
+|---|---|
+| `acp.sessions.list` | Enumerate live `NativeAcp` sessions. |
+| `acp.sessions.cancel` | Send `session/cancel` to a live session without blocking on the per-session prompt mutex. |
+| `acp.sessions.shutdown` | Shut a session down and remove it from the pool. |
+
+Mutations publish `acp.sessions.changed` on the gateway event bus so the panel drops polling.
+
+---
+
+## Process-Isolation Kernel
+
+The Aleph server (the `aleph-server` binary) is the spawner for ACP subprocesses. When a child harness is launched, the spawn path runs through the same process-isolation kernel the daemon uses for its own children — restricted tokens / job objects / AppContainer / integrity level / SID·ACL syscalls are issued in place at spawn. This is a deliberate carve-out from R1 (Brain / Limb separation): the ACP subprocess is a separate OS process from the moment of `Command::spawn`, so the kernel-level isolation replaces the harness-level isolation that the rest of the system enforces. See [Architectural Redlines R1 Process-Isolation Kernel carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation).
 
 ---
 
 ## Integration Points
 
 ACP integrates with:
-- **Gateway** — Exposes ACP endpoints via JSON-RPC
-- **Agent Runtime** — Controls agent lifecycle
-- **Session Service** — Persists agent state
-- **Metrics** — Collects and reports agent metrics
+
+- **Gateway** — `extensions.*` is not ACP; ACP harness CRUD is `acp.*` (`acp.list`, `acp.create`, `acp.update`, `acp.delete`, `acp.test`, `acp.set_enabled`, `acp.presets`, `acp.presets_meta`, `acp.sessions.list`, `acp.sessions.cancel`, `acp.sessions.shutdown`).
+- **Spawner / SubAgent** — The `acp_member` builtin tool wraps a configured harness as a team member; the `acp_delegate` tool dispatches one-shot tasks to a named harness.
+- **Event bus** — `acp.sessions.changed` is published on every pool mutation.
+- **Persistence** — `~/.aleph/data/acp_sessions.json` snapshots live sessions and is replayed at boot.
 
 ---
 
 ## Code Location
 
-- `src/acp/mod.rs` — Module entry point
-- `src/acp/server.rs` — ACP server implementation
-- `src/acp/commands.rs` — Command definitions
-- `src/acp/events.rs` — Event streaming
+- `src/acp/mod.rs` — Module entry point, `AcpSessionEvent`, `PersistenceHook`, `GatewayChangeHook`, `AcpChunkCallback`
+- `src/acp/adapter.rs` — `AcpAdapter` trait, `AdapterMode` (`NativeAcp` / `Oneshot`)
+- `src/acp/adapters/` — Built-in presets: `claude_code`, `codex`, `gemini`, `custom`, `generic`
+- `src/acp/manager/` — `AcpAdapterManager` (`harness_admin`, `lifecycle`, `persistence`, `session_key`)
+- `src/acp/protocol.rs` — JSON-RPC request/response/notification types
+- `src/acp/transport.rs` — `StdioTransport` (NDJSON framing, background reader, `CancelHandle`)
+- `src/acp/session.rs` — `AcpSession`, `AdapterConfig`, `PersistedAcpSession`
+- `src/acp/incoming.rs` — `IncomingHandler` (services `fs/*` + `session/request_permission` from the agent)
+- `src/acp/output_format.rs` — `OutputFormat` (text/markdown/json shaping for the model's view)
+- `src/gateway/handlers/acp_config.rs` — `acp.*` RPC handlers
 
 ## See Also
 
-- [Agent Runtime](./agent-runtime) — Agent lifecycle management
-- [Gateway](../architecture/gateway) — WebSocket JSON-RPC interface
-- [Event System](./event-system) — Real-time event distribution
-
----
-
-## 26.7.x Addendum
-
-### ACP Presets + Test
-
-26.7.x full RPC:
-
-- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
-- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
-- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
-
-### Process-Isolation Kernel
-
-26.7.x: ACP sessions are backed by the process-isolation kernel — sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. This is a legitimate carve-out from R1 (see [Architectural Redlines R1 Process-Isolation Kernel carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
-
-### See Also
-
-- [Architecture Overview](/docs/en/architecture/overview) — where ACP sits in the system
-- [Sandboxing](/docs/en/concepts/sandboxing) — process isolation
+- [Agent Runtime](./agent-runtime) — How subagents are spawned and managed
+- [Extensions Store](./extensions-store) — Unified catalog for Skills / Plugins / MCP (distinct from ACP, which is for external CLI harnesses)
+- [Multi-Agent System](./teams) — How ACP harnesses fit as team members

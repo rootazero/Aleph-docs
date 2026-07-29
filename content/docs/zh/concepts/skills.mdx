@@ -1,282 +1,150 @@
 ---
 title: "技能"
-description: "Aleph 的技能系统如何通过 SKILL.md 定义、提示注入和斜杠命令集成实现可重用的能力。"
+description: "通过 SKILL.md、模型可见触发提示、渐进披露与共享 SkillSystem 编写与使用 Aleph 技能。"
 ---
 
-技能是由基于 markdown 的 `SKILL.md` 文件定义的可重用能力。与静态工具定义不同，技能提供自然语言指令，指导 LLM 在特定任务中的行为。
+技能是目录中以 `SKILL.md` 为入口的一组可复用 Markdown 指令；它是给模型使用的「方法」，不是另一个硬编码工具。在统一扩展模型中，Skill 与 Plugin、Mcp 并列为三种 Kind。
 
-> 技能是三种**扩展**类型（`Skill`、`Plugin`、`Mcp`）之一。在日常使用中，可在**扩展商店**（[/docs/zh/concepts/extensions-store](/docs/zh/concepts/extensions-store)）中按功能类别浏览并安装技能，与插件和 MCP 服务器并列。本页聚焦于技能定义与激活。
+发现与安装请使用[扩展商店](/docs/zh/concepts/extensions-store)。本页只覆盖 `SKILL.md` 的编写契约与运行时行为。
 
-## 什么是技能？
+## 编写契约
 
-Aleph 中的技能包括：
+技能就是一个包含 `SKILL.md` 的目录：
 
-- **SKILL.md** — 一个 markdown 文件，描述技能应该在何时以及如何使用，用自然语言编写供 LLM 解释
-- **Manifest** — 从 SKILL.md frontmatter 解析的结构化元数据（名称、描述、触发器）
-- **可选工具** — 技能可以调用内置工具、WASM 插件或 Node.js 扩展
-
-技能从技能目录中发现并在运行时加载：
-
-```
-~/.aleph/skills/
-├── code-review/
-│   └── SKILL.md
-├── git-commit/
-│   └── SKILL.md
-└── translate/
-    └── SKILL.md
+```text
+~/.aleph/skills/code-review/SKILL.md
+.aleph/skills/project-review/SKILL.md
 ```
 
-## 技能系统架构
+项目级技能也可以从 `.claude/skills/` 发现。插件内捆绑的技能位于插件的 `skills/` 目录，会被并入同一 SkillSystem 索引。
 
-```
-SkillSystem (门面)
-  ├── SkillRegistry — 存储加载的技能清单
-  ├── SkillSnapshot — 用于提示构建的不可变视图
-  ├── EligibilityService — 确定哪些技能适用
-  └── Events — 广播技能系统更改
-```
+frontmatter 必填项：
 
-## 核心组件
+- `name`：人类可读的名称，运行时 ID 由此推导。
+- `description`：单句路由描述。
 
-### SkillSystem
+Markdown 正文是模型在选中技能后加载的完整指令。解析器把 `name` 转为小写、用连字符拼接空白并据此生成 ID；同名重复由来源优先级裁决。
 
-主入口点，通过 `Arc` 廉价克隆：
+## 描述与触发提示
 
-```rust
-// src/skill/mod.rs
-pub struct SkillSystem {
-    inner: Arc<Inner>,
-}
+`description` 是模型路由的主要输入，应说明技能做什么、何时适用、关键输入输出，以及如何排除邻近但不属于它的请求。把用户实际会说的词和短语放进这句话中。当前 `SkillManifest` 不支持 `triggers` 字段，不要再维护独立的关键词列表。
 
-struct Inner {
-    registry: RwLock<SkillRegistry>,
-    snapshot: RwLock<SkillSnapshot>,
-    eligibility: EligibilityService,
-    config: RwLock<SkillsConfig>,
-    // ...
-}
-
-impl SkillSystem {
-    pub async fn init(&self, 
-        dirs: Vec<PathBuf>
-    ) -> Result<(), SkillSystemError>;
-    
-    pub async fn current_snapshot(&self
-    ) -> SkillSnapshot;
-}
-```
-
-### 技能注册表
-
-维护加载的技能集合：
-
-```rust
-// src/skill/registry.rs
-pub struct SkillRegistry {
-    skills: HashMap<SkillId, SkillManifest>,
-}
-
-impl SkillRegistry {
-    pub fn register(&mut self, 
-        manifest: SkillManifest
-    );
-    
-    pub fn get(&self, 
-        id: &SkillId
-    ) -> Option<&SkillManifest>;
-}
-```
-
-### 技能清单
-
-从 SKILL.md frontmatter 解析：
-
-```rust
-// src/domain/skill.rs
-pub struct SkillManifest {
-    pub id: SkillId,
-    pub name: String,
-    pub description: String,
-    pub triggers: Vec<String>,
-    pub tools: Vec<String>,
-    pub prompt: String,
-}
-```
-
-### 资格服务
-
-确定哪些技能与给定上下文相关：
-
-```rust
-// src/skill/eligibility.rs
-pub struct EligibilityService;
-
-impl EligibilityService {
-    pub fn evaluate(
-        &self,
-        skills: &[SkillManifest],
-        context: &Context,
-    ) -> Vec<EligibilityResult>;
-}
-```
-
-### 提示构建器
-
-将符合条件的技能注入系统提示词：
-
-```rust
-// src/skill/prompt.rs
-pub fn build_skills_prompt_xml(
-    snapshot: &SkillSnapshot,
-    eligible: &[SkillId],
-) -> String;
-```
-
-技能在提示词中格式化为 XML：
-
-```xml
-<skills>
-  <skill id="code-review">
-    <description>Review code for bugs and style issues</description>
-    <instructions>
-      When the user shares code, analyze it for:
-      - Logic errors
-      - Security vulnerabilities
-      - Performance issues
-    </instructions>
-  </skill>
-</skills>
-```
-
-## 技能加载流程
-
-1. **扫描** — 在配置的目录中发现 SKILL.md 文件
-2. **解析** — 从每个文件中提取 frontmatter 和正文
-3. **注册** — 使用唯一 ID 添加到 SkillRegistry
-4. **快照** — 构建用于查询的不可变 SkillSnapshot
-5. **注入** — 符合条件的技能注入 LLM 提示词
-
-## SKILL.md 格式
+当简短的主动调用提示装不进 description 时，可使用 `when-to-use`：
 
 ```markdown
 ---
-id: code-review
-name: Code Review
-description: Review code for bugs and improvements
-triggers:
-  - code review
-  - review this
-tools:
-  - file_read
+name: code-review
+description: 对变更后的源代码做正确性、安全、性能与可维护性审查；用于代码评审、检查补丁或复核 PR。
+when-to-use: 当代码被编写或修改后需要独立质量评审时
+scope: system
+user-invocable: true
+disable-model-invocation: false
 ---
 
-When the user shares code, analyze it systematically:
-
-1. Check for logic errors and edge cases
-2. Identify security vulnerabilities
-3. Suggest performance improvements
-4. Note style inconsistencies
-
-Always provide specific line references when possible.
+按系统化方式评审变更后的代码，并给出附文件与行号的具体发现。
 ```
 
-## 配置
+`when-to-use` 会以 `<when>` 输出到可用技能目录。匹配由模型语义完成，Aleph 不再运行 BM25 或编辑距离类的确定性触发器。请求匹配时模型会主动加载技能，而不是等用户显式点名。
 
-技能在 `~/.aleph/data/skills.toml` 中配置：
+## 可选 frontmatter
 
-```toml
-[skills]
-enabled = true
-auto_match = false  # 需要显式激活
+当前 SkillSystem 解析器支持的可选字段：
 
-[[skills.directories]]
-path = "~/.aleph/skills"
-priority = 1
+| 字段 | 用途 |
+|---|---|
+| `scope` | 提示词注入范围：`system`、`tool`、`standalone`、`disabled` |
+| `user-invocable` | 用户能否直接调用 |
+| `disable-model-invocation` | 不允许模型自动调用 |
+| `bound-tool` | 将 tool 范围技能绑定到工具 |
+| `eligibility` | 操作系统、二进制、环境、配置和启用检查 |
+| `install` | 平台相关的依赖安装方式 |
+| `primary-env` | 技能主要使用的环境变量 |
+| `homepage` | 外部文档或凭证获取页 |
+| `emoji` | UI 图标 |
+| `automation` | 建议的定时任务与提示，自身不会创建任务 |
+
+依赖元数据示例：
+
+```yaml
+eligibility:
+  required-bins:
+    - git
+  required-env:
+    - GITHUB_TOKEN
+install:
+  - id: git
+    kind: brew
+    package: git
+    bins:
+      - git
 ```
 
-## 斜杠命令
+`enabled: false` 让技能变为 ineligible；`always: true` 跳过其他检查，但不会覆盖显式禁用。未知的 prompt scope 默认为 `disabled`。
 
-技能可以定义用于直接调用的斜杠命令：
+### Markdown CLI 兼容字段
 
-```rust
-// src/skill/commands.rs
-pub fn resolve_command(
-    input: &str,
-    skills: &SkillSnapshot,
-) -> Option<SkillCommandSpec>;
+兼容的 Markdown CLI 读取器还支持 `metadata.requires.bins`、`metadata.aleph.security`、`metadata.aleph.input_hints` 与 Docker 设置，这些字段描述旧的 CLI 执行路径；新写的 SkillSystem 技能应使用上面的顶层字段表达 eligibility 和依赖安装。安全声明无法替代 Aleph 的运行时审批与安装门槛。
+
+## 保持正文简洁
+
+渐进披露原则：
+
+1. `SKILL.md` 聚焦路由、规则与标准工作流。
+2. 细节参考资料放在 `references/guide.md` 等文件中。
+3. 适当时把确定性辅助逻辑放入 `scripts/`。
+4. 让模型通过 `skill_read(skill_id, file_name=...)` 读取支撑文件。
+
+`skill_read` 路径会做目录约束、字节限制并展开 `${ALEPH_SKILL_DIR}` 与内联 shell 片段。技能不应教模型用裸绝对路径或 `cat` 读自己的 Markdown 资源。`skill_read` 返回的绝对 `location` 仅用于执行被引用的脚本，不能绕过技能读取器。
+
+声明 `automation` 块仅是建议；安装后模型可在取得用户同意后通过 `cron_manage` 创建定时任务，安装本身不会静默调度。
+
+## 发现与优先级
+
+共享 SkillSystem 会扫描已配置的根目录与插件发布根目录，无需重启。来源优先级：
+
+1. Workspace
+2. Plugin
+3. Global
+4. Bundled
+
+高优先级技能替换低优先级副本。符号链接或重复路径会按优先级解析，而不是直接拒绝为歧义。已安装插件的技能会出现在同一索引里并可由 `skill_read` 访问。
+
+## 提示词形态
+
+模型可见的技能以紧凑 XML 注入：
+
+```xml
+<available_skills>
+  <skill>
+    <name>Code Review</name>
+    <description>对变更后的源代码做正确性与安全审查</description>
+    <when>当代码被编写或修改后</when>
+    <version>sha256:a1b2c3d4</version>
+  </skill>
+</available_skills>
 ```
 
-示例: `/code-review` 为当前会话激活 code-review 技能。
+未声明 `when-to-use` 时省略 `<when>`。`<version>` 是指令正文的短摘要，若发生变化说明正文已变，模型必须重新调用 `skill_read`。提示词预算在压力大时只保留名称、触发提示与摘要，把描述与正文降级到 `skill_read` 加载；`skill_list` 始终是兜底枚举入口。
 
-## 模块结构
+## 安装期安全
 
-| 模块 | 目的 |
-|--------|---------|
-| `commands` | 斜杠命令解析 |
-| `compat` | 向后兼容性 |
-| `config` | 技能配置 |
-| `eligibility` | 基于上下文的技能过滤 |
-| `events` | 技能系统事件 |
-| `installer` | 技能安装 |
-| `manifest` | SKILL.md 解析 |
-| `prompt` | 提示 XML 生成 |
-| `recaller` | 技能召回跟踪 |
-| `registry` | 技能注册 |
-| `snapshot` | 不可变技能视图 |
-| `status` | 技能状态跟踪 |
-| `tools` | 技能工具集成 |
+第三方技能包在注册前会经过扫描，覆盖提示注入、不可见 Unicode、凭证路径、反弹 shell、破坏性命令、下载即执行模式以及过大文件。在社区信任等级下命中 caution 直接阻止；危险内容对不可信来源阻止，捆绑内容遵循内置信任策略。该扫描是纵深防御，不替代通用沙箱。
 
-## 代码位置
+## 管理接口
 
-- `src/skill/mod.rs` — SkillSystem 门面
-- `src/skill/registry.rs` — SkillRegistry
-- `src/skill/eligibility.rs` — EligibilityService
-- `src/skill/prompt.rs` — 提示 XML 构建器
-- `src/skill/manifest.rs` — SKILL.md 解析器
-- `src/skill/commands.rs` — 斜杠命令解析器
-- `src/domain/skill.rs` — 核心技能类型
+内置工具：
 
-## 另请参阅
+- `skill_list`：发现技能元数据与支撑文件
+- `skill_read`：读取 `SKILL.md` 或目录内的支撑文件
+- `skill_status`：检查 eligibility、缺失项、来源与使用统计
+- `skill_install`：安装声明的依赖
+- `skill_manage`：创建、编辑、配置、删除技能
 
-- [扩展](/docs/zh/concepts/extensions) — 插件系统集成
-- [工具系统](/docs/zh/tools/overview) — 技能可以调用的内置工具
+对应的网关方法包括 `skills.status`、`skills.update`、`skills.install_dep` 与 `skills.remove`。扩展安装会通过同一 SkillSystem 处理 Skill 入口，而不是另设一套 store-only 注册表。
 
----
+## 相关页面
 
-## 26.7.x 补充
-
-### Markdown 技能作者指南
-
-26.7.x 推出 `docs/reference/MARKDOWN_SKILL_AUTHORING.md`——技能以 `SKILL.md` 形式由 LLM 可读的 markdown 描述编写，触发词由 BM25 + 编辑距离检测。`tools.publish` 工具可发布工作产物到工件存储。
-
-### 触发词增强
-
-26.7.x 增强：
-
-- BM25 排序
-- 编辑距离补底
-- 触发词覆盖 Markdown frontmatter
-- 详情见 `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`
-
-### 插件捆绑技能
-
-26.7.17+：已安装插件的技能被**折叠进技能索引**与 `skill_read`，智能体 catalog 复活——之前插件技能与技能机制并行，模型可见度低。
-
-### `skill_read` 解析升级
-
-26.7.17 修复：`skill_read` 之前**拒绝**符号链接 / 重复技能——现按优先级解析而非报告歧义错误。
-
-### SkillOpt 自我演化纪律
-
-26.7.x（memory 自演化）—— SkillOpt 端口的自我演化纪律：
-
-- 「够用即停」原则落进自我演化管线
-- bounded、validation-gated edit loop 加在 LLM 提出的编辑之上
-- 详情见 `docs/reference/memory/DREAM_DAEMON.md`
-
-### 见另请参阅
-
-- [技能系统](/docs/zh/concepts/skill-system) — 技能生命周期
-- [扩展商店](/docs/zh/concepts/extensions-store) — 用户视角
-- [记忆梦境守护进程](/docs/zh/concepts/memory-evolution) — SkillOpt 上下文
+- [技能系统](./skill-system) — 运行时生命周期与数据模型
+- [扩展](./extensions) — 插件宿主与插件内技能
+- [扩展商店](./extensions-store) — 统一发现与受信安装
+- [能力系统](./capability-system) — 扩展声明与运行时账本

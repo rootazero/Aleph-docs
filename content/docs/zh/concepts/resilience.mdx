@@ -30,17 +30,50 @@ pub enum TaskStatus {
 }
 ```
 
+### Lane
+
+执行车道（资源隔离），不是顺序/并行：
+
+```rust
+pub enum Lane {
+    Main,         // 用户交互、abort 命令（高优先级）
+    Subagent,     // 后台工作（普通优先级）
+}
+```
+
+### RiskLevel
+
+任务恢复决策的风险等级，只有两档：
+
+```rust
+pub enum RiskLevel {
+    Low,          // 只读操作；可自动恢复
+    High,         // 写操作；需要用户确认
+}
+```
+
 ### AgentTask
 
 具有恢复检查点的任务：
 
 ```rust
 pub struct AgentTask {
-    pub task_id: String,
+    pub id: String,                           // task_id
+    pub parent_session_id: String,
+    pub agent_id: String,
+    pub task_prompt: String,
     pub status: TaskStatus,
-    pub lane: Lane,           // 执行车道 (Sequential/Parallel)
-    pub risk_level: RiskLevel,// Low/Medium/High/Critical
-    pub checkpoint_data: Option<String>,// 用于恢复的序列化状态
+    pub risk_level: RiskLevel,
+    pub lane: Lane,
+    pub checkpoint_snapshot_path: Option<String>,  // Shadow Replay 快照路径
+    pub last_tool_call_id: Option<String>,
+    pub recursion_depth: u32,
+    pub parent_task_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub metadata_json: Option<String>,
 }
 ```
 
@@ -50,24 +83,33 @@ pub struct AgentTask {
 
 ```rust
 pub struct TaskTrace {
-    pub trace_id: String,
+    pub id: i64,
     pub task_id: String,
-    pub events: Vec<TaskTraceInfo>,
+    pub step_index: u32,
+    pub event: AgentTraceEvent,
+    pub timestamp: i64,
 }
 ```
 
-### SubagentSession
+`TaskTrace::with_timestamp` 让固定时间的 fixture 能覆盖 `new()` 写入的 `Utc::now()`，因为 trace 列表分页使用严格小于语义的 `timestamp` 游标。
 
-长期子代理会话管理：
+### AgentEvent
+
+骨架 / Pulse 两层持久化：
 
 ```rust
-pub struct SubagentSession {
-    pub session_id: String,
-    pub status: SessionStatus,
-    pub idle_since: Option<DateTime<Utc>>,
-    pub swapped_at: Option<DateTime<Utc>>,
+pub struct AgentEvent {
+    pub id: i64,
+    pub task_id: String,
+    pub seq: u64,                       // Gap-Fill 排序
+    pub event_type: String,
+    pub payload_json: String,
+    pub is_structural: bool,            // true = 骨架，立即持久化
+    pub timestamp: i64,
 }
 ```
+
+子代理会话管理在 `src/teams/sessions/store.rs`（`SessionStatus` / `CollaborativeSession` / `SessionTurn`），不在 `resilience` 内。
 
 ## StateDatabase
 
@@ -75,10 +117,12 @@ SQLite 数据库提供 CRUD 操作：
 
 | 表 | 目的 |
 |-------|---------|
-| `events` | 代理事件 (骨架 + Pulse 层级) |
+| `events` | 代理事件（骨架 + Pulse 层级；`seq` 用于 Gap-Fill） |
 | `tasks` | 具有状态和检查点的代理任务 |
-| `traces` | 任务执行跟踪 |
-| `sessions` | 子代理会话 |
+| `traces` | 任务执行跟踪（`TaskTrace`，含 `AgentTraceEvent`） |
+| `channel_offsets` | 通道消费偏移 |
+| `paired_users` | 配对用户状态 |
+| `group_chat` | 群组聊天状态 |
 | `memory_events` | 内存支持的事件索引 |
 
 ### 模式
@@ -113,25 +157,25 @@ SQLite 数据库提供 CRUD 操作：
 
 ## 26.7.x 补充
 
-### Guardian Judge Payload 隐藏密钥
+### Guardian Judge payload 隐藏密钥
 
-26.7.21+：Heartbeat 探针使用的 LLM 判官（`Guardian Judge`）其 payload 必须隐藏密钥——密钥不会再被序列化到日志或被审计员读取。
+26.7.21+：`GuardianApprovalRequester`（LLM 判官，位于 `src/approval/guardian_requester.rs`）向判官 LLM 发送的 action 描述走 `SecretMasker`（`src/exec/masker`）屏蔽密钥——摘要与每个解析出的命令段都过同一 masker，避免被遮蔽的摘要遮不住 argv 中残留的 bearer / basic-auth / 通用密码赋值。判官失败也有熔断（重复 judge 调用错误超时直接升级到人，跳过 judge 调用）。
 
 ### Heartbeat 拒绝危险工具
 
-26.7.21+：Heartbeat 探针拒绝使用危险工具与确认门控工具。`Heartbeat` 现在是实化（stubs → real）的周期守护。
+26.7.21+：`DefaultProbeExecutor::execute`（`src/tasks/heartbeat/probe.rs`）调用 `is_denied_on_gateway_surface(tool_name)`，探针在定时器上运行、没有 LLM 在回路，因此任何 RCE / 主机变更 / 控制平面工具或确认门控工具都会被拒绝并返回错误提示；与 `tools.invoke` RPC 使用同一道闸门。
 
 ### Provider 错误读取加边界
 
 26.7.15+：Provider 错误响应体读取现在加边界——之前可能挂在失速的代理上。
 
-### 影子模式事件总线
+### 影子模式系统状态总线
 
-26.7.x 影子模式：系统状态总线带 PII 过滤、稳健性和隐私层；用于系统事件自动响应的动作调度器；平台抽象层（PAL）带 macOS 特定传感器。
+26.7.x 影子模式：系统状态总线（System State Bus，SSB）带 PII 过滤、稳健性与隐私层；用于系统事件自动响应的动作调度器；平台抽象层（PAL）带 macOS 特定传感器。
 
 ### Dreaming Daemon 不再烧额度
 
-26.7.15 修复：梦境守护进程夜间梦境运行的重试风暴已加边界，不再耗尽 provider 额度。
+26.7.15 修复：梦境守护进程夜间梦境运行的重试风暴已加边界（`should_skip_scheduled_run` 把 `error` / 残留 `running` 当作"今日已耗"；只有 `cancelled` 才允许重试），不再耗尽 provider 额度。
 
 ### 失败关闭
 

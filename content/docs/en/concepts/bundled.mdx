@@ -1,90 +1,160 @@
 ---
 title: "Bundled Content"
-description: "Compile-time embedded official skills and plugins, extracted to disk on startup with version-based update detection."
+description: "Compile-time-embedded official skills / plugins / templates, extracted on startup via version comparison into `~/.aleph/bundled/`, with symlink-planting rejected."
 ---
 
-The `bundled` module manages official skills and plugins that are embedded in the Aleph binary at compile time. On startup, these are extracted to `~/.aleph/` if the bundled version is newer than what's already installed.
+The `bundled` module embeds official skills, plugins, and templates into the Aleph binary at compile time (`include_dir!`), then on startup compares the `bundled_version` against `~/.aleph/bundled/manifest.json` to decide whether to re-extract. The whole flow is "self-contained distribution + user-content protection + light startup check"; it does not depend on external downloads.
 
 ## Design Philosophy
 
-1. **Self-contained distribution** — Official content ships with the binary, no external downloads
-2. **Version-aware updates** — Extraction only occurs when the binary's bundled version is newer
-3. **User content protection** — Bundled extraction skips files that would overwrite user customizations
-4. **Idempotent extraction** — Safe to run multiple times; partial failures don't update version
+1. **Self-contained distribution** — official content ships inside the binary; no network at runtime, works behind firewalls and offline.
+2. **Version-aware updates** — only re-extract when `manifest.bundled_version < BUNDLED_VERSION`; a repeat start is zero-cost.
+3. **User-content protection** — `SkillOrigin::User / Local / Github` entries are skipped during extraction; the binary never overwrites them.
+4. **Idempotent** — partial failure does not advance `manifest.bundled_version`; the next start retries automatically.
+5. **Network-free by design** — the `bundled.sync` RPC (CLI / tool / Hub button) only reconciles the embedded content with `~/.aleph/bundled/` on disk.
 
-## How It Works
+---
 
-```
+## Flow
+
+```text
 Compile Time                          Startup
-───────────                           ───────
-skills/ ──► include_dir! ──► binary ──► extract_bundled_content()
-plugins/                                │
-                                        ▼
-                                  ~/.aleph/skills/
-                                  ~/.aleph/plugins/
+───────────                          ────────
+skills/   ─► include_dir! ─► binary ──► extract_bundled_content()
+plugins/                               │
+templates/                            ▼
+                                ~/.aleph/bundled/manifest.json
+                                ├── skills/<name>/SKILL.md
+                                ├── plugins/<id>/
+                                └── templates/<name>.md
 ```
+
+`bundled_version` is locked to the server release (`build.rs` writes `ALEPH_VERSION` into the `BUNDLED_VERSION` constant). `extract_bundled_content` is the startup hook that runs in `bin/aleph-server/commands/start/helpers.rs:320` inside the `start` command.
+
+---
 
 ## Embedded Content
 
 ```rust
-/// Official skills directory tree, embedded at compile time
-pub static BUNDLED_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills");
-
-/// Official plugins (marketplace), embedded at compile time
+pub static BUNDLED_SKILLS: Dir  = include_dir!("$CARGO_MANIFEST_DIR/skills");
 pub static BUNDLED_PLUGINS: Dir = include_dir!("$CARGO_MANIFEST_DIR/plugins");
+pub const  BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
 
-/// Version tied to the server release
-pub const BUNDLED_VERSION: &str = env!("ALEPH_VERSION");
+pub const OFFICIAL_SKILLS_REPO:  &str = "https://github.com/rootazero/Aleph-skills";
+pub const OFFICIAL_PLUGINS_REPO: &str = "https://github.com/rootazero/Aleph-plugins";
 ```
 
-## Extraction Logic
+`include_dir!` compresses entire directory trees into the binary at compile time; at startup `extract_bundled_content` writes them to `~/.aleph/bundled/skills/` and `~/.aleph/bundled/plugins/<id>/`. **The first start also runs a one-time bootstrap**: clone `main` from `OFFICIAL_SKILLS_REPO` / `OFFICIAL_PLUGINS_REPO` into `~/.aleph/cache/aleph-skills-checkout` and `~/.aleph/cache/aleph-plugins-checkout`, prefers the cloned result, and falls back to the embedded snapshot on clone failure — clone failure never blocks startup.
 
-1. **Check manifest** — Read `manifest.json` from `~/.aleph/skills/`
-2. **Compare versions** — Skip extraction if `manifest.bundled_version == BUNDLED_VERSION`
-3. **Extract skills** — Copy embedded skills to `~/.aleph/skills/`
-4. **Extract plugins** — Copy embedded plugins to `~/.aleph/plugins/cache/aleph-official/`
-5. **Update manifest** — Write new version only after successful extraction
+---
 
-### User Content Protection
+## Extraction Pipeline (`src/bundled/extractor.rs`)
 
-When extracting skills, the system checks `SkillOrigin`:
+1. **Read manifest** — `~/.aleph/bundled/manifest.json`; create a blank one if it does not exist.
+2. **First-run bootstrap** — when the manifest is empty, call `sync_official_now(SyncKind::All)` to pull the latest `main` from the official repos; **`skills` succeeding while `plugins` fails is treated as partial success**, and `manifest.bundled_version` aligns with the embedded version on the parts that landed.
+3. **Version compare** — if `manifest.bundled_version == BUNDLED_VERSION`, skip re-extraction (saves time); otherwise step 4.
+4. **Atomic directory swap** —
+   - **Skills**: each `include_dir!` subdirectory writes to `~/.aleph/bundled/skills/<name>/`; `SkillOrigin::User / Local / Github` entries are skipped (**only `Official` is overwritten**).
+   - **Plugins**: `swap_dir_into_place` (`temp → remove-if-exists → rename`) atomically replaces `~/.aleph/bundled/plugins/cache/aleph-official/`. `ENOTEMPTY` on Unix and `AlreadyExists` on Windows are both eaten.
+5. **Update manifest** — on full success, write `manifest.bundled_version = BUNDLED_VERSION`; on partial failure, **do not write** (next start retries automatically).
 
-- **Official** — Can be updated by bundled extraction
-- **Custom/User** — Skipped to prevent overwriting user modifications
+`sync_official_with_urls` is a URL-injectable variant (takes `skills_url` / `plugins_url`) so tests can mount local git repos and avoid the network entirely.
 
-## Manifest Format
+---
 
-```json
-{
-  "bundled_version": "0.9.1",
-  "skills": [
-    {
-      "name": "git-commit",
-      "version": "1.0.0",
-      "origin": "official"
+## User-Content Protection (`SkillOrigin`)
+
+```rust
+pub enum SkillOrigin { Official, Local, Github }
+```
+
+`extract_skills` iterates `BUNDLED_SKILLS.dirs()` and looks each subdirectory up in the manifest:
+
+| `manifest[entry].source` | Behavior |
+|--------------------------|----------|
+| `Official` (matches `BUNDLED_VERSION`) | Overwrite (official content update) |
+| `Local` (placed by hand / created via `note_manage`) | Skipped, never overwritten |
+| `Github` (installed via `skill_install` from a GitHub URL) | Skipped, never overwritten |
+
+`reconcile(skills_dir)` reverse-scans the disk: a directory not in the manifest is treated as `Local` and **cannot** be promoted to `Official` by a binary upgrade. The manifest is persisted as a `BTreeMap` (not `HashMap`), guaranteeing byte-deterministic JSON output.
+
+---
+
+## Symlink Planting Refused
+
+26.7.21+ (merged in the `6e625c407` hardening series): every "clean temp dir" and "delete stale file" path now uses `symlink_metadata` instead of `metadata`, closing the symlink TOCTOU window:
+
+```rust
+// extract_plugins temp dir cleanup
+if let Ok(meta) = tmp_dir.symlink_metadata() {       // not metadata()
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&tmp_dir)?;
     }
-  ]
+}
+
+// prune_stale_entries
+let ft = match entry.file_type() { /* not called */ }   // switched to symlink_metadata
+// copy_tree_with_prune
+if !ft.is_symlink() {                                   // explicitly skip symlinks
+    keep.insert(e.file_name());
 }
 ```
 
-## Safety
+Threat model: a malicious repo places a symlink under `skills/` pointing at `~/.aleph/data/loop_graph.db`; the next `extract_bundled_content` would follow it on `remove_dir_all` and delete the graph. `symlink_metadata` reads the symlink's own attributes only, **not** its target, closing this attack vector.
 
-- **Zero unwrap** — All errors handled via `if let Err` / `match` / `?`
-- **Directory creation** — `create_dir_all` with error logging
-- **BTreeMap** — Deterministic JSON output (no HashMap ordering issues)
-- **No locks** — Pure filesystem operations, no concurrency concerns
+---
+
+## `bundled.sync` RPC and CLI
+
+`bundled.sync` is the explicit refresh entry point (`src/gateway/handlers/bundled_sync.rs`):
+
+| Param | Value | Behavior |
+|-------|-------|----------|
+| `kind = "skills"` | Skills only | clone `OFFICIAL_SKILLS_REPO` → extract |
+| `kind = "plugins"` | Plugins only | clone `OFFICIAL_PLUGINS_REPO` → extract |
+| `kind = "all"` | default | both |
+
+Response: `{ ok: true, skills: bool, plugins: bool }`. An `Err` returns the fine-grained reason (network / extraction / manifest write), surfaced verbatim as `INTERNAL_ERROR` to the caller. `cron_manage(action="list")` paired with `run_count=0` is a usable probe for "did the bundled sync actually run" (`governance_metrics` reads this pair too).
+
+`aleph skills sync` and `aleph plugin sync` CLI subcommands take the two non-`All` `SyncKind` variants and print the same `(skills_ok, plugins_ok)` tuple to stderr.
+
+---
+
+## Security and Extraction Paths
+
+| Path | When written | Anti-symlink protection |
+|------|--------------|-------------------------|
+| `~/.aleph/bundled/manifest.json` | Only on a successful full extraction | `read_to_string` → `serde_json::from_str` validation before write; a corrupt manifest is treated as "first start" and goes through the bootstrap path |
+| `~/.aleph/bundled/skills/<name>/` | On every `Official` extraction | `remove_file` / `remove_dir_all` precondition with `symlink_metadata` |
+| `~/.aleph/bundled/plugins/cache/aleph-official/` | Same as above | Same as above |
+| `~/.aleph/cache/aleph-{skills,plugins}-checkout/` | First start or explicit `bundled.sync` | A temp dir; still uses `symlink_metadata` before deletion |
+
+`SKILL.md` extraction copies by byte (the embedded `DirEntry::contents()`); **no** Markdown parsing happens at extraction time — skill parsing is the LLM's job at read time. `create_dir_all` calls all precondition the parent with `symlink_metadata` to defeat symlink-privesc.
+
+---
 
 ## Key Source Files
 
-- `src/bundled/mod.rs` — Embedded content declarations
-- `src/bundled/extractor.rs` — Extraction logic
-- `src/bundled/manifest.rs` — Manifest parsing and serialization
+- `src/bundled/mod.rs` — module entry, `BUNDLED_SKILLS` / `BUNDLED_PLUGINS` / `BUNDLED_VERSION` / `OFFICIAL_*_REPO` constants; re-exports `extract_bundled_content` / `sync_official_now` / `SyncKind` / `SyncReport`
+- `src/bundled/extractor.rs` — embedded + disk paths: disk goes through `extract_skill_tree_from_dir` (from git checkout), embedded through `extract_skills` / `extract_plugins`; `swap_dir_into_place` does the atomic replace
+- `src/bundled/sync.rs` — `clone_or_update`, libgit2 clone + hard-reset to `main`; `update_existing` calls `git fetch + reset --hard`
+- `src/bundled/manifest.rs` — `InstallRegistry` / `SkillEntry` / `SkillOrigin::{Official, Local, Github}`; `reconcile` reverse-syncs disk with manifest
 
-## See Also
+---
 
-- [Skill System](/docs/concepts/skill-system) — Skill architecture
-- [Extension System](/docs/concepts/extension-system) — Plugin architecture
-- [Configuration](/docs/concepts/configuration) — Config file locations
+## Difference from `skills.install` / `plugin.install`
+
+| Dimension | bundled (this page) | `skills.install` / `plugin.install` |
+|-----------|--------------------|--------------------------------------|
+| Source | Compile-time-embedded official repos / `OFFICIAL_*_REPO` | User-supplied GitHub URL or local path |
+| Install path | `~/.aleph/bundled/{skills,plugins}/` | `~/.aleph/skills/`, user-level `~/.aleph/plugins/<id>/` |
+| Upgrade trigger | Startup version check + explicit `bundled.sync` | Explicit `install` call |
+| Overwrite rule | Only `Official` is overwritten | User-level; `Local` / `Github` entries only overwrite at the same user-level slot |
+| User override | A same-name `Local` file is skipped | A same-name `Official` is **still** overwritten (the user picked this explicitly) |
+| Uninstallation | Via `uninstall` / manifest rewrite | Via `uninstall` |
+| Offline | Fully self-contained | Install needs network to pull the repo |
+
+A short mnemonic: bundled = compile-time built-in, read-only; install = user-level, explicitly controllable.
 
 ---
 
@@ -92,11 +162,11 @@ When extracting skills, the system checks `SkillOrigin`:
 
 ### `bundled.sync` RPC
 
-26.7.x adds a `bundled.sync` RPC — syncs bundled content with disk; consistent across workspaces.
+26.7.x added the `bundled.sync` RPC — syncs the embedded content with disk; consistent across workspaces. `SyncKind` has three values (`skills` / `plugins` / `all`, default `all`); `spawn_blocking` wraps the call so the `gateway/execution_engine/run_loop` main thread does not block on libgit2 (which is fully blocking IO).
 
 ### Symlink Planting Refused
 
-26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata` — preventing attack vectors implanted at extract time.
+26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata` — preventing attack vectors planted at extract time. Every `remove_*` / `prune_*` path now confirms the target type with `symlink_metadata` before acting; `copy_*` paths explicitly skip symlink entries.
 
 ### Path
 
@@ -104,6 +174,9 @@ When extracting skills, the system checks `SkillOrigin`:
 
 ### See Also
 
-- [Skills](/docs/en/concepts/skills) — user-level skills
+- [Skills](/docs/en/concepts/skills) — user-level skills (`SKILL.md` format)
 - [Extensions](/docs/en/concepts/extensions) — user-level plugins
+- [Configuration](/docs/en/concepts/configuration) — `~/.aleph/` directory layout
 - [Gateway RPC `bundled.*`](/docs/en/gateway/methods/skills) — protocol
+- [Official skills repo](https://github.com/rootazero/Aleph-skills) — `OFFICIAL_SKILLS_REPO`
+- [Official plugins repo](https://github.com/rootazero/Aleph-plugins) — `OFFICIAL_PLUGINS_REPO`

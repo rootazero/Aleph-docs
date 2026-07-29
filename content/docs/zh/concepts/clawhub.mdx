@@ -1,26 +1,24 @@
 ---
 title: "ClawHub"
-description: "用于 ClawHub 技能注册表（clawhub.ai）的 HTTP 客户端和类型。"
+description: "ClawHub（clawhub.ai）的历史参考 —— 其 HTTP 客户端已从 Aleph 退役。"
 ---
 
-> **状态（2026-06）：ClawHub 不再是一等源。** 它的设置标签页已被移除，并已被并入[扩展商店](/docs/zh/concepts/extensions-store)。ClawHub 不再在主界面中可浏览；扩展商店从 Claude/Aleph 插件市场、Official MCP Registry 和 Docker MCP Catalog 浏览 Skill、Plugin 和 MCP 服务器。下文所述的 ClawHub HTTP API 仍可访问，但仅通过商店智能体的长尾安装路径（其 `store_fetch_docs` 工具读取某个 URL/仓库）——而非主浏览界面。本页作为历史参考保留。
+> **状态（2026-07）：ClawHub 不再作为一等源可达。** 专属的 `src/clawhub/` 模块已退役；指向它的 Settings 标签页被移除并并入 Settings → Advanced。ClawHub 内容的浏览、搜索、安装现统一通过[扩展商店](./extensions-store)进行，后者门面化 **aleph-hub** 目录（`https://hub.heyaleph.com/catalog.json`）以及 Claude / Aleph 插件市场、Official MCP Registry、Docker MCP Catalog。当前源码中 `clawhub` 仅以两种方式出现：作为 `HubCatalog` 条目上的 `via` 来源标签（当某 artifact 可溯源到 OpenClaw 上游时），以及作为 `markdown_skill` 加载器仍识别的 OpenClaw `ClawHub` SKILL.md 元数据命名空间（兼容旧式安装）。本页仅作历史参考保留。
 
-`clawhub` 模块提供用于与 ClawHub 技能注册表交互的 HTTP 客户端和类型定义。ClawHub 是一个公共仓库，用户可以在其中浏览、搜索和下载用于 Aleph 和兼容代理的技能。
+## 设计理念（历史）
 
-## 设计理念
+ClawHub 集成在彼时遵循两个原则：
 
-ClawHub 集成遵循两个原则：
-
-1. **只读访问** —— 客户端从注册表获取技能；它不上传或修改注册表内容。公共 API 访问不需要认证。
-2. **干净的类型分离** —— 原始 API 类型通过 `From` 实现转换为内部统一类型，保持 HTTP 层与领域逻辑解耦。
+1. **只读访问** —— 客户端从注册表拉取技能；既不上传也不修改注册表内容。公共 API 访问不需要认证。
+2. **干净的类型分离** —— 原始 API 类型通过 `From` 实现转换为内部统一类型，使 HTTP 层与领域逻辑解耦。
 
 ---
 
-## 核心组件
+## 历史 HTTP 客户端
 
-### ClawHubClient
+已退役的 `clawhub` 模块曾暴露一个 HTTP 客户端与类型定义，用于与 `https://clawhub.ai` 上的 ClawHub 技能注册表交互。该模块已从 `src/` 移除；以下片段反映历史 API，保留供归档参考。
 
-注册表操作的主 HTTP 客户端：
+### ClawHubClient（历史）
 
 ```rust
 pub struct ClawHubClient {
@@ -30,32 +28,31 @@ pub struct ClawHubClient {
 
 impl ClawHubClient {
     pub fn new() -> Self { /* ... */ }
-    
+
     pub async fn browse(
         &self,
         category: Option<String>,
-    ) -> Result<Vec<SkillSummary>> { /* ... */ }
-    
+    ) -> Result<Vec<SkillSummary>, ClawHubError> { /* ... */ }
+
     pub async fn search(
         &self,
         query: &str,
-    ) -> Result<Vec<SkillSummary>> { /* ... */ }
-    
+    ) -> Result<Vec<SkillSummary>, ClawHubError> { /* ... */ }
+
     pub async fn download(
         &self,
         slug: &str,
-    ) -> Result<Vec<u8>> { /* ... */ }
+    ) -> Result<Vec<u8>, ClawHubError> { /* ... */ }
 }
 ```
 
-**关键行为：**
-- 当浏览端点返回空时，浏览回退到搜索
-- 下载在临时文件名中使用之前清理 slug（将 `/` 替换为 `-`）
-- 所有方法使用 `?` 或 `map_err` 进行错误传播
+**历史行为：**
 
-### 类型
+- `browse` 在浏览端点返回空时回退到 `search`。
+- `download` 在临时文件名中使用前清理 slug（把 `/` 替换为 `-`）。
+- 所有方法均使用 `?` 或 `map_err` 进行错误传播。
 
-核心注册表类型：
+### 历史类型
 
 ```rust
 pub struct SkillSummary {
@@ -75,37 +72,23 @@ pub struct SkillDetail {
 
 ---
 
-## API 操作
+## 历史 API 操作
 
 ### 浏览
 
-按类别列出技能。如果类别端点返回空，则回退到搜索：
-
-```rust
-let client = ClawHubClient::new();
-let skills = client.browse(Some("productivity".to_string())).await?;
-```
+按类别列出技能。若类别端点返回空则回退到搜索。
 
 ### 搜索
 
-跨注册表的全文搜索：
-
-```rust
-let results = client.search("file organizer").await?;
-```
+跨注册表的全文搜索。
 
 ### 下载
 
-获取技能包作为 ZIP 存档：
-
-```rust
-let zip_bytes = client.download("aleph/file-organizer").await?;
-// slug "aleph/file-organizer" 变为临时文件 "clawhub-aleph-file-organizer-{uuid}.zip"
-```
+将技能包作为 ZIP 归档获取。
 
 ---
 
-## 工具函数
+## 历史工具函数
 
 ### URL 编码
 
@@ -113,7 +96,7 @@ let zip_bytes = client.download("aleph/file-organizer").await?;
 pub fn encode_slug_path(slug: &str) -> String
 ```
 
-对 slug 进行编码以用于 URL，使用每段百分比编码。
+用于 URL 的每段百分比编码。
 
 ### 版本比较
 
@@ -121,7 +104,7 @@ pub fn encode_slug_path(slug: &str) -> String
 pub fn is_newer_version(current: &str, latest: &str) -> bool
 ```
 
-比较两个语义版本字符串。对于非 semver 输入回退到字符串比较。
+比较两个语义化版本字符串。对非 semver 输入回退到字符串比较。
 
 ### 时间戳转换
 
@@ -129,52 +112,41 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool
 pub fn unix_ms_to_rfc3339(ts: i64) -> String
 ```
 
-将 Unix 毫秒转换为 RFC 3339 格式。对于无效时间戳返回空字符串。
+将 Unix 毫秒转换为 RFC 3339 格式。对无效时间戳返回空字符串。
 
 ---
 
-## 错误处理
+## 历史错误处理
 
-客户端使用 `reqwest` 进行 HTTP，并从所有操作返回 `Result<T, ClawHubError>`。错误包括：
+客户端使用 `reqwest` 进行 HTTP，所有操作返回 `Result<T, ClawHubError>`。错误覆盖：
+
 - 网络故障
 - HTTP 非 2xx 状态码
-- 无效响应解析
+- 响应解析失败
 - 下载期间的文件系统错误
+
+---
+
+## ClawHub 在当前代码中的出现位置
+
+| 位置 | 作用 |
+|---|---|
+| `src/hub/catalog_client.rs` | `HubCatalog` 条目上的 `"via": "clawhub"` 来源标签 —— 仅当某 artifact 溯源到 OpenClaw 上游；标签是纯信息性的，从不触发网络拉取。 |
+| `src/hub/types.rs` | `ExtensionEntry` 上的 `via` 字段；同样仅作信息。 |
+| `src/tools/markdown_skill/spec.rs` | `OpenClaw` 元数据命名空间（`ClawHub` SKILL.md 兼容） —— 加载器仍解析旧式 `ClawHub` 风格 SKILL.md frontmatter，使既有技能继续可装。 |
+| `src/skill/guard.rs` | 扫描技能目录时跳过 `.clawhub.json` 附属文件。 |
+
+ClawHub HTTP 客户端本身已不在 `src/` 中；没有 `clawhub.*` 网关 RPC，也没有与 `clawhub.ai` 通信的安装器。
 
 ---
 
 ## 代码位置
 
-- `src/clawhub/mod.rs` —— 模块入口点
-- `src/clawhub/client.rs` —— HTTP 客户端实现
-- `src/clawhub/types.rs` —— 注册表类型和转换
+- 历史模块：`src/clawhub/`（已移除） —— `client.rs`、`types.rs`
+- 当前出现位置：`src/hub/catalog_client.rs`、`src/hub/types.rs`、`src/tools/markdown_skill/spec.rs`、`src/skill/guard.rs`
 
 ## 另请参阅
 
-- [扩展商店](/docs/zh/concepts/extensions-store) —— 取代 ClawHub、用于浏览和安装扩展的统一面板
+- [扩展商店](./extensions-store) —— 替代品：统一的目录，覆盖官方 Aleph Hub、插件市场、MCP 注册表、Docker MCP Catalog 中的 Skill、Plugin、MCP 服务器。
 - [技能](./skills) —— 技能在 Aleph 中的工作原理
 - [扩展](./extensions) —— 用于添加能力的插件架构
-
----
-
-## 26.7.x 补充
-
-### ClawHub 降级为长尾
-
-ClawHub **不再是一级扩展源**：
-
-- 设置标签页**已移除**（并入 Settings → Advanced）
-- 降级为长尾，只由商店智能体 `store-agent` 在 `/extensions` 浏览时读取
-- 不再维护为独立面板模式
-
-### 完整 RPC（已实化）
-
-- `clawhub.search` —— 搜索（按源 / 关键词）
-- `clawhub.browse` —— 浏览分类
-- `clawhub.detail` —— 单个扩展详情
-- `clawhub.install` —— 安装（统一走 `plugin.install` 或 `skills.install`）
-
-### 见另请参阅
-
-- [扩展商店](/docs/zh/concepts/extensions-store) — 替代品
-- [网关 RPC `extensions.*`](/docs/zh/gateway/methods/extensions) — 协议

@@ -1,340 +1,378 @@
 ---
 title: "Memory System"
-description: "Long-term memory with raw_memories + notes (SQLite + Markdown), hybrid retrieval, and dream daemon."
+description: "Aleph's long-term memory: raw_memories (L0) + notes (L1) two-layer architecture, hybrid retrieval, and dream daemon. Includes SkillOpt self-evolution, wikilink lifecycle, Leiden refinement, and [[wikilink]] supersession."
 ---
 
-The `memory` module provides Aleph's long-term memory system. It stores conversations in an ephemeral raw-memory buffer (L0) and distills persistent knowledge into markdown notes (L1) with a rebuildable SQLite index.
+The `memory` module gives Aleph long-term memory. L0 is a rebuildable SQLite table (raw conversation + attachment text, deduplicated), L1 is on-disk Markdown notes plus a rebuilt index/link/vector/event stack. Retrieval happens on L1 (hybrid FTS5 + sqlite-vec + RRF), and the dream daemon maintains L1's dedup / links / communities offline.
 
 ## Design Philosophy
 
-1. **Markdown-first** — Notes are `.md` files on disk; SQLite indexes are rebuildable
-2. **Hybrid retrieval** — FTS5 full-text + sqlite-vec vector search fused with RRF
-3. **LLM sovereignty** — Retrieval gives ranked candidates; the LLM decides what matters
-4. **Event-sourced** — Every note mutation is captured as an immutable `MemoryEvent`
+1. **Markdown-first** — L1 is `.md` files on disk plus a SQLite index. The L1 index is 100% rebuildable from disk: deleting `memory.db` loses no note content; a rebuild restores everything.
+2. **Hybrid retrieval** — `notes_fts` (`unicode61` + `trigram` dual FTS tables) + `notes_vec_{dim}` (sqlite-vec per-dim virtual tables), RRF fusion + a 6-stage scoring pipeline (`cosine_rerank` / `recency_boost` / `length_normalization` / `time_decay` / `hard_min_score` / `mmr_diversity`).
+3. **LLM sovereignty** — retrieval gives candidates; the model decides what matters. No "memory layer judges relevance on the model's behalf" cognitive verdict.
+4. **Event-sourced** — every note mutation is recorded as an immutable `MemoryEvent`; replay can reconstruct any past state (L0 fully compressed by default; events not currently replayed).
+5. **Persistent + offline** — `Memory` is the only persistence site after 26.7.x; `L0.is_processed` is a consumption flag, not a semantic field.
 
 ---
 
 ## Architecture
 
-```
+```text
 Gateway / Agent Loop
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ L0: raw_memories (SQLite)                                    │
 │   sessions · transcripts · attachment_text                   │
-│   consumed by CompressionService (is_processed flag)         │
+│   consumed by CompoundIngestor (is_processed flag)            │
+│   Skips ToolInvocation telemetry rows (insights/dream signals) │
 └─────────────────────────────────────────────────────────────┘
-    │  CompressionService (realtime)
+    │  CompoundIngestor (realtime, per-source groups)
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ L1: notes (Markdown files + SQLite index)                    │
 │   ~/.aleph/memory/note/{agent}/{category}/*.md               │
-│   notes_index · notes_links · notes_fts · notes_vec_{dim}    │
+│   notes_index · notes_links · notes_fts · notes_fts_trigram  │
+│   notes_vec_{768/1024/1536} · notes_vec_map                  │
+│   notes_sources · notes_provenance · notes_graph_cache       │
+│   notes_graph_insights · notes_graph_related                 │
 └─────────────────────────────────────────────────────────────┘
-    │  Dream Daemon (offline, idle-only)
+    │  DreamDaemon (offline, idle-only)
     ▼
    consolidate → drift → lint → decay → digest
     │
     ▼
-   queries: NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
+   NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
 ```
+
+`CompressionService` / `CompoundIngestor` are the only path that writes to L1; `NoteIndexer` is the writer for L1's index, links, FTS, vectors, sources, dedup, and community cache; `DreamDaemon` maintains L1's dedup / links / communities / distillation offline.
 
 ---
 
 ## Core Components
 
-### Storage Layer (SQLite)
-
-The storage layer uses **four separate traits** — not a monolithic `MemoryStore`. Each caller depends only on the capabilities it needs.
+### Storage Traits (4 independent traits, no `MemoryStore`)
 
 | Trait | File | Purpose | Primary Caller |
-|---|---|---|---|
-| `NoteStore` | `src/memory/notes/store.rs` | Notes index, wikilinks, FTS, vector search | `NoteFactRetrieval`, `NoteIndexer` |
-| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | Raw memory CRUD + `is_processed` flag | `CompressionService`, `SessionCompactor` |
-| `DreamStore` | `src/memory/store/mod.rs` | Dream status + daily insights | `DreamDaemon` |
-| `CompressionStore` | `src/memory/store/mod.rs` | Compression-run audit metadata | `CompressionService` |
+|-------|------|---------|-----------------|
+| `NoteStore` | `src/memory/notes/store.rs` | Note index, wikilinks, FTS, vector search, community cache, sources, neighbours, graph | `NoteFactRetrieval`, `NoteIndexer`, `GoalLessonsPromote` |
+| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | Raw memory CRUD + `is_processed` flag + `find_by_path` / `get_raws_by_ids` / `get_raws_by_session` / `get_raw_by_source` | `CompoundIngestor`, `SessionCompactor`, dream `signal` table |
+| `DreamStore` | `src/memory/store/mod.rs` | Dream status + daily insights + `best_health` checkpoint | `DreamDaemon` |
+| `CompressionStore` | `src/memory/store/mod.rs` | Compression-run audit metadata (incl. `feedback_distill` watermark / lesson management) | `CompoundIngestor` |
 
-All four traits are implemented by `SqliteMemoryBackend`, wrapped in:
-
-```rust
-pub type MemoryBackend = Arc<SqliteMemoryBackend>;
-```
+All four traits are implemented by `SqliteMemoryBackend`, wrapped as `MemoryBackend = Arc<SqliteMemoryBackend>`. `SqliteMemoryBackend::new(db_path)` accepts either a directory (auto-creates `memory.db`) or a file; tests use `in_memory()`.
 
 ### sqlite-vec Integration
 
-Vector storage using the sqlite-vec extension with per-dimension virtual tables:
+Vector tables are dimension-keyed virtual tables (initialized in one `db.exec_batch`):
 
 | Table | Dimension |
-|---|---|
+|-------|-----------|
 | `notes_vec_768` | 768 |
 | `notes_vec_1024` | 1024 |
 | `notes_vec_1536` | 1536 |
 
-A `notes_vec_map` table links `(path, agent_id)` pairs to numeric rowids for vec0 table joins.
+The `notes_vec_map` table maps `(path, agent_id)` to the `rowid` for the dimension-matched vec0 table; routing at retrieval time uses the embedder's reported dimension, and unmatched vectors are silently skipped by the reranker rather than producing an error.
 
-### Knowledge Notes
-
-Markdown-based notes with wikilink support:
+### Knowledge Note (`src/memory/notes/note.rs`)
 
 ```rust
-// src/memory/notes/note.rs
 pub struct KnowledgeNote {
     pub title: String,
     pub category: String,
     pub tags: Vec<String>,
     pub facts: Vec<String>,
     pub links: Vec<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
+    pub body: Option<String>,           // full Markdown body (verbatim)
+    pub relations: Vec<Relation>,        // typed edges (Gap A entity graph)
+    pub source_notes: Vec<String>,      // distillation sources
+    pub supersedes: Vec<String>,        // notes this one replaces
+    pub superseded_by: Vec<String>,     // notes that replace this one
+    pub fact_provenance: Vec<FactProvenance>,
+    pub permanent: bool,                // permanent core knowledge (skip decay erosion)
+    pub stale: bool,                    // staleness flag written by NoteDrift
+    pub note_type: Option<String>,      // Obsidian / llm_wiki compatibility
+    pub aliases: Vec<String>,          // Obsidian aliases (wikilink alias resolution)
+    pub created_at: i64, pub updated_at: i64,
     pub content_hash: String,
+    pub confidence: f32, pub severity: Severity,
 }
 ```
 
-**Features:**
-- Wikilink syntax: `[[Note Title]]`
-- Bidirectional link tracking via `notes_links` table
-- Note retrieval by title or content
-- Graph traversal for connected concepts
+**Obsidian compatibility**: vault frontmatter fields (`type` / `title` / `aliases`) are byte-compatible. The reader parses those fields, and the remaining `body` becomes the verbatim segment in `to_markdown()`. `body` is a new field; older notes have only the `facts` / `links` index views (joined into a `Related:` line) — `to_markdown` takes the legacy path for those.
 
-### Transcript Indexer
+**Lifecycle** (`NoteStore::upsert_note` / `remove_note_index`):
+- Write: render via `to_markdown` to a temp file, fsync, rename atomically.
+- Delete: `remove_note_index` first (clears `notes_index` / `links` / FTS / `notes_vec_map`), then `std::fs::remove_file`.
+- `permanent: true` or `tags` containing `permanent` / `pinned` (case-insensitive) → permanent core knowledge; skips `NoteDecay` and `NoteLint.relation_drift`.
 
-Indexes conversation transcripts for exact recall:
+### Dream Daemon (`src/memory/dreaming/`)
 
-```rust
-// src/memory/transcript_indexer/indexer.rs
-pub struct TranscriptIndexer;
+`DreamDaemon` is the **only** process allowed to write L1 in the background (online `CompoundIngestor` is the other). The scheduling loop (`tokio::time::interval(60s)`) checks every minute:
+
+```text
+Startup checks:
+  enabled? → in_window (config)? → idle ≥ 15 min? → is_running unlocked? →
+  should_skip_scheduled_run? (today cancelled ? no : yes run again)
+
+Run:
+  pick strategy (StrategySelector) →
+  pick pipeline (Consolidate | Synthesize | Conserve) →
+  build DreamContext (notes / report / provider / embedder / budget) →
+  run stages → emit DreamReport → update manifest + best_health
 ```
 
-Config: `max_tokens_per_chunk = 400`, `overlap_tokens = 80`, `enable_chunking = true`.
+#### Evolution Gate (`src/memory/dreaming/evolution/`)
 
-### Dream Daemon
+A port of SkillOpt's "textual learning rate" (arXiv 2605.23904): **`EditBudget`** defaults to `32 edits / 256 KiB` per cycle, shared across `NoteConsolidate` (merge), `NoteDecay` (archival), and `distill::Supersede` — the three **destructive** stages. **Additive paths** (new notes / links / strengthen) **do not** go through the budget; growth is never starved by an over-eager destructive stage.
 
-Background memory processing with a **5-stage daily** / **6-stage weekly** pipeline:
+`evaluate_gate(candidate, current, best, ε)` is a pure scalar compare: `candidate > current + ε && candidate > best + ε` → `AcceptNewBest`; `candidate > current + ε` → `Accept`; otherwise `Reject`. `AcceptNewBest` persists the score to `dream_best_health__{agent}` (via `SqliteMemoryBackend`'s `DreamStore`); on restart, the daemon reloads from this value rather than resetting to 0 — otherwise a restart would let the first degraded cycle masquerade as a new best.
 
-**Daily:** `[Consolidate] → [Drift] → [Lint] → [Decay] → [DailyDigest]`
-**Weekly:** `[Consolidate] → [Drift] → [Synthesis] → [Lint] → [Decay] → [DailyDigest]`
+`score_merge_candidate(keeper, absorbed)` gives a local merge-safety score from Jaccard fact overlap + unique-fact ratio + shared leading token. `recall_support(hit_count) = hit / (hit + 3)` (saturating to `[0,1)`) is SkillOpt's cheap held-out-split substitute. `gate_supersede_evidence(candidate_conf, target_hit_count)` projects both onto the same scalar comparison — a high-recall-support (hot) note requires proportionally higher LLM confidence to be superseded.
 
-```rust
-// src/memory/dreaming/mod.rs
-pub fn ensure_dream_daemon();
-pub fn record_activity();
+`MutationGate` detects three pathology classes: merge cycle (same pair merged 3+ consecutive cycles), synthesis oscillation (regex negation patterns), wasted distillation (mature skill-notes with recall rate persistently below 10%); any hit flips to `Conserve` mode and enters cooldown.
+
+#### Dream Pipeline
+
+`DreamPipeline::from_strategy(strategy, dreaming_cfg, decay_policy)` is the **only** stage assembly point (a hand-maintained name list previously drifted and was deleted; 2026-07-24):
+
+| Strategy | Stage sequence | Frequency |
+|----------|-----------------|-----------|
+| `Consolidate` (default) | `lint → review → consolidate → feedback_distill → drift → index_refresher → co_recall_edges → graph_recompute → weave → mention_weave → decay → skill_lifecycle → goal_lessons_promote` | Nightly |
+| `Synthesize` (growth) | `lint → review → consolidate → synthesis → skill_distill → feedback_distill → workflow_proposal → corpus_narrative → daily_digest` | Rare |
+| `Conserve` (defensive) | `lint → review → index_refresher → co_recall_edges → graph_recompute` | After pathology detection |
+
+> Note: `feedback_distill` appears on **both** the `Consolidate` (frequent) and `Synthesize` (rare) paths — but only one strategy runs per cycle, so the LLM distillation work is never executed twice.
+
+`consolidate` uses `batch_consolidate_candidates` (LLM-batch decision for ≤ 20 candidates in the same category; > 20 uses `title_heuristic_candidates`, a pure filename heuristic with no LLM), and a single `consolidate_pair` sends LLM ≤ 600 chars of two notes for a `MERGE / COEXIST / ABSORB_A / ABSORB_B` decision; unrecognized answers default to `COEXIST` (conservative).
+
+`CompoundIngestor::ingest_batch` (`src/memory/notes/ingest/ingestor.rs`) is the main L0 → L1 write path:
+
+```text
+1. SkillExtension registry.pre_compress fires on_pre_compress (optional)
+2. Partition by source (ProfileSynthesizer etc. by source)
+3. ToolInvocation telemetry rows are marked processed directly
+4. Per-source batches:
+   CompoundIngestor::ingest_batch(agent_id, raws, extra_context):
+     retrieve related (≤ N)
+     plan (LLM call: PROMPT)
+     apply (read-modify-write: write_note / delete_note / link / move)
+     record ApplyReport
+5. mark_raw_as_processed (per group, on success)
 ```
 
-### WorkingMemoryAssembler
+- `defer-on-empty-plan`: the batch's LLM produced no writes (ApplyReport all zero), but the row's `created_at` is < 6 h ago → **do not mark processed** so the next cycle retries (protects knowledge from a transiently-failing LLM); after 6 h, give up.
+- `rearm_after_busy`: a claimed continuation lost the session slot to `AgentBusy`; re-arm the same pending marker with `BUSY_RETRY_DELAY = 30s`, **not counting a new iteration**, so the same tick fires again 30s later.
 
-Replaces the legacy `ContextComptroller::arbitrate` path. Produces a `MemoryEnvelope` with explicit slots:
+#### Dream Stages (see `src/memory/dreaming/stages/` for details)
 
-```rust
-// src/memory/assembler/mod.rs
-#[async_trait]
-pub trait WorkingMemoryAssembler: Send + Sync {
-    async fn assemble(
-        &self,
-        query: &str,
-        agent_id: &str,
-        session_id: Option<&str>,
-        budget: AssemblyBudget,
-    ) -> Result<MemoryEnvelope, AlephError>;
+| Stage | Behavior |
+|-------|----------|
+| `NoteLintStage` | Frontmatter fixes (missing `category` / `tags` / `created` / `updated` get backfilled) |
+| `NoteReviewStage` | Drains `notes_review_queue` / `notes_review_archive` (high-risk candidates queued, LLM review async) |
+| `NoteConsolidateStage` | Same-category LLM-driven merge (see above) |
+| `NoteDriftStage` | Walks wikilink neighbours; LLM decides `CONSISTENT / CONTRADICTORY / STALE` for each pair; CONTRADICTORY writes `## Superseded` section, STALE writes `stale: true` |
+| `NoteSynthesisStage` | Runs only when ≥ 5 notes; clusters by category (`dbscan(eps=0.3, min_samples=2)` + Leiden refinement), writes cross-category `synthesis/` notes |
+| `NoteWeaveStage` | Weaves orphan notes (no inbound link) into the graph — the critical fix that breaks the orphan→no-link-weight→archived vicious cycle |
+| `MentionWeaveStage` | Materializes unlinked-mention soft edges |
+| `NoteDecayStage` | Time half-life (default 90 d) adjusted by `recall_signals`; LRU-archive below threshold; **`permanent: true` / `permanent|pinned` tag skips**; < 7 d skipped (too new) |
+| `GoalLessonsPromoteStage` | Goal lessons (`Goal.lessons`) promoted to L1 long-term notes — ring of 5, R2.2 |
+| `IndexRefresherStage` | Rewrites `notes_index` |
+| `GraphRecomputeStage` | 4-signal community-aware recompute + Leiden refinement, writes `notes_graph_cache` + `notes_graph_insights` |
+| `CoRecallEdgesStage` | Materializes behavioral co-recall edges |
+| `SkillDistillStage` | Skill-note → `feedback/notes/` skill |
+| `FeedbackDistillStage` | User corrections (`aleph://correction/`) → `feedback/notes/` skill; High/Critical bypass quorum, bundled + scheduled both run |
+| `WorkflowProposalStage` | Behavioral co-recall mining → `MetaSkill` draft (no LLM, automatic aggregation) |
+| `CorpusNarrativeStage` | LLM writes the daily memory narrative |
+| `DailyDigestStage` | LLM writes the daily insight |
+| `SkillLifecycleStage` | Skill-note Active→Stale (rule-based, default 30 d) |
+
+> `DailyInsight` is keyed by date (`YYYY-MM-DD`); same-day re-runs upsert. The D7 fetch_daily_insight falls back today → yesterday.
+
+---
+
+## Retrieval (`src/memory/retrieval.rs` + `src/memory/note_retrieval/`)
+
+`NoteFactRetrieval::retrieve(query, agent_id, k)`:
+
+```text
+1. FTS5 search notes_fts (or notes_fts_trigram for CJK) → score_f
+2. sqlite-vec KNN on notes_vec_{dim} (matching embedder dim) → score_v
+3. RRF fusion: rrf(d) = 1 / (k + rank), k = 60
+4. Stage pipeline:
+   cosine_rerank → recency_boost → length_normalization →
+   time_decay (exp(-age/half_life)) → hard_min_score (0.35) →
+   mmr_diversity (λ ~ 0.7, penalize near-duplicates)
+5. Return ScoredFact<MemoryFact> with provenance
+```
+
+`SessionManager::recall_recent_messages` (separate path) recalls the N most recent messages of the current session, weighted by `recency_boost`. Both paths merge in `HybridAssembler::assemble` (`src/memory/assembler/`) into a `MemoryEnvelope`:
+
+```text
+MemoryEnvelope {
+  schema_version: "...",
+  query, agent_id, session_id,
+  slots: [
+    { kind: UserProfile,    items: [...] },  // permanent user profile
+    { kind: SessionRecent,  items: [...] },  // current session recent
+    { kind: RelevantNotes,  items: [...] },  // note retrieval result
+    { kind: Feedback,       items: [...] },  // FeedbackFloorLoader (always-on)
+    { kind: RawFragments,   items: [...] },  // raw text fragments
+    { kind: Nudges,         items: [...] },  // prompts
+  ],
+  meta: { ... }
 }
 ```
 
-### MemoryReflector
+`FeedbackFloorLoader` permanently promotes High/Critical severity entries from `aleph://correction/{id}` into the `Feedback` slot, **immune to reranker drop** — the LLM can no longer ignore them, on a par with `UserProfile`. `UserProfileLoader` works the same way (six sections of USER.md + ProfileSynthesizer incremental merge).
 
-Synthesis layer on top of `HybridAssembler` (Spec 2):
+`MemoryReflector::reflect(query, hits, agent_id)` is the Speculation-mode reflection: a single LLM turn answers the user. `MemoryContextProvider` feeds the envelope to `thinker/layers/curated_memory.rs`, which injects the "Memory envelope" section into the SYSTEM prompt.
+
+---
+
+## Knowledge Graph (`src/memory/notes/graph/`)
+
+`load_graph_snapshot(agent_id)` pulls one frame from `notes_index` + `notes_links` (no LLM, O(1) FTS/JOIN):
 
 ```rust
-// src/memory/reflector/mod.rs
-pub struct MemoryReflector;
+pub struct GraphSnapshot {
+    pub nodes: Vec<GraphNodeView>,   // path, category, title, tags, severity
+    pub edges: Vec<GraphEdgeView>,   // from, to, relation, confidence
+}
 ```
 
-Returns a coherent LLM-synthesised answer with cited sources via the `memory_reflect` builtin tool.
+4-signal retrieval weighting (`src/memory/notes/graph/community.rs`): ① note hit rate, ② skill recall, ③ contradiction, ④ duplication; Leiden refinement (`leidenalg` crate, pure-Rust binding) produces stable communities. The four insight classes `isolated` / `sparse` / `bridge` / `surprising` are written to `notes_graph_insights` and queryable through `note_manage`.
 
-### Retrieval Pipeline
+The `note_graph_query` tool: bidirectional BFS, typed-relation edges, supersession forced on the wikilink path so an outdated recall surfaces the corrected version, not the old one. The `memo://note/<path>` URI follows `notes_sources` back to the original raw memory / distillation source. The four provenance levels (`USER.md section / synthesis / distillation / raw`) are exposed by the `memory_trace` tool reading `notes_provenance` and `notes_sources`.
 
+---
+
+## Note-Layer Graph Expansion (§2.16 → §2.17)
+
+- **Hand-rolled Louvain community detection** (`src/memory/notes/graph/community.rs`): no external crate (R3 compliance), 4-signal retrieval weighting via `note_hit_rate` / `skill_recall_rate`
+- **Leiden refinement** as a second community-quality pass over Louvain
+- **`notes_sources` / `notes_provenance` / `notes_graph_cache` / `notes_graph_insights` tables**
+- **`notes_links` lifecycle**: `resolved_by` / `status` / `label` / `edge confidence` (with schema + migration + write)
+- **Graph health insights**: `isolated` / `sparse` / `bridge` / `surprising` (4 classes; exposed to the LLM via the `note_manage insights` action)
+- **`GraphRecomputeStage`**: triggered via `spawn_blocking`, zero LLM calls
+
+---
+
+## SkillOpt Self-Evolution (the Dream's Discipline)
+
+26.7.x dream-side lesson/note-layer evolution is constrained by SkillOpt discipline — a bounded, validation-gated edit loop layered over LLM-proposed edits.
+
+- **Strict-improvement gate** (`evolution/gate.rs::evaluate_gate`): `candidate > current + ε` AND `candidate > best + ε` is accepted; `ε` defaults to `0.01` (health-score domain) to guard against float noise
+- **Best-checkpoint persistence**: every `AcceptNewBest` persists the score to `dream_best_health__{agent}` (via `SqliteMemoryBackend`'s `DreamStore`); on restart the daemon reloads from this value rather than resetting to 0 — otherwise a restart would let the first degraded cycle masquerade as a new best
+- **Edit budget ("textual learning rate")** (`evolution/budget.rs::EditBudget`): default `32 edits / 256 KiB` per cycle, shared across `NoteConsolidate` (merge), `NoteDecay` (archival), and `distill::Supersede` — additive paths (new / link / strengthen) **do not** go through the budget
+- **Recall-evidence gate** (`evolution/evidence.rs::gate_supersede_evidence`): uses recall-support (`hits / (hits + 3)` saturating to `[0,1)`) as a cheap held-out-split substitute; high-recall-support notes require proportionally higher LLM confidence to be superseded
+- **Rejected-edit buffer** (`DistillRejectRecord`): fingerprinted on rejection, dropped immediately on replay (so an LLM cannot re-propose the same bad edit)
+
+---
+
+## `[[wikilink]]` Lifecycle
+
+26.7.7+ note-layer wikilinks:
+
+- Parse `[[wikilinks]]` (with aliases `[Note|alias]`)
+- Resolve through a strategy chain recording provenance (`resolved_by` / `status` / `label`)
+- Rename cascades (including typed relations)
+- Tombstone delete semantics with targeted inbound back-fill
+- The dreaming daemon materializes unlinked-mention soft edges
+
+`NoteDriftStage` calls LLM on every (note, wikilink target) pair to decide `CONSISTENT / CONTRADICTORY / STALE`: CONTRADICTORY writes a `## Superseded` section, STALE writes `stale: true`. The `note_graph_query` BFS path forces supersession to surface the corrected version, never the outdated one.
+
+---
+
+## CJK Trigram Full-Text Search
+
+26.7.15+ crash-safe index + CJK trigram FTS. `notes_fts` uses `unicode61` tokenization (a contiguous CJK run becomes one token; substring queries cannot match). `notes_fts_trigram` uses `trigram` (overlapping 3-char windows) for substring/phrase recall on CJK and other scripts. **Both are kept byte-synchronized**: every write/delete updates both.
+
+---
+
+## Note-Layer Leiden Refinement
+
+26.7.15+: connected communities refined by Leiden — clustering, relation-kind edge tinting, contradiction→supersession closure. A second Leiden-refinement pass on top of the existing Louvain layer.
+
+---
+
+## Retrieval Score Pipeline
+
+`NoteFactRetrieval::retrieve`'s 6-stage scoring (`src/memory/note_retrieval/`):
+
+```text
+Input:  (cosine_sim, recency_age, fact_count)
+ ↓
+1. cosine_rerank   — recompute cosine via the embedder (vs the FTS/vec approximations)
+2. recency_boost    — linear boost for newer notes
+3. length_normalization — length normalisation (avoid long notes dominating)
+4. time_decay       — exp(-age/half_life) (default 90 d half-life)
+5. hard_min_score   — drop everything below 0.35
+6. mmr_diversity     — penalize near-duplicates
+ ↓
+ScoredFact<MemoryFact>[] (with provenance chain)
 ```
-Query → Vector Search (sqlite-vec) → FTS Search (FTS5) → RRF Fusion → Scoring Pipeline → Context Injection
-```
 
-Scoring stages (6 stages):
-1. `cosine_rerank` — Blend vector-search score with fresh cosine
-2. `recency_boost` — Additive boost for recently created facts
-3. `length_normalization` — Penalize very long content
-4. `time_decay` — Exponential decay by age, floor 0.5
-5. `hard_min_score` — Drop candidates below threshold (default 0.35)
-6. `mmr_diversity` — Defer near-duplicate embeddings to tail
+`hybrid_search_notes` uses **RRF** (Reciprocal Rank Fusion, k=60) to combine FTS and vector results; the 6-stage scoring pipeline then refines the fused ranking.
 
 ---
 
-## Memory Hub
+## Global Event Sourcing (Optional)
 
-The desktop **Memory** top-level mode (`/memory`) is the **Memory Hub** — one host that unifies what were
-previously two separate surfaces:
-
-| View | Was | Shows |
-|---|---|---|
-| **Graph view** | the radial "canvas" at `/memory` | Notes as nodes, wikilinks as edges, graph traversal of connected concepts |
-| **Table view** | the faceted "vault" at `/dashboard/memory` | Notes as rows, filtered/paged by category facet |
-
-Both live behind a single shared toolbar:
-
-- **Graph ↔ Table toggle** — switch view without losing context
-- **Unified search** — one query box drives both views
-- **Shared agent selector** — scope both views to the same agent's memory
-
-**Node identity is the note path.** The same note path identifies a graph node and a table row, which makes
-navigation bidirectional:
-
-- A table row's **"View in graph"** highlights the matching node in the Graph view.
-- A graph node's **"View in list"** jumps the Table view to that note's facet/page and opens its drawer.
-
-> The old `/dashboard/memory` route now redirects to `/memory?view=table`.
-
----
-
-## Governance Visibility
-
-Memory **writes stay LLM- and tool-driven** — the Dream Daemon and correction lifecycle mutate notes on their
-own. The Memory Hub adds **read-only observability** panels under **Settings → Memory** so you can see *what*
-the system has been doing without taking the pen out of the LLM's hand:
-
-| Panel | Backed by | Surfaces |
-|---|---|---|
-| **Dream Insights** | `dreaming.list_insights` | Recent daily synthesis notes from the dream daemon + dream-run history |
-| **Corrections** | `memory.list_corrections` | The correction → distillation lifecycle |
-
-Both panels are strictly read-only — they observe, they do not write. To trigger a synthesis pass on demand
-(rather than waiting for idle), the daemon exposes `dreaming.run_now`.
-
-For debugging *why* a fact did or didn't surface, `memory.retrieve_with_trace` runs the real
-`NoteFactRetrieval` scoring pipeline and returns per-stage telemetry (query → candidate pool → BM25 + vector
-scores → RRF fusion → cutoff → ranked).
-
----
-
-## Memory Evolution Specs
-
-Aleph's memory system has evolved through a series of specs:
-
-| Spec | Focus | Status |
-|---|---|---|
-| **Spec 1** | Memory Capture Hooks (PreCompress, Delegation, SessionEnd) | Shipped |
-| **Spec 2** | MemoryReflector — synthesis layer on top of HybridAssembler | Shipped |
-| **Spec 3** | Context Fencing + Memory Modes (Context/Tools/Hybrid) | Shipped |
-| **Spec 4** | Pluggable Memory Extensions (`MemoryExtension` trait) | Shipped |
-| **Spec A** | Curated Hot Memory (`remember` tool, frozen snapshot) | Shipped |
-| **Spec B** | session_search Summarization | Shipped |
-| **Spec C** | Cross-process Safety | Shipped |
-
-See [Memory Evolution](../architecture/memory-evolution) for full details.
-
----
-
-## Deleted Concepts
-
-The following concepts were removed in the **Memory Sovereignty Cleanup** (2026-04-12):
-
-- `MemoryTier` (ShortTerm/LongTerm/Core) — replaced by structural distinction (raw_memories vs notes)
-- `MemoryFact.strength` / `confidence` — deterministic heuristics deleted per LLM sovereignty (R8)
-- `importance_weight` scoring stage — deleted
-- `ValueEstimator` — deleted entirely
-
----
-
-## Module Structure
-
-| Module | Purpose |
-|--------|---------|
-| `ai_retrieval` | AI-powered memory retrieval |
-| `assembler` | Memory assembly for context windows (WorkingMemoryAssembler + HybridAssembler) |
-| `audit` | Memory access auditing |
-| `compression` | Memory compression and compaction |
-| `context` | Context anchors and fact metadata |
-| `context_comptroller` | Context budget management |
-| `curated` | Curated hot memory (Spec A) |
-| `dreaming` | Background dream daemon |
-| `embedding_manager` | Embedding model management |
-| `embedding_provider` | Remote embedding providers |
-| `events` | Memory event sourcing |
-| `extensions` | Pluggable memory extensions (Spec 4) |
-| `ingestion` | Memory ingestion pipeline |
-| `namespace` | Scoped memory namespaces |
-| `noise_filter` | Filter irrelevant memories |
-| `note_retrieval` | NoteFactRetrieval (hybrid search) |
-| `notes` | Knowledge notes (wikilinks) |
-| `query_expander` | Query expansion for retrieval |
-| `reembed` | Re-embedding operations |
-| `reflector` | Memory reflection (Spec 2) |
-| `reranker` | Result reranking |
-| `ripple` | Ripple search expansion |
-| `scoring_pipeline` | Multi-factor scoring |
-| `scratchpad` | Temporary working memory |
-| `session_compactor` | Per-session compaction |
-| `session_resume` | Session restoration |
-| `store` | SQLite storage backends |
-| `transcript_indexer` | Conversation indexing |
-
----
-
-## Safety Properties
-
-- **UTF-8 safe** — `chars().take(n)` for truncation
-- **Lock recovery** — `unwrap_or_else(|e| e.into_inner())`
-- **No SQL injection** — Parameterized queries via rusqlite
-- **Vector bounds** — Cosine similarity clamped to `[-1.0, 1.0]`
-
----
-
-## Code Location
-
-- `src/memory/mod.rs` — Module entry point
-- `src/memory/assembler/` — WorkingMemoryAssembler + HybridAssembler
-- `src/memory/curated/` — Curated hot memory (Spec A)
-- `src/memory/extensions/` — MemoryExtension trait + registry (Spec 4)
-- `src/memory/note_retrieval/` — NoteFactRetrieval
-- `src/memory/reflector/` — MemoryReflector (Spec 2)
-- `src/memory/notes/` — Knowledge notes
-- `src/memory/store/` — SQLite storage backends
-- `src/memory/store/sqlite/` — SQLite + sqlite-vec implementation
-- `src/memory/retrieval/` — Search and ranking
-- `src/memory/dreaming/` — Dream daemon
-- `src/memory/transcript_indexer/` — Conversation indexing
-- `src/memory/events/` — Event sourcing
-
-## See Also
-
-- [Thinker](./thinker) — How memories are injected into prompts
-- [Architecture: Memory](../architecture/memory) — Deep dive into storage implementation
-- [Memory Evolution](../architecture/memory-evolution) — Spec 1-4 and Spec A-C details
+Before 26.7.x, every `NoteConsolidate` / `NoteUpdate` wrote a `MemoryEvent` (skeleton / pulse). **By default, after L0 is fully compressed, events are not replayed** (replay is a P3 candidate; not currently enabled). `MemoryCommandHandler` still accepts events, but the event's `is_processed` flag determines whether the retrieval reflects it — reusing the same consumption mechanism as L0.
 
 ---
 
 ## 26.7.x Addendum
 
-### Note Layer Rounds 2–4
+### Note-Layer Rounds 2–4
 
-26.7.15+ the knowledge-memory note layer matured:
+26.7.15+ knowledge-memory note-layer maturation:
 
-- Category names canonicalized (singular/plural split-brain fixed)
+- Category name canonicalization (singular/plural split-brain fix)
 - Relation vocabulary cleaned of entity-name pollution
 - Connected communities via Leiden refinement
 - Contradiction→supersession closure
-- Stale notes archived
-- Default-off governance gate
+- Stale note archival
+- Default-off governance gate (skill_gate L1 validation)
 
-### Vault Panel Refactor (26.7.27+)
+### Vault Panel Refactor (26.7.27+, 13 `panel/memory` commits)
 
-- Card view (replaces the old table)
-- Batch-action bar
-- Deep-link anchors
-- **Evidence chain** (sequence of other notes that cite this note)
-- Cross-agent selection (atomic consistency)
-- **Provenance** (writer / timestamp / source event)
-- Batch export as a **deliverable**
+`platform/wide/views/memory/` 11 submodules + `platform/phone/memory/` 7 submodules:
+
+- **Card view** (`cards.rs`, three-state shell: `Loading` / `Empty` / `Content`)
+- **Batch action bar** (`batch_bar.rs`): batch archive / export / tag across cards
+- **Dual-track search**: `raw` rows vs `notes` rows; `hits invalidate`; facets chip (`facets.rs`)
+- **Pager + page-size selector** (`pager.rs`): `locate_note` page index correct after switching
+- **Loadable** (`data.rs` + `loader.rs`): all 4 fetch routes go through it; failed fetch cannot represent as empty (regression-pinned)
+- **Toast** (`toast.rs`): per-push seq identity (**module-private slot** to avoid spam)
+- **Stats** (`stats.rs`): scoped to a single agent; `raw_rows_total = filtered_count` (regression-pinned)
+- **Deep links / anchors**: `locate_note` page index correct after page-size switch
+- **Evidence chain / `notes_citing`**: render backlinks into the drawer
+- **Provenance** (`provenance.rs`): writer / timestamp / source event triple
+- **Cross-agent selection** (`selection.rs`): atomic consistency, no lost updates on race
+
+### Memory RPC Behaviour Changes (26.7.27+)
+
+- **`memory.listFacts`**: returns `total` + carries `tags` / `link_count` / `updated_at` fields (**previously not present**)
+- **`memory.search total = filtered count`** (**not** store total; regression-pinned)
+- **`memory.search`** returns raw rows only, **never** returns notes
+- **`memory.graph`** (`graph.query`) reports `null` (not `0`) on scoped fetch failure
+- **Graph endpoints**:
+  - `graph.neighbors` endpoint **retired** (cut; `graph.search` returns a full note row on hit instead)
+
+### Note-Layer Graph Expansion (§2.16 → §2.17)
+
+- **Hand-rolled Louvain community detection** (no external crate, R3 compliance)
+- **4-signal community-aware recall** + Leiden refinement
+- **`notes_sources` / `notes_provenance` / `notes_graph_cache` / `notes_graph_insights` tables**
+- **`notes_links` lifecycle**: `resolved_by` / `status` / `label` / `edge confidence` (with schema + migration + write)
+- **Graph health insights**: `isolated` / `sparse` / `bridge` / `surprising` (4 classes; exposed to the LLM via the `note_manage insights` action)
+- **`GraphRecomputeStage`**: triggered via `spawn_blocking`, zero LLM
 
 ### SkillOpt Self-Evolution
 
-26.7.x: skill evolution is constrained by the SkillOpt discipline — a bounded, validation-gated edit loop layered over LLM-proposed edits.
+26.7.x skill/note-layer evolution is constrained by SkillOpt discipline — a bounded, validation-gated edit loop layered over LLM-proposed edits (strict-improvement gate + best-checkpoint + edit budget + recall-evidence gate + rejected-edit buffer).
 
 ### `note_graph_query` + `memory.retrieve_with_trace`
 
@@ -347,19 +385,19 @@ The following concepts were removed in the **Memory Sovereignty Cleanup** (2026-
 
 ### `memory.list_corrections`
 
-26.7.x: list the correction→distillation lifecycle.
+26.7.x: list the correction records of the correction → distillation lifecycle (consumed by the dream's `FeedbackDistillStage`).
 
 ### `memory.appList`
 
-Lists memory entries associated with an app (filtered by `app_key`).
+List memory entries associated with an app (filtered by `app_key`).
 
-### Real Cost and Token Accounting
+### Real Cost & Token Accounting
 
-26.7.15+: Memory Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort, several retrieval bug fixes.
+26.7.15+: memory Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort, several retrieval bug fixes. `memory.session_recent_messages` and `context_compactor` are two recall paths, with token totals accumulated inside the `MemoryBackend`.
 
 ### See Also
 
-- [Memory System (Architecture)](/docs/en/architecture/memory) — full retrieval architecture
-- [Memory Evolution](/docs/en/concepts/memory-evolution) — Dreaming + SkillOpt
-- [Note-Layer Wikilink](/docs/en/concepts/markdown-utils) — `[[wikilinks]]`
-- [Gateway RPC `memory.*`](/docs/en/gateway/methods/memory) — protocol
+- [Thinker](/docs/en/concepts/thinker) — how memories are injected into prompts
+- [Dream Daemon reference](/docs/en/reference/memory-system) — detailed stages + scheduling
+- [Note-layer Rounds 2–4 commits](https://github.com/rootazero/Aleph/blob/main/src/memory/notes) — key PRs
+- [Dream Daemon source](https://github.com/rootazero/Aleph/blob/main/src/memory/dreaming) — full stages + evolution gate

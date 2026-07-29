@@ -1,240 +1,71 @@
 ---
-title: 协议适配器
-description: 三层协议系统：内置、可配置 YAML 和扩展适配器，支持热重载。
+title: "协议适配器"
+description: "提供商协议与消息频道适配器的边界、注册方式和运行时能力。"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
+Aleph 把模型供应商的 HTTP 协议与消息频道的收发适配分开。协议适配器负责模型请求和流式增量；频道适配器负责入站事件、权限前置、会话路由和出站能力。Telegram、Discord 和 iMessage 不是模型协议，也不共享供应商协议注册表。
 
-## 概述
+## 提供商协议层
 
-Aleph 将**供应商**与**协议**解耦。多个提供商可以共享同一个协议适配器 —— 例如，DeepSeek、Moonshot 和 Groq 都使用 `openai` 协议。添加一个新的 OpenAI 兼容供应商只需要一个预设条目，而不需要新的适配器。
+供应商配置引用协议名称，由协议注册表解析动态 YAML 协议或编译进程序的协议实现。OpenAI 兼容供应商可以复用 `openai` 协议，而不需要为每个供应商复制适配器；原生 Messages、Gemini、OpenAI Responses、Codex/ChatGPT 和 Ollama 等协议保留各自的请求与流解析差异。
 
-这种设计意味着：
+动态协议位于 `~/.aleph/protocols/`，变更经过防抖、解析和原子注册后生效。动态名称优先于内置名称；找不到时返回包含可用协议的错误。协议层不负责 Telegram/Discord/iMessage 的 pairing、allowlist、频道 ID 或消息长度。
 
-- **一个适配器，多个供应商** —— `openai` 协议处理 OpenAI、DeepSeek、Moonshot 等 20 多个供应商
-- **运行时扩展性** —— 通过 YAML 自定义协议，无需重新编译
-- **快速迭代** —— YAML 协议在 600ms 内重载
+## 频道适配层
 
-## 三层系统
+所有频道实现 `src/gateway/channel.rs` 的 `Channel` trait，通过 `ChannelInfo` 暴露 `ChannelCapabilities`。能力标志是承诺：声明支持某项能力的适配器必须实现对应方法，否则默认方法返回 `UnsupportedFeature`，不会虚报成功。
 
-```
-User config.protocol
-    │
-    ▼
-ProtocolRegistry.get(name)
-    │
-    ├── Dynamic protocols (YAML-loaded) ──▶ ConfigurableProtocol
-    │   ├── Minimal mode: base protocol + differences
-    │   └── Custom mode: full template rendering
-    │
-    ├── Built-in protocols ──▶ OpenAI / Anthropic / Gemini / Ollama
-    │
-    └── Not found ──▶ Error with available protocol list
-```
+配置型频道通过 `src/gateway/interfaces/plugin.rs` 的 `ChannelFactory` 注册。`register_channel_plugins` 当前注册 Telegram、Discord 以及其他可配置频道；iMessage 是例外，由频道初始化流程直接构造，故不依赖该插件表。
 
-注册表按优先级顺序解析协议名称：动态协议优先，内置协议兜底，若均不存在则报错。
+## Telegram 边界
 
-## 内置协议
+Telegram 当前适配器使用 teloxide 长轮询，处理消息、附件、回复、编辑式流、状态 reaction、贴纸和 inline callback。它在接口层只做 DM/群组策略与静态 allowlist 的快速分类：
 
-这些是在启动时注册的编译型 Rust 适配器：
+- `open`、`allowlist`、`pairing` 和 `disabled` 由 DM/群组策略决定；
+- 未在静态 allowlist 中、但允许 pairing 的 DM 返回 `NeedsPairing`，随后转交 inbound router；
+- pairing 状态、配对批准和最终访问决定由 router 的 `check_permission` 与 `pairing_store` 单源负责；
+- 频道不再维护自己的 pairing code store、运行时 paired-user 集合、webhook 服务器、session manager 或 draft API。
 
-| Protocol | Adapter | Use Case |
-|----------|---------|----------|
-| `openai` | `OpenAiProtocol` | OpenAI and OpenAI-compatible APIs |
-| `anthropic` | `AnthropicProtocol` | Claude API (native Messages API) |
-| `gemini` | `GeminiProtocol` | Google Gemini API |
-| `openai-responses` | `OpenAiResponsesProtocol` | OpenAI `/v1/responses` API, OpenRouter |
-| `codex` / `chatgpt` | `OpenAiResponsesProtocol` (Codex variant) | ChatGPT subscription via OAuth |
-| `ollama` | `OllamaProvider` | Local Ollama (native implementation) |
+Telegram 声明附件、图片、音频、视频、reaction、回复、编辑和 Markdown/HTML 等能力，单条消息上限为 4096 字节级平台限制，流协议为 edit-based。它不是一个 Webhook 适配器。
 
-每个内置适配器实现两个方法：
+## Discord 边界
 
-- `build_request(payload, config)` —— 构建 HTTP 请求构造器（流式优先：始终设置 `stream: true`）
-- `stream_deltas(response)` —— 将 SSE/流式响应解析为细粒度的 `ProviderDelta` 事件
+Discord 通过已注册的 `DiscordChannelFactory` 接入，处理 guild/DM 消息、slash command、组件按钮、嵌入、附件、回复、编辑式流和 reaction。入站消息、slash command 以及 approval 按钮都执行同一组 DM、guild 和 channel allowlist：
 
-## 可配置协议
+- `dm_allowed` 控制私信；
+- `allowed_guilds` 限制服务器；
+- `allowed_channels` 限制服务器内频道；
+- 组件按钮只把 callback 转成带 `cb_` 前缀的入站消息并交给 router 的 `ApprovalCallbackSink`；Discord 适配器不保存审批状态。
 
-YAML 定义的协议位于 `~/.aleph/protocols/`，支持热重载。系统会监视该目录并自动重新加载定义。
+Discord 声明附件、媒体、reaction、回复、编辑、删除、输入状态和 Markdown，消息上限为 2000，普通附件上限为 25 MB。Bot 权限审计是独立的权限位检查，不等同于 Gateway 的频道 allowlist。
 
-<Callout type="info">
-从文件变更到生效的重载延迟约为 600ms（500ms 防抖 + 解析/注册开销）。
-</Callout>
+## iMessage 边界
 
-### 热重载机制
+iMessage 是一个频道类型、两种传输：
 
-1. `notify-debouncer-full` 监视 `~/.aleph/protocols/`
-2. 检测到文件变更（创建 / 修改 / 删除）
-3. YAML 被解析为 `ProtocolDefinition`
-4. 创建 `ConfigurableProtocol` 适配器
-5. 注册表原子更新
-6. 新请求立即使用更新后的协议
+| 传输 | 入站 | 出站 | 平台边界 |
+| --- | --- | --- | --- |
+| Local | macOS `chat.db` 轮询 | AppleScript | 仅 macOS，需要 Full Disk Access 与 Automation；不能发送 tapback，`reactions` 为 false |
+| BlueBubbles | REST + webhook，可选 catch-up poll | BlueBubbles REST | 任意操作系统；支持附件、回复、reaction；reaction 需要 private-api，编辑和删除不声明支持 |
 
-## 最小模式与自定义模式
+本地 iMessage 轮询会把 add-tapback 转成带 `MessageMeta::Reaction` 的入站上下文，并过滤 remove-tapback；因此“模型能看到用户新增 reaction”不表示本地传输能发送 reaction。BlueBubbles 的 reaction 还会校验 tapback 名称和 private-api 能力。
 
-### 最小模式
+## 地址与路由
 
-扩展现有协议，仅覆盖差异部分：
+频道的 `ChannelId` 标识传输，`ConversationId` 标识平台会话，`ChannelCapabilities` 描述可用操作。Gateway 的 `channel_directory` 只读取路由元数据，`channel_message` 执行发送；DM/群组策略、pairing 和 allowlist 仍由 inbound router 约束，频道适配器不能绕过这些边界。
 
-```yaml
-# ~/.aleph/protocols/my-proxy.yaml
-name: my-proxy
-extends: openai
-base_url: https://proxy.example.com/v1
-differences:
-  auth:
-    header: X-API-Key
-    prefix: "Bearer "
-```
+## 代码位置
 
-最小模式继承基础协议的请求构建和响应解析，仅应用指定的覆盖项。
+- `src/providers/protocols/` — 模型供应商协议与注册
+- `src/gateway/channel.rs` — 频道 trait、地址和能力
+- `src/gateway/interfaces/plugin.rs` — 频道工厂表
+- `src/gateway/interfaces/telegram/` — Telegram 长轮询、策略前置和路由转交
+- `src/gateway/interfaces/discord/` — Discord 消息、组件和权限前置
+- `src/gateway/interfaces/imessage/` — Local 与 BlueBubbles 传输
+- `src/gateway/inbound_router/` — 统一入站权限、pairing 和会话路由
 
-### 自定义模式
+## 另请参阅
 
-通过模板渲染从头定义完整协议：
-
-```yaml
-# ~/.aleph/protocols/exotic-ai.yaml
-name: exotic-ai
-base_url: https://api.exotic.ai
-custom:
-  auth:
-    type: header
-    header: Authorization
-    prefix: "Bearer "
-  endpoints:
-    chat: /v2/completions
-    stream: /v2/completions/stream
-  request_template: |
-    {"model": "{{config.model}}", "messages": [{"role": "user", "content": "{{input}}"}]}
-  response_mapping:
-    content: "$.choices[0].message.content"
-    error: "$.error.message"
-```
-
-自定义模式提供对请求模板和 JSONPath 响应映射的完全控制。
-
-## ProtocolRegistry
-
-`ProtocolRegistry` 将协议名称字符串映射到适配器实现：
-
-```rust
-pub struct ProtocolRegistry {
-    dynamic: RwLock<HashMap<String, Arc<dyn ProtocolAdapter>>>,  // YAML-loaded
-    builtin: RwLock<HashMap<String, ProtocolFactory>>,           // Compiled Rust
-}
-```
-
-查找顺序：
-
-1. **动态协议优先** —— 从 `~/.aleph/protocols/*.yaml` 加载
-2. **内置协议兜底** —— 工厂函数按需实例化适配器
-
-注册表访问：
-
-```rust
-let registry = ProtocolRegistry::global();
-let adapter = registry.get("openai")?;
-```
-
-## 添加自定义协议
-
-添加自定义协议只需三步：
-
-**第一步 —— 创建 YAML：**
-
-```yaml
-name: my-custom-api
-base_protocol: openai
-base_url: https://api.example.com/v1
-headers:
-  Authorization: Bearer ${API_KEY}
-```
-
-**第二步 —— 放入协议目录：**
-
-```bash
-mv my-custom-api.yaml ~/.aleph/protocols/
-```
-
-**第三步 —— 在供应商配置中引用：**
-
-```toml
-[providers.my-provider]
-protocol = "my-custom-api"
-models = ["my-model"]
-api_key = "sk-..."
-enabled = true
-```
-
-## YAML 格式示例
-
-```yaml
-name: my-custom-api          # Protocol identifier (referenced in config.protocol)
-base_protocol: openai        # Base protocol for minimal mode
-base_url: https://api.example.com/v1
-
-# Optional: custom headers applied to every request
-headers:
-  Authorization: Bearer ${API_KEY}
-  X-Custom-Header: my-value
-
-# Minimal mode: override specific fields
-differences:
-  auth:
-    header: X-API-Key
-    prefix: "Bearer "
-
-# Or custom mode: full control
-custom:
-  auth:
-    type: header
-    header: Authorization
-  endpoints:
-    chat: /v1/chat/completions
-    stream: /v1/chat/completions/stream
-  request_template: |
-    {"model": "{{config.model}}", "messages": {{messages}}, "stream": true}
-  response_mapping:
-    content: "$.choices[0].delta.content"
-    error: "$.error.message"
-```
-
-## 相关页面
-
-- [Providers](./providers) —— 供应商预设、故障转移和健康监控
-- [Gateway](./gateway) —— Gateway 如何路由请求到供应商
-
----
-
-## 26.7.x 补充
-
-### Telegram 平行层清理
-
-26.7.21 重大变更：Telegram 适配器**砍掉约 2.6k 行死代码**——之前包含一个**未编译**的 webhook 服务器、一个**未构造**的 session manager、一个**死的** draft API、重复的 status reactions。访问 / 配对 / allowlist 现在**单源到路由器**——频道本地 pairing store 之前从未生效。
-
-### Discord 平行层清理
-
-26.7.21：Discord 中重复的嵌套配置 / account-pool / 解析器层被清理。**仅保留**与路由器对齐的接入路径。
-
-### 跨通道可寻址 / 可达性
-
-26.7.x：配置后的 channel 现在**真的可达且可寻址**——之前有些配置从未生效，单元 `gateway.credentials` / `channels.set_agent` / `channel.pairing_data` 提供完整寻址 + 凭据。
-
-### iMessage
-
-26.7.21+ 增强：iMessage 入站 add-tapback（add-reaction）会上抛为模型上下文，不是被丢弃。
-
-### 统一频道调用
-
-`channels.*` / `channel.*` 命名空间聚合：
-
-- `channel.create` / `delete` / `health` / `list` / `start` / `status` / `stop` / `send` / `pairing_data`
-- `channels.set_agent` / `channels.list` / `channels.status` / `channels.dead_letters` / `channels.redrive_dead_letters`
-- `channel.pairing.approve` / `approved` / `list` / `reject` / `revoke`
-
-### 见另请参阅
-
-- [接口概览](/docs/zh/interfaces/overview) — 通道总览
-- [Telegram](/docs/zh/interfaces/telegram) — 大改后
-- [Discord](/docs/zh/interfaces/discord) — 大改后
-- [iMessage](/docs/zh/interfaces/imessage) — 新通道
+- [Gateway](/docs/zh/concepts/gateway) — WebSocket、路由与频道控制面
+- [MCP 集成](/docs/zh/concepts/mcp-integration) — MCP 传输和能力广播
+- [扩展系统](/docs/zh/concepts/extension-system) — 插件工具和频道扩展

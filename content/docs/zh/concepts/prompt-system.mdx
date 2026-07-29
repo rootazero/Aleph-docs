@@ -1,218 +1,251 @@
 ---
-title: 提示词系统
-description: 29 层 PromptBuilder、节缓存、装配路径和思考模式。
+title: "提示词系统"
+description: "PromptBuilder、PromptPipeline 层，以及可缓存/稳定 与 瞬态/动态 的边界。"
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-## 概述
-
-提示词系统是 Aleph 为 LLM 调用组装上下文的标准方式。它位于 `src/thinker/`，围绕 `PromptPipeline` 构建，共 29 层，将内容注入最终的系统提示词字符串。
-
-唯一的公开入口点是 `thinker::PromptBuilder`，它包装了一个 `PromptPipeline`。旧的 `agent_loop::PromptBuilder` 在 Harness 迁移期间已被移除。
+提示词系统是 Aleph 为每次 LLM 调用组装 system 串的标准方式。它住在
+`src/thinker/`；唯一公开入口点是 `thinker::PromptBuilder`，里面包着一个
+`PromptLayer` 实现的 `PromptPipeline`。没有独立的 `agent_loop::PromptBuilder`——
+agent loop 解散时（Phase 7）那条路径就退了役。
 
 ## 架构
 
 ```
-FlowRequest
-    │
-    ▼
-┌─────────────────────────────────────────┐
+FlowRequest (harness bridge)
+   │
+   ▼
+┌──────────────────────────────────────────┐
 │           PromptBuilder                  │
 │  ┌───────────────────────────────────┐  │
-│  │        PromptPipeline              │  │
-│  │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ │  │
-│  │  │Layer│→│Layer│→│Layer│→│ ...│ │  │
-│  │  │  1  │ │  2  │ │  3  │ │ 29 │ │  │
-│  │  └─────┘ └─────┘ └─────┘ └─────┘ │  │
+│  │        PromptPipeline             │  │
+│  │  按优先级升序注册：                │  │
+│  │  Stable 在先，Dynamic 在后         │  │
 │  └───────────────────────────────────┘  │
-└─────────────────────────────────────────┘
-    │
-    ▼
-System Prompt String
+└──────────────────────────────────────────┘
+   │
+   ▼
+Vec<SystemPromptPart>     ◀── stable {cache: true}, dynamic {cache: false}
 ```
 
-## 层级系统
-
-每一层都实现了 `PromptLayer` trait：
+## Layer trait
 
 ```rust
 pub trait PromptLayer: Send + Sync {
     fn name(&self) -> &'static str;
-    fn priority(&self) -> u32;
-    fn paths(&self) -> &'static [AssemblyPath];
+    fn priority(&self) -> u32;                      // 组装顺序（升序）
+    fn paths(&self) -> &'static [AssemblyPath];     // 哪些入口点会触发它
+    fn supports_mode(&self, mode: PromptMode) -> bool { true }
+    fn stability(&self) -> LayerStability { Stable } // 缓存分区
     fn inject(&self, output: &mut String, input: &LayerInput);
 }
 ```
 
-`PromptPipeline` 按优先级升序执行各层（数字小的优先）。每一层检查 `LayerInput` 上下文并将其内容追加到输出字符串。
-
-### 29 层（按优先级排序）
-
-**稳定区** — 内容很少变化，支持节级缓存（优先级 50–1600）：
-
-| Priority | Layer | Notes |
-|----------|-------|-------|
-| 50 | `SoulLayer` | Identity / personality |
-| 55 | `AgentRoleLayer` | Sub-agent role header + protocol blocks |
-| 75 | `ProfileLayer` | Workspace profile overlay |
-| 100 | `RoleLayer` | Base assistant role |
-| 300 | `EnvironmentLayer` | OS, date, working directory |
-| 400 | `RuntimeCapabilitiesLayer` | Python, Node.js, FFmpeg, etc. |
-| 500 | `ToolsLayer` | Tool definitions (text schema) |
-| 501 | `HydratedToolsLayer` | Semantic-retrieval tool definitions |
-| 550 | `ToolUsageGrammarLayer` | Data-driven tool usage conventions |
-| 600 | `SecurityLayer` | Safety / security guidelines |
-| 700 | `ProtocolTokensLayer` | JSON-RPC protocol tokens |
-| 710 | `HeartbeatLayer` | Session keep-alive instructions |
-| 800 | `OperationalGuidelinesLayer` | Operational rules |
-| 900 | `CitationStandardsLayer` | Citation formatting |
-| 1000 | `GenerationModelsLayer` | Available image/video/audio models |
-| 1050 | `SkillInstructionsLayer` | Active skill instructions |
-| 1100 | `SpecialActionsLayer` | Special action syntax |
-| 1200 | `ResponseFormatLayer` | Response structure |
-| 1300 | `GuidelinesLayer` | General guidelines |
-| 1350 | `ThinkingGuidanceLayer` | Structured reasoning guidance |
-| 1400 | `SkillModeLayer` | Strict skill workflow enforcement |
-| 1500 | `CustomInstructionsLayer` | User custom instructions |
-| 1600 | `LanguageLayer` | Response language |
-
-**动态区** — 每请求重新计算，从不缓存（优先级 1700–1750）：
-
-| Priority | Layer | Notes |
-|----------|-------|-------|
-| 1700 | `InboundContextLayer` | Sender, channel, session metadata |
-| 1710 | `VoiceModeLayer` | Voice-specific response instructions |
-| 1720 | `RuntimeContextLayer` | Current time, session info |
-| 1730 | `IdentityFilesLayer` | SOUL.md, IDENTITY.md workspace files |
-| 1740 | `MemoryAugmentationLayer` | Dual-path memory injection |
-| 1750 | `SessionContextGuideLayer` | Compressed session context guidance |
-
-## 装配路径
-
-每一层声明其参与的 `AssemblyPath` 值。管道在装配时根据所选路径过滤层：
-
-| Path | Description |
-|------|-------------|
-| `Basic` | Minimal system prompt — config + tool list only |
-| `Hydration` | Tools come from semantic retrieval (`HydrationResult`) |
-| `Soul` | Soul-enriched — includes identity / personality layers |
-| `Context` | Context-aware — uses `ResolvedContext` |
-| `Cached` | Pre-cached stable prefix |
-
-<Callout type="info">
-大多数调用的默认路径是 `Soul`，它会包含身份、个性和完整的工具套件。
-</Callout>
-
-## 节缓存
-
-`PromptPipeline` 在首次调用后缓存 `LayerStability::Stable` 层的输出。动态层始终重新计算。29 层中约有 23 层是稳定的。
+只有两种 stability 和两条 assembly path——不再是更多。原集合里的 `Hydration` /
+`Soul` / `Context` 路径在最后调用者消失之后只剩调试工具里的影子，每个都因为
+同一个原因被移除：影子路径是指不在任何地方渲染、又看不出差异的层。今天：
 
 ```rust
-pipeline.invalidate("soul");    // 按名称使某一层失效
-pipeline.invalidate_all();      // 清除所有缓存的节
-pipeline.cache_stats();         // CacheStats { hits, misses, entries }
+pub enum AssemblyPath { Basic, Cached }
+
+pub enum LayerStability { Stable, Dynamic }
 ```
 
-**缓存失效触发器：**
-- 工具列表变更 → 使 `"tools"` 和 `"hydrated_tools"` 失效
-- Soul 变更 → 使 `"soul"` 失效
-- 会话重置 → `invalidate_all()`
+| 路径     | 入口点                                                  | 调用方 |
+|----------|-------------------------------------------------------|--------|
+| `Basic`  | `PromptBuilder::build_system_prompt`               | `src/agents/subagent_spawner`——inline 子代理 prompt，整段字符串，不做缓存切分 |
+| `Cached` | `PromptBuilder::build_system_prompt_cached_with_mode` | `src/orchestrator/harness_bridge/prompt_build.rs`——主循环 prompt，切分为 stable + dynamic |
 
-### 稳定区与动态区
+只有当生产调用方已不再请求某 path 时，该 path 才应该从层上被省掉；
+`src/thinker/prompt_pipeline.rs::default_layers()` 里的注册块是顺序的
+权威，其层数、优先级单调性、Stable 在 Dynamic 之前都被测试锁定。
 
-| Zone | Layers | Behavior |
-|------|--------|----------|
-| **Stable** | Priorities 50–1600 | Cached across turns; recomputed only on invalidation |
-| **Dynamic** | Priorities 1700–1750 | Recomputed every request; never cached |
+## 可缓存 / 瞬态边界
+
+Anthropic 适配器读 `messages` 上的 `cache_control` 标记；`system` 块位于
+它们的**前面**，所以从一次会话的第二次调用起，每个 system 字节都是按 0.1×
+输入价做的 cache READ。把 system 串切成**可缓存**的 stable 前缀和**瞬态**
+dynamic 后缀，就是 prompt 侧的优化点——每次请求变的字节必须落在 suffix 里，
+否则就会作废缓存的前缀。
+
+`build_system_prompt_cached_with_mode(tools, mode)`
+（`src/thinker/prompt_builder/cache.rs`）返回：
+
+```rust
+vec![
+    SystemPromptPart { content: stable,  cache: true  }, // 落在可缓存前缀
+    SystemPromptPart { content: dynamic, cache: false }, // 每请求 suffix
+]
+```
+
+这个切分来自每层的 `stability()` 声明，外加 strategy / 护栏 weld 逻辑——
+按字节镜像 `StrategyLayer` 在恰当区里的包裹（完整 `<strategy>` 正文落在
+stable 侧，`<strategy_reminder>` echo 落在 dynamic 侧）。Anthropic 适配器
+再把 prompt-cache 断点放在 stable/dynamic 边界上。
+
+### token 预算
+
+`TokenBudget::fit_dynamic_suffix`（`src/thinker/prompt_budget.rs`）只在
+**dynamic 侧**超预算时做 trim。stable 前缀是被保护的底——persona / tools /
+security / skills——所以 dynamic 后缀被替换成截断提示也不会让缓存作废。
+
+## 入口点（以及它们的 weld）
+
+### `build_system_prompt`（Basic，子代理 inline）
+
+被 `src/agents/subagent_spawner` 用，为子 harness 拼一个一整段扁串的 system
+prompt。Basic 路径不 thread `ResolvedContext`，所以读 `LayerInput::context`
+的层（例如 `StrategyLayer` 的 guardrails、`SecurityLayer` 的 `session_mode`
+行）在这条路径上保持沉默。两个 post-pipeline **weld** 按字节镜像这些层：
+
+- `with_strategy(body)` ——把正文包成
+  `<strategy>\n{body}\n</strategy>\n\n`，与 `StrategyLayer` 一致。
+- `with_session_mode(mode)` ——追加 `SessionMode::subagent_prompt_line()`，
+  与若有 `ResolvedContext` 时 `SecurityLayer` 会渲染的那一行一致。
+
+### `build_system_prompt_cached_with_mode`（Cached，主循环）
+
+被 `src/orchestrator/harness_bridge/prompt_build.rs` 每回合调用一次。这条
+生产入口把 builder 的每个字段都 thread 进去（identity files、
+curated envelope、agent def、MCP instructions、chain context、resolved
+context、behaviour name、model behaviour delta、iteration cap、session
+summaries），让 Phase 2 拓宽的层（`SecurityLayer`、`OperationalGuidelinesLayer`、
+`ProtocolTokensLayer`、`RuntimeContextLayer`）在 Cached 路径上都能发声。
+这条入口的连线回归已被修过多次——RoleLayer / CitationStandardsLayer /
+AgentRoleLayer / SoulLayer / ProfileLayer 的测试把这些缓存层的 `Cached`
+参与钉死。
 
 ## 思考模式
 
-`PromptMode` 控制在装配期间哪些层参与：
+`PromptMode::{Full, Compact, Minimal}` 控制单次组装里哪些层出声。`Full`
+是默认，按字节复刻旧版 prompt。`Compact` 和 `Minimal` 通过每层的
+`supports_mode` 让较重的指导层闭嘴。Stable/Dynamic 切分——也就是 prompt-cache
+断点——在三种模式下都被保留。
 
-| Mode | Behavior |
-|------|----------|
-| `Full` (default) | All 29 layers participate |
-| `Compact` | Excludes 14 heavy layers (runtime context, environment, runtime capabilities, protocol tokens, heartbeat, operational guidelines, citation standards, generation models, skill instructions, special actions, guidelines, thinking guidance, skill mode, custom instructions) |
-| `Minimal` | Only 5 core layers: soul, tools, hydrated tools, response format, language |
+| 模式      | 静态骨架（实测） | 适用场景                                            |
+|-----------|------------------|------------------------------------------------------|
+| `Full`    | 最大             | 默认；身份、规则、环境、special actions 都给到     |
+| `Compact` | 排出约 15 个较重层 | 延迟敏感的高吞吐调用                                  |
+| `Minimal` | 排出大多数层     | 纯工具调用或 token 预算严重受限的路径                |
 
-在延迟敏感的高吞吐场景中使用 `Compact`。在纯工具调用或 token 预算极度受限时使用 `Minimal`。
+这些是接受自身所删除内容的运维者用的钝器。**没有**任何东西会按模型的价格档
+位或声明窗口自动选模式——这一点被实测过（`aleph-server prompt-size --path cached`，
+2026-07-14），省下的字节对已经在 provider 缓存前缀里跑的字节而言不划算。
+真正的「小窗口」情况由 `TokenBudget::from_context_window` 处理，它按模型实际
+窗口算一个字符预算，超出时只 trim dynamic 后缀。
 
-## 配置
+## 配置面
 
-提示词系统通过 `aleph.toml` 配置：
+管线行为由 `PromptConfig`（`src/thinker/prompt_builder/mod.rs`）驱动：
 
-```toml
-[thinker]
-# Default mode for system prompt assembly
-# Options: "full", "compact", "minimal"
-default_mode = "full"
+| 字段                    | 作用                                                  |
+|--------------------------|-------------------------------------------------------|
+| `language`               | `LanguageLayer`（Stable，@1600）取的语言             |
+| `runtime_capabilities`   | 预格式化的运行时描述（Python / Node / FFmpeg）        |
+| `token_budget`           | dynamic 侧的 `TokenBudget` 修剪                       |
+| `eligible_skills`        | v2 `SkillSystem` scope-aware skill 快照               |
+| `skill_prompt_budget`    | 注入 `<available_skills>` 索引的天花板               |
+| `available_agents`       | `AgentCatalogLayer`（Dynamic）条目                    |
+| `mcp_instructions`       | MCP 服务器指令块                                      |
+| `active_tool_names`      | 用于在缓存路径上保留 Tool-scoped skills               |
 
-# Maximum total characters in assembled prompt
-max_total_chars = 80000
+`PromptBuilder` 上其它 thread-through 的字段（用 builder 方法设置）：
+`agent_def`、`identity_files`、`curated_memory_envelope`、`chain_context`、
+`resolved_context`、`behaviour_name`、`model_behaviour_delta`、
+`iteration_cap`、`extra_files`、`strategy`、`session_mode`、
+`has_session_summaries`。
 
-# Protected priorities that survive budget enforcement
-protected_priorities = [50, 55, 75, 100, 500, 501, 1200]
+> `aleph.toml` 里**没有** `[thinker]` 块。唯一真读配置的字段是
+> `[execution] prompt_mode`，直接反序列化到 `PromptMode`（小写 wire：
+> `full` / `compact` / `minimal`）。
 
-[thinker.caching]
-# Enable section-level caching for stable layers
-enabled = true
+## 两把尺
 
-[thinker.memory]
-# Path to workspace MEMORY.md (relative to workspace root)
-memory_file = ".aleph/MEMORY.md"
-# Maximum lines to read from MEMORY.md
-max_memory_lines = 200
-# Maximum characters for memory injection
-max_memory_chars = 20000
-```
+修剪 prompt 字节是循环往复的事——system prompt 本身也是 Harness，模型越强
+就需要越少方向、越少约束、越少例子。两把尺被编进了 codebase，约束新增字节：
 
-## 关键层
+1. **运行时事实 vs 教强规则。**「这是模型不可能知道的运行时事实」（时间、
+   cwd、tool schema、活跃目标、identity 文件、security context、MCP
+   指令）是**脚手架**，保留。「这是我在教强模型怎么思考」是一条**枷锁』，
+   搬到架构（error-hint 信号、验证器链、stop hooks）里去，别放散文里。
+2. **Pi 之镜**——「若一句话有工具拥有它，把它写进那个工具的 `DESCRIPTION』
+   （随 schema 发，且只发给真能调它的请求），别写进 system prompt。」
+   system prompt 只承载跨工具的取舍、运行时事实、和安全边界——绝不放某个
+   工具自己的契约。
 
-### AgentRoleLayer
+两把尺都在架构层面被检查。prompt-size 分布
+（`ALEPH_PROMPT_SIZE_TRACE=1`）和重复句守卫（`no_sentence_is_stated_twice`、
+`no_environment_fact_is_stated_twice`）让骨架天花板由实测，而不是手编。
 
-替代了旧的 `prompt_sections::resolve()` 函数。当设置了 `LayerInput.agent_def` 时，从 `AgentDef.prompt_sections` 注入角色头部和协议块（例如 `explore_constraints`、`coder_guidelines`、`researcher_protocol`）。
+## 能否开口（结构性守卫）
 
-### ToolUsageGrammarLayer
+一个层列了某条 `AssemblyPath` 但没有任何调用者请求它，它就在哪里都不渲染，
+而这个缺漏是看不见的——影子路径就是层「静默失踪」的机理。
+`src/thinker/prompt_contract.rs` 用三个测试把它落到 `cargo test` 里：
 
-读取 `ToolInfo.usage_hint` 字段（`prefer_for`、`prefer_over`）并生成数据驱动的指导规则，例如 "use `file_read` instead of shell `cat`"。所有约定均来自工具定义 —— 没有硬编码规则。
+- `reachable_layers` ——每个已注册的层必须在至少一个 paradigm 下能开口，否则
+  必须列入 `CONDITIONALLY_SILENT`，并附上点名「什么会话内容会唤起它」的理由。
+- `scaffold_bytes_ratchet` ——prompt-size 天花板由实测，不是手编；只减不增。
+- `no_sentence_is_stated_twice` 与 `no_environment_fact_is_stated_twice`
+  ——句子级和事实级重复守卫（后者按事实的值而不是按句子比对，所以 OS 写成两
+  种方式也算重复）。
 
-### MemoryAugmentationLayer
+同一个 `prompt_contract.rs` 还提供调试命令 `aleph-server prompt-size`，对
+每个 paradigm 报当前实际骨架字节数（取五个中的最大值）。
 
-双路径记忆注入：
-1. **结构化索引** —— 读取 `.aleph/MEMORY.md`，截断至 200 行
-2. **向量检索** —— 来自 sqlite-vec 的 top-K 语义搜索结果
-3. **Wikilink 图谱** —— 兼容 Obsidian 的 `[[note]]` 链接构成可遍历的知识图谱
+## 哪些已经被解散（避免重新引入）
 
-## 相关页面
+管线的注册块从约 40 个层一路修剪到当前集合，以往几轮 prune 的删除项
+（新人有时会想再加回来）：
 
-- [Thinker](./thinker) —— LLM 交互与流式传输
-- [Harness](./harness) —— Think→Act 循环执行
-- [Memory](./memory) —— RAG、事实与检索
+- **文本 schema 工具清单**（`ToolsLayer`、`HydratedToolsLayer`）——
+  两条生产路径都强制 `native_tools_enabled = true`，而消费这种清单的
+  文本包装 parser 在 2026-05-10 已被删除。发现退化为按需 `tool_search`
+  工具（`MODEL_PERCEIVABLE_ECOSYSTEM.md`、R7 静态分区）。
+- **`ToolUsageGrammarLayer`** ——读 `ToolInfo::usage_hint`，repo 全范围
+  没有生产者。它唯一活着的那一句话（并发工具调用）搬到了总会发声的
+  `RoleLayer`。
+- **`GenerationModelsLayer`、`ThinkingGuidanceLayer`、
+  `CustomInstructionsLayer`、`SkillModeLayer`、`HeartbeatLayer`、
+  `ResponseFormatLayer`、`McpToolIndexLayer`、`InboundContextLayer`、
+  `SessionResumeLayer`、`McpResourceIndexLayer`** ——每一项都没有生产
+  输入能让它发声；区分具体是哪一类是 `reachable_layers` 测试的活，
+  不是要背的琐事。
 
----
+源码出处：`src/thinker/prompt_pipeline.rs::default_layers`。
 
-## 26.7.x 补充
+## 代码位置
 
-### Layers 大改（prompt 极简化）
+- `src/thinker/prompt_builder/mod.rs` ——`PromptBuilder`、`PromptConfig`、
+  `SystemPromptPart`
+- `src/thinker/prompt_builder/cache.rs` ——`build_system_prompt_cached_with_mode`
+- `src/thinker/prompt_pipeline.rs` ——`PromptPipeline`、`default_layers`、
+  `execute_stable_with_mode`、`execute_dynamic_with_mode`、`layer_breakdown`
+- `src/thinker/prompt_layer.rs` ——`PromptLayer` trait、`AssemblyPath`、
+  `LayerStability`、`LayerInput`
+- `src/thinker/prompt_mode.rs` ——`PromptMode::{Full, Compact, Minimal}`
+- `src/thinker/prompt_budget.rs` ——`TokenBudget`、`fit_dynamic_suffix`
+- `src/thinker/prompt_contract.rs` ——`reachable_layers`、
+  `scaffold_bytes_ratchet`、`no_sentence_is_stated_twice`
+- `src/thinker/layers/` ——层实现：`soul`、`agent_role`、
+  `curated_memory`、`strategy`、`chain_context`、`mcp_instructions`、
+  `voice_mode`、`profile`、`role`、`runtime_context`、`environment`、
+  `runtime_capabilities`、`tool_runtime_state`、`agent_catalog`、
+  `security`、`protocol_tokens`、`operational_guidelines`、
+  `multi_step_conduct`、`provider_guidance`、`session_budget`、
+  `citation_standards`、`skill_instructions`、`special_actions`、
+  `doctor_repair_hint`、`guidelines`、`identity_files`、`extra_files`、
+  `memory_protocol`、`session_context_guide`、`timer_loop`、
+  `graph_topology`、`standing_goal`、`execution_plan`、`strategy_pointer`、
+  `operating_envelope`、`language`
+- `src/thinker/nudges.rs` ——6 个 `GRACE_NUDGE_*` + warning 字符串；住在
+  `nudges` 是因为 prompt 散文是认知（R9），不是脚手架（R10）
+- `src/orchestrator/harness_bridge/prompt_build.rs` ——主循环调用方
 
-26.7.17/20 多次 **prune-the-prompt** 轮次：死提示层表面被修剪（净约 −3.4k LOC），`scaffold_bytes_ratchet`（实测骨架天花板，只减不增），`no_sentence_is_stated_twice` 三件套约束。**R9「智慧在 Prompt 中」**两把尺已建进架构：
+## 另请参阅
 
-- **第一把尺**：模型做不到的运行时事实 vs 教强模型怎么思考——后者别进 prompt
-- **第二把尺（pi 之镜）**：某句话如果有工具拥有它，写进该工具 `DESCRIPTION`（随 schema 发，且只发给真能调它的请求），别写进 system prompt
-
-`src/thinker/prompt_contract.rs` 的 `reachable_layers`（层必须能开口，否则带理由进白名单）作为强制门。`aleph-server prompt-size` 命令给出当前实际骨架字节数。
-
-### Layers 数量
-
-旧的 6 层心智模型（身份 / 技能 / 内存 / 工具 / 规则 / 对话）已被 ~28 个更细的层替代（位于 `src/thinker/layers/`）：`agent_role`、`chain_context`、`citation_standards`、`curated_memory`、`doctor_repair_hint`、`environment`、`execution_plan`、`extra_files`、`graph_topology`、`guidelines`、`identity_files`、`language`、`mcp_instructions`、`memory_protocol`、`multi_step_conduct`、`operational_guidelines`、`profile`、`protocol_tokens`、`provider_guidance`、`role`、`runtime_capabilities`、`runtime_context`、`security`、`session_budget`、`session_context_guide`、`skill_instructions`、`soul`、`special_actions`、`standing_goal`、`strategy`、`strategy_pointer`、`timer_loop`、`tool_runtime_state`、`voice_mode` 等。
-
-### `session_mode` 在 prompt 中的体现
-
-每个会话模式在 prompt 中加一行缓存稳定的提示行（chat / work / code 各自不同）。
-
-### 见另请参阅
-
-- [思考器](/docs/zh/concepts/thinker) — 实际层
-- [架构红线 R9](/docs/zh/philosophy/redlines#r9-智慧在-prompt-中-intelligence-lives-in-the-prompt) — 两把尺
-- [架构概览](/docs/zh/architecture/thinker) — 层细节
+- [思考器](/docs/zh/concepts/thinker) ——层的宿主
+- [Harness](/docs/zh/architecture/harness) ——prompt 如何被消费
+- [记忆](/docs/zh/concepts/memory) ——recall 消息，curated envelope
+- [架构红线 R9 / R10](/docs/zh/philosophy/redlines) ——两把尺、薄 harness

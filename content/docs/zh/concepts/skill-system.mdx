@@ -1,224 +1,147 @@
 ---
 title: "技能系统"
-description: "具有 SKILL.md 解析、资格评估、提示注入和生命周期管理的领域驱动技能管理。"
+description: "统一的 SkillSystem：负责 SKILL.md 发现、解析、资格判定、提示注入、安装与生命周期。"
 ---
 
-`skill` 模块实现技能系统 v2，一个用于管理技能的领域驱动运行时。它处理技能注册、资格评估、`SKILL.md` 解析、提示注入和生命周期管理。
+`skill` 模块是承载技能加载与统一运行时（一个进程内共享实例）的限界上下文，被代理循环、插件宿主、网关与面板共用，负责解析、来源优先级、eligibility、快照、提示词渲染、依赖安装、状态、使用统计与热重载。
 
-> 对于日常用户，技能通过统一的[扩展商店](/docs/zh/concepts/extensions-store)进行发现和安装，其中技能是三种扩展类型（`Skill`、`Plugin`、`Mcp`）之一，按功能类别浏览。本页描述商店所路由到的底层技能子系统。
+面向用户的 Skill 类型由统一的扩展门面按 Kind 路由到该子系统，并不是与扩展商店并列的第二套实现。
 
-## 设计理念
+## 运行时架构
 
-1. **领域驱动** — 技能是具有清单、资格规则和生命周期状态的一等领域对象
-2. **声明式** — 技能在 `SKILL.md` 文件中声明其能力；系统评估何时使用它们
-3. **可热重载** — 技能可以在不重启的情况下添加、更新或移除
+```text
+SkillSystem
+├── SkillRegistry
+├── SkillSnapshot
+├── EligibilityService
+├── SkillsConfig
+├── InstallExecutor
+├── 状态与使用统计
+└── 广播事件
+```
 
----
-
-## 核心组件
-
-### SkillSystem
-
-应用程序其余部分的统一门面：
+`SkillSystem` 通过 `Arc` 廉价克隆；进程级共享实例同时被 `ExtensionManager` 与内置技能工具使用。
 
 ```rust
 pub struct SkillSystem {
     registry: SkillRegistry,
+    snapshot: SkillSnapshot,
     eligibility: EligibilityService,
-    installer: InstallExecutor,
-}
-
-impl SkillSystem {
-    pub async fn init(&self,
-    ) -> Result<()> { /* ... */ }
-
-    pub async fn rebuild(&self,
-    ) -> Result<()> { /* ... */ }
-
-    pub fn skill_status(&self,
-    ) -> Vec<SkillStatusEntry> { /* ... */ }
+    config: SkillsConfig,
 }
 ```
 
-**确定性：** `skill_status()` 和 `full_status()` 按技能 ID 返回排序结果。
+初始化时扫描已配置根目录，原子地替换注册表并重建快照，过程中发出生命周期事件。单文件重载会替换单条 manifest 并重建快照，无需重启守护进程。
 
-### SkillRegistry
+## 技能清单模型
 
-维护已知技能集：
+当前领域聚合包含：
 
-```rust
-pub struct SkillRegistry {
-    skills: HashMap<SkillId, SkillSnapshot>,
-}
+```text
+SkillManifest
+├── id, name, description
+├── content
+├── scope 与 bound_tool
+├── eligibility
+├── install 规格
+├── invocation 策略
+├── source
+├── primary_env, homepage, emoji
+├── when_to_use
+└── automation
 ```
 
-### Skill Manifest
+Markdown 解析器要求 `name` 与 `description`，接受 `when-to-use` 并映射到 `when_to_use`；不再从 `triggers` 列表构建确定性触发器。`SKILL.md` 正文是模型指令，frontmatter 提供路由与运行时元数据。
 
-从 `SKILL.md` frontmatter 解析：
+`SkillSource` 取值 `Bundled` / `Global` / `Plugin` / `Workspace`，优先级 `Bundled < Global < Plugin < Workspace`。注册表为每个重复 ID 保留最高优先级 manifest；插件技能被发布到共享扫描根，从而进入同一快照与 `skill_read` 解析。
 
-```rust
-pub struct SkillManifest {
-    pub id: SkillId,
-    pub name: String,
-    pub description: String,
-    pub triggers: Vec<String>,
-    pub eligibility: EligibilityRules,
-}
-```
+## 资格判定
 
-### EligibilityService
+`EligibilityService` 按以下顺序对单条 manifest 评估：
 
-确定技能是否可以在当前上下文中使用：
+1. 显式 `enabled: false` 直接返回 `Disabled`。
+2. `always: true` 直接判为 eligible。
+3. 检查当前操作系统。
+4. `required-bins` 列表中所有条目必须能在 `PATH` 中解析。
+5. `any-bins` 非空时至少有一条能解析。
+6. `required-env` 中每个变量都必须存在。
+7. `required-config` 中每个点分路径都必须在配置快照中存在。
 
-```rust
-pub struct EligibilityService;
+`skill_status` 与 `full_status` 返回的 `eligible` / `disabled`、缺失的二进制 / 环境变量 / 配置键等结果按技能 ID 排序，便于客户端确定性消费。
 
-impl EligibilityService {
-    pub fn check(
-        &self,
-        skill: &SkillManifest,
-        context: &ExecutionContext,
-    ) -> EligibilityResult { /* ... */ }
-}
-```
+## 提示词与延迟加载
 
-**不合格原因：**
-- 缺少依赖项
-- 不支持的平台
-- 缺少环境变量
-- 冲突的技能
+只有模型可见的技能会进入提示快照。`scope: disabled` 与 `disable-model-invocation: true` 都会把技能排除在模型目录之外。`scope: system` 为默认；`tool` 与可用工具绑定；`standalone` 仅供显式调用。
 
-### Skill Commands
-
-技能可以暴露 CLI 风格的命令：
-
-```rust
-pub struct SkillCommandSpec {
-    pub name: String,
-    pub description: String,
-    pub args: Vec<CommandArg>,
-}
-```
-
-**解析：** 当多个技能定义相同的命令名称时，工作区技能覆盖捆绑技能（按优先级排序，然后按 ID 决胜）。
-
-### InstallExecutor
-
-从外部源安装技能：
-
-```rust
-pub struct InstallExecutor;
-
-impl InstallExecutor {
-    pub async fn install(
-        &self,
-        spec: &InstallSpec,
-    ) -> Result<InstallResult> { /* ... */ }
-}
-```
-
-**安全：** 对包名称使用严格的允许列表 — 仅允许 `[a-zA-Z0-9\-_./:@+=~]`。阻止空格、引号、重定向、反引号、`$()` 和所有 shell 元字符。
-
----
-
-## 提示注入
-
-技能作为 XML 注入系统提示词：
-
-```rust
-pub fn build_skills_prompt_xml(
-    skills: &[SkillSnapshot],
-) -> String
-```
+提示构建器输出 `<available_skills>` 条目，包含 name、description、可选 `<when>` 提示与正文版本摘要：
 
 ```xml
-<skills>
-  <skill id="code-review" name="Code Review">
-    <triggers>
-      <trigger>review code</trigger>
-      <trigger>check this</trigger>
-    </triggers>
-    <instructions>
-      When reviewing code, check for: ...
-    </instructions>
+<available_skills>
+  <skill>
+    <name>Code Review</name>
+    <description>对变更后的源代码进行审查</description>
+    <when>当代码被编写或修改后</when>
+    <version>sha256:a1b2c3d4</version>
   </skill>
-</skills>
+</available_skills>
 ```
 
----
+模型被要求在使用技能正文前先调用 `skill_read`，发现阶段调用 `skill_list`，并在请求匹配 `<when>` 时主动调用。支撑文件请传入技能相对路径的 `file_name` 由 `skill_read` 读取。
+
+提示预算限制条目数量与完整 description 的字符消耗。超预算时把 description 降级为名称 + 可选触发提示 + 版本，使整库不会被吞没；超出数量上限时附加 `note`，引导模型调用 `skill_list`。
+
+## 安装与配置
+
+技能级启用与 scope 覆盖、依赖偏好以及提示词预算持久化在：
+
+```text
+~/.aleph/data/skills.toml
+```
+
+`InstallExecutor` 挑选当前 OS 的安装规格，支持 `brew` / `apt` / `scoop` / `winget` / `npm` / `uv` / `go` 与 URL 下载。包名与路径参数走严格白名单；下载要求 HTTP/HTTPS URL 且无路径穿越。
+
+内置管理工具：
+
+| 工具 | 职责 |
+|---|---|
+| `skill_list` | 列出模型可见的技能元数据与文件 |
+| `skill_read` | 读取指令或目录内支撑文件 |
+| `skill_status` | 返回 eligibility 与安装状态 |
+| `skill_install` | 安装声明的依赖 |
+| `skill_manage` | 创建、编辑、配置与删除技能 |
+
+`skills.install` 是兼容网关，处理 Git、ZIP 与本地 Markdown 包，并在注册前扫描。统一 `extensions.install` 解析 Hub 的 Skill 条目后通过同一后端路由。
 
 ## 生命周期
 
+```text
+扫描 → 解析 → 注册 → 资格判定 → 快照 → 提示词
+                  └──────────────→ 状态
 ```
-已发现 → 已评估 → 符合条件 → 已加载 → 激活
-                ↓
-            不符合条件
-```
 
-**状态：**
-- `Discovered` — 在文件系统中发现
-- `Evaluated` — 资格已检查
-- `Eligible` — 可以在当前上下文中使用
-- `Loaded` — 已解析并准备就绪
-- `Active` — 当前对代理可用
+目录重扫描原子地替换注册表；`skill_manage` 变更后立即重建快照。使用统计与生命周期数据保存在技能目录的 `.usage.json` 旁路文件，由 `full_status` 报告；捆绑技能不能通过 SkillSystem 删除。
 
----
+当指令正文变更，内容摘要变化；模型在继续使用缓存正文前必须重新 `skill_read`。这让模型可见的元数据保持廉价，同时保证指令新鲜。
 
-## 安全属性
+## 安全边界
 
-- **无命令注入** — 包名称的严格允许列表
-- **确定性排序** — 按 ID 排序技能以产生可重现的输出
-- **生产中无 unwrap** — 所有错误路径返回 `Result`
-- **锁安全** — 使用 `tokio::sync::RwLock`（无中毒）
-
----
+技能扫描与依赖安装是相互独立的控制。安装期扫描器会遍历目录内每个可读文件，受单文件大小限制，结果按 safe / caution / dangerous 分类。信任等级决定是否放行。运行时工具执行仍需经 Aleph 的 scoped tool、审批与沙箱控制。
 
 ## 代码位置
 
-- `src/skill/mod.rs` — `SkillSystem` 门面
-- `src/skill/registry.rs` — 技能注册表
-- `src/skill/eligibility.rs` — 资格评估
-- `src/skill/manifest.rs` — `SKILL.md` 解析
-- `src/skill/installer.rs` — 技能安装
-- `src/skill/commands.rs` — 命令解析
-- `src/skill/prompt.rs` — 提示注入
-- `src/skill/status.rs` — 状态跟踪
-- `src/skill/snapshot.rs` — 技能快照
+- `src/skill/mod.rs` — 共享 `SkillSystem`
+- `src/skill/manifest.rs` — `SKILL.md` 解析器
+- `src/skill/registry.rs` — 优先级感知注册表
+- `src/skill/snapshot.rs` — 模型可见快照
+- `src/skill/eligibility.rs` — eligibility 评估
+- `src/skill/prompt.rs` — XML 提示词与预算
+- `src/skill/installer.rs` — 依赖安装
+- `src/skill/status.rs` — 状态投影
+- `src/skill/guard.rs` — 安装期扫描
 
-## 另请参阅
+## 相关页面
 
-- [技能](/docs/zh/concepts/skills) — 技能的概念性概述
-- [扩展](/docs/zh/concepts/extensions) — 插件架构
-- [ClawHub](/docs/zh/concepts/clawhub) — 技能注册表集成
-
----
-
-## 26.7.x 补充
-
-### SkillOpt 自我演化
-
-26.7.x：技能演化现在受 SkillOpt 纪律约束——bounded、validation-gated edit loop 加在 LLM 提出的编辑之上（`src/memory/note_layer/` 的 `doctor_repair_hint` 支撑）。
-
-### 工具调用
-
-- `skills.install` —— 统一入口（从市场 / zip / 路径）安装
-- `skills.install_dep` —— 安装依赖
-- `skills.remove` —— 卸载
-- `skills.status` —— 当前状态
-- `skills.update` —— 更新
-
-### 触发词
-
-详见 `docs/reference/SKILL_TRIGGER_ENHANCEMENT.md`：
-
-- BM25 ranker
-- 编辑距离补底
-- 前置元数据驱动
-- `tools.defer_mcp_tools` 协调
-
-### 见另请参阅
-
-- [技能](/docs/zh/concepts/skills) — 概念
-- [扩展](/docs/zh/concepts/extensions) — 插件架构
-- [ClawHub](/docs/zh/concepts/clawhub) — 长尾源
-- [网关 RPC `skills.*`](/docs/zh/gateway/methods/skills) — 协议
+- [技能](./skills) — 编写契约与触发提示
+- [扩展](./extensions) — 插件集成
+- [扩展商店](./extensions-store) — 统一安装
+- [能力系统](./capability-system) — 声明、权限与运行时账本

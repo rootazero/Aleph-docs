@@ -131,10 +131,9 @@ ClawHub **不再是一级扩展源**：
 - 降级为长尾
 - 不再维护为独立面板模式
 
-### 完整 RPC
+### 历史 RPC
 
-- `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install`
-- 由 `store-agent` 在 `/extensions` 浏览时读取
+历史上曾提供 `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install` 等 RPC；这些端点已在当前源码中移除，长尾内容通过 Hub 目录的 `via: "clawhub"` 标签与兼容的 `ClawHub` 技能命名空间读取。
 
 ### 见另请参阅
 

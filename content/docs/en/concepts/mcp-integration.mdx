@@ -1,142 +1,65 @@
 ---
 title: "MCP Integration"
-description: "Model Context Protocol integration for external tool servers, supporting stdio, HTTP, and SSE transports with OAuth authentication."
+description: "External MCP servers, transports, capability gates, on-demand discovery, and longest-prefix routing for resources and prompts."
 ---
 
-The `mcp` module integrates Aleph with external MCP (Model Context Protocol) servers. It provides transport abstraction, tool discovery, resource management, and prompt templates from third-party MCP servers.
+Aleph's MCP host manages external server connections; native filesystem, shell, and other built-in capabilities do not belong to `McpClient`. Servers connect over stdio, HTTP, or SSE, and the initialize handshake negotiates the protocol version and records server capabilities.
 
-> An MCP server is one of three **Extension** kinds (`Skill`, `Plugin`, `Mcp`). The Official MCP Registry is a **source** in the [Extensions Store](/docs/en/concepts/extensions-store), where MCP servers are browsed and installed by functional category alongside plugins and skills. This page describes the low-level MCP host; for the everyday install/discovery flow, see the Extensions Store.
+## Connections and Transports
 
-## Design Philosophy
+`ExternalServerConfig` stores the server name, command, arguments, environment, working directory, runtime requirement, and timeout. The connection layer supports:
 
-1. **Transport abstraction** — All MCP transports implement the same `McpTransport` trait
-2. **Runtime detection** — Automatically detects Node.js, Python, and Bun runtimes for local servers
-3. **Security first** — SSRF validation, OAuth token management, and approval workflows
-4. **Unified registry** — External MCP tools are wrapped and registered alongside native tools
+- `StdioTransport` for local subprocesses;
+- `HttpTransport` for remote HTTP POST;
+- `SseTransport` for remote HTTP + SSE with server notifications.
 
-## Architecture
+After initialization, the connection drains paginated `tools/list`, normalizes the tool definition, and registers it under the `<server>:<tool>` namespace. Tool descriptions are untrusted input; schemas are normalized, and MCP annotations conservatively affect scheduling and confirmation without replacing Aleph's security policy.
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                     MCP Integration                         │
-├─────────────────────────────────────────────────────────────┤
-│  McpClient (Registry)                                       │
-│  ├─ ExternalServerConfig (name, command, args, env, cwd)   │
-│  ├─ McpServerConnection (transport + JSON-RPC state)       │
-│  └─ Tool discovery via JSON-RPC `tools/list`               │
-├─────────────────────────────────────────────────────────────┤
-│  Transports (McpTransport trait)                            │
-│  ├─ StdioTransport — Local subprocess via stdio            │
-│  ├─ HttpTransport — Remote server via HTTP POST            │
-│  └─ SseTransport — Remote server via HTTP + SSE            │
-├─────────────────────────────────────────────────────────────┤
-│  Managers                                                   │
-│  ├─ McpResourceManager — Files and data exposed by servers │
-│  ├─ McpPromptManager — Reusable prompt templates           │
-│  └─ McpManagerActor — Orchestration and health checks      │
-├─────────────────────────────────────────────────────────────┤
-│  Auth & Security                                            │
-│  ├─ OAuth token storage and refresh                        │
-│  ├─ SSRF validation on all outbound requests               │
-│  └─ ApprovalHandler — User approval for sensitive ops      │
-└─────────────────────────────────────────────────────────────┘
-```
+## Capability Gates
 
-## Transports
+The MCP initialize result's `ServerCapabilities` distinguishes `tools`, `resources`, and `prompts`. The connection layer calls `resources/list`, `resources/templates/list`, or `prompts/list` only when the server declares the corresponding capability; results are cached and paginated.
 
-### StdioTransport
+The MCP tool bridge dynamically registers capability tools based on the capabilities of healthy connected servers:
 
-For local MCP servers launched as subprocesses. Used when the server command is specified in config (e.g., `npx @modelcontextprotocol/server-filesystem`).
+| Capability | Tools |
+| --- | --- |
+| At least one resource or resource template | `mcp_list_resources`, `mcp_list_resource_templates`, `mcp_read_resource` |
+| At least one prompt | `mcp_list_prompts`, `mcp_get_prompt` |
+| At least one remote HTTP/SSE server | `mcp_login` |
 
-### HttpTransport
+Resource reading and resource discovery share one gate, so a template-only server still receives read and discovery tools. Prompt reading and prompt discovery are likewise paired. Without the corresponding capability, the tools are removed from the registry instead of being shown to the model as guaranteed failures.
 
-For remote MCP servers communicating via HTTP POST. Validates URLs against SSRF allowlists.
+## On-Demand Discovery
 
-### SseTransport
+Resources and prompts are not projected into a prebuilt prompt index. The current path is `mcp_list_resources`, `mcp_list_resource_templates`, and `mcp_list_prompts`: the model discovers first, then passes the exact opaque ID returned to the read tool. A `cat`-guard read-steer routes file reads to native MCP, skill, or plugin paths.
 
-For remote MCP servers using Server-Sent Events for notifications. Supports bidirectional communication with callback handling.
+MCP tools can also be placed in the progressive-disclosure deferred tier by `[tools] defer_mcp_tools` and retrieved through `tool_search`; this is separate from resource/prompt capability gating.
 
-## Tool Discovery
+## Resource, Template, and Prompt Names
 
-When an MCP server connects, Aleph sends a `tools/list` JSON-RPC request. Each discovered tool is wrapped in `McpToolWrapper` and registered in the tool registry alongside native tools.
+Resources and prompts returned by a server are namespaced. Discovery tools build IDs that must be copied verbatim; they must not be shortened or reconstructed. A cached resource is already `<server>:<uri>`, and discovery wraps it with another server prefix so the read tool strips the discovery layer and the client then strips the connection layer before sending the original URI to the server. Resource templates retain their raw RFC 6570 pattern; after filling it, the model reads it using the returned server-qualified form.
 
-```rust
-// Tool wrapper bridges MCP schema to Aleph's tool system
-pub struct McpToolWrapper {
-    pub server_name: String,
-    pub tool: McpTool,
-}
-```
+Server IDs may themselves contain colons. `McpClient` and `mcp_read_resource`/`mcp_get_prompt` use the same longest-prefix rule: candidates are tried from the rightmost colon, selecting the longest registered `<server>:` prefix, and exactly one layer is stripped. If both `gh` and `gh:sub` exist, `gh:sub:file:///x` routes to `gh:sub` rather than being misrouted to `gh`.
 
-## Configuration
+## Configuration and Security
 
-MCP servers are configured in `providers.toml`:
+The MCP manager owns server start/stop, health, capability-change events, aggregation, and configuration reload. Remote connections use configured HTTP/SSE transports and the OAuth login tool; local servers check declared Node, Python, Bun, or other runtimes before launch. Per-server allow/deny filtering runs when `tools/list` enters the registry, so denied tools are neither registered nor advertised; Aleph's own permission, confirmation, and sandbox boundaries still apply at execution time.
 
-```toml
-[[mcp.servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem"]
-env = { HOME = "/Users/alice" }
-```
+The client advertises its wired sampling capability and honors the protocol version returned by the server. Resource and prompt list changes propagate through MCP manager events, allowing the tool bridge to reconcile the registry.
 
-## Security
+## Code Location
 
-- **SSRF validation** — All outbound URLs are validated against allowlists
-- **OAuth token management** — Automatic refresh with `saturating_sub` to prevent integer overflow
-- **Approval workflow** — Sensitive operations require user approval via the approval handler
-- **Health checks** — Periodic server health monitoring with proper lock hygiene
-
-## Key Source Files
-
-- `src/mcp/mod.rs` — Module overview and re-exports
-- `src/mcp/client.rs` — `McpClient` registry and tool discovery
-- `src/mcp/transport/` — Transport implementations (stdio, HTTP, SSE)
-- `src/mcp/auth/` — OAuth and token management
-- `src/mcp/manager/` — Orchestration layer
-- `src/mcp/protocol.rs` — JSON-RPC protocol types
-- `src/mcp/external.rs` — Runtime detection (node, python, bun)
+- `src/mcp/client.rs` — external registry, resource/prompt lookup, and longest-prefix matching
+- `src/mcp/external/connection.rs` — initialization, capability checks, pagination, and caches
+- `src/mcp/protocol.rs` — MCP initialization and capability types
+- `src/mcp/tool_bridge.rs` — capability-gated tool registration
+- `src/builtin_tools/mcp_resource.rs` — resource, template, and read tools
+- `src/builtin_tools/mcp_prompt.rs` — prompt discovery and read tools
+- `src/mcp/resources.rs`, `src/mcp/prompts.rs` — manager interfaces
+- `src/tools/adapters/mcp_adapter.rs` — MCP tool execution adapter
 
 ## See Also
 
-- [Builtin Tools](/docs/concepts/builtin-tools) — Native Aleph tools
-- [Capability System](/docs/concepts/capability-system) — Tool permission framework
-- [Extension System](/docs/concepts/extension-system) — Plugin architecture
-
----
-
-## 26.7.x Addendum
-
-### `McpResourceIndexLayer` Retracted
-
-26.7.17+ convergence: the eager resource/prompt index layer is **retracted**. That layer used single-prefix ids (which didn't round-trip); now replaced with **on-demand discovery tools**.
-
-### On-Demand Discovery Tools
-
-`mcp_list_*` tools (in `src/gateway/handlers/mcp.rs`) let the model discover MCP resources/prompts on demand, instead of blindly reading files. A `cat`-guard read-steer routes to native MCP / skill / plugin reads.
-
-### Protocol-Version Negotiation + Capability Broadcast
-
-26.6.29+:
-
-- Advertises the sampling capability
-- Negotiates the protocol version
-- `max_failures` wired
-- `post_install` field
-
-### `mcp.respond_approval` / `cancel_approval`
-
-26.7.21+: Discord interactive approval buttons; a two-way `ApprovalCallbackSink` flow.
-
-### `mcp_config.*`
-
-26.7.x full RPC:
-
-- `mcp_config.create` / `mcp_config.delete` / `mcp_config.get` / `mcp_config.list` / `mcp_config.update`
-
-### See Also
-
-- [Built-in Tools](/docs/en/concepts/builtin-tools) — native counterpart
-- [Capability System](/docs/en/concepts/capability-system) — permissions
-- [Extension System](/docs/en/concepts/extension-system) — parallel to plugins
-- [Gateway RPC `mcp.*`](/docs/en/gateway/methods/mcp) — protocol
+- [Builtin Tools](/docs/en/concepts/builtin-tools) — native tool registry
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — deferred tools and permission execution
+- [Extension System](/docs/en/concepts/extension-system) — plugin-owned MCP servers

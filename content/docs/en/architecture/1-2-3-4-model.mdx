@@ -241,24 +241,38 @@ Each layer of the 1-2-3-4 model maps to specific directories in the codebase:
 aleph/
 ├── src/                         # 1. CORE (Brain)
 │   ├── harness/                 #    Reasoning: Observe-Think-Act-Feedback
-│   ├── thinker/                 #    Reasoning: LLM interaction
-│   ├── dispatcher/              #    Reasoning: Task orchestration
+│   ├── thinker/                 #    Reasoning: LLM interaction (incl. graph_topology layer)
+│   ├── tool_metadata/           #    Reasoning: tool metadata / risk / unified index
+│   ├── orchestrator/            #    Routing: FlowSpec / FlowRequest / HarnessRunner
 │   ├── routing/                 #    Routing: Session keys
 │   ├── memory/                  #    State: Memory system
 │   ├── resilience/              #    State: Task persistence
+│   ├── session/                 #    State: single-source session_events + actor
 │   ├── gateway/                 #    2. FACE 2 (Gateway server)
 │   │   ├── handlers/            #       RPC method handlers
-│   │   ├── interfaces/          #       Telegram, Discord, iMessage
+│   │   ├── interfaces/          #       Telegram, Discord, iMessage, Slack, ...
 │   │   └── security/            #       Auth, pairing, devices
-│   ├── desktop/                 #    4. NERVE N2 (Bridge client)
 │   ├── mcp/                     #    4. NERVE N4 (MCP client)
 │   ├── tools/                   #    3. LIMB (Tool definitions)
 │   ├── builtin_tools/           #    3. LIMB 1 (Native tools)
-│   └── extension/               #    3. LIMB 3 (Plugin runtime)
-├── apps/
-│   ├── desktop/                 #    3. LIMB 1 (Desktop Bridge)
-│   └── cli/                     #    2. FACE 1 (CLI client)
-└── web/                         #    2. FACE 1 (Leptos/WASM Panel)
+│   ├── extension/               #    3. LIMB 3 (Plugin runtime)
+│   ├── loop_graph/              #    Layered on top: governance topology (NOT part of 1-2-3-4)
+│   ├── looping/ goal/ strategy/ #    Long-task subsystems (loop / goal / strategy)
+│   └── hub/                     #    Aleph Hub single source
+├── desktop/
+│   ├── shell/                   #    3. LIMB 1 (Tauri desktop shell)
+│   │   ├── macos/               #       macOS native bridge (Swift)
+│   │   ├── linux/ windows/      #       Linux / Windows native bridge
+│   │   └── shared/              #       DesktopCapability trait + IPC protocol
+│   └── shared/                  #    4. NERVE N2 shared bridge client
+├── interfaces/
+│   ├── cli/                     #    2. FACE 1 (CLI client)
+│   ├── tui/                     #    2. FACE 1 (TUI client)
+│   └── webchat/                 #    2. FACE 1 (Leptos/WASM panel, served by core via rust_embed)
+├── mobile/                      #    Mobile clients
+├── bindings/                    #    External language bindings
+├── shared/                      #    Cross-crate shared (protocol / logging / ui_logic / client)
+└── plugins/                     #    Plugin examples + SDK
 ```
 
 ## Design Philosophy

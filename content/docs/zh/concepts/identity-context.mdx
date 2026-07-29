@@ -19,67 +19,43 @@ import { Callout } from "fumadocs-ui/components/callout";
    ┌────────────────────────────────────────────┐
    │ 所有者会话:                                 │
    │   metadata = SessionIdentityMeta {          │
-   │     role: Owner,                            │
+   │     role: Role::Owner,                      │
    │     identity_id: "owner",                   │
-   │     scope: None                             │
+   │     scope: None,                            │
+   │     source_channel: "gateway",              │
    │   }                                         │
    │                                             │
    │ 访客会话:                                   │
    │   metadata = SessionIdentityMeta {          │
-   │     role: Guest,                            │
-   │     identity_id: "guest-123",               │
-   │     scope: Some(GuestScope { ... })         │
+   │     role: Role::Guest,                      │
+   │     identity_id: "<guest-uuid>",            │
+   │     scope: Some(GuestScope { ... }),        │
+   │     source_channel: "telegram",             │
    │   }                                         │
    └────────────────────────────────────────────┘
             │
             ▼
-2. 请求处理
-   ExecutionEngine
-   ┌────────────────────────────────────────────┐
-   │ let identity = session_manager              │
-   │     .get_identity_context(&session_key)     │
-   │     .await?;                                │
-   │                                             │
-   │ // IdentityContext {                        │
-   │ //   request_id, session_key, role,         │
-   │ //   identity_id, scope, created_at,        │
-   │ //   source_channel                         │
-   │ // }                                        │
-   └────────────────────────────────────────────┘
+2. 解析为 IdentityContext
+   IdentityContext::owner(session_key, source_channel)
+   IdentityContext::guest(session_key, guest_id, scope, source_channel)
+   IdentityContext::anonymous(session_key, source_channel)
             │
             ▼
-3. Harness 执行
-   HarnessRunner::run(
-       FlowRequest {
-           agent_id, input,
-           identity,  // IdentityContext 在此处传递
-           abort_signal,
-       }, ...
-   )
+3. Harness 执行（Orchestrator::dispatch）
+   FlowRequest { agent_id, input, channel, ... }
+   HarnessRunner::run(session_key, spec, input, sandbox, events, ...)
             │
             ▼
-4. 工具执行
-   Executor::execute(&action, &identity)
+4. 工具执行（ScopedToolService）
    ┌────────────────────────────────────────────┐
-   │ let normalized = normalize_tool_name(...);  │
-   │                                             │
-   │ let result = PolicyEngine::check_tool_permission(
-   │     &identity, &normalized                  │
+   │ let svc = ScopedToolService::new(           │
+   │     registry,                               │
+   │     allowed_tools,                          │
    │ );                                          │
    │                                             │
-   │ match result {                              │
-   │     Allowed => execute_tool(...),           │
-   │     Denied { reason } => ToolError { ... }  │
-   │ }                                           │
-   └────────────────────────────────────────────┘
-            │
-            ▼
-5. 权限检查
-   PolicyEngine::check_tool_permission
-   ┌────────────────────────────────────────────┐
    │ match identity.role {                       │
-   │     Role::Owner => Allowed,                 │
-   │     Role::Guest => { check scope },         │
+   │     Role::Owner => 全量工具集可用,          │
+   │     Role::Guest => scope.allows_tool(name), │
    │     Role::Anonymous => Denied,              │
    │ }                                           │
    └────────────────────────────────────────────┘
@@ -89,165 +65,155 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 | 组件 | 位置 | 职责 |
 |-----------|----------|----------------|
-| **IdentityContext** | `src/identity/` | 不可变的身份快照 |
-| **SessionIdentityMeta** | `src/session/` | 持久化身份元数据 |
-| **PolicyEngine** | `src/security/policy_engine.rs` | 无状态权限检查器 |
-| **SignerKey / OperationLedger** | `src/identity/signer.rs` | 每代理签名密钥 + 签名操作账本 |
-| **IdentityLoader** | `src/gateway/identity_loader.rs` | 网关侧身份加载 |
-| **Orchestrator** | `src/orchestrator/` | 身份注入到 FlowRequest |
+| **`IdentityContext` / `GuestScope` / `Role`** | `shared/protocol/src/auth.rs`（`aleph_protocol`） | 不可变身份快照、访客范围、角色枚举 |
+| **`SessionIdentityMeta`** | `src/gateway/session_manager/mod.rs` | 会话持久化的身份元数据 |
+| **`AgentKeystore` / `AgentLedger` / `LedgerRecord` / `LedgerAction` / `ChainReport`** | `src/identity/{keystore,ledger,record,verify}.rs` | 每代理 Ed25519 密钥与哈希链账本 |
+| **`as_actor` / `current_actor`** | `src/identity/actor.rs` | 子代理/委派场景下的"扮演角色" task-local |
+| **`SessionKey` / `DmScope`** | `src/routing/session_key.rs` | 分层会话键与 DM 隔离策略 |
+| **`Orchestrator` / `HarnessRunner`** | `src/orchestrator/` | 会话键解析、调度、`FlowRequest` 装配 |
+| **`ScopedToolService`** | `src/gateway/execution_engine/` | 在工具执行层强制 `allowed_tools` |
 
 ## 角色类型
 
-Aleph 定义了三个角色层级，决定调用者被允许执行的操作：
+Aleph 定义了三个角色层级，决定调用者被允许执行的操作（`shared/protocol/src/auth.rs`）：
 
 | 角色 | 权限 | 使用场景 |
 |------|-------------|----------|
-| **Owner** | 绕过所有检查 | 具有完全访问权限的服务器所有者 |
-| **Guest** | 范围受限 | 通过邀请获得的临时访问权限 |
-| **Anonymous** | 除非禁用认证否则拒绝 | 未经认证的请求 |
+| **`Owner`** | 跳过工具过滤 | 服务器所有者 |
+| **`Guest`** | 受 `allowed_tools` 约束 | 通过邀请获得的临时访问 |
+| **`Anonymous`** | 默认拒绝 | 未认证请求；`Role` 的 `#[default]` |
 
 ### Owner
 
-所有者角色分配给服务器管理员。所有者会话跳过所有权限检查——当 `role == Owner` 时，`PolicyEngine` 立即返回 `Allowed`。这是适当的，因为所有者已经通过操作系统拥有完全的系统访问权限。
+所有者角色分配给服务器管理员。`IdentityContext::owner` 在构造时填入 `role = Role::Owner`、`identity_id = "owner"`、`scope = None`；执行端会跳过 `allowed_tools` 过滤，由 `ScopedToolService` 透传全部可见工具集。
 
 ### Guest
 
-访客会话通过邀请系统创建。访客接收一个有限的范围，定义他们可以调用哪些工具以及他们的访问何时到期。`PolicyEngine` 验证所有三个维度：角色、范围存在性和工具成员资格。
+访客会话通过邀请系统创建。访客接收一个有限的范围 `GuestScope`，定义他们可以调用哪些工具以及访问何时到期。访客工具路径走 `scope.allows_tool(name)`（`GuestScope::allows_tool`）的精确匹配——不接受通配符或类别前缀。
 
 ### Anonymous
 
-匿名请求被拒绝，除非服务器在禁用认证的情况下运行（开发模式）。在生产环境中，所有请求必须携带所有者或访客身份。
+匿名请求走 `IdentityContext::anonymous`，`Role` 派生为 `Anonymous`（`#[default]`）时同一构造路径被采用；在执行端被拒绝，除非整条调用链在禁用认证的开发模式下运行。
 
 ## GuestScope
 
-当创建访客会话时，它携带一个 `GuestScope`，限定访客可以执行的操作：
+当创建访客会话时，`SessionIdentityMeta` 携带一个 `GuestScope`（`shared/protocol/src/auth.rs`）：
 
 ```rust
 pub struct GuestScope {
-    pub allowed_tools: Vec<String>,  // 访客可以调用的工具名称
-    pub expires_at: Option<i64>,     // Unix 时间戳；None = 无到期时间
-    pub display_name: Option<String>,// 用于日志的人工可读名称
+    pub allowed_tools: Vec<String>,   // 访客可调用的工具名（精确匹配）
+    pub expires_at: Option<i64>,      // Unix 秒；None = 无到期
+    pub display_name: Option<String>, // 审计日志中的人工可读名
 }
 ```
 
 | 字段 | 类型 | 描述 |
 |-------|------|-------------|
-| `allowed_tools` | `Vec<String>` | 访客可以调用的确切工具名称 |
-| `expires_at` | `Option<i64>` | 访问被拒绝后的 Unix 时间戳 |
-| `display_name` | `Option<String>` | 审计日志中显示的友好名称 |
+| `allowed_tools` | `Vec<String>` | 精确匹配的工具名；调用端 `allows_tool` 逐项 `==` 比对 |
+| `expires_at` | `Option<i64>` | Unix 时间戳；`GuestScope::is_expired(now)` 在 ≥ 触发时视为过期 |
+| `display_name` | `Option<String>` | 审计日志中显示的友好名 |
 
 <Callout type="warn">
-访客范围在工具执行级别强制执行，而不是在 API 边界。访客可以发送任何请求，但 `PolicyEngine` 会拒绝不在 `allowed_tools` 中的工具调用。
+访客范围在 `ScopedToolService` 的工具执行层强制执行，而不是在 API 边界。访客可以发送任何请求，但任何不在 `allowed_tools` 中的工具调用在执行层被丢弃。
 </Callout>
 
-## PolicyEngine
+## IdentityContext
 
-`PolicyEngine` 是一个**无状态**的权限检查器。它没有可变状态、没有数据库访问，也没有副作用。它接收一个 `IdentityContext` 和一个规范化的工具名称，并返回 `Allow` 或 `Deny` 决策。
+`IdentityContext` 是「证书权威」模式：构造时拍板权限，全程不可变，所有审计信息内嵌，无需外部查询即可独立校验。
 
 ```rust
-pub struct PolicyEngine;
-
-impl PolicyEngine {
-    pub fn check_tool_permission(
-        identity: &IdentityContext,
-        tool_name: &str,
-    ) -> PermissionResult {
-        match identity.role {
-            Role::Owner => PermissionResult::Allowed,
-            Role::Guest => { /* 检查范围、到期时间、工具列表 */ }
-            Role::Anonymous => PermissionResult::Denied { reason: "auth required" },
-        }
-    }
+pub struct IdentityContext {
+    pub request_id: String,      // crate::ids::next_id()
+    pub session_key: String,
+    pub role: Role,
+    pub identity_id: String,     // Owner="owner" | Guest=<uuid> | Anonymous="anonymous"
+    pub scope: Option<GuestScope>,
+    pub created_at: i64,         // SystemTime::now().duration_since(UNIX_EPOCH).as_secs()
+    pub source_channel: String,
 }
 ```
 
-由于 `PolicyEngine` 是无状态的，它可以在调用链中的任何位置实例化，而无需担心生命周期或同步问题。不可变的 `IdentityContext` 提供了做出决策所需的所有数据。
+工厂方法：
+
+- `IdentityContext::owner(session_key, source_channel)`
+- `IdentityContext::guest(session_key, guest_id, scope, source_channel)`
+- `IdentityContext::anonymous(session_key, source_channel)`
+
+每个工厂都自填 `request_id` 与 `created_at`，因此同一个调用点生成的两个上下文不会共享 `request_id`。
+
+## 身份账本与签名
+
+`src/identity/` 提供「谁能执行 + 发生了什么」两层账本：
+
+- **`AgentKeystore`**（`src/identity/keystore.rs`）—— 每代理 Ed25519 密钥对；公钥/指纹存 `security.db`，私钥放共享 Vault；轮换只退役旧 key，使旧签名仍可校验。
+- **`AgentLedger`**（`src/identity/ledger.rs`）—— 每代理独立的哈希链；每个工具调用（`tools::scoped::dispatch` 是全代码唯一收口）追加一条签名记录。
+- **`verify_chain`**（`src/identity/verify.rs`）—— 返回 `ChainReport` / `ChainFault`，校验哈希链是否完整。
+- **`as_actor` / `current_actor`**（`src/identity/actor.rs`）—— 一个 `tokio::task_local`，让子代理/委派场景下「实际签发者」落到被委派那一层，而不是父级。
+
+注意：账本「忠实记录被赋予的身份」，它本身不是反冒充防御——`agent_id` 仍是 `chat.send` 上调用方提供的字符串，调用级认证通过后仍可冒用任何已存在代理（详见 `docs/reference/AGENT_IDENTITY.md`）。
 
 ## 示例：所有者请求
 
 ```rust
-// 1. 所有者创建会话（默认）
-let session_key = "owner-session-1";
+use aleph_protocol::{IdentityContext, Role};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+let session_key = String::from("agent:main:main");
 let metadata = SessionIdentityMeta::owner("gateway");
 
-// 2. 请求到达
-let identity = session_manager
-    .get_identity_context(session_key, "gateway")
-    .await?;
-// identity.role = Role::Owner
-
-// 3. 执行工具
-let action = Action::ToolCall {
-    tool_name: "shell_exec".to_string(),
-    arguments: json!({"command": "ls"}),
-};
-
-let result = executor.execute(&action, &identity).await;
-// 结果：ToolSuccess（所有者绕过所有检查）
+let identity = metadata.to_identity_context(session_key);
+// identity.role == Role::Owner
+// identity.identity_id == "owner"
+// identity.scope == None
 ```
 
 ## 示例：带邀请的访客请求
 
 ```rust
-// 1. 所有者创建邀请
-let invitation = manager.create_invitation(CreateInvitationRequest {
-    guest_name: "Alice".to_string(),
-    scope: GuestScope {
-        allowed_tools: vec!["translate".to_string()],
-        expires_at: Some(now + 3600),
-        display_name: Some("Alice".to_string()),
-    },
-})?;
+use aleph_protocol::{GuestScope, IdentityContext, Role};
 
-let guest_token = manager.activate_invitation(&invitation.token)?;
-
-// 2. 访客创建会话
-// SessionManager 存储带有访客范围的元数据
-
-// 3. 请求到达
-let identity = session_manager
-    .get_identity_context(session_key, "gateway")
-    .await?;
-// identity.role = Role::Guest
-// identity.scope = Some(GuestScope { allowed_tools: ["translate"], ... })
-
-// 4. 执行允许的工具
-let action1 = Action::ToolCall {
-    tool_name: "translate".to_string(),
-    arguments: json!({"text": "Hello"}),
+let scope = GuestScope {
+    allowed_tools: vec!["translate".to_string()],
+    expires_at: Some(
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 3600
+    ),
+    display_name: Some("Alice".to_string()),
 };
-let result1 = executor.execute(&action1, &identity).await;
-// 结果：ToolSuccess（工具在 allowed_tools 中）
 
-// 5. 执行被拒绝的工具
-let action2 = Action::ToolCall {
-    tool_name: "shell_exec".to_string(),
-    arguments: json!({"command": "ls"}),
-};
-let result2 = executor.execute(&action2, &identity).await;
-// 结果：ToolError { error: "Tool 'shell_exec' not in guest scope" }
+let session_key = String::from("agent:main:telegram:dm:<alice-uuid>");
+let metadata = SessionIdentityMeta::guest(
+    "<alice-uuid>".to_string(),
+    scope,
+    "telegram".to_string(),
+);
+
+let identity = metadata.to_identity_context(session_key);
+// identity.role == Role::Guest
+// identity.scope.allows_tool("translate")   == true
+// identity.scope.allows_tool("bash_exec")    == false
 ```
 
 ## 另请参阅
 
-- [工具系统](/docs/zh/concepts/tool-system) -- 工具如何声明能力和执行
-- [安全概述](/docs/zh/security/overview) -- 纵深防御安全架构
+- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — `ScopedToolService` 怎么收口 `allowed_tools`
+- [安全概述](/docs/zh/security/overview) — 纵深防御安全架构
+- [AGENT_IDENTITY.md](https://github.com/aleph/aleph/blob/main/docs/reference/AGENT_IDENTITY.md) — 身份账本设计
 
 ---
 
 ## 26.7.x 补充
 
-### 委托角色链（Delegated Role Chain）
+### 委托角色链
 
-26.7.26+ 引入委托角色链：
+26.7.26+：`as_actor` task-local 让委派链路上每个被委派角色都有自己的签名身份：
 
 - 身份链路**生命周期内闭包**——委托关系一旦建立就在链内完成所有签发
-- `SignerKey` 由对应的 Agent 持有，私钥不出节点
-- `OperationLedger` 由签名者所属链路回放验证
+- 子代理不再被记到父级账本上；`AgentKeystore` 给每个代理角色独立 key，私钥不出节点
+- `verify_chain` 沿签名者所属链路回放 `LedgerRecord` 校验
 
 ### 失败关闭
 
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时，授权**失败关闭**而不是开放。`/sandbox.command_policy` 硬底优先级最高，不能被任何 `exec_tier` 拉低。
+26.7.21 强化：策略文件缺失、无法读取或无法解析时，授权必须**失败关闭**而不是开放。`[sandbox.command_policy]` 硬底优先级最高，不能被任何 `exec_tier` 拉低。
 
 ### 真实客户端 IP
 

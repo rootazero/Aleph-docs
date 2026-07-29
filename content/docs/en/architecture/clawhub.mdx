@@ -131,10 +131,9 @@ ClawHub is **no longer a first-class extension source**:
 - Demoted to long-tail
 - No longer maintained as a separate panel mode
 
-### Full RPC
+### Historical RPCs
 
-- `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install`
-- Read by the `store-agent` when browsing `/extensions`
+Historically `clawhub.search` / `clawhub.browse` / `clawhub.detail` / `clawhub.install` were exposed. Those endpoints are removed from the current source; long-tail content is now reached through the Hub catalog's `via: "clawhub"` provenance and the compatible `ClawHub` skill namespace.
 
 ### See Also
 

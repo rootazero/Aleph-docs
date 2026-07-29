@@ -1,142 +1,253 @@
 ---
 title: "Agent Components"
-description: "Core event handler components for the agentic loop: intent analysis, task planning, tool execution, loop control, session recording, and compaction."
+description: "Module map of the Think→Act loop — where the 12 Harness modules live, how they cooperate, and why there is no monolithic `components` directory."
 ---
 
-The `components` module provides the 6 core components of Aleph's agentic loop. Each component is an independent event handler that subscribes to specific event types and publishes outcomes to the event bus.
+Aleph's Think→Act loop is **not** an "event-handler bus with 6 typed handlers".
+That mental model does not exist in the codebase — there is no `src/components/`
+directory. Each subsystem owns its own crate module; they cooperate through the
+`AgentHarness` boundary, not through a shared event bus. The split is
+deliberate, rooted in the harness-dissolution work (2026-04 to 2026-07), and
+encoded as R3 / R10 / R11 in the design philosophy.
 
-## Design Philosophy
+| # | Module                  | Aleph home                                  | Notes |
+|---|-------------------------|---------------------------------------------|-------|
+| 1 | Orchestration Loop      | `src/harness/`                              | **薄核心** — 12 文件/棘轮行数预算 |
+| 2 | Tools                   | `src/tools/` + `src/builtin_tools/`         | 吸收了原 harness 的 exec_context |
+| 3 | Memory                  | `src/memory/`                               | 不动（最干净的一块） |
+| 4 | Context Management      | `src/context/{budget,compact}/`             | 5 处合并到 1 处 |
+| 5 | Prompt Assembly         | `src/thinker/`                              | 历史名保留，不强行改名 |
+| 6 | Tool Calling            | `src/tools/calling/` + `src/providers/bridge.rs` | |
+| 7 | State & Checkpointing   | `src/session/`                              | `SessionEventStore` + `replay()` 已经是事件溯源框架 |
+| 8 | Error Handling          | `HarnessError` + 各域 typed error            | 跨模块，无单一容身处 |
+| 9 | Guardrails              | `src/{security,sandbox,approval,pii}/`      | 4 域分立，不强搞 facade |
+| 10 | Verification & Feedback | `src/verification/`                         | 新建，吸收 stop_hooks |
+| 11 | Subagent Orchestration  | `src/{agents,teams,orchestrator,group_chat}/` | 4 域职责正交，不合并 |
+| 12 | Initialization & Env    | `src/init_unified/` + `src/bin/aleph-server/commands/start/` | 见 `docs/reference/BOOT_ASSEMBLY.md` |
 
-1. **Event-driven composition** — Each component is an `EventHandler` with typed subscriptions
-2. **Clean separation** — Components communicate only via events, no direct coupling
-3. **Recoverable state** — Session recording persists state to SQLite for crash recovery
-4. **Token awareness** — Session compaction manages context window limits
+## The Thin Core — `src/harness/`
 
-## Component Overview
+The orchestration loop directory is bounded to **12 files** and a ratchet-tested
+line ceiling (`src/harness/CLAUDE.md`, `src/harness/tests/budget.rs`). Every
+file beyond the 12 must answer a 3-question gate before it lands.
 
+| File                          | Responsibility |
+|-------------------------------|----------------|
+| `mod.rs`                      | Re-exports `AgentHarness` |
+| `agent.rs`                    | `AgentHarness` struct + top-level `run()` + stalled-turn grace slot |
+| `deps.rs`                     | `HarnessDeps` DI container + `StallConfig` / `StallTracker` |
+| `trait_def.rs`                | `HarnessError`, `TurnState`, `TurnStep` |
+| `callback.rs`                 | `HarnessCallback` + `NoopHarnessCallback` |
+| `chain_context.rs`            | Subagent call-chain position relay |
+| `trace.rs`                    | Loop `LoopTraceEvent` collection |
+| `trace_sink.rs`               | `TraceSink` output abstraction |
+| `agent/think.rs`              | Think: LLM call + guards + verifier pass |
+| `agent/act.rs`                | Act: tool execution + resource-domain parallel scheduling |
+| `agent/guardrails.rs`         | Input/output/tool-call guardrail mounts |
+| `agent/prompt.rs`             | Per-turn message assembly |
+
+The harness does **not** own: class of intent, tool relevance scoring,
+completion judgement, content moderation, error-recovery strategy, or provider
+failover (that's wrapped *inside* `providers::FailoverProvider` so the loop sees
+one provider and never knows failover exists). Those responsibilities are the
+LLM's, not the loop's.
+
+### Loop state
+
+Two-type state machine in `src/harness/trait_def.rs`:
+
+```rust
+#[must_use]
+pub enum TurnState { Continue, Done }
+
+#[must_use]
+pub struct TurnStep {
+    pub state: TurnState,
+    pub executed: usize,
+    pub vetoed: bool,
+    pub split_child: Option<SessionId>,
+}
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      Agentic Loop                            │
-├──────────────────────────────────────────────────────────────┤
-│  InputReceived                                               │
-│       │                                                      │
-│       ▼                                                      │
-│  ┌──────────────┐   multi-step?   ┌──────────────┐          │
-│  │IntentAnalyzer│ ──────────────► │ TaskPlanner  │          │
-│  │              │   simple        │              │          │
-│  │  Complexity  │ ──────────────► │ Decompose    │          │
-│  │  detection   │                 │ into steps   │          │
-│  └──────────────┘                 └──────────────┘          │
-│                                          │                   │
-│                                          ▼                   │
-│  ┌──────────────┐   success     ┌──────────────┐          │
-│  │LoopController│ ◄──────────── │ ToolExecutor │          │
-│  │              │   failure     │              │          │
-│  │  Protection  │ ◄──────────── │ Retry logic  │          │
-│  │  mechanisms  │               │ Timeout      │          │
-│  └──────────────┘               └──────────────┘          │
-│       │                                                      │
-│       ▼                                                      │
-│  ┌──────────────┐   persist     ┌──────────────┐          │
-│  │SessionRecorder│ ──────────── │SessionCompactor│         │
-│  │              │               │              │          │
-│  │  SQLite      │               │  Token limit │          │
-│  │  persistence │               │  management  │          │
-│  └──────────────┘               └──────────────┘          │
-└──────────────────────────────────────────────────────────────┘
-```
 
-## IntentAnalyzer
+`TurnState` has **two** variants, not five. The richer
+`Restart | Act | Finalize` split shown in some drafts was collapsed when the
+`restart` arm turned out to be reachable from one site only — represented now as
+an `HarnessError` early-return, not a separate state.
 
-Detects input complexity for routing decisions. Uses rule-based keyword matching (Chinese and English multi-step keywords) to identify whether a request needs multi-step planning.
+## Prompt Assembly — `src/thinker/`
 
-**Subscribes to**: `InputReceived`  
-**Publishes**: `PlanRequested` (multi-step) or `ToolCallRequested` (simple)
+Layered system-prompt builder. See [Prompt System](/docs/en/concepts/prompt-system)
+for the layer pipeline, the two entry points (`Basic` / `Cached`), and the
+cacheable/transient boundary. The harness's `agent/prompt.rs` calls
+`PromptBuilder::build_system_prompt_cached_with_mode` exactly once per turn.
 
-## TaskPlanner
+## Tools — `src/tools/` + `src/builtin_tools/`
 
-Decomposes multi-step requests into executable tasks. Identifies parallel groups and dependency chains for optimal execution order.
+`ToolService` is the registry and the dispatch entry point. Three subsystems:
 
-**Key feature**: Transitive depth computation for correct parallel group identification. A sequential chain A→B→C produces depths 0, 1, 2 (not 1, 1, 1).
+- **Scoping** (`src/tools/scoped/`) — runtime allowlist / deny / health
+  filtering per request. Mechanical `retain` operations, not LLM-influenced.
+- **Resource claims** (`src/tools/resource_claim.rs`) — each tool self-declares
+  one of `Shared`, `Exclusive{Global}`, `Exclusive{Paths}` so the Act phase
+  knows what can run in parallel. Inter-claim serial, intra-claim concurrent.
+- **Result spill** (`src/tools/{turn_budget, result_store}.rs`) — Layer 3
+  spill-to-disk for oversize tool outputs; session-scoped `ToolResultStore`.
+- **Calling** (`src/tools/calling/`) — schema-constrained tool-call
+  parsing/serialization; the harness's `act` consumes `NativeToolCall` from
+  the provider adapter.
 
-## ToolExecutor
+Concurrent tool batching happens inside the harness's `act` step, not in a
+separate dispatcher; see `parallel_tool_concurrency` on `HarnessDeps`.
 
-Executes tools with retry logic and timeout handling. Wraps tool calls with error recovery and result formatting.
+## Session — `src/session/`
 
-**Retry policy**: Configurable max attempts with exponential backoff.
+Append-only event log. The frame is **event sourcing**, not snapshotting —
+`SqliteEventStore` plus `InProcessActorSessionService`, building replay via
+`get_events(session, Some(seq), None)`. The harness reads `from: watermark+1`
+where `last_prompt_seq` records the seq of the last event covered by the
+current turn's prompt. There is no separate checkpoint subsystem: Git-style
+trait sketches for checkpointing have been retracted as dead abstractions
+(P5 retraction).
 
-## LoopController
+## Memory — `src/memory/`
 
-Controls the agentic loop with protection mechanisms:
+Three storage kinds, kept separate:
 
-- **Max iterations** — Prevents infinite loops
-- **Timeout** — Per-iteration time limit
-- **Error budget** — Stops after N consecutive failures
-- **Yield points** — Allows cancellation between steps
+- **Facts DB / vector search** — `src/memory/` core
+- **Curated memory envelope** — pre-rendered `<CuratedMemory>` block
+  (`CuratedMemoryLayer` @60, Stable), threaded into every `LayerInput` so the
+  prompt-cache stays warm
+- **Recall message** — per-query semantic recall travels as a **transient
+  trailing user message** (`HarnessDeps::recall_context`), never as part of
+  the system prompt. Putting it in the system prompt re-keyed the
+  conversation-prefix cache every run; placing it at the message tail costs
+  only itself.
 
-## SessionRecorder
+## Context Management — `src/context/`
 
-Persists session state to SQLite:
+Two complementary subsystems:
 
-- Agent events with timestamps
-- Task execution records
-- Tool call history
-- Token usage statistics
+- **`src/context/budget/`** — `ContextBudget`, `PreflightPipeline`,
+  `pressure::*`. Surfaces a `LoopDirective` (`CompactToFit`, `SplitSession`,
+  …) the harness carries out mechanically.
+- **`src/context/compact/`** — `ContextCompactor`,
+  `directive.rs` (dispatcher), `rescue.rs` (reactive rescue host),
+  `pipeline.rs`, `plan_carry.rs`. Reactive rescue is bounded by
+  `MAX_REACTIVE_COMPACT_ATTEMPTS` in `context/compact/rescue.rs`, and the
+  rescue slot in the harness reads that constant via a 52-line adapter —
+  `rg "crate::harness" src/context/` returns empty (seam lives in context;
+  state lives in harness).
 
-**Error handling**: Database errors are propagated via `RecorderError`, not silently swallowed.
+## Orchestrator — `src/orchestrator/`
 
-## SessionCompactor
+Builds the `AgentHarness` for each run:
 
-Manages context window limits through compaction:
+- `resolver.rs` — `RoutingOverrides`, `MAX_FLOW_DEPTH`
+- `flow_spec.rs` — `FlowSpec`, `FlowOverrides`, `SessionStrategy`
+- `flow_registry.rs` — registry of `FlowSpec`s per `agent_id`
+- `dispatch.rs` — `Orchestrator`, `FlowHandle`, `FlowOutcome`,
+  `FlowRequest`, `FlowStreamEvent`, `HarnessRunner`, `TerminateReason`
+- `harness_bridge/` — `AgentHarnessRunner` (the bridge from flow dispatch
+  down to harness construction)
+- `deps_builder/` — helpers that assemble `HarnessDeps`
+- `sandbox_factory.rs` — sandbox-per-flow policy
 
-- **Token tracking** — Monitors cumulative token usage
-- **Model limits** — Per-model context window limits with longest-prefix matching
-- **Pruning** — Removes oldest turns when approaching limits
-- **Summarization** — Replaces pruned content with compact summaries
+The orchestrator is a **DI assembler**, not a coordinator. It owns one
+decision per run (which `AgentDef` + which `FlowSpec` to honour); after that,
+control flows into the harness.
 
-## Key Source Files
+## Subagent Surfaces — Kept Separate on Purpose
 
-- `src/components/mod.rs` — Component re-exports
-- `src/components/intent_analyzer.rs` — Complexity detection
-- `src/components/task_planner.rs` — Task decomposition
-- `src/components/tool_executor.rs` — Tool execution with retry
-- `src/components/loop_controller.rs` — Loop protection
-- `src/components/session_recorder/` — SQLite persistence
-- `src/components/session_compactor/` — Token management
+Originally planned as a single `SubagentOrchestrator` trait with `Fork` /
+`Handoff` / `Graph` modes. Withdrawn (P5 retraction) as a zero-consumer
+abstraction — there were no call sites asking for that trait. Today the four
+surfaces coexist orthogonally:
+
+- `src/agents/` — `SubagentTool`, `AgentRuntime`, registry, subagent spawner
+- `src/teams/` — team coordinator
+- `src/orchestrator/` — multi-agent dispatch (already covered above)
+- `src/group_chat/` — group chat shared-nothing broadcast
+
+Each owns a distinct responsibility. There is no facade.
+
+## Verification & Feedback — `src/verification/`
+
+`VerifierChain` is consulted between Think and Act every iteration
+(`src/harness/agent/think.rs::run_verifiers`). Composition:
+
+- `StopHookVerifier` — preserves pre-Stage 6a "veto before Done" semantics
+- `ToolLoopVerifier` — detects `tool_use` death-loops
+
+A `Veto` forces one extra Continue so the model can react; it's not a hard
+stop. There is also `ModelRobustnessProfile` per model id, threaded via
+`HarnessDeps.robustness_profile`, so verifier sensitivity scales with model
+behaviour.
+
+## Guardrails — 4-Domain Split
+
+`src/{security, sandbox, approval, pii}/` — four separate domains rather than
+one `Guardrail` facade. The harness mounts each at the appropriate seam:
+
+- **Input guardrails** — `agent/guardrails.rs` mounts the
+  `GuardrailRegistry::screen_session_input`; mod runs on historical messages
+  too (a `Block` decision is rewritten as redaction, so immutable history
+  cannot brick a session).
+- **Output guardrails** — `agent/think.rs`, after streaming finalize but
+  before commit; max-output-tokens resumption concatenates segments.
+- **Tool-call guardrails** — `agent/guardrails.rs::apply_tool_call_guardrail`,
+  outcomes `Pass | Sanitize(Value) | Block`. Applied sequentially in `act`'s
+  PASS 0, before the parallel `join_all` (Pi-style validate-then-execute).
+
+`safety.rs`, `truncation_recovery.rs`, `streaming_bridge.rs` are also part of
+the harness's safety surface but live inside `src/harness/agent/`.
+
+## Initialisation & Environment — `src/init_unified/`
+
+See [Boot Assembly](/docs/en/architecture/boot-assembly). Five-phase setup
+runs at `InitializationCoordinator` (`src/init_unified/coordinator.rs`,
+re-exported at `src/lib.rs:99`); runtime boot wired through
+`src/bin/aleph-server/commands/start/` (5 sub-builders, ~6,194 LOC total).
+
+## What does NOT exist (and why this list is short)
+
+The legacy `src/components/{intent_analyzer,task_planner,tool_executor,
+loop_controller,session_recorder,session_compactor}.rs` directory and its
+five (or six) `EventHandler`-style subscribers were dissolved as part of the
+2026-04 → 2026-07 harness dissolution wave:
+
+- Intent classification is the LLM's job (R8), not a rule-based analyser.
+- Task DAG planning in the loop breaks ReAct (R8 / R10 #1).
+- Tool execution lives at `src/tools/scoped/dispatch.rs::execute_inner` — the
+  loop only knows `act(call)`.
+- Loop protection (`max_iterations`, `consecutive_failure_cap`, per-tool
+  timeouts, verifier veto) is configuration on `HarnessDeps`, not a
+  component.
+- Session recording is `src/session/SqliteEventStore`, an event log — the
+  same thing with a different name.
+
+Deleting the `src/components/` facade removed ~3,000 LOC of dead subscribers
+without changing any external behaviour.
+
+## Code Locations
+
+- `src/harness/` — Think→Act driver (12 files; budget ratcheted)
+- `src/thinker/` — PromptBuilder + PromptPipeline layers
+- `src/tools/`, `src/builtin_tools/` — `ToolService`, scoping, resource claims
+- `src/session/` — `SessionService`, `SqliteEventStore`
+- `src/memory/` — facts DB, vector search, recall message assembly
+- `src/context/{budget,compact}/` — pressure sensor + compactor + reactive rescue
+- `src/verification/` — `VerifierChain`, `StopHookVerifier`, `ToolLoopVerifier`
+- `src/{security,sandbox,approval,pii}/` — guardrail domains
+- `src/orchestrator/` — `Orchestrator`, `AgentHarnessRunner`, `HarnessDeps` builders
+- `src/agents/` — `SubagentTool`, `AgentRuntime`, registry
+- `src/teams/`, `src/group_chat/` — multi-agent surfaces
+- `src/init_unified/` — `InitializationCoordinator` + boot-time wiring
 
 ## See Also
 
-- [Event System](/docs/concepts/event-system) — Event bus architecture
-- [Agent Runtime](/docs/concepts/agent-runtime) — Runtime configuration
-- [Thinker](/docs/concepts/thinker) — Prompt construction
-- [Task Scheduling](/docs/concepts/task-scheduling) — Task queue
-
----
-
-## 26.7.x Addendum
-
-### Act-Stage Parallel Groups
-
-The pre-26.7.x serial execution is now replaced by **resource-claim bucketed** parallelism:
-
-- Tools declare `Shared` / `Exclusive{Global}` / `Exclusive{Paths}` three-state resource claims
-- Resource-scope parallel dispatch (**intra-group** concurrent, **inter-group** serial) — not a task-dependency graph
-- `batch_parallelizable` checks whether calls admit parallel dispatch
-- Serial mode only falls back on single call / parallelism disabled / duplicate call / no parallel group
-
-### Guardrail + Parallel
-
-26.7.x: serial fallback no longer triggers from a wired guardrail registry. The tool-call guardrail (Block / Sanitize / Pass) is applied sequentially in `act_parallel`'s PASS 0 — the same prep/execute split Pi uses (sequential validate + approval, then concurrent execute).
-
-### Cooperative Steer Checkpoint
-
-Before each serial group (and before each parallel group), Act re-checks `has_unanswered_user_message`; if the user has injected a message, the model is let respond first.
-
-### Tool-Loop Verifier
-
-26.7.15+: the tool-loop verifier (`src/verification/`) post-validates each turn's tool calls. Only the model's explicit stop ends a turn (**R10 "Don't #3**). `max_iterations` remains a safety cap.
-
-### See Also
-
-- [Harness Architecture](/docs/en/architecture/harness) — Think→Act implementation
-- [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop) — the five "Don'ts"
+- [Agent Runtime](/docs/en/concepts/agent-runtime) — runtime path end-to-end
+- [Harness Architecture](/docs/en/architecture/harness) — thin-harness philosophy
+- [Prompt System](/docs/en/concepts/prompt-system) — layer pipeline + caching
+- [Tool System](/docs/en/concepts/tool-infrastructure) — resource claims
+- [Boot Assembly](/docs/en/architecture/boot-assembly) — module wiring at startup
+- [Redlines R3 / R10 / R11](/docs/en/philosophy/redlines) — the harness boundary

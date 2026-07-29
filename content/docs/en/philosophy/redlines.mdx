@@ -210,6 +210,7 @@ Aleph follows the Anthropic school — minimal runtime, trust the model. The har
 ### Core Boundaries
 
 - `src/harness/` is locked at **12 files**; the line count is gated by the ratchet in `src/harness/tests/budget.rs` (measured, not hand-counted, only decreases, increases must answer the 3 questions below). **Code is the authority** — every doc number is just a copy of `CEILING`
+- **Single source of truth for the line count**: `src/harness/tests/budget.rs::CEILING` (runs under `cargo test -p alephcore --lib`); `src/harness/CLAUDE.md` is the local reinforcement note, root `CLAUDE.md §R10` is the top-level statement. This page intentionally does not quote a specific number — any "current X lines" must defer to the ratchet in `budget.rs`
 - Top-level (8): `mod.rs` / `agent.rs` / `deps.rs` / `trait_def.rs` / `callback.rs` / `chain_context.rs` / `trace.rs` / `trace_sink.rs`
 - `agent/` subdirectory (4): `think.rs` / `act.rs` / `guardrails.rs` / `prompt.rs` (Tasks 8/9/10 split `agent.rs` into Think / Act / Guardrails / Prompt)
 

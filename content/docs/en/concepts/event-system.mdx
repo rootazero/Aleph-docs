@@ -1,9 +1,14 @@
 ---
 title: "Event System"
-description: "Event-driven architecture with EventBus, typed events, filters, and handlers. Decouples subsystems via asynchronous event passing."
+description: Event-driven architecture with EventBus, typed events, filters, and handlers. Decouples subsystems via asynchronous event passing.
 ---
 
-The `event` module implements an event-driven architecture that decouples Aleph's subsystems. Instead of direct method calls between modules, components publish events to a central bus and subscribe to the events they care about.
+The `event` module implements an event-driven architecture that decouples Aleph's subsystems. Instead of direct method calls between modules, components publish events to buses and subscribe to the events they care about. `src/event/` ships two related but distinct buses:
+
+- **`EventBus`** (`src/event/bus.rs`) -- per-agent tokio `broadcast` channel; created via `EventBus::new()` / `EventBus::with_buffer_size` / `EventBus::with_config`. Optionally connects to a `GlobalBus` for cross-agent aggregation. **It is not a singleton.**
+- **`GlobalBus`** (`src/event/global_bus.rs`) -- a process-wide **singleton** guarded by `once_cell::sync::Lazy`, accessed via `GlobalBus::global()`. It aggregates events from multiple `EventBus` instances and routes callbacks through `EventFilter`s.
+
+`AlephEvent` (`src/event/types.rs`) is the shared payload type for both buses; `#[serde(tag = "type", content = "data")]` makes it directly JSON-serializable.
 
 ## Design Philosophy
 
@@ -13,7 +18,7 @@ Event-driven architecture provides three benefits in Aleph:
 2. **Observability** — Every significant action produces an event that can be logged, audited, or streamed to clients
 3. **Extensibility** — New features can subscribe to existing events without modifying publishers
 
-The EventBus is a singleton (initialized via `Lazy`) that lives for the lifetime of the process. All event handling is asynchronous and non-blocking.
+`EventBus` defaults to a 1024-slot broadcast buffer; it retains history up to `MAX_HISTORY_SIZE = 10000`. `GlobalBus` also defaults to 1024 slots. All event handling is asynchronous and non-blocking.
 
 ---
 
@@ -21,177 +26,205 @@ The EventBus is a singleton (initialized via `Lazy`) that lives for the lifetime
 
 ```
 ┌─────────────────────────────────────────┐
-│           EventBus (Singleton)           │
+│         GlobalBus (singleton, Lazy)      │
 │  ┌─────────────┐  ┌──────────────────┐ │
-│  │  EventQueue │  │  HandlerRegistry │ │
+│  │  broadcast  │  │  Subscription    │ │
+│  │  (GlobalEvt)│  │  Registry        │ │
 │  └─────────────┘  └──────────────────┘ │
-└─────────────────────────────────────────┘
-     │                           ▲
-     │ publish(Event)            │ dispatch(Event)
-     ▼                           │
-┌──────────┐              ┌──────────────┐
-│ Publisher │              │   Handler    │
-│ (any      │              │ (implements  │
-│ module)   │              │ EventHandler)│
-└──────────┘              └──────────────┘
+│       ▲                                 │
+│       │ auto-broadcast when EventBus    │
+│       │ is connected                    │
+│       │                                 │
+│ ┌──────────────────────────────────────┐│
+│ │ EventBus (per-agent, NOT singleton)  ││
+│ │  broadcast(TimestampedEvent)         ││
+│ │  + history ring                      ││
+│ └──────────────────────────────────────┘│
+│       │                           ▲     │
+│       │ publish(AlephEvent)       │ recv│
+│       ▼                           │     │
+│ ┌──────────┐              ┌─────────────┐
+│ │ Publisher│              │  Handler    │
+│ │ (any     │              │ (impl       │
+│ │ module)  │              │ EventHandler│
+│ └──────────┘              └─────────────┘
 ```
 
 ---
 
 ## Core Components
 
-### EventBus
+### GlobalBus (singleton)
 
-The central event distribution system.
+Process-wide cross-agent aggregation bus:
 
 ```rust
-// Singleton access
-let bus = event::bus();
-bus.publish(SessionCreated { session_id: id }).await?;
+use alephcore::event::global_bus::GlobalBus;
+use alephcore::event::filter::EventFilter;
+use alephcore::event::EventType;
+
+let bus = GlobalBus::global();
+let sub_id = bus.subscribe(
+    EventFilter::new(vec![EventType::ToolCallStarted, EventType::ToolCallCompleted]),
+    |event| println!("from agent={}", event.source_agent_id),
+).await;
 ```
 
-The EventBus:
-- Maintains a typed event queue per event type
-- Dispatches events to all registered handlers asynchronously
-- Never blocks publishers — events are queued and processed concurrently
+`GlobalBus::broadcast(agent_id, session_id, event)` wraps the event with `source_agent_id` / `source_session_id` / `timestamp` / `sequence` and dispatches it to all subscribers whose filters match.
+
+### EventBus (per-agent)
+
+```rust
+use alephcore::event::{EventBus, AlephEvent, SessionInfo};
+
+let bus = EventBus::with_buffer_size(2048);
+bus.publish(AlephEvent::SessionCreated(
+    SessionInfo {
+        id: session_id.clone(),
+        parent_id: None,
+        agent_id: "main".into(),
+        model: "gpt-4-turbo".into(),
+        created_at: chrono::Utc::now().timestamp_millis(),
+    }
+)).await;
+```
+
+The `EventBus`:
+
+- Holds a tokio `broadcast::Sender<TimestampedEvent>` with a configurable buffer (default 1024)
+- Wraps each published event as `TimestampedEvent { event, timestamp, sequence }`; `sequence` is monotonically incremented by an internal `AtomicU64`
+- Retains history up to `MAX_HISTORY_SIZE = 10000`; configurable via `EventBusConfig { buffer_size, enable_history, max_history_size }`
+- Can optionally connect to a `GlobalBus` (after setting `agent_id` / `session_id`); connected buses auto-broadcast through `GlobalBus::broadcast`
 
 ### EventHandler Trait
 
 ```rust
 #[async_trait]
-pub trait EventHandler<E: Event>: Send + Sync {
-    async fn handle(&self, event: &E) -> Result<(), EventError>;
+pub trait EventHandler: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn subscriptions(&self) -> Vec<EventType>;
+    async fn handle(
+        &self,
+        event: &AlephEvent,
+        ctx: &EventContext,
+    ) -> Result<Vec<AlephEvent>, HandlerError>;
 }
 ```
 
-Implementors receive events of a specific type and perform side effects:
+Implementors receive `AlephEvent` and may return new events to publish:
+
 - Logging handlers write to disk
 - WebSocket handlers forward to connected clients
 - Memory handlers update the knowledge graph
 
+Note that the trait is **not** generic over `E: Event` -- the receiver signature is `&AlephEvent`, and subscriptions are declared via `subscriptions() -> Vec<EventType>`. `EventContext` (`src/event/handler.rs`) carries `bus: EventBus`, `abort_signal: Arc<AtomicBool>`, and `session_id: Arc<RwLock<Option<String>>>`.
+
 ### EventFilter
 
-Selective subscription — handlers only receive events matching their filter.
+`EventFilter` (`src/event/filter.rs`) is a **struct**, not an enum; the three filtering dimensions are AND-combined:
 
 ```rust
-pub enum EventFilter {
-    All,                    // Receive all events
-    Type(EventType),       // Only specific event types
-    Source(String),        // Only from specific source module
-    Custom(Box<dyn Fn(&Event) -> bool>),
+pub struct EventFilter {
+    pub session_ids: Option<HashSet<String>>,   // None = all sessions
+    pub agent_ids: Option<HashSet<String>>,     // None = all agents
+    pub event_types: Vec<EventType>,            // empty = matches nothing
 }
 ```
 
-**Example:** The Gateway's WebSocket handler filters for `TraceEvent` types to stream agent execution traces to the Panel UI.
+Construction:
+
+```rust
+let filter = EventFilter::new(vec![EventType::ToolCallStarted, EventType::ToolCallCompleted])
+    .with_session("session-123")
+    .with_agent("agent-1");
+// or
+let filter = EventFilter::all();   // equivalent to EventFilter::new(vec![EventType::All])
+```
+
+**Example:** The Panel's WebSocket subscription uses `EventFilter::new(vec![EventType::ToolCallStarted, ...]).with_session(...)` to stream the relevant tool events for that session to the client.
 
 ---
 
 ## Event Types
 
-### Core Events
+`AlephEvent` (`src/event/types.rs`) is a `#[serde(tag = "type", content = "data")]` `#[non_exhaustive]` enum. Variants grouped by purpose:
 
-| Event | Description | Published By |
+| Group | Variants | Notes |
 |---|---|---|
-| `SessionCreated` | New session initialized | SessionService |
-| `MessageReceived` | User message arrived | Gateway |
-| `ToolExecuted` | Tool finished execution | Engine |
-| `MemoryUpdated` | Fact added or invalidated | Memory |
-| `ConfigReloaded` | Configuration hot-reloaded | Config watcher |
+| Input | `InputReceived(InputEvent { text, session_id, context, timestamp })` | User input |
+| Tool | `ToolCallRequested(ToolCallRequest { tool, parameters })` | Tool-call request |
+| Tool | `ToolCallStarted(ToolCallStarted { call_id, tool, input, timestamp, session_id? })` | Tool call started |
+| Tool | `ToolCallCompleted(ToolCallResult { call_id, tool, input, output, started_at, completed_at, token_usage, session_id? })` | Tool call finished |
+| Tool | `ToolCallFailed(ToolCallError { call_id, tool, input, error, error_kind, is_retryable, attempts, session_id? })` | Tool call failed |
+| Tool | `ToolCallRetrying(ToolCallRetry { call_id, attempt, delay_ms, reason? })` | Tool call retrying |
+| Loop | `LoopContinue(LoopState)` / `LoopStop(StopReason)` | Loop advance / stop |
+| Session | `SessionCreated(SessionInfo)` / `SessionUpdated(SessionDiff)` / `SessionResumed(SessionInfo)` / `SessionCompacted(CompactionInfo)` | Session lifecycle |
+| Sub-agent | `SubAgentCompleted(SubAgentCompletionEvent)` / `SubAgentTreeUpdate(...)` | Sub-agent finish / tree update |
+| AI | `AiResponseGenerated(AiResponse { content, reasoning?, is_final, timestamp })` | Model response |
+| Part | `PartAdded/Updated/Removed(crate::components::PartUpdateData)` | UI message-flow rendering |
+| Team | `TeamCreated { team_id, name, member_ids }` / `TeamMemberAdded` / `TeamMemberRemoved` / `TeamTaskAssigned` / `TeamTaskUpdated` / `TeamTaskCompleted` / `TeamTaskFailed` / `TeamDisbanded` | Multi-agent team |
 
-### Event Sequencing
+`EventType` is the subscription-filter discriminant. There is **no** `MemoryUpdated` or `ConfigReloaded` on this bus -- the latter is private to `McpManagerEvent` and is not bridged into the global stream.
 
-Every event carries a monotonic sequence number:
+### Event Ordering and Timestamps
+
+Each event is wrapped in `TimestampedEvent`:
 
 ```rust
-pub struct EventMetadata {
-    pub sequence: u64,      // Global ordering
-    pub timestamp: i64,     // Unix millis
-    pub source: String,     // Module name
+pub struct TimestampedEvent {
+    pub event: AlephEvent,
+    pub timestamp: i64,   // chrono::Utc::now().timestamp_millis()
+    pub sequence: u64,    // monotonically incremented by EventBus's AtomicU64
 }
 ```
 
-Sequence numbers enable:
-- Replay of events for debugging
-- Deterministic state reconstruction
-- Ordering guarantees across distributed handlers
-
----
-
-## Permissions and Safety
-
-### EventPermission
-
-Not all handlers can see all events. The Permission layer checks handler authorization:
-
-```rust
-pub enum EventPermission {
-    Owner,      // Full access
-    Guest,      // Only events for their session
-    System,     // Internal events only
-}
-```
-
-**Example:** A guest's WebSocket connection only receives events for their own session, preventing cross-session information leakage.
-
-### EventQuestion
-
-For sensitive operations, the EventBus can pause and ask for confirmation:
-
-```rust
-pub enum EventQuestion {
-    Allow,      // Proceed with the event
-    Deny,       // Drop the event
-    Modify(Event), // Replace with modified event
-}
-```
-
-**Example:** Before executing a `bash_exec` tool, the system publishes a `ToolExecutionRequested` event. If the Approval module denies it, the execution is cancelled before any harm is done.
+`EventBus` retains an in-process history ring (`Arc<RwLock<Vec<TimestampedEvent>>>`); new subscribers replay from there. `GlobalEvent` (`src/event/global_bus.rs`) adds `source_agent_id` / `source_session_id` and its own `sequence`, giving a deterministic ordering for cross-agent delivery.
 
 ---
 
 ## Usage Example
 
 ```rust
-use aleph::event::{EventBus, EventHandler, Event};
+use alephcore::event::{EventBus, EventHandler, EventContext, EventType, AlephEvent, HandlerError};
+use async_trait::async_trait;
+use std::sync::Arc;
 
-// Define an event
-#[derive(Clone, Debug)]
-pub struct MemoryCreated {
-    pub fact_id: String,
-    pub content: String,
-}
-
-impl Event for MemoryCreated {}
-
-// Implement a handler
-pub struct MemoryLogger;
+struct MemoryLogger;
 
 #[async_trait]
-impl EventHandler<MemoryCreated> for MemoryLogger {
-    async fn handle(&self, event: &MemoryCreated) -> Result<(), EventError> {
-        tracing::info!("Memory created: {}", event.fact_id);
-        Ok(())
+impl EventHandler for MemoryLogger {
+    fn name(&self) -> &'static str { "MemoryLogger" }
+    fn subscriptions(&self) -> Vec<EventType> {
+        vec![EventType::ToolCallCompleted]
+    }
+    async fn handle(
+        &self,
+        event: &AlephEvent,
+        _ctx: &EventContext,
+    ) -> Result<Vec<AlephEvent>, HandlerError> {
+        if let AlephEvent::ToolCallCompleted(t) = event {
+            tracing::info!(call_id = %t.call_id, tool = %t.tool, "tool finished");
+        }
+        Ok(vec![])
     }
 }
 
-// Register and publish
-let bus = event::bus();
-bus.register(MemoryLogger).await?;
-bus.publish(MemoryCreated {
-    fact_id: "fact-123".into(),
-    content: "User prefers dark mode".into(),
-}).await?;
+let bus = EventBus::new();
+let mut registry = EventHandlerRegistry::new();
+registry.register(Arc::new(MemoryLogger));
+let _handles = registry.start(EventContext::new(bus.clone())).await;
 ```
 
 ---
 
 ## Code Location
 
-- `src/event/mod.rs` — EventBus and core types
-- `src/event/handler.rs` — EventHandler trait
-- `src/event/filter.rs` — EventFilter implementations
-- `src/event/permission.rs` — Permission checks
-- `src/event/question.rs` — Interactive confirmation
+- `src/event/mod.rs` — Module entry point, re-exports
+- `src/event/bus.rs` — `EventBus` (per-agent) + `EventBusConfig` + `EventSubscriber`
+- `src/event/global_bus.rs` — `GlobalBus` singleton + `GlobalEvent` + `Subscription` + `SubscriptionId`
+- `src/event/handler.rs` — `EventHandler` trait + `EventHandlerRegistry` + `EventContext`
+- `src/event/filter.rs` — `EventFilter` struct
+- `src/event/types.rs` — `AlephEvent` + `EventType` + payload types
 
 ## See Also
 
@@ -213,18 +246,18 @@ bus.publish(MemoryCreated {
 
 ### SessionEvent
 
-26.7.7+ `session_events` is the canonical event log — `MessageProjector` materializes events into the `messages` table; a boot-time `ProjectionReconciler` back-fills transcripts. `SessionEventRecord` + `TurnId` are the new payloads.
+26.7.7+ `session_events` is the canonical event log -- `MessageProjector` materializes events into the `messages` table; a boot-time `ProjectionReconciler` back-fills transcripts. `SessionEventRecord { seq, event, created_at_ms }` is the log payload; this is a parallel event stream to `AlephEvent`, separating "session events" from "runtime events".
 
-### Dead-Letter and Re-Drive
+### Gateway Dead-Letter Forensics
 
-26.7.17+: messages that failed to deliver via `channel.*` are collected in a **dead-letter** queue and can be re-driven from the Panel. `channel.pairing_data` provides pairing context.
+26.7.17+: undeliverable messages on the channel path are captured in a gateway-side **dead-letter** forensics trail, inspectable from the Panel, with safe re-drive semantics.
 
 ### Loop-Graph Governance Events
 
-26.7.21+ governance events (victory claim, goal settled, team disbanded, watcher triggered) flow over the same event bus, subscribed by watchers in the `loop_graph` layer.
+26.7.21+ governance events (victory claim, goal settled, team disbanded, watcher triggered) flow over the same event bus, subscribed by watchers in the `loop_graph` layer. `NodeKind::Team` and `NodeKind::LoopGoal` are members of the `non_exhaustive` enum in `loop_graph/types.rs`.
 
 ### See Also
 
-- [Gateway Protocol](/docs/en/gateway/protocol) — error-receipt single-source
+- [Gateway Protocol](../gateway/protocol) — error-receipt single-source
 - [Messages](./messages) — `SessionEvent` and `MessageProjector`
-- [Architecture Overview](/docs/en/architecture/overview#loop-graph-governance-layer) — how governance events flow through the graph
+- [Architecture Overview](../architecture/overview#loop-graph-governance-layer) — how governance events flow through the graph

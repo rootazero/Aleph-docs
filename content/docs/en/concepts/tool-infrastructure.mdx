@@ -1,135 +1,77 @@
 ---
 title: "Tool Infrastructure"
-description: "Tool system infrastructure including schema generation, execution, repair, registry, and middleware pipeline."
+description: "Aleph's unified tool service, request-scoped execution, resource claims, progressive disclosure, and permission boundaries."
 ---
 
-The `tools` module provides the infrastructure for Aleph's tool system. It handles tool registration, schema generation, execution, repair, and the middleware pipeline that wraps tool calls.
+Aleph's production tool stack uses `ToolService` as its consumer interface and `ScopedToolService` as Gateway's request-scoped implementation. Built-in, MCP, skill, and extension tools can enter one request view, while the tools actually exposed in a turn are jointly determined by allow/deny policy, health, deferred exposure, and session mode.
 
-## Design Philosophy
+## Production Service Interface
 
-1. **Schema-driven** — All tools declare their input schema via JSON Schema
-2. **Repair-friendly** — Failed tool calls can be automatically repaired and retried
-3. **Middleware pipeline** — Permission checks, logging, and metrics happen in layered middleware
-4. **Type-safe execution** — Strongly typed tool traits with dynamic dispatch support
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                      Tool Infrastructure                     │
-├──────────────────────────────────────────────────────────────┤
-│  Registry                                                    │
-│  ├─ register() — Add tool to registry                        │
-│  ├─ get() — Lookup by name                                   │
-│  └─ list() — All registered tools                            │
-├──────────────────────────────────────────────────────────────┤
-│  Schema                                                      │
-│  ├─ JSON Schema generation from Rust types                   │
-│  ├─ Strictification (remove LLM-unfriendly fields)           │
-│  └─ YAML serialization with injection protection             │
-├──────────────────────────────────────────────────────────────┤
-│  Execution                                                   │
-│  ├─ ToolExecutor — Async execution with timeout              │
-│  ├─ ExecutionContext — Workspace, env, permissions           │
-│  └─ Repair — Auto-fix common failures (case, snake_case)     │
-├──────────────────────────────────────────────────────────────┤
-│  Middleware Pipeline                                         │
-│  ├─ Permission layer — Capability checks                     │
-│  ├─ Audit layer — Logging and metrics                        │
-│  └─ Rate limit layer — Throttling                            │
-├──────────────────────────────────────────────────────────────┤
-│  Runtime                                                     │
-│  ├─ Docker sandbox — Containerized execution                 │
-│  ├─ VirtualFs — Environment-level isolation                  │
-│  └─ Scoped execution — Temporary permission elevation        │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## Tool Traits
+`src/tools/service.rs:152` defines the main operations:
 
 ```rust
-/// Core tool trait
-pub trait AlephTool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn schema(&self) -> Value; // JSON Schema
-    async fn execute(&self, input: Value, ctx: &ExecutionContext) -> ToolResult;
+pub trait ToolService: Send + Sync + 'static {
+    async fn execute(&self, name: &str, input: serde_json::Value) -> Result<ToolOutput, ToolError>;
+    async fn list(&self) -> Vec<ToolDefinition>;
+    async fn dispatchable_list(&self) -> Vec<ToolDefinition>;
+    async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+    fn metadata_schema(&self) -> Arc<[ToolDefinition]>;
 }
 ```
 
-## Schema Generation
+`list` is the model-visible tool array; `dispatchable_list` also includes deferred-but-executable tools for name repair; `describe` returns one definition; and `metadata_schema` supplies the cached definition array sent to the model. The production implementation is under `src/tools/scoped/`.
 
-Tool schemas are generated from Rust types using reflection:
+## Registration and Definitions
 
-```rust
-// Derive macro generates JSON Schema
-#[derive(ToolSchema)]
-pub struct SearchInput {
-    pub query: String,
-    pub limit: Option<u32>,
-}
-```
+- `BUILTIN_TOOL_DEFINITIONS` is the single source for built-in names, descriptions, and configuration requirements.
+- `ToolCatalog` aggregates built-ins, skills, plugins, and custom commands, and handles conflicts, health probes, and queries.
+- Gateway's runtime `LoopToolRegistry` then merges request-specific subagent, MCP, and extension tools.
+- Before execution, `ScopedToolService` applies allowlists, deny rules, health filtering, confirmation gates, and definition rewriters.
 
-The `schema_strictify` module removes LLM-unfriendly fields (like `format`, `pattern` on complex types) to reduce token usage.
+Permission filtering applies to both presentation and execution: denied tools do not enter `list`, and a direct name submitted to `execute` is denied again. Unknown or undeclared tools fail closed under the `ask` tier.
 
-## Repair System
+## Schema and Progressive Disclosure
 
-When a tool call fails, the repair system attempts common fixes:
+Tool definitions contain a name, description, input schema, source, and metadata. `ProgressiveDisclosureRewriter` is a request-level static presentation rewrite, not per-message intent guessing:
 
-1. **Case correction** — `getMP3File` → `get_mp3_file`
-2. **Unicode handling** — Proper `to_lowercase()` for non-ASCII
-3. **Schema validation** — Check input against schema before execution
+1. Tools in the core set retain their full schemas.
+2. Other tools retain their names and descriptions, but their schemas collapse to an open object with a `get_tool_schema` hint.
+3. `get_tool_schema` returns the full parameters from the pre-collapse request snapshot.
+4. `tool_search` performs dependency-free BM25 retrieval over deferred names and descriptions, returns full schemas, and promotes hits back into the tool array.
+5. An empty core set or one containing `*` leaves the rewriter detached and preserves the old tool surface byte-for-byte.
 
-## Middleware Pipeline
+`get_tool_schema` is registered only when progressive disclosure is enabled. `tool_search` is registered only when deferred tools exist and is placed in the core set while disclosure is active, so it cannot collapse itself. MCP deferral is controlled by `[tools] defer_mcp_tools`; session modes use the same deferred set.
 
-Tool calls flow through middleware layers:
+## `ConcurrencyClaim` and Parallel Partitioning
 
-```
-User Request
-    │
-    ▼
-┌─────────────┐
-│  Permission │ ← Capability checks
-│   Layer     │
-└─────────────┘
-    │
-    ▼
-┌─────────────┐
-│   Audit     │ ← Logging, metrics
-│   Layer     │
-└─────────────┘
-    │
-    ▼
-┌─────────────┐
-│   Tool      │ ← Actual execution
-│  Execution  │
-└─────────────┘
-    │
-    ▼
-  Result
-```
+`src/tools/concurrency.rs:30` replaces a single `concurrent_safe` boolean with a resource claim:
 
-## Docker Sandbox
+- `Shared`: read-only or side-effect-free for scheduling; it conflicts only with exclusive claims;
+- `Exclusive { scope: Global }`: an unknown or unbounded footprint such as `bash`, conflicting with every claim;
+- `Exclusive { scope: Paths(...) }`: normalized filesystem paths, conflicting only when equal or ancestor/descendant paths overlap;
+- `Exclusive { scope: Nodes(...) }`: cluster nodes, conflicting only when target nodes overlap;
+- `Exclusive { scope: Sessions(...) }`: local agent sessions, allowing disjoint sessions to run together but conservatively conflicting with other scope kinds.
 
-For untrusted tools, Docker provides containerized execution:
+`call_concurrency_claim` computes the actual claim from the tool name and this call's input, so the same `file_ops` tool can produce different claims for reads, bounded writes, and unknown operations. Path comparison is component-wise: `src/a` and `src/ab` do not conflict, while `src/a` and `src/a/b.rs` do; an unextractable footprint degrades to `Global`.
 
-- **Allowlist** — Only explicitly allowed Docker flags are permitted
-- **Volume mounts** — Workspace directory mounted read-write
-- **Network** — Configurable network access (enabled/disabled)
+`partition_parallel_groups` walks left to right and creates contiguous, order-preserving ranges. If the next call conflicts with any member of the current group, a new group starts; groups complete serially, while calls inside a group run concurrently. Multiple reads can therefore run first, a following `bash` can run alone, and disjoint file or node mutations can remain parallel. This is not a coarse split into one parallel bucket and one serial bucket.
 
-## Key Source Files
+## Execution and Errors
 
-- `src/tools/mod.rs` — Module overview
-- `src/tools/traits.rs` — Core tool traits
-- `src/tools/registry.rs` — Tool registry
-- `src/tools/schema_strictify.rs` — Schema optimization
-- `src/tools/repair.rs` — Failure repair
-- `src/tools/execution_context.rs` — Execution context
-- `src/tools/middleware/permission/` — Permission middleware
-- `src/tools/runtime.rs` — Docker sandbox
+`ScopedToolService` brings turn context, cancellation, confirmation, extension hooks, retry, and tool-result budgets into one call. `ToolError` distinguishes not found, permission denied, validation, execution, timeout, expired approval, transport, and duplicate-name failures so callers can retry, request approval, or report the correct failure.
+
+## Code Location
+
+- `src/tools/service.rs` — `ToolService`, `ToolDefinition`, and claim interface
+- `src/tools/scoped/` — `ScopedToolService`, permissions, deferred exposure, and rewriters
+- `src/tools/concurrency.rs` — `ConcurrencyClaim`, conflict detection, and partitioning
+- `src/tools/tool_search.rs` — `tool_search`
+- `src/tools/schema_lookup.rs` — `get_tool_schema`
+- `src/tool_metadata/registry/` — `ToolCatalog` aggregation and queries
+- `src/executor/builtin_registry/definitions.rs` — built-in tool list
 
 ## See Also
 
-- [Builtin Tools](/docs/concepts/builtin-tools) — Specific tool implementations
-- [Capability System](/docs/concepts/capability-system) — Permission framework
-- [Execution Engine](/docs/concepts/execution-engine) — Command sandboxing
+- [Builtin Tools](/docs/en/concepts/builtin-tools) — tool names and implementation families
+- [MCP Integration](/docs/en/concepts/mcp-integration) — MCP capabilities and deferred tools
+- [Protocol Adapters](/docs/en/concepts/protocol-adapters) — provider protocols and channel boundaries

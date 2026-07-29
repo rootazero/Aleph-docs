@@ -1,17 +1,15 @@
 ---
 title: "审批"
-description: "用于代理发起的行动（包括浏览器导航、桌面点击和 shell 命令）的策略驱动审批系统。"
+description: "针对浏览器、桌面、桌面自动化、PIM 与媒体采集等动作的能力域审批引擎。"
 ---
 
-`approval` 模块提供策略驱动的审批系统，决定代理发起的行动应该被允许、拒绝还是升级为用户确认。这适用于浏览器导航、桌面 UI 交互、shell 命令和其他潜在敏感操作。
+`approval` 模块提供按动作类型（浏览器、桌面、桌面自动化、PIM 写入、媒体采集）分类的能力域审批引擎。该引擎与 `src/sandbox/exec_approval/` 的动作感知执行审批门是相互独立的层 —— 后者覆盖 shell / 工具调用，由 `src/tools/scoped/` 强制执行。
 
 ## 设计理念
 
-审批系统遵循三个原则：
-
-1. **默认拒绝** —— 除非策略明确允许，否则行动被阻止
-2. **分层决策** —— 阻止列表 → 允许列表 → 默认值 → 询问，按优先级排序
-3. **配置驱动** —— 策略在配置文件中定义，不是硬编码的
+1. **默认拒绝** —— 没有匹配的规则与默认值时一律 `Ask`
+2. **失败关闭** —— 策略文件缺失或解析失败时返回 `safe_default`（全 `Ask`），默认值不与 `safe_default` 分歧
+3. **配置驱动** —— 规则从 `~/.aleph/approval-policy.json` 加载，不在源码中硬编码
 
 ---
 
@@ -19,10 +17,10 @@ description: "用于代理发起的行动（包括浏览器导航、桌面点击
 
 ```
 ActionRequest ──▶ ApprovalPolicy::check() ──▶ ApprovalDecision
-                        │
-                   ┌────┴────┐
-                   │ Config  │  (阻止列表 → 允许列表 → 默认值 → 询问)
-                   └─────────┘
+                         │
+                         │  (blocklist → allowlist → defaults → ask)
+                         ▼
+                  ConfigApprovalPolicy
 ```
 
 ---
@@ -31,12 +29,14 @@ ActionRequest ──▶ ApprovalPolicy::check() ──▶ ApprovalDecision
 
 ### ActionRequest
 
-表示代理想要执行的行动：
+描述代理想要执行的动作：
 
 ```rust
 pub struct ActionRequest {
     pub action_type: ActionType,
     pub target: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_target: String,
     pub agent_id: String,
     pub context: String,
     pub timestamp: DateTime<Utc>,
@@ -45,21 +45,28 @@ pub struct ActionRequest {
 
 ### ActionType
 
-可以请求的行动类别：
+按动作域枚举的合法请求：
 
 ```rust
 pub enum ActionType {
     BrowserNavigate,
+    BrowserClick,
+    BrowserType,
+    BrowserFill,
+    BrowserEvaluate,
     DesktopClick,
-    ShellCommand,
-    FileOperation,
-    // ... 等等
+    DesktopType,
+    DesktopKeyCombo,
+    DesktopLaunchApp,
+    DesktopAutomation,
+    PimWrite,
+    MediaCapture,
 }
 ```
 
 ### ApprovalDecision
 
-策略检查的结果：
+策略判断的结果：
 
 ```rust
 pub enum ApprovalDecision {
@@ -71,42 +78,54 @@ pub enum ApprovalDecision {
 
 ---
 
-## 策略类型
+## 策略实现
 
 ### ConfigApprovalPolicy
 
-从配置加载规则的主要策略实现：
+从 JSON 配置加载规则的主策略实现：
 
 ```rust
-pub struct ConfigApprovalPolicy {
-    config: PolicyConfig,
-}
+pub struct ConfigApprovalPolicy { /* ... */ }
 
 impl ConfigApprovalPolicy {
-    pub fn load() -> Self { /* ... */ }
-    
-    pub async fn check(
-        &self,
-        request: &ActionRequest,
-    ) -> ApprovalDecision { /* ... */ }
+    pub fn new(config: PolicyConfig) -> Self;
+    pub fn load() -> Self;
+    pub fn load_from(path: PathBuf) -> Self;
+}
+
+#[async_trait]
+impl ApprovalPolicy for ConfigApprovalPolicy {
+    async fn check(&self, request: &ActionRequest) -> ApprovalDecision;
+    async fn record(&self, request: &ActionRequest, decision: &ApprovalDecision);
 }
 ```
 
-**决策流程：**
-1. 检查阻止列表 —— 如果目标匹配，`Deny`
-2. 检查允许列表 —— 如果目标匹配，`Allow`
-3. 按行动类型检查默认规则
-4. 如果没有规则匹配，`Ask` 用户
+**决策流程（按顺序求值）：**
+
+1. **阻止列表** —— 若目标匹配本 `ActionType` 的任何 `blocklist` 条目 ⇒ `Deny`
+2. **允许列表** —— 若目标匹配本 `ActionType` 的任何 `allowlist` 条目 ⇒ `Allow`
+3. **默认值** —— 查找本 `ActionType` 在 `defaults` 中的 `DefaultDecision`
+4. **回退** —— 无任何匹配 ⇒ `Ask`
+
+**失败关闭：** 当 `~/.aleph/approval-policy.json` 缺失、不可读或解析失败时，`load_from` 返回 `safe_default`（空 allowlist / 空 blocklist / 空 defaults），所有动作一律 `Ask`。`Default::default()` 与 `safe_default` 不存在分歧。
 
 ### PolicyRule
 
-单个规则定义：
-
 ```rust
 pub struct PolicyRule {
-    pub pattern: String,        // Glob 模式
-    pub decision: DefaultDecision,
-    pub description: String,
+    #[serde(rename = "type")]
+    pub action_type: ActionType,
+    pub pattern: String,
+}
+```
+
+`PolicyConfig` 顶层结构：
+
+```rust
+pub struct PolicyConfig {
+    pub defaults: HashMap<ActionType, DefaultDecision>,
+    #[serde(default)] pub allowlist: Vec<PolicyRule>,
+    #[serde(default)] pub blocklist: Vec<PolicyRule>,
 }
 ```
 
@@ -117,105 +136,88 @@ pub struct PolicyRule {
 模式使用具有路径安全语义的 glob 语法：
 
 ```rust
-pub fn matches_glob(pattern: &str, target: &str) -> bool
+pub fn matches_glob(value: &str, pattern: &str) -> bool;
 ```
 
-- `*` 匹配除 `/` 之外的任何字符
-- `?` 匹配除 `/` 之外的任何单个字符
-- `**` 匹配任何路径段
+- `*` —— 匹配除 `/` 之外的任何字符（包括换行）
+- `**` —— 匹配任意路径段，包括跨 `/` 与换行
+- `?` —— 匹配除 `/` 之外的任意单个字符
 
-`?` 模式在内部使用 `[^/]` 正则表达式以实现一致的路径安全匹配。
+`?` 模式在内部以 `[^/]` 实现，因此 `**` 块规则不会因多行目标而失效；编译后的正则会在进程级缓存内复用，热路径不重复编译。
+
+`check` 与 `record` 在写入 `tracing` 事件前都会通过 `redact_target` 把 `target` 替换为 `<redacted len=… sha=…>`，避免把剪贴板、PIM 正文、脚本体等敏感内容泄漏到日志。
 
 ---
 
-## 配置格式
+## 配置文件
 
-策略在主配置文件中定义：
+策略从 JSON 文件加载（路径由 `ConfigApprovalPolicy::config_path()` 解析）：
 
-```toml
-[approval]
-
-[[approval.blocklist]]
-pattern = "**/secrets/*"
-decision = "deny"
-description = "永远不要访问秘密文件"
-
-[[approval.allowlist]]
-pattern = "https://github.com/**"
-decision = "allow"
-description = "允许 GitHub 导航"
-
-[approval.defaults]
-browser_navigate = "ask"
-shell_command = "deny"
+```json5
+{
+  "defaults": {
+    "browser_navigate": "allow",
+    "browser_evaluate": "ask",
+    "desktop_automation": "ask",
+    "pim_write": "ask"
+  },
+  "allowlist": [
+    { "type": "browser_navigate", "pattern": "https://*.github.com/**" }
+  ],
+  "blocklist": [
+    { "type": "browser_navigate", "pattern": "**/secrets/**" }
+  ]
+}
 ```
+
+`DefaultDecision` 序列化使用小写（`"allow" / "deny" / "ask"`），无效值在解析阶段被拒绝。
 
 ---
 
-## 安全属性
+## Guardian Judge
 
-- **无 SQL 注入** —— 所有查询使用参数化绑定
-- **无锁中毒** —— 使用 `tokio::sync` 锁（无中毒）
-- **安全算术** —— 风险评分使用 `saturating_add`/`saturating_mul`
-- **无 UTF-8 切片** —— 没有 `&s[..n]` 模式
+`src/approval/guardian_requester.rs::GuardianApprovalRequester` 是一个 LLM 风险分诊器，包裹人类审批请求器。它的判定语义：
+
+- **风险等级 `low` 且 `allow == true`** —— 自动批准，跳过人类
+- **其他一切** —— 升级到人类请求器
+
+`GuardianJudge` 永不自主否决，也不会扩展人类原本会被问询的范围。代码解析 + provider 故障 + 30 秒超时 + 提供方断路器（连续 3 次失败后 5 分钟冷却）一律升级到人类。它消费 `src/exec/masker.rs::SecretMasker`，对 `summary` 与命令段 `raw` 做密钥遮蔽，所以密钥不会随判断 payload 一并序列化到日志或回灌到上游审计。
+
+判决 payload 通过稳定的 `GUARDIAN_SYSTEM` 规则 + `cache: true` 的 `SystemPromptPart` 发送，支持 Anthropic 兼容 provider 跨次调用复用 prompt cache（每动作 payload 是唯一动态尾）。
+
+接线位置：`bin/aleph-server/commands/start/mod.rs` 的 `set_requester` 站点，由 `[policies] guardian_review = true` 且存在默认 `provider` 时启用。
+
+---
+
+## Discord 交互式审批
+
+`src/approval/callback_sink.rs::ApprovalCallbackSink` 提供一个跨通道的双向流 —— `mcp.respond_approval` / `mcp.cancel_approval` 让 Discord 按钮与 TUI / Panel 表单共享同一个待审批席位池。
+
+---
+
+## 与执行审批门的关系
+
+`src/approval/` 与执行审批 (`src/sandbox/exec_approval/`) 是两层：
+
+- `src/approval/` —— 能力域（旧）：浏览器 / 桌面 / PIM / 自动化 / 媒体采集类型的动作判定
+- `src/sandbox/exec_approval/` —— 动作感知（新）：shell 命令 / 工具调用指纹 + 拒绝账本 + Ask/Auto/Full 等级执行门
+
+执行门在 `src/tools/scoped/` 强制为单一收口点。Ask/Auto/Full 三档由 `src/config/types/policies/exec_tier.rs` 定义，元数据驱动，未知工具在 `ask` 档失败关闭。任何执行都不能绕过 `src/tools/scoped/`。
 
 ---
 
 ## 代码位置
 
-- `src/approval/mod.rs` —— 模块入口点和公共 API
-- `src/approval/config.rs` —— 配置加载和 glob 匹配
-- `src/approval/policy.rs` —— 策略评估逻辑
-- `src/approval/types.rs` —— 核心类型
-- `src/approval/adapters.rs` —— 集成适配器
+- `src/approval/mod.rs` —— 模块入口与公共导出
+- `src/approval/types.rs` —— `ActionRequest` / `ActionType` / `ApprovalDecision` / `DefaultDecision`
+- `src/approval/policy.rs` —— `ApprovalPolicy` trait
+- `src/approval/config.rs` —— `ConfigApprovalPolicy` / `PolicyConfig` / glob 匹配 / 缓存 / `safe_default`
+- `src/approval/guardian_requester.rs` —— Guardian Judge 分诊
+- `src/approval/callback_sink.rs` —— 跨通道审批回调流
+- `src/approval/adapters.rs` —— 内置工具适配
 
 ## 另请参阅
 
-- [配置](./configuration) —— 如何配置审批策略
-- [安全：概览](../security/overview) —— 安全架构
-
----
-
-## 26.7.x 补充
-
-### Action-aware 三级执行权限
-
-26.7.15+ 重大变更：三级执行权限（Ask / Auto / Full）替换二元 ask/auto：
-
-| 等级 | 行为 | 默认 |
-|------|------|------|
-| `ask` | 每次工具执行前请求审批；未知工具失败关闭 | ✅ |
-| `auto` | 幂等工具自动放行，破坏性工具仍需审批 | |
-| `full` | 全部自动放行（独立的安全硬过滤除外） | |
-
-### 工具元数据驱动
-
-读取每个工具声明的元数据（idempotent / destructive），**不读名字**。未知工具在 `ask` tier 下**失败关闭**。
-
-### Action-aware Grant 指纹键
-
-人看到真实命令且授权指纹键**绑定在命令上**。授权粒度从「工具级」升到「命令级」。
-
-### 单一强点
-
-26.7.15+：审批门强制在 `src/tools/scoped/` 单一强点。斜杠快路径、`tools.invoke`、后台延续旁路**全部关闭**。
-
-### `[sandbox.command_policy]` 硬底
-
-不能被任何 `exec_tier` 拉低。缺失或不一致**拒绝授权**（`fail-closed`）。
-
-### Discord 交互式审批按钮
-
-26.7.21+：双向 `ApprovalCallbackSink` 流；`mcp.respond_approval` / `mcp.cancel_approval` 支撑。
-
-### Panel / TUI 表面
-
-- Panel: composer tier pill + 内联审批 / `ask_user` 卡片
-- TUI: 轮询的 Ask-tier 工具审批覆盖（HITL overlay）
-
-### 见另请参阅
-
-- [执行引擎](/docs/zh/concepts/execution-engine) — 完整执行流
-- [安全：执行审批](/docs/zh/security/exec-approval) — 用户视角
-- [能力系统](/docs/zh/concepts/capability-system) — 权限声明
-- [架构红线 R7 / R10](/docs/zh/philosophy/redlines) — LLM 主权 + 笨循环
+- [配置](./configuration) —— 配置文件与默认值
+- [安全基元](./security-primitives) —— SSRF、内容清理、运行时守卫、审计日志
+- [秘密管理](./secret-management) —— 加密凭据存储与 `secrets.*` RPC

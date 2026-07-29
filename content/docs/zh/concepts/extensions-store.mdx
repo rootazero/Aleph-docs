@@ -1,198 +1,143 @@
 ---
 title: "扩展商店"
-description: "统一的扩展概念 —— 将 MCP 服务器、插件和技能纳入同一伞下 —— 通过单一、受信任层级把关的扩展商店进行发现与安装。"
+description: "Aleph Hub：统一的 Skill、Plugin 与 MCP 扩展目录，附带受信安装与已安装状态对账。"
 ---
 
-在日常使用中，Aleph 不再要求你去区分 *MCP 服务器*、*插件* 还是 *技能*。
-它们都只是**扩展** —— 你可以浏览、一键安装、用向导配置，并随时启用、禁用或移除的能力。**扩展商店**就是统一这
-三者的顶层界面，它按照*扩展能做什么*来组织，而不是按其技术类型。
+Aleph 把 **Skill**、**Plugin** 与 **MCP server** 统一为面向用户的一种概念：**Extension**。Hub 让用户按功能浏览，查看 Kind 与信任层级，查看安装披露，配置密钥，执行安装、验证、启用/禁用与卸载。
 
-> **伞形术语。** **扩展**是面向用户的概念；在底层，它恰好是三种**类型**之一 —— `Skill`、`Plugin` 或 `Mcp`。
-> 商店是一层*薄联邦*：一个 `Extension` 门面，按类型路由到既有的技能 / 插件 / MCP 子系统。高级用户仍然能看到
-> 类型徽章以及原有的各类型管理面板。
+## 一种概念，三种 Kind
 
-## 一个概念，三种类型
+| Kind | 内容 | 后端 |
+|---|---|---|
+| **Skill** | `SKILL.md` 指令与可选支撑文件 | 共享 `SkillSystem` |
+| **Plugin** | 静态组件、MCP 配置或 WASM runtime | `ExtensionManager` 与市场安装器 |
+| **MCP** | 外部 stdio 或远程 Model Context Protocol server | `McpManager` |
 
-| 类型 | 它是什么 | 路由到的后端 |
-|------|-----------|----------------------|
-| **Skill** | 提示驱动的能力（`SKILL.md` + 可选工具） | 技能系统（`~/.aleph/skills/`） |
-| **Plugin** | 声明工具、钩子、通道、提供方、路由的 WASM 或 Node.js 模块 | 插件宿主（`src/extension/`） |
-| **MCP** | 外部 Model Context Protocol 服务器（stdio 或远程） | MCP 管理器（`mcp.add`） |
+主浏览轴是功能分类：Search、Developer、Data、Productivity、Writing、Communication、Knowledge、Files、Design、Automation、Finance、Utilities、Other。Kind 与信任层级保留为过滤项与卡片徽章。
 
-**主要浏览轴是功能类别** —— 搜索与网络（Search & Web）、开发者（Developer）、数据与数据库（Data & Databases）、
-生产力（Productivity）、写作（Writing）、通信（Communication）、知识（Knowledge）、文件（Files）、设计（Design）、
-自动化（Automation）、财务（Finance）、实用工具（Utilities）。**类型**（Skill / Plugin / MCP）和**信任层级**是
-*次要*筛选项，以小徽章形式出现在每张卡片上。你按意图浏览（"查询我的数据库"、"搜索网络"），而非按实现方式。
+## Aleph Hub 是目录源
 
-> **命名说明。** 面向商店的 `ExtensionKind { Skill, Plugin, Mcp }` 与运行时的
-> `PluginKind { Wasm, Mcp, Static }` 是不同的。伞形概念位于新的 `src/store/` 模块；既有的
-> `src/extension/` 模块仍然是**插件宿主**，并刻意*未*重命名。关于插件运行时本身，参见
-> [扩展（插件宿主）](/docs/zh/concepts/extensions) 和 [扩展系统](/docs/zh/concepts/extension-system)。
+官方目录源是单一的 **`aleph-hub`** 工件：
 
-## 它在应用中的位置
+```text
+https://hub.heyaleph.com/catalog.json
+```
 
-扩展商店是一个**顶层面板模式**（`/extensions`），在顶部导航中与 Teams 归为一组，并占据整个聊天窗口（带有明确的
-"← 返回聊天"）。它是面板七个顶层模式之一：**Chat · Dashboard · Memory · Agents · Teams · Extensions · Settings**。
+守护进程把归一化后的目录持久化在：
 
-作为本次整合的一部分，有两处发生了迁移：
+```text
+~/.aleph/hub_catalog.db
+```
 
-- **Settings → MCP / Plugins / Skills** 面板被**降级到"Advanced（高级）"分组**。它们仍为高级用户保留（手动编辑
-  MCP 命令 / 环境变量、查看原始清单），但不再是主路径。
-- **ClawHub 设置标签页已被移除**。ClawHub 不再是一等的源；只能通过商店智能体的长尾安装路径访问（参见
-  [ClawHub](/docs/zh/concepts/clawhub)）。
+每个工件包含 schema 版本、Hub ID、客观的扩展条目、信任层级与 `install_spec`。`installed` / `enabled` 等用户态字段在本地贴标，绝不来自线缆。
 
-## 源
+冷启动时 `hub::primer` 仅在 `aleph-hub` 槽为空时填充它，把捆绑的官方 MCP、技能与插件投影合并进同一槽；非空的成功 fetch 会整体替换该槽；失败或空响应则保留 last-good 缓存。摄取阶段执行 schema 校验与条目文本的提示注入扫描。
 
-目录由确定性的数据管线从若干**镜像安全、经过策展的源**聚合而来，并在本地缓存于 SQLite（`~/.aleph/`）。浏览与
-搜索始终由缓存提供，因此商店可离线工作；每个源都带有"上次同步"/"可能已过期"的指示。
+目录层不是多个独立 provider 的并发联邦，安装解析是对 `ExtensionEntry.install_spec` 的直接本地缓存查找。插件市场仍是插件安装后端，并非额外的 Hub 目录槽。
 
-| 源 | 类型 | 信任层级 | 说明 |
-|--------|-------|-----------|-------|
-| Aleph 内置 + Claude 插件市场（`marketplace.json`） | Plugin（+ 捆绑技能） | Official / Verified | 复用既有的 `MarketplaceManager`；SHA 锁定 |
-| 官方 MCP 注册表（`registry.modelcontextprotocol.io`） | MCP | Community | 仅命名空间已验证；`config_schema` 由声明的环境变量合成 |
-| Docker MCP Catalog（`catalog.yaml`） | MCP | Official / Verified | 经签名的 `image@sha256` 服务器 |
-
-`SourceProvider` trait + `ProviderRegistry` 并发地扇出同步（单个源失败绝不会阻塞整个目录），并在各提供方之间去重。
-后台同步按 TTL 逐提供方运行（市场约 6–12 小时，通过 ETag；MCP 注册表每小时增量；Docker 每天）。新增社区源只需实现该
-trait 并注册它 —— 零 UI 改动。
-
-> **ClawHub** 在 v1 中*不是*一等的确定性提供方（缺乏稳定的第三方 API，信任度较低）。全 GitHub 范围的爬虫，以及
-> Glama / Smithery / npm 富化叠加层，均推迟到 v1 之后。
+已退出的 MCP 预设 RPC `mcp.list_presets` 与 `mcp.install_preset` 不再是发现入口。MCP 的发现与安装统一收敛到 Hub 目录。
 
 ## 已安装状态对账
 
-商店同时展示**已安装**与**未安装**的扩展。在构建目录时，它会枚举所有已安装的项（`plugins.list`、`skills.status`、
-`mcp.list`），并将每一项表示为一条已安装条目：
+`extensions.catalog` 读取缓存目录并叠加实时已安装集合。`extensions.installed` 本地查询 MCP 管理器、插件管理器与共享 SkillSystem，因此已安装视图不依赖网络。
 
-- **匹配**到某个目录条目（按仓库 URL / 包 id / 名称）→ 合并并富化。
-- **未匹配**（手动配置的 MCP 服务器、本地技能）→ 标记为 **"已安装 · 手动 / 不在目录中"**，仍可在商店中切换启用与卸载。
+本地条目 ID 形如 `local:{kind}:{backend_id}`。目录条目保持目录 ID，不被 toggle 或 uninstall 接受；生命周期操作需要本地已安装 ID。未匹配的本地 MCP server 与本地技能仍以「未在目录中」状态展示。
 
-## 信任与安全
+MCP 目录条目按确定性派生的 server ID 匹配。插件与技能条目按 Kind 与大小写不敏感的 name 匹配。启用状态始终取自实时后端。
 
-"在某注册表中被列出"不等于"已审核" —— **Aleph 本身就是信任边界。** 每一次安装都会经过系统强制执行、且商店智能体
-无法绕过的关卡。
+## 信任与披露
 
-**信任层级**（源级默认值）：`Official` · `Verified publisher`（已验证发布者） · `Community`（已列出 + 已扫描，作者
-未验证） · `Unverified`（手动 URL / 长尾）。
+每次 Hub 安装都会先构建披露。信任层级：
 
-**风险类别**，逐项呈现：
+- `Official`
+- `Verified`
+- `Community`
+- `Unverified`
 
-- **MCP（stdio）** → 红色横幅 *"在你的计算机上运行命令"*。
-- **Skill / Plugin** → 黄色横幅 *"可以指挥智能体"*（提示注入 / 工具投毒）。
-- **MCP（远程 URL）** → 较温和的提示。
+披露按安装规格生成对应字段：
 
-**强制的安装前披露**（无静默绕过）：精确的命令 + 参数（逐字、可复制）；每个所需密钥及其用途；声明的网络 + 文件系统
-触及范围；将安装的锁定版本与 **SHA256**；信任层级与来源。社区 / 由 LLM 推导的 MCP 服务器还额外要求一次明确的
-**"我了解此风险"**确认。
+- stdio 模式下的精确命令与参数
+- 必需和敏感的密钥，必要时附用途
+- 声明的网络端点或文件系统/运行时触达
+- 版本
+- 当目录或市场提供时附 SHA-256 摘要
+- 信任层级与来源
+- 条目文本的注入扫描结果
 
-**密钥**存储于操作系统钥匙串 / 保险库（AES-256-GCM），从不以明文形式存于配置，也绝不进入可被原始继承的子进程环境
-—— 而是在启动时通过 Aleph 的 WASM 凭据注入边界，逐 MCP 服务器注入。
+风险从安装规格推导：
 
-**变更即锁定并重新把关**杜绝"抽地毯"式攻击：获批的 SHA256、版本以及工具 / 技能描述在安装时被绑定。版本提升、哈希变更
-或工具描述变更都会触发重新扫描与重新提示（"此扩展改变了它能做的事"）。
+| 安装形态 | 显示风险 |
+|---|---|
+| MCP stdio | 在你的计算机上运行命令 |
+| MCP remote | 连接远程端点 |
+| Skill 或 Plugin checkout | 可以指挥智能体 |
+| OCI image | 会运行命令，但当前版本不可安装 |
 
-**注入加固**会在披露文本展示之前对其进行扫描（零宽字符、RTL 覆盖、隐藏块、"忽略先前指令 / 读取 .env"等模式）—— 包括
-会到达策展智能体的文本。
+Community 与 Unverified 的运行命令类安装需要用户显式确认。用于技能或插件的 Git checkout 始终需要用户手势，因为它写入指令或可执行内容。OCI/Docker MCP 镜像作为目录条目可浏览，但当前安装路由会拒绝。
 
-> **沙箱是紧随其后的跟进项，而非 v1。** 知情同意式披露是 v1 中针对不受信任的 stdio MCP 服务器的边界（与当前
-> VS Code / Claude Desktop / Cursor 的做法一致）。进程 / 容器沙箱是首要的延后项。同样地，**OCI / Docker 镜像 MCP
-> 服务器在 v1 中可浏览但不可安装**。
+密钥写入加密保险库的扩展字段命名空间。MCP 配置中保存 `{{secret:NAME}}` 引用而非明文；密钥仅在进程 spawn 边界被解析。
 
-## 商店智能体
+批准路径会扫描名称与描述中的零宽字符、双向覆盖与可疑指令，例如「忽略先前指令」「读取 .env」「外泄数据」「暴露系统提示」等。
 
-一个内置、**受保护（不可删除）**的智能体 —— 与 `main` 同级 —— 拥有
-发现 → 策展 → 安装 → 验证的完整生命周期。它以 SubAgent 模式运行，配有一组**不向聊天智能体暴露**的私有工具集
-（`STORE_TOOLS`）：
+## 安装流水线
 
-| 工具 | 用途 |
-|------|---------|
-| `store_catalog_sync` | 将各提供方的同步结果写入本地目录缓存 |
-| `store_fetch_docs` | 获取仓库 / URL 的 README 与清单（长尾） |
-| `store_resolve_spec` | 推导并校验一个 `InstallSpec` |
-| `store_install_run` | 执行受信任层级把关、原子化、经 SHA256 校验的安装 |
-| `store_install_verify` | 安装后验证（MCP 启动并列出工具；技能可解析；插件可加载） |
+```text
+目录条目
+  → 解析缓存的 InstallSpec
+  → 构建披露与注入扫描
+  → 需要时用户确认
+  → 校验必需配置
+  → 密钥字段入保险库
+  → 按 InstallSpec 路由
+  → 安装后验证
+  → 返回结果与已批准的 pin
+```
 
-该智能体**策展呈现并驱动安装**，但**安装规范、信任裁决、SHA256、密钥与沙箱都是系统关卡** —— 它无法伪造或绕过它们。
-策展优先采用确定性方式（一张关键词 → 类别的映射表），仅在条目含糊时才动用 LLM；它是惰性、增量且带缓存的，因此绝不会
-消耗用户的 token。
+路由映射：
 
-## 安装模型
+- `McpStdio` / `McpRemote` → 通过 `McpManager` 添加并启动
+- kind `Skill` 的 `GitDir` → 隔离 checkout，复制进技能目录，记录来源
+- kind `Plugin` 的 `GitDir` → 市场安装并校验 SHA-256、原子复制
+- `OciImage` → 当前版本拒绝
 
-两个层级，均受同一组关卡把关：
+stdio MCP 的命令必须已经在 `PATH` 上可解析；缺运行时在持久化 server 之前即失败。
 
-- **确定性快路径**（多数安装，无需 LLM）：干净的机器可读规范 —— 合成的 MCP 官方规范、Docker 镜像引用、市场插件或
-  技能 —— 直接进入 `store_install_run`。
-- **LLM 辅助的长尾**：将商店智能体指向任意 GitHub 仓库或 URL →
-  `store_fetch_docs` → `store_resolve_spec`（推断类型 + 规范 + 所需密钥）→ 信任关卡 →
-  `store_install_run` → `store_install_verify`。这无需全局爬虫即可覆盖开源长尾。
+## 内置 Hub 工具与代理边界
 
-安装是原子化的，因此在安装途中离开只会取消 —— 绝不会造成损坏。
+当前活动内置工具：
 
-## RPC 接口
+| 工具 | 角色 |
+|---|---|
+| `hub_catalog_sync` | 拉取 Aleph Hub 工件到本地缓存 |
+| `hub_resolve_spec` | 读取条目的缓存安装规格 |
+| `hub_install_run` | 执行系统信任关卡与干净安装 |
+| `hub_install_verify` | 校验 MCP server 或已安装工件 |
+| `hub_fetch_docs` | 注入扫描过的长尾文档抓取脚手架 |
 
-UI 与一层薄的 `extensions.*` 门面通信，由它分派到既有的各类型处理器。完整参考参见
-[网关方法：extensions](/docs/zh/gateway/methods/extensions)。
+主分支目前没有独立 `hub-agent`，`HUB_TOOLS` 也不是由某个代理独占的 allowlist。这些工具都注册在主内置工具注册表里；`hub_install_run` 是 operator 闸门，而只读校验代理会显式拒绝 Hub 工具。LLM 控制的调用无法提供用户确认：需要确认的安装只返回披露与同意提示，不会产生安装或密钥存储副作用。
+
+`hub_fetch_docs` 是带 SSRF 检查、注入扫描与字节上限的脚手架，没有接入任何用户长尾安装流程。不要把它描述为自主仓库安装。
+
+## 网关门面
+
+UI 使用一层薄的 `extensions.*` 门面：
 
 | 方法 | 用途 |
-|--------|---------|
-| `extensions.catalog` | 浏览缓存的目录（按类型 / 类别 / 源 / 查询筛选） |
-| `extensions.installed` | 对账后的已安装列表（目录 + 手动项） |
-| `extensions.disclosure` | 安装前披露载荷 + 注入扫描结果 |
-| `extensions.configure` | 为某扩展写入配置 / 密钥值 |
-| `extensions.install` | 受信任层级把关的安装（返回 `needs_ack` / `missing` / 验证结果） |
-| `extensions.toggle` | 启用或禁用某个已安装扩展 |
-| `extensions.uninstall` | 移除某个扩展 |
-| `extensions.sources.list` | 列出已配置的源及其信任层级与类型 |
-| `extensions.sources.refresh` | 触发一次后台重新同步 |
+|---|---|
+| `extensions.catalog` | 按 Kind、分类、源 ID 或 name 查询浏览缓存 |
+| `extensions.installed` | 三后端的实时对账 |
+| `extensions.disclosure` | 返回安装前披露与扫描结果 |
+| `extensions.configure` | 校验提交的字段 |
+| `extensions.install` | 完成信任确认、安装、验证并返回 pin |
+| `extensions.toggle` | 启用或禁用本地已安装扩展 |
+| `extensions.uninstall` | 移除本地已安装扩展 |
+
+各 Kind 的高级入口仍可用，包括规范的单数 `plugin.*` 命名空间与复数 `plugins.*` 兼容别名。
 
 ## 相关页面
 
-- [扩展（插件宿主）](/docs/zh/concepts/extensions) —— 插件运行时与清单
-- [技能](/docs/zh/concepts/skills) —— Skill 类型
-- [MCP 集成](/docs/zh/concepts/mcp-integration) —— MCP 类型
-- [ClawHub](/docs/zh/concepts/clawhub) —— 长尾技能源（不再是一等的）
-- [网关方法：extensions](/docs/zh/gateway/methods/extensions) —— `extensions.*` RPC 接口
-
----
-
-## 26.7.x 补充
-
-### `plugin.marketplace.list` / `add`
-
-26.7.x 引入索引式插件目录：
-
-- `plugin.marketplace.list` —— 列出已添加的市场源
-- `plugin.marketplace.add` —— 添加市场（提供 URL）
-
-### 信任层级
-
-| 层级 | 含义 |
-|------|------|
-| **Official** | 官方维护（`Official MCP Registry` 等） |
-| **Verified** | 经过验证的第三方 |
-| **Community** | 社区贡献 |
-| **Unverified** | 未验证 |
-
-### 安装前披露（强制）
-
-每次安装都给出**完整披露**：
-
-- `command+args` —— 启动命令
-- 密钥 —— 需要的密钥清单
-- 网络 / 文件系统触达 —— 权限范围
-- 固定版本 + SHA256 —— 完整性证明
-- 信任层级 —— 来源
-
-### 商店智能体
-
-`store-agent`（受保护智能体）负责 discover → curate → install → verify，**无法绕过系统约束**（specs、信任裁决、SHA256、密钥）。
-
-### 面板导航
-
-`/extensions`（顶层面板模式）按功能类别浏览/安装扩展。`/settings` 把 MCP / Plugins / Skills 归入 **Advanced** 组；ClawHub 设置标签页已移除（降级为长尾）。
-
-### 见另请参阅
-
-- [MCP 集成](/docs/zh/concepts/mcp-integration) — MCP 类型
-- [ClawHub](/docs/zh/concepts/clawhub) — 长尾源
-- [网关 RPC `extensions.*`](/docs/zh/gateway/methods/extensions) — 协议
+- [扩展](./extensions) — Plugin Kind 与 runtime
+- [扩展系统](./extension-system) — 发现与注册架构
+- [技能](./skills) — Skill Kind 编写
+- [技能系统](./skill-system) — Skill 后端
+- [能力系统](./capability-system) — 声明、权限与运行时账本

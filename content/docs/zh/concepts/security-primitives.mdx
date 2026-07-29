@@ -1,85 +1,73 @@
 ---
 title: "安全基元"
-description: "跨领域安全层，包括 SSRF 保护、内容清理、安全头、运行时守卫和持久审计日志。"
+description: "跨领域安全层，包括 SSRF 保护、内容清理、安全头、运行时守卫与持久审计日志。"
 ---
 
-`security` 模块提供跨领域安全基元，保护 Aleph 免受常见攻击向量。它通过 SSRF 保护、内容清理、安全头、运行时守卫和审计日志补充网关的认证/身份系统。
+`security` 模块提供跨领域的安全基元，覆盖 Aleph 出站请求、HTTP 响应头、注入检测与运行时编排。它与网关的认证 / 身份系统互为补充 —— 后者解决"谁能连进来"，前者解决"出了 Aleph 不能做什么 / 不能写什么日志"。
 
 ## 设计理念
 
-1. **纵深防御** — 不同层上的多个独立检查
-2. **非阻塞审计** — 安全事件通过异步通道记录，不阻塞热路径
-3. **可配置严格性** — 策略可以为开发放宽，为生产收紧
+1. **纵深防御** —— 不同层的多个独立检查
+2. **非阻塞审计** —— 安全事件通过异步通道落地，不阻塞热路径
+3. **可配置严格性** —— 策略可按部署场景放宽或收紧
 
 ---
 
 ## SSRF 保护
 
-SSRF（服务器端请求伪造）引擎在 HTTP 请求之前验证所有出站 URL：
+SSRF 引擎位于 `src/security/ssrf/`，在任何出站 HTTP 请求发出之前验证 URL：
 
-```rust
-pub async fn validate_url_async(
-    url_str: &str,
-    policy: &SsrfPolicy,
-) -> Result<Url, SsrfError>
+```
+src/security/ssrf/
+├── mod.rs        —— 公共 API：validate_url, validate_url_async, safe_fetch, SsrfError
+├── policy.rs     —— SsrfPolicy 配置
+├── ip.rs         —— IPv4 / IPv6 分类与阻断范围
+├── hostname.rs   —— 主机名黑名单、白名单、传统 IP 字面量识别
+├── dns.rs        —— 异步 DNS 解析 + 地址钉扎
+└── fetch.rs      —— safe_fetch（含重定向链验证）
 ```
 
-**阻止：**
-- 私有网络 (10.x, 172.16-31.x, 192.168.x)
-- 环回 (127.x, ::1)
-- 链路本地 (169.254.x)
-- CGNAT (100.64-127.x)
-- 云元数据端点 (169.254.169.254)
-- 传统 IP 字面量 (0x7f000001)
-- 带有嵌入式凭据的 URL
-- 阻止列表中的主机名
+**阻断：**
 
-**DNS 重新绑定防御：** 解析主机名并验证所有返回的 IP。
+- RFC1918 私有网络（10/8、172.16/12、192.168/16）
+- 环回（127/8、`::1`）
+- 链路本地 + 云元数据（169.254/16）
+- CGNAT（100.64/10）
+- 唯一本地 IPv6（fc00::/7）、链路本地 IPv6、IPv6 组播
+- 传统 IPv4 字面量（八进制、十六进制、十进制、短形）
+- IPv4 嵌入 IPv6（IPv4-mapped / NAT64 / 6to4 / Teredo / IPv4-compatible）
+- 主机名黑名单
+- URL 内嵌凭据
 
-**允许列表支持：** 精确主机或通配符子域 (`*.example.com`) 可以绕过检查。
+**DNS 钉扎：** 异步解析主机名后验证所有返回的 IP，调用方通过 `reqwest::Client::builder().resolve(host, validated_addr)` 钉到预校验的地址，杜绝解析到连接之间的 TOCTOU 窗口。
 
-```rust
-let policy = SsrfPolicy {
-    allowed_hosts: vec!["*.internal.corp".to_string()],
-    allow_private_network: false,
-    ..Default::default()
-};
-```
+**白名单支持：** 精确主机或通配符子域（`*.example.com`）。
+
+**`safe_fetch`（`fetch.rs`）** 是所有出站 HTTP 的唯一入口：URL 解析 → 传统字面量拒绝 → 凭据混淆检测 → 主机名 / 白名单 → IP 字面量或异步 DNS + 全 IP 校验 → DNS 钉扎 → 发起请求（重定向策略禁开）→ 重定向循环：提取 `Location`、重复以上步骤、跨源剥除 `Authorization` / `Cookie` / `Proxy-Authorization`、URL 集合去重、超 `max_redirects` ⇒ `SsrfError::TooManyRedirects`。
+
+调用方包括 web fetch 工具、webhook 投递、媒体下载器、MCP HTTP 传输、浏览器导航。
 
 ---
 
 ## 内容清理
 
-在 LLM 注入之前用边界标记包装不受信任的外部内容：
+`src/security/content_sanitizer.rs` 在外部内容进入 LLM 之前用边界标记包裹：
 
 ```rust
-pub fn wrap_external_content(
-    content: &str,
-    source: ContentSource,
-) -> String
+pub fn wrap_external_content(content: &str, source: ContentSource) -> String;
 ```
 
-**来源：**
-- Web 获取
-- MCP 工具输出
-- Webhook 负载
-- 电子邮件
-- 浏览器内容
-- 用户上传
+支持的来源：Web fetch / MCP 工具输出 / Webhook 负载 / 邮件 / 浏览器内容 / 用户上传。
 
-**检测：**
-- 注入模式（指令覆盖尝试）
-- Tokenizer 标记操纵
-- 模型格式标记欺骗
-- 同形攻击（Unicode 规范化）
+**检测：** 注入模式 / tokenizer 标记操纵 / 模型格式标记欺骗 / 同形攻击（Unicode 规范化）/ 不可见字符 (`unicode_guard.rs`) / token-level 注入 (`injection_patterns.rs`)。命中被标记而非阻断 —— 由 LLM 决定信任（参 R8 LLM 主权）。
 
-**方法：** 标记可疑模式但让 LLM 决定信任（R8 — LLM 主权）。
+**喂入 prompt 的边界标记输入** 在拼接之前也要 escape —— transcript / focus / prior-summary 这些字段会先 escape 再加入 prompt，防止伪造的边界标记跨越到下一段会话。
 
 ---
 
 ## 安全头
 
-Tower 层在所有 HTTP 响应上注入安全头：
+`src/security/headers.rs` 是一个 Tower 层，在所有 HTTP 响应上注入：
 
 | 头 | 值 |
 |---|---|
@@ -90,48 +78,48 @@ Tower 层在所有 HTTP 响应上注入安全头：
 | `X-XSS-Protection` | `0` |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
-| `Cache-Control` | `no-store` (静态资源除外) |
+| `Cache-Control` | `no-store`（静态资源除外） |
 
-静态资源 (`.js`, `.css`, `.wasm`, `.png` 等) 免于 `Cache-Control: no-store`。
+静态资源（`.js` / `.css` / `.wasm` / `.png` 等）免于 `Cache-Control: no-store`。
 
 ---
 
 ## 运行时安全守卫
 
-在代理执行期间编排多个安全检查：
+`src/security/runtime_guard.rs::RuntimeSecurityGuard` 编排多个安全检查：
 
 ```rust
-pub struct RuntimeSecurityGuard {
-    pii_engine: Option<PiiEngine>,
-    leak_detector: Option<SecretLeakDetector>,
-    audit_log: Option<SecurityAuditLog>,
+pub struct SecurityGuardConfig {
+    pub pii_filtering: bool,
+    pub content_sanitization: bool,
+    pub leak_detection: bool,
+    pub secret_injection: bool,
+    pub audit_enabled: bool,
+    pub custom_leak_patterns: Vec<CustomLeakPattern>,
 }
 ```
 
-**检查：**
-- 出站消息上的 PII 过滤
-- 工具输出上的秘密泄漏检测
-- 外部输入上的内容清理
-- 安全事件的审计日志
+**出站（`process_outbound`）：**
 
-**配置：**
+1. 占位符引用解析（`{{secret:NAME}}` 通过 `AsyncSecretResolver`）
+2. 泄漏检测（执行类 + 密钥类两套扫描器）—— 命中即阻断 / Redact / Warn
+3. PII 过滤（调用 `PiiEngine::filter_with_platform`）
+4. 占位符替换
 
-```rust
-SecurityGuardConfig {
-    pii_filtering: true,
-    content_sanitization: true,
-    leak_detection: true,
-    secret_injection: true,
-    default_action_on_leak: LeakAction::Block,
-    audit_enabled: true,
-}
-```
+**入站（`process_inbound`）：**
+
+1. 泄漏检测 —— `Block` 命中即返回 `SecretMasker::mask` 过的文本
+2. PII 过滤 —— 在回显到宿主之前清除 LLM 回灌的敏感数据
+
+锁纪律：PII 引擎使用 `crate::sync_primitives::RwLock`（同步，短临界区），泄漏检测器使用 `tokio::sync::Mutex`（跨 await）。审计通道关闭 / 满载不会阻塞热路径 —— `try_send` 失败时计数 + 一次性日志。
 
 ---
 
 ## 审计日志
 
-用于安全事件的持久 SQLite 支持审计日志：
+`src/security/audit.rs::SecurityAuditLog` 是一个有界 `tokio::sync::mpsc` 通道；背景任务 `spawn_audit_drain`（`audit_drain.rs`）从通道读取条目并经 `SecurityStore::insert_audit_entry` 写入 SQLite 的 `security_audit_log` 表，按 `DEFAULT_RETENTION_SECS`（30 天）定期清除。
+
+事件类型：
 
 ```rust
 pub enum AuditEventType {
@@ -141,81 +129,77 @@ pub enum AuditEventType {
     ExecBlocked,
     ExecApprovalDenied,
     InvisibleCharsDetected,
+    TokenizerMarkerScrubbed,
     InjectionPatternDetected,
+    EnvInjectionDetected,
     PathTraversalBlocked,
     PermissionDenied,
     PiiDetected,
     LeakWarning,
-    // ... 等
 }
 ```
 
-**非阻塞：** 使用 `tokio::sync::mpsc` 和 `try_send`。如果通道已满，事件会被丢弃并发出警告，而非阻塞执行。
+严重级别：`Critical / Warn / Info`。
+
+**非阻塞：** `SecurityAuditLog::log` 调用 `try_send`，通道满时条目被丢弃并发出警告，自上次丢弃以来的总丢弃数可读。`new_with_audit` 返回 `(guard, receiver)` —— 谁拥有 receiver 谁负责实际写入，避免接收端被立刻 drop 关闭通道。
 
 ---
 
-## 安全属性
+## Pairing 单源
 
-- **无 DRY 违规** — 共享的 `is_ip_blocked_by_policy()` 辅助函数用于所有 SSRF 检查
-- **热路径中无 unwrap** — 所有锁恢复使用 `unwrap_or_else(|e| e.into_inner())`
-- **参数化 SQL** — 审计日志使用 `?1` 绑定
-- **无 `static mut`** — 未找到
+频道本地 pairing store 已被回退：访问 / pairing / 白名单 **全部单源** 于入站路由器。Telegram / Discord / iMessage 共用同一个 pairing store。
+
+---
+
+## 命令注入修复
+
+- 桌面 `open` / `launch` 改为通过 `ShellExecuteW` 而非 shell
+- 打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接
+- 技能下载的路径穿越关闭，扫描器文件大小加封顶
+
+---
+
+## 集群 `file.write` 无 TOCTOU
+
+集群 `file.write` 不再有存在检查与写入之间的 TOCTOU 窗口。
+
+---
+
+## 证书审批指纹匹配
+
+证书审批 **必须** 匹配指纹才授权；WebView 在 Linux / Windows 上 **必须** 限制麦克风权限来源。
+
+---
+
+## 路径安全
+
+- 符号链接安全的删除 / 移动
+- glob / deny 复检
+- 冲突去重
+- 逐路径锁
+- 加固的路径 deny gate（`%APPDATA%` 展开、系统 / proc 守护）
+- `apply_patch` 前向游标诚实地失败
 
 ---
 
 ## 代码位置
 
-- `src/security/mod.rs` — 模块入口点
-- `src/security/ssrf/` — SSRF 保护引擎
-- `src/security/content_sanitizer.rs` — 注入检测
-- `src/security/headers.rs` — HTTP 安全头
-- `src/security/runtime_guard.rs` — 运行时编排
-- `src/security/audit.rs` — 持久审计日志
+- `src/security/mod.rs` —— 模块入口
+- `src/security/ssrf/` —— SSRF 引擎（policy / ip / hostname / dns / fetch）
+- `src/security/content_sanitizer.rs` —— 注入检测
+- `src/security/headers.rs` —— HTTP 安全头
+- `src/security/runtime_guard.rs` —— 运行时守卫
+- `src/security/audit.rs` —— 审计日志通道
+- `src/security/audit_drain.rs` —— 审计持久化任务
+- `src/security/unicode_guard.rs` —— 不可见字符检测
+- `src/security/injection_patterns.rs` —— token 级注入模式
+- `src/security/safe_regex.rs` —— 正则字面量编译辅助
+- `src/security/context_id_hasher.rs` —— 上下文 ID 哈希
+- `src/security/secret_env.rs` / `secret_equal.rs` —— 凭据环境与常量时间比较
+- `src/security/dangerous_tools.rs` —— `tools.invoke` 黑名单
 
 ## 另请参阅
 
-- [PII 保护](/docs/zh/concepts/pii-protection) — PII 检测和过滤
-- [秘密管理](/docs/zh/concepts/secret-management) — 加密凭据存储
-
----
-
-## 26.7.x 补充
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已被回退，**单一源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### 命令注入修复
-
-- 桌面 `open` / `launch` 改为通过 `ShellExecuteW` 而非 shell
-- 打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接
-- 技能下载路径穿越关闭，扫描文件大小加封顶
-
-### Cluster `file.write` 无 TOCTOU
-
-26.7.21+：集群 `file.write` 不再有存在检查与写入之间的 TOCTOU 窗口。
-
-### 证书审批指纹匹配
-
-26.7.21+：证书审批**必须**匹配指纹才授权。WebView 麦克风权限在 Linux/Windows 上**必须**做来源限制。
-
-### 路径安全
-
-26.7.15+：
-
-- 符号链接安全的删除/移动
-- glob/deny 复检
-- 冲突去重
-- 逐路径锁
-- 加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）
-- `apply_patch` 前向游标诚实地失败
-
-### 进程隔离内核
-
-26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口（详见 [架构红线 R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
-
-### 见另请参阅
-
-- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 详细
-- [安全：配对](/docs/zh/security/pairing) — pairing 流程
-- [架构红线 R1](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation) — 进程隔离例外
+- [PII 保护](/docs/zh/concepts/pii-protection) —— PII 检测与脱敏
+- [秘密管理](/docs/zh/concepts/secret-management) —— 加密凭据存储
+- [审批](/docs/zh/concepts/approval) —— 能力域审批引擎

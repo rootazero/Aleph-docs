@@ -1,244 +1,94 @@
 ---
 title: "Execution Engine"
-description: "Sandboxed command execution with approval workflow, risk analysis, seatbelt profiles, and audit logging."
+description: "Gateway run lifecycle, session admission, resource-aware tool concurrency, cancellation, steering, approvals, and sandbox integration."
 ---
 
-The `exec` module provides sandboxed command execution for Aleph. It handles shell command parsing, risk analysis, approval workflows, and sandbox enforcement via platform-specific profiles (Seatbelt on macOS).
+The execution engine bridges Gateway requests to the Orchestrator and agent harness. It owns run admission, per-session exclusivity, global and per-agent limits, event emission, persistence, cancellation, deadlines, steering, and per-request tool-service construction. Sandboxed command execution is one tool path inside this engine, not the engine itself.
 
-## Design Philosophy
+## Run Lifecycle and Admission
 
-1. **Default deny** — Commands are blocked unless explicitly approved or allowlisted
-2. **Progressive trust** — One-time, session, or permanent approval
-3. **Sandbox enforcement** — Platform-specific sandboxing (Seatbelt on macOS)
+A `RunRequest` carries the run and session ids, input, timeout, metadata, attachments, optional workspace and sandbox overrides, iteration cap, and model override. The engine tracks `Running`, `Completed`, `Cancelled`, and `Failed` states and emits ordered stream events.
 
----
+Concurrency is enforced at two levels:
 
-## Architecture
+- `SessionRunRegistry` permits only one active run per session.
+- `ConcurrencyLimiter` applies `[execution] max_runs_global` and `max_runs_per_agent` for the lifetime of each run. These limits are hot-reloadable.
 
-```
-Command → Parser → Risk Analyzer → Approval Manager → Sandbox → Execute
-                                          │
-                              ┌───────────┼───────────┐
-                              ▼           ▼           ▼
-                          Allowlist    Human      Auto
-                           Check     Approval   Approve
-                              │           │       │
-                              └───────────┼───────┘
-                                          │
-                                          ▼
-                                    Audit Log
-```
+Messages that arrive while a session is busy follow an explicit channel policy: `steer` injects at the next turn boundary, `interrupt` cancels and restarts through the wait lane, and `queue` waits without disturbing the current run. The shared per-session wait lane is FIFO and bounded.
 
----
+## Resource-Aware Tool Concurrency
 
-## Core Components
-
-### Command Parser
-
-Parses and normalizes shell commands:
+When `[tool_service] parallel_tool_concurrency` is at least 2 and a model emits multiple calls, the Act phase asks the tool service for a `ConcurrencyClaim` for each call's concrete arguments.
 
 ```rust
-pub struct CommandParser;
+pub enum ConcurrencyClaim {
+    Shared,
+    Exclusive { scope: ExclusiveScope },
+}
 
-impl CommandParser {
-    pub fn parse(
-        &self,
-        cmd: &str,
-    ) -> Result<ParsedCommand> { /* ... */ }
+pub enum ExclusiveScope {
+    Global,
+    Paths(BTreeSet<String>),
+    Nodes(BTreeSet<String>),
+    Sessions(BTreeSet<String>),
 }
 ```
 
-**Normalization:**
-- Expands environment variables
-- Resolves relative paths
-- Detects chained commands (`;`, `&&`, `||`)
+Claims describe the resources a call may affect:
 
-### Risk Analyzer
+- `Shared` is for read-only or side-effect-free calls. Shared calls can run together.
+- `Global` is the conservative fallback for unknown or unbounded mutation and conflicts with every call.
+- `Paths` names normalized filesystem paths. Equal or ancestor/descendant paths conflict; disjoint path trees can run together.
+- `Nodes` names remote cluster nodes. Calls to distinct nodes can run together; the same node conflicts.
+- `Sessions` names delegated local sessions. Distinct sibling sessions can run together, but a session claim conflicts with paths, nodes, global mutation, and shared reads because the delegated run's local footprint is unknown.
 
-Classifies commands by risk level:
+An empty or unresolvable resource set degrades to `Global` rather than guessing.
 
-```rust
-pub enum RiskLevel {
-    Safe,      // Read-only operations (ls, cat, grep)
-    Caution,   // Destructive but common (rm, mv, cp)
-    Dangerous, // System-level (sudo, chmod, kill)
-    Unknown,   // Unrecognized command
-}
+## Ordered Bucketing
 
-pub struct RiskAnalyzer;
+The scheduler does not make one parallel-or-serial decision for the whole batch. `partition_parallel_groups` walks calls in model order and creates contiguous groups whose members are pairwise non-conflicting. Groups execute sequentially; calls inside a group execute concurrently up to the configured cap.
 
-impl RiskAnalyzer {
-    pub fn analyze(
-        &self,
-        cmd: &ParsedCommand,
-    ) -> RiskLevel { /* ... */ }
-}
-```
+For example, several reads followed by `bash` become one parallel read group followed by one serial global group. Same-file writes split into separate groups, while writes to disjoint files can remain together. This preserves the relative order of conflicting calls without serializing unrelated work.
 
-**Risk factors:**
-- Command type (read vs write vs execute)
-- Target path sensitivity
-- Network access
-- Privilege escalation
+Claims are computed from the arguments used for admission and carried into dispatch. Unknown tools receive a global claim. Duplicate calls stay on the serial deduplication path.
 
-### Approval Manager
+## Resource Declarations
 
-Manages the approval workflow:
+The default tool declaration is fail-closed: `is_concurrent_safe = false` maps to `Global`; an explicitly concurrent-safe tool maps to `Shared`. Tools with bounded effects override `concurrency_claim(input)`:
 
-```rust
-pub struct ApprovalManager {
-    allowlist: Allowlist,
-    escalation: EscalationPolicy,
-}
+- `file_write` and `file_edit` claim their target path.
+- `apply_patch` claims every file parsed from the patch envelope.
+- Mutating `file_ops` actions claim source and destination paths; read actions are shared.
+- `node_invoke` claims its resolved node.
+- `session_send` claims its resolved target session.
+- Input-dependent tools may declare shared for read modes and global for mutating modes.
 
-impl ApprovalManager {
-    pub async fn request_approval(
-        &self,
-        request: ApprovalRequest,
-    ) -> Result<ApprovalDecision> { /* ... */ }
-}
-```
+MCP tools use their read-only/idempotent annotations for shared admission; unannotated tools remain global. A resource declaration affects scheduling only. It does not grant permission or bypass approval.
 
-**Decision types:**
-- `Allow` — Execute immediately
-- `Deny` — Block execution
-- `Ask` — Prompt user for confirmation
-- `Escalate` — Escalate to higher authority
+## Approval and Sandbox Boundaries
 
-**Escalation reasons:**
-- `FirstExecution` — Never seen this command before
-- `HighRisk` — Command is classified as dangerous
-- `PathSensitive` — Target is a sensitive directory
+Every execution still passes through the scoped tool service. The action-aware approval gate keys grants on the concrete action, while execution tiers control automatic approval:
 
-### Sandbox
+| Tier | Behavior |
+|---|---|
+| `ask` | Ask before non-idempotent execution; unknown tools fail closed |
+| `auto` | Automatically allow idempotent tools; mutating tools require approval |
+| `full` | Automatically allow tools except where hard security rules intervene |
 
-Platform-specific sandbox enforcement:
+`[sandbox.command_policy]` remains a hard floor that no tier can weaken. Unattended runs fail closed for confirmation-gated tools. Platform sandboxing, command policy, workspace scope, timeout, cancellation, and output limits are enforced after scheduling and approval decisions.
 
-**macOS (Seatbelt):**
-```rust
-pub struct SeatbeltProfile {
-    rules: Vec<SeatbeltRule>,
-}
+## Code Locations
 
-impl SeatbeltProfile {
-    pub fn generate(
-        &self,
-        request: &ExecutionRequest,
-    ) -> String { /* ... */ }
-}
-```
-
-**Profile rules:**
-- Read-only access to workspace
-- No network access (unless requested)
-- No access to sensitive paths (`~/.ssh`, `~/.config`, etc.)
-- Temporary directory access for output
-
-**Security:**
-- Domain character whitelist (`[a-zA-Z0-9._-]`) prevents profile injection
-- Path quotes escaped to prevent expression injection
-
-### Executor
-
-Executes approved commands:
-
-```rust
-pub struct SandboxExecutor;
-
-impl SandboxExecutor {
-    pub async fn execute(
-        &self,
-        request: ExecutionRequest,
-    ) -> Result<ExecutionResult> { /* ... */ }
-}
-```
-
-**Features:**
-- Timeout enforcement (configurable, default 30s)
-- Output capture (stdout + stderr)
-- Exit code tracking
-- Cleanup on completion (temp files, sandbox profile)
-
-**Safety:** Cleanup errors are logged via `tracing::warn` but don't override the execution result.
-
----
-
-## Audit Logging
-
-All executions are logged:
-
-```rust
-pub struct ExecutionAudit {
-    pub command: String,
-    pub decision: ApprovalDecision,
-    pub executor: String,
-    pub timestamp: DateTime<Utc>,
-    pub exit_code: Option<i32>,
-}
-```
-
----
-
-## Safety Properties
-
-- **Path scope validation** — Uses `Path::starts_with` (component-level) not `str::starts_with`
-- **HMAC timing-safe** — `hmac::verify_slice()` for constant-time comparison
-- **No panic in async** — `compute_hmac` returns `Result`, not `expect`
-- **Saturating arithmetic** — Timeout calculations use `saturating_mul`
-- **No cleanup override** — Cleanup failures don't mask execution results
-
----
-
-## Code Location
-
-- `src/exec/mod.rs` — Module entry point
-- `src/exec/parser.rs` — Command parsing
-- `src/exec/risk.rs` — Risk analysis
-- `src/exec/approval/` — Approval workflow
-- `src/exec/sandbox/` — Sandbox profiles and execution
-- `src/exec/manager.rs` — Approval manager
-- `src/exec/audit.rs` — Execution audit log
+- `src/gateway/execution_engine/` — run lifecycle, admission, steering, cancellation, and tool-service wiring
+- `src/harness/agent/act.rs` — ordered claim collection and group dispatch
+- `src/tools/concurrency.rs` — claim types, conflict rules, path normalization, and partitioning
+- `src/tools/runtime.rs` — per-tool `concurrency_claim` declaration
+- `src/tools/adapters/registry_adapter.rs` — argument-aware claims for built-in tools
+- `src/tools/scoped/` — approval and policy choke point
+- `src/sandbox/` — command policy and platform sandboxing
 
 ## See Also
 
-- [Security Primitives](./security-primitives) — Security layers
-- [Builtin Tools](./builtin-tools) — Code execution tool
-- [Approval](./approval) — Desktop/browser approval system
-
----
-
-## 26.7.x Addendum
-
-### Action-Aware Approval Gate
-
-26.7.15+: the execution approval gate is **action-aware** — the human sees the actual command and the grant fingerprint **keys on it**. Authorization granularity moves from "tool-level" to "command-level".
-
-### `sandbox.command_policy` Hard Floor
-
-26.7.15+: the hard floor cannot be lowered by any `exec_tier`. Missing or inconsistent refuses authorization.
-
-### Process-Isolation Kernel
-
-26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn ([R1 Process-Isolation Kernel carve-out](/docs/en/philosophy/redlines#r1-brain-limb-separation)).
-
-### Slash Fast-Path Bypass Closed
-
-26.7.15+: the slash fast-path, `tools.invoke`, and the background-continuation bypass are all forced through the approval gate — previously they could bypass approval.
-
-### Three-Tier Execution Permissions
-
-| Tier | Behavior |
-|------|----------|
-| `ask` | Prompt for approval before every tool execution; unknown tools fail closed |
-| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
-| `full` | All auto-allow (besides the hard security filter) |
-
-### Sandbox Hardening
-
-26.7.15+: invisible-character SSOT, symmetric breaker purge, dead-code sweep.
-
-### See Also
-
-- [Capability System](/docs/en/concepts/capability-system) — permission declarations
-- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` details
-- [Architectural Redlines R7 / R10](/docs/en/philosophy/redlines) — LLM Sovereignty + Dumb Loop
+- [Approval](/docs/en/concepts/approval) — human approval surfaces
+- [Builtin Tools](/docs/en/concepts/builtin-tools) — available execution tools
+- [Teams](/docs/en/concepts/teams) — team and task-level concurrency

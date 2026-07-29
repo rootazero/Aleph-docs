@@ -1,274 +1,64 @@
 ---
 title: "配置"
-description: "具有原子写入、热重载、冲突检测和预设覆盖的配置管理。"
+description: "Aleph 当前 canonical 配置结构、Gateway 传输设置与重载影响。"
 ---
 
-`config` 模块管理 Aleph 的配置系统。它支持通过 TOML 进行基于文件的配置、运行时编程更新以及无需重启服务器的热重载。
+Aleph 默认读取 `~/.aleph/config.toml`；`ALEPH_HOME` 可覆盖配置和数据根目录。值支持 `${VAR}` 与 `${VAR:-default}` 插值。
 
-## 设计理念
-
-Aleph 中的配置遵循三个原则：
-
-1. **原子性** — 配置更改永远不会是部分的；要么整个更改应用，要么都不应用
-2. **安全性** — 运行时更新受冲突和意外擦除保护
-3. **透明性** — 更改被记录、可审计且可逆
-
-配置系统建立在标准 Rust 文件操作之上，具有防御性模式以防止数据丢失。
-
----
-
-## 架构
-
-```
-┌─────────────────────────────────────────┐
-│           ConfigManager                  │
-│  ┌─────────────┐  ┌──────────────────┐ │
-│  │  FileStore  │  │  ConfigPatcher   │ │
-│  └─────────────┘  └──────────────────┘ │
-└─────────────────────────────────────────┘
-      │                           ▲
-      │ read/write                │ patch
-      ▼                           │
-┌──────────┐              ┌──────────────┐
-│ aleph.toml│              │  Runtime     │
-│ (~/.aleph/)│              │  Updates     │
-└──────────┘              └──────────────┘
-```
-
----
-
-## 核心组件
-
-### ConfigManager
-
-中央配置协调器。
-
-```rust
-pub struct ConfigManager {
-    store: FileStore,
-    patcher: ConfigPatcher,
-    defaults: ConfigDefaults,
-}
-```
-
-**职责：**
-- 启动时从 `~/.aleph/aleph.toml` 加载配置
-- 监视文件更改（通过 `notify` crate）
-- 应用来自 Gateway 管理 API 的运行时补丁
-- 将更改原子性地持久化回磁盘
-
-### FileStore
-
-处理具有原子写入语义的所有文件 I/O。
-
-```rust
-impl FileStore {
-    pub async fn save_to_file(&self,
-        path: &Path,
-        config: &Config,
-    ) -> Result<(), ConfigError> {
-        // 1. 写入临时文件
-        // 2. fsync 以确保数据写入磁盘
-        // 3. 原子重命名（替换旧文件）
-        // 4. 成功时清理临时文件
-    }
-}
-```
-
-**原子写入模式：**
-1. 将新内容写入同一目录中的临时文件
-2. 调用 `fsync()` 将 OS 缓冲区刷新到磁盘
-3. 将临时文件重命名为目标文件名（在 POSIX 上是原子的）
-4. 如果重命名成功，删除临时文件
-
-如果任何步骤失败，原始配置文件保持不变。
-
-### ConfigPatcher
-
-应用具有冲突检测的增量更新。
-
-```rust
-pub struct ConfigPatcher {
-    last_modified: SystemTime,
-}
-
-impl ConfigPatcher {
-    pub async fn apply(
-        &mut self,
-        config: &mut Config,
-        patch: ConfigPatch,
-    ) -> Result<(), PatchError> {
-        // 1. 检查 mtime — 自上次读取以来文件是否已更改？
-        // 2. 如果冲突，重新读取文件并重新应用补丁
-        // 3. 验证补丁不变量
-        // 4. 在写锁下应用
-    }
-}
-```
-
-**冲突检测 (TOCTOU 缓解)：**
-- 读取之前记录文件的修改时间
-- 写入之前，检查 mtime 是否已更改
-- 如果已更改：重新读取文件，将补丁与当前状态合并，然后写入
-- 这防止了当文件监视器和 API 同时尝试修改配置时的丢失更新
-
----
-
-## 配置结构
+## Canonical schema
 
 ```toml
-# ~/.aleph/aleph.toml
+[general]
+default_provider = "claude"
+fallback_providers = ["openai"]
 
-[server]
+[providers.claude]
+provider_type = "claude"
+enabled = true
+api_key = "${ANTHROPIC_API_KEY}"
+models = ["<model ID>"]
+
+[policies]
+mode = "work"       # chat / work / code
+exec_tier = "auto"  # ask / auto / full
+
+[gateway]
 host = "127.0.0.1"
 port = 18790
-
-[channels.telegram]
-enabled = true
-token = "${TELEGRAM_BOT_TOKEN}"
-
-[channels.discord]
-enabled = true
-token = "${DISCORD_BOT_TOKEN}"
-
-[memory]
-embedding_model = "text-embedding-3-small"
-max_facts = 10000
-
-[tools]
-allowed = ["search", "bash_exec", "file_read"]
-
-[[presets]]
-name = "fast"
-provider = "openai"
-model = "gpt-4o-mini"
-temperature = 0.7
+allow_insecure_remote = false
 ```
 
-### 环境变量替换
+`[providers.<name>]` 是提供商表；`general.default_provider` 与 `general.fallback_providers` 引用表名。模型 ID 应以当前模型目录和 Panel 配置为准。
 
-以 `${}` 为前缀的值在加载时从环境变量解析：
+`[policies]` 保存全局 `mode` 与 `exec_tier`。`[sandbox.command_policy]` 是不能被 `exec_tier` 降低的独立安全硬底。不要把会话模式、执行等级或不存在的 `agents.defaults.thinking` 放进 `[agents.defaults]`；该表只放 Agent 定义支持的默认值，例如模型、工作区和技能。
+
+## Gateway host、TLS 与可信代理
 
 ```toml
-token = "${TELEGRAM_BOT_TOKEN}"
+[gateway]
+host = "0.0.0.0"
+port = 18790
+allow_insecure_remote = false
+
+[gateway.tls]
+enabled = true
+# cert_path = "/path/to/cert.pem"
+# key_path = "/path/to/key.pem"
+# san = ["aleph.example.com"]
+
+[gateway.trusted_proxy]
+enabled = true
+trusted_ips = ["127.0.0.1", "::1"]
 ```
 
-这将秘密保留在配置文件之外，同时允许对非敏感设置进行版本控制的默认值。
+Gateway WebSocket 路径是 `/ws`。启用 TLS 且未提供证书和密钥时，核心生成并持久化自签名证书，远程客户端使用 `wss://`。只有直接对端属于 `trusted_ips` 时，才信任 `X-Forwarded-For` 与 `X-Forwarded-Proto`。非环回远程绑定默认拒绝明文连接。
 
-### 预设覆盖
+## 重载影响
 
-命名预设可以覆盖默认设置：
+配置重载影响由 `src/config/reload_impact.rs` 分类。provider 配置、模型目录与故障转移链、通道启停以及 `[execution]` 运行上限可热重载；监听地址、端口和 TLS 证书属于传输设置，通常需要重启。重载失败时不要假定部分字段已生效；以运行中的配置和 `aleph-server doctor`、`aleph-server status` 为准。
 
-```rust
-// 对此请求使用 "fast" 预设
-let config = Config::load()
-    .with_preset("fast")
-    .build();
-```
+## 相关位置
 
-预设对于以下情况很有用：
-- 在快速/廉价和慢速/准确模型之间切换
-- A/B 测试配置
-- 访客特定设置
-
----
-
-## 防御性设计
-
-### 嵌入提供商保护
-
-防止嵌入提供商配置的意外擦除：
-
-```rust
-if patch.removes("memory.embedding_model") {
-    // 捕获回溯以进行调试
-    tracing::warn!("Attempted to remove embedding provider");
-    return Err(PatchError::InvalidEmbeddingChange);
-}
-```
-
-### 验证
-
-所有补丁在应用之前都经过验证：
-- 端口号必须在有效范围内 (1-65535)
-- 文件路径不得包含路径遍历 (`../`)
-- 数组长度必须在边界内
-- 枚举值必须是有效的变体
-
----
-
-## 热重载
-
-通过 `notify-debouncer-full` 在 600ms 内检测到配置更改：
-
-```rust
-// 文件监视器设置
-let mut watcher = notify::recommended_watcher(move |res| {
-    match res {
-        Ok(event) if event.kind.is_modify() => {
-            // 重新加载配置
-            config_manager.reload().await?;
-        }
-        _ => {}
-    }
-})?;
-
-watcher.watch(config_path, RecursiveMode::NonRecursive)?;
-```
-
-**限制：**
-- 嵌入模型更改需要服务器重启（模型权重在启动时加载）
-- 端口更改需要重启（套接字绑定在启动时发生）
-- 通道令牌更改立即生效
-
----
-
-## 代码位置
-
-- `src/config/mod.rs` — ConfigManager 和公共 API
-- `src/config/store.rs` — 具有原子写入的 FileStore
-- `src/config/patcher.rs` — 具有冲突检测的 ConfigPatcher
-- `src/config/validation.rs` — 补丁验证规则
-- `src/config/presets.rs` — 预设覆盖逻辑
-
-## 另请参阅
-
-- [入门: 配置](/docs/zh/getting-started/configuration) — 面向用户的配置指南
-- [网关](/docs/zh/architecture/gateway) — 运行时配置更新的管理 API
-- [错误处理](/docs/zh/concepts/error-handling) — 配置错误如何传播
-
----
-
-## 26.7.x 补充
-
-### 新增配置段
-
-- **`[gateway.tls]`**（26.7.17+）—— 自签名 TLS。`cert` / `key` 留空时核心自动生成；SAN 自动覆盖主机非环回接口 IP；`san` 字段手动覆盖。
-- **`[gateway] trusted_proxy`**（26.7.17+）—— 反向代理信任列表，决定网关是否读取真实客户端 IP。
-- **`[gateway] allow_insecure_remote`**（26.7.17+）—— 默认 false；false 时非环回绑定失败关闭。
-- **`[agents.defaults] session_mode`**（26.7.21+）—— `chat` / `work` / `code` 三档。
-- **`[agents.defaults] exec_tier`**（26.7.15+）—— `ask` / `auto` / `full` 三级。
-- **`[sandbox.command_policy]`** —— 硬底；不能被任何 `exec_tier` 拉低。
-- **`[tools] defer_mcp_tools`**（26.7.7+）—— MCP 工具是否进入 deferred-tier（按需 `tool_search`）。
-- **`[tools] enable_tool_search`**（26.7.7+）—— 启用 `tool_search` 元工具。
-- **`[[hook]]` 段**（26.7.x）—— Hooks；`context_injection_limit_bytes` 注入限额，`require_consent` 同意门。
-- **`[[mcp.servers]]` 段**（26.7.x）—— MCP 服务器配置。
-- **`[[plugin.marketplace]]` 段**（26.7.x）—— 插件市场源。
-- **`[projects]` / `[[project]]`**（26.7.x）—— 项目存储；`projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` 支撑。
-- **`[runtimes]`**（26.7.x）—— 运行时管理；`runtimes.install` / `list` / `refresh`。
-- **`[voice]`**（26.7.x）—— 语音子系统（WhisperLiveKit、TTS 多提供商）。
-
-### 失败关闭与单源
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时拒绝授权。`aleph.toml` 是**唯一**配置文件——`aleph-core` 中不再持有重复价格表（shell 也不再有）。
-
-### 热重载
-
-- 可热重载：模型目录与故障转移链、provider 配置、channels 启停、`[execution]` 运行上限（`max_runs_global` / `max_runs_per_agent`）
-- 需重启：核心端口、绑定地址、TLS 证书
-
-### 详细参考
-
-- [配置入门](/docs/zh/getting-started/configuration) —— `aleph.toml` 完整字段
-- [网关协议 TLS 段](/docs/zh/gateway/protocol#tls--tofu) —— 自签名 + TOFU
-- [执行审批](/docs/zh/security/exec-approval) —— `exec_tier` 与硬底
+- `~/.aleph/config.toml`：主配置
+- `~/.aleph/defaults.toml`：默认值覆盖
+- Gateway：`config.schema`、`config.get`、`config.patch`、`config.reload`

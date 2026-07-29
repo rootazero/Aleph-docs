@@ -241,24 +241,38 @@ MCP 服务器作为单独进程运行。Aleph 的 `mcp/` 模块处理服务器�
 aleph/
 ├── src/                         # 1. 核心（大脑）
 │   ├── harness/                 #    推理：观察-思考-行动-反馈
-│   ├── thinker/                 #    推理：LLM 交互
-│   ├── dispatcher/              #    推理：任务编排
+│   ├── thinker/                 #    推理：LLM 交互（含 graph_topology 层）
+│   ├── tool_metadata/           #    推理：工具元数据 / risk / unified 索引
+│   ├── orchestrator/            #    路由：FlowSpec / FlowRequest / HarnessRunner
 │   ├── routing/                 #    路由：会话密钥
 │   ├── memory/                  #    状态：记忆系统
 │   ├── resilience/              #    状态：任务持久化
+│   ├── session/                 #    状态：单一源 session_events + actor
 │   ├── gateway/                 #    2. 面孔 2（网关服务器）
 │   │   ├── handlers/            #       RPC 方法处理程序
-│   │   ├── interfaces/          #       Telegram、Discord、iMessage
+│   │   ├── interfaces/          #       Telegram、Discord、iMessage、Slack…
 │   │   └── security/            #       认证、配对、设备
-│   ├── desktop/                 #    4. 神经 N2（桥接客户端）
 │   ├── mcp/                     #    4. 神经 N4（MCP 客户端）
 │   ├── tools/                   #    3. 肢体（工具定义）
 │   ├── builtin_tools/           #    3. 肢体 1（原生工具）
-│   └── extension/               #    3. 肢体 3（插件运行时）
-├── apps/
-│   ├── desktop/                 #    3. 肢体 1（桌面桥接）
-│   └── cli/                     #    2. 面孔 1（CLI 客户端）
-└── web/                         #    2. 面孔 1（Leptos/WASM 面板）
+│   ├── extension/               #    3. 肢体 3（插件运行时）
+│   ├── loop_graph/              #    叠加层：治理拓扑（不属 1-2-3-4）
+│   ├── looping/ goal/ strategy/ #    长任务子系统（loop / goal / strategy）
+│   └── hub/                     #    Aleph Hub 单一源
+├── desktop/
+│   ├── shell/                   #    3. 肢体 1（Tauri 桌面壳）
+│   │   ├── macos/               #       macOS 原生桥接 (Swift)
+│   │   ├── linux/ windows/      #       Linux / Windows 原生桥接
+│   │   └── shared/              #       DesktopCapability trait + IPC 协议
+│   └── shared/                  #    4. 神经 N2 共享桥接客户端
+├── interfaces/
+│   ├── cli/                     #    2. 面孔 1（CLI 客户端）
+│   ├── tui/                     #    2. 面孔 1（TUI 客户端）
+│   └── webchat/                 #    2. 面孔 1（Leptos/WASM 面板，由 core 经 rust_embed 提供）
+├── mobile/                      #    移动端
+├── bindings/                    #    外部语言绑定
+├── shared/                      #    跨 crate 共享（protocol / logging / ui_logic / client）
+└── plugins/                     #    插件示例 + SDK
 ```
 
 ## 设计理念

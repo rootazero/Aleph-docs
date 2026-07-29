@@ -229,7 +229,7 @@ matcher = "shell:.*"
 
 ### 在 TOML 配置中
 
-钩子也可以直接在 `aleph.toml` 中定义：
+钩子也可以直接在 `config.toml` 中定义：
 
 ```toml
 [[hooks]]
@@ -366,13 +366,45 @@ actions = [
 
 - `hooks.list` / `hooks.registry` / `hooks.add` / `hooks.remove` / `hooks.reload` / `hooks.events`
 
-### Hooks 注入限额 / 同意 / 库存
+### Hooks 注入限额 / 同意 / 库存（26.7.22+ 强化）
 
-26.7.x Hooks 加固：
+26.7.22+ 把 hooks 从"任意上下文注入"加固为**有界、有同意、可审计**的子系统：
 
-- `context_injection_limit_bytes` —— 注入上下文限额（避免无界增长）
-- `require_consent` —— 同意门
-- 运行时库存（runtime inventory）—— 列出已注册 hook
+- **`context_injection_limit_bytes`** —— 注入上下文字节限额（默认 16 KB；超限拒绝）
+- **`require_consent`** —— 同意门；首次触发需用户在 Panel 内点击"我了解此风险"才能继续
+- **`runtime inventory`** —— `HookExecutor::inventory()` 暴露所有已注册 hook 及其匹配器；`hooks.registry` RPC 拉取
+- **超时泄漏修复**（26.7.22+）：`HookExecutor` 的 timeout 现在是 per-call 而非共享——之前是共享 future，泄漏导致后续 hook 都拒绝
+- **token 桶限流**（26.7.22+）：每个 hook 源有自己的 token 桶；高频触发自动降级到丢弃而非反压
+
+```toml
+[[hook]]
+name = "audit-shell-commands"
+event = "pre_tool_execute"
+match = { tool = "bash_exec" }
+context_injection_limit_bytes = 16384
+require_consent = true
+action = "observe"
+
+[[hook]]
+name = "budget-watchdog"
+event = "post_turn"
+match = { agent_id = "main" }
+rate_limit = { tokens_per_second = 1, burst = 5 }
+```
+
+### `hooks_manage` 工具
+
+新增内置工具 `hooks_manage`（不在聊天 agent 默认工具集内——由受保护 agent 持有）：
+
+```rust
+hooks_manage(action: "list")                         // 列出所有 hook
+hooks_manage(action: "get", hook_id)                // 单 hook 详情
+hooks_manage(action: "test", hook_id, event)        // dry-run 测试
+hooks_manage(action: "enable", hook_id)
+hooks_manage(action: "disable", hook_id)
+hooks_manage(action: "reload")                       // 强制重载
+hooks_manage(action: "stats")                        // 命中率 / 超时 / 同意率
+```
 
 ### Guardian Judge
 

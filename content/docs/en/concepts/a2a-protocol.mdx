@@ -1,33 +1,34 @@
 ---
 title: "A2A Protocol"
-description: "Agent-to-Agent (A2A) protocol adapter for cross-agent communication and task delegation."
+description: "A2A (Agent-to-Agent) protocol adapter for delegating tasks to remote agents over JSON-RPC and authenticated sessions."
 ---
 
-The `a2a` module implements the A2A (Agent-to-Agent) protocol adapter. A2A enables Aleph to communicate with other AI agents, delegate tasks to external agent systems, and receive results in a standardized format.
+The `a2a` module implements the A2A (Agent-to-Agent) protocol adapter. Aleph speaks A2A natively as both a client (delegating tasks to remote agents) and a server (accepting inbound requests from other agents), with the adapter translating between A2A wire types and Aleph's internal types.
 
 ## Design Philosophy
 
 A2A integration follows two principles:
 
-1. **Protocol abstraction** — Aleph speaks A2A natively; the adapter handles translation to/from internal types
-2. **Trust boundaries** — External agents are treated with the same permission model as internal tools
+1. **Protocol abstraction** — Aleph speaks A2A natively; the adapter handles translation to/from internal types and ports.
+2. **Trust boundaries** — Remote agents are classified by `TrustLevel` (Local / Trusted / Public), which determines the auth scheme and the action surface exposed by the `A2AAuthenticator` port.
 
 ---
 
 ## Protocol Overview
 
-A2A is a protocol for agent-to-agent communication that defines:
-- **Task delegation** — How one agent asks another to perform work
-- **Status updates** — How progress is reported back
-- **Result delivery** — How completed work is returned
-- **Capability discovery** — How agents advertise what they can do
+A2A is a JSON-RPC 2.0 protocol for agent-to-agent communication that defines:
+
+- **Task delegation** — One agent asks another to perform work via `message/send` or `message/stream`.
+- **Status updates** — Live progress is streamed back as SSE events (`status-update`, `artifact-update`).
+- **Result delivery** — Completed work lands as artifacts on the final `A2ATask`.
+- **Capability discovery** — Agents advertise their skills via the Agent Card (`agent_card`) at a well-known URL.
 
 ```
 ┌─────────────┐         A2A Protocol          ┌─────────────┐
-│   Aleph     │  ───────────────────────────→ │ External    │
-│  Agent      │  task request + context       │  Agent      │
-│             │  ←─────────────────────────── │             │
-│             │  status updates + result      │             │
+│   Aleph     │  ───────────────────────────▶ │ Remote      │
+│  Agent      │  message/send or /stream      │  Agent      │
+│             │  ◀─────────────────────────── │             │
+│             │  status-update + artifacts    │             │
 └─────────────┘                               └─────────────┘
 ```
 
@@ -35,134 +36,148 @@ A2A is a protocol for agent-to-agent communication that defines:
 
 ## Core Types
 
-### A2ATask
+### A2ARole
 
-Represents a task delegated to an external agent:
+Identifies the speaker on a message:
 
 ```rust
-pub struct A2ATask {
-    pub task_id: String,
-    pub description: String,
-    pub input: serde_json::Value,
-    pub deadline: Option<i64>,
+pub enum A2ARole {
+    User,
+    Agent,
 }
 ```
 
-### A2AResult
+### A2AMessage
 
-The outcome of an A2A task:
+The communication payload. Content is carried as a sequence of `Part`s (text / file / structured data):
 
 ```rust
-pub struct A2AResult {
-    pub task_id: String,
-    pub status: A2AStatus,
-    pub output: Option<serde_json::Value>,
-    pub error: Option<String>,
+pub struct A2AMessage {
+    pub message_id: String,
+    pub role: A2ARole,
+    pub parts: Vec<Part>,
+    pub session_id: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub metadata: Option<Map<String, serde_json::Value>>,
 }
 
-pub enum A2AStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-    Cancelled,
+pub enum Part {
+    Text { text: String, metadata: Option<Map<String, serde_json::Value>> },
+    File { file: FileContent, metadata: Option<Map<String, serde_json::Value>> },
+    Data { data: Map<String, serde_json::Value>, metadata: Option<Map<String, serde_json::Value>> },
 }
 ```
 
 ### FileContent
 
-Validates file attachments against A2A specification invariants:
+A reference to a file — exactly one of `bytes` (base64) or `uri` must be set, per the A2A spec:
 
 ```rust
 pub struct FileContent {
-    pub mime_type: String,
-    pub data: Vec<u8>,
-    pub name: String,
+    pub name: Option<String>,
+    pub mime_type: Option<String>,
+    pub bytes: Option<String>,  // base64-encoded
+    pub uri: Option<String>,
 }
 
 impl FileContent {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        // Enforces: non-empty MIME type, non-empty data,
-        // valid filename (no path traversal, no null bytes)
+    pub const fn validate(&self) -> Result<(), &'static str> {
+        match (&self.bytes, &self.uri) {
+            (None, None) => Err("FileContent must have either bytes or uri"),
+            (Some(_), Some(_)) => Err("FileContent cannot have both bytes and uri"),
+            _ => Ok(()),
+        }
     }
 }
 ```
+
+### A2ATask
+
+The aggregate root of an A2A conversation. State transitions are enforced by `TaskState::can_transition_to`:
+
+```rust
+pub struct A2ATask {
+    pub id: String,
+    pub context_id: String,
+    pub status: TaskStatus,
+    pub artifacts: Vec<Artifact>,
+    pub history: Vec<A2AMessage>,
+    pub metadata: Option<Map<String, serde_json::Value>>,
+    pub kind: String,  // always "task"
+}
+
+pub enum TaskState {
+    Submitted,
+    Working,
+    InputRequired,
+    Completed,
+    Canceled,
+    Failed,
+    Rejected,
+    AuthRequired,
+}
+```
+
+`AuthRequired` is a non-terminal state that signals the remote needs fresh credentials. The client can resume from `AuthRequired` after reauthorizing — see [Subagent authorization recovery](#subagent-authorization-recovery).
 
 ---
 
 ## Trust Levels
 
-A2A connections use the same `TrustLevel` system as internal components:
+Remote connections are classified by `TrustLevel` (see `src/a2a/domain/security.rs`), which drives both auth requirements and the actions exposed to the peer:
 
-| Level | Behavior |
-|---|---|
-| `Local` | Full access, no approval needed |
-| `Private` | Standard approval flow |
-| `Public` | Strictest approval, all actions audited |
-| `Untrusted` | Blocked by default |
+| Level | Inferred from | Auth scheme | Permissions |
+|---|---|---|---|
+| `Local` | loopback (`127.0.0.0/8`, `::1`) | none required | full |
+| `Trusted` | private IPv4 (`10/8`, `172.16/12`, `192.168/16`), LAN IPv6 (ULA `fc00::/7`, link-local `fe80::/10`), `.local` / `.lan` hostnames | bearer / API key | configured per-token |
+| `Public` | everything else (public DNS, public IPs, unparseable URLs) | OAuth2 / mTLS | restricted |
 
-Trust levels are inferred from the connection source (IP address, hostname, or mTLS certificate).
+The `TieredAuthenticator` enforces the per-level policy at the JSON-RPC boundary; the `Authenticator` port trait (`src/a2a/port/authenticator.rs`) defines `authenticate` + `authorize(principal, action)` over `A2AAction` (`SendMessage`, `GetTask`, `CancelTask`, `ListTasks`, `Subscribe`, `ManagePushConfig`, `GetExtendedCard`).
+
+When A2A is fronted by a same-host reverse proxy, every proxied peer presents as `Local`. Set `[a2a.server.security] local_bypass = false` so loopback still requires credentials.
 
 ---
 
 ## Capability Discovery
 
-Before delegating tasks, Aleph queries the external agent's capabilities:
+Remote agents advertise their capabilities via the **Agent Card** (`AgentCard` in `src/a2a/domain/agent_card.rs`). Aleph fetches the card at the well-known `/.well-known/agent-card.json` URL on a per-remote basis, caches it locally via `CardRegistry`, and refreshes it on demand through `CardRefresh`. Resolution of a card by id, name, or URL is exposed through the `AgentResolver` port.
 
-```rust
-pub async fn discover_capabilities(
-    &self,
-    endpoint: &str,
-) -> Result<Vec<Capability>, A2AError> {
-    let response = self.client
-        .get(format!("{}/capabilities", endpoint))
-        .send().await?;
-    
-    response.json().await
-}
-```
+Discovery is centralised through `SmartRouter` (`src/a2a/service/smart_router.rs`): given a prompt, it picks the best-matching registered agent via the `LlmMatcher` (semantic) or a fallback heuristic. The chosen agent is then handed to the `A2AClientPool` for an actual `message/send` or `message/stream` call.
 
-Capabilities are cached locally to avoid repeated discovery calls.
+---
+
+## Subagent Authorization Recovery
+
+A2A subagent authorizations are no longer one-shot. A failed or expired authorization enters `TaskState::AuthRequired` instead of permanently failing the task; the client can then resume by re-presenting credentials, and the task transitions back to `Working` (or to a terminal state).
+
+This is consistent with `ChainContext` in `src/harness/chain_context.rs`, which tracks the parent-child delegation chain so reauthorization at a child level doesn't invalidate the parent's chain. The chain id is shared across all depths and `depth >= max_depth` is refused — recovery preserves the chain id rather than minting a fresh one.
 
 ---
 
 ## Integration Points
 
 The A2A adapter integrates with:
-- **Gateway** — Receives A2A requests from external agents
-- **Orchestrator** — Decides whether to handle locally or delegate via A2A
-- **Approval** — Routes sensitive A2A operations through approval workflow
-- **Session** — Persists A2A task state across restarts
+
+- **Gateway** — Receives incoming A2A requests over JSON-RPC; the inbound side lives in `src/a2a/adapter/server/` (routes, request processor, task store, stream hub).
+- **Orchestrator / Spawner** — Decides whether to handle locally (intra-process via `SubAgent`) or delegate via `A2ASubAgent::execute_delegation` (`src/a2a/sub_agent.rs`).
+- **Authenticator port** — `TieredAuthenticator` consults the trust level and per-token permissions on every JSON-RPC request.
+- **Card registry & smart router** — Discovers and routes to the right remote agent by intent.
+- **Memory** — `A2ASubAgent` emits a `RawMemory(Delegation{child_agent_id})` row carrying the parent agent id and session id, so parent-agent long-term memory picks up the subagent's lessons (`emit_delegation_primitives`).
+- **Session Service** — Persists A2A task state and event log across restarts.
 
 ---
 
 ## Code Location
 
 - `src/a2a/mod.rs` — Module entry point
-- `src/a2a/protocol.rs` — A2A message types
-- `src/a2a/client.rs` — External agent client
-- `src/a2a/server.rs` — A2A request handler
-- `src/a2a/discovery.rs` — Capability discovery
+- `src/a2a/domain/` — Pure types: `agent_card`, `error`, `events`, `message`, `security` (TrustLevel + SecurityScheme + Credentials), `task`
+- `src/a2a/adapter/` — Wire adapters: `client` (A2AClient + A2AClientPool + streaming), `server` (HTTP routes + request processor + task store + stream hub), `auth` (`TieredAuthenticator` + `TokenStore`)
+- `src/a2a/port/` — Port traits: `agent_resolver`, `authenticator`, `message_handler`, `task_manager`, `streaming`
+- `src/a2a/service/` — Higher-level services: `card_builder`, `card_refresh`, `card_registry`, `llm_matcher`, `notification`, `smart_router`
+- `src/a2a/sub_agent.rs` — `A2ASubAgent` (delegation entry point, memory emit)
 
 ## See Also
 
-- [Agent Runtime](./agent-runtime) — How agents spawn and manage tasks
-- [Orchestrator](./orchestrator) — Task routing and delegation decisions
-- [Security: Overview](../security/overview) — Trust levels and approval
-
----
-
-## 26.7.x Addendum
-
-### A2A Interrupt and Cancel
-
-26.7.24+: A2A stream interrupt and cancel — `Interrupt` truly cancels fan-out, **not demoted to queue**. Long-running detached members no longer leak (the detached-member leak was fixed).
-
-### Subagent Authorization Restored
-
-A2A subagents can now **be re-authorized** — previously a failed authorization was permanent; now managed by the chain-internal closed lifecycle (consistent with the `Identity` delegation chain).
-
-### See Also
-
-- [Agent Runtime](/docs/en/concepts/agent-runtime) — 26.7.x subagent interruptible
-- [Identity & Signing](/docs/en/concepts/identity-context) — delegation chain
+- [Agent Runtime](./agent-runtime) — How agents spawn and manage subagents
+- [Identity & Signing](./identity-context) — Delegation chain via `ChainContext`
+- [Hub](./extensions-store) — Unified extension catalog (the replacement surface for legacy skills registries)

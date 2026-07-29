@@ -1,172 +1,123 @@
 ---
-title: "世界模型"
-description: "用于主动代理行为、上下文推断和行动规划的世界模型。"
+title: "loop_graph 治理拓扑"
+description: "叠加在核心之上的治理拓扑层（loop_graph），以及与 graph_topology 提示层的关系。"
 ---
 
-`worldmodel` 模块为守护进程的主动行为提供世界模型，使代理能够推断上下文、预测需求并自主规划行动。
+> **本页替代旧的「世界模型」章节**。源码中并不存在 `src/daemon/worldmodel/` 或 `WorldModel` / `CoreState` / `EnhancedContext` / `PendingAction` / `ActivityType` 等类型——这些概念在 26.7.x 治理拓扑重构后已被替换为下面描述的 `loop_graph` 层与 `graph_topology` 提示层。
 
 ## 概览
 
-世界模型支持：
-- **上下文推断** —— 从观察中推断用户意图和上下文
-- **状态跟踪** —— 维护当前系统和用户状态的模型
-- **行动预测** —— 预测可能需要哪些行动
-- **主动规划** —— 为预期需求生成计划
+`loop_graph` 是叠加在 Aleph 核心之上的**治理拓扑层**（governance topology），给多代理 / 自改进系统提供一对闭合的拓扑边，回答单循环的四种失败模式（Goodhart、参考盲、环冲突、测量衰减）：
 
-## 架构
+- **锚点（anchor）** —— 不可反驳的测量
+- **冻结（frozen）** —— 在其它地方强制执行的规则
+- **根（root）** —— 人类提供的「更好」定义（`origin=human` 由 store 强制）
+- **配对（watches）** —— 监督关系
+- **层级（owns_reference）** —— 引用归属
+- **仲裁（arbitrates）** —— 冲突裁决
+- **审计（audits）** —— 闭环审计日志
 
-```
-WorldModel
-  ├── CoreState —— 当前系统状态
-  ├── EnhancedContext —— 带有推断的丰富上下文
-  ├── InferenceCache —— 缓存的推断结果
-  └── PendingAction —— 排队的主动行动
-```
+源码：`src/loop_graph/`（`mod.rs` / `service.rs` / `store.rs` / `templates.rs` / `types.rs`）。Store 由 `init_global(Arc<LoopGraphStore>)` 在 boot 时安装一次（`OnceCell`），未初始化的进程读为「无 graph 子系统」（fail-soft）。
 
-## 核心组件
+边界（R7/R9/R10）：该模块只做脚手架——拓扑存储、结构 lint、事实渲染。任何**语义性裁决**（这是否廉价？这个引用是否错了？冲突哪边胜？）都是普通的 LLM turn，由 `templates.rs` 与 `loop-governance` skill 引导；它**位于 `src/harness/` 之外**，graph 为空时每个 turn 的成本为零。Dreaming 与其它 optimizer 在这里没有写路径——拓扑是 held-out layer，监督它们。
 
-### WorldModel
+## graph_topology 提示层
 
-中央世界模型外观：
+`graph_topology` 不是独立模块，而是 `src/thinker/layers/graph_topology.rs` 中的一个 **PromptLayer**：
 
 ```rust
-// src/daemon/worldmodel/mod.rs
-pub struct WorldModel {
-    state: CoreState,
-    inference_cache: InferenceCache,
-    config: WorldModelConfig,
-}
+pub struct GraphTopologyLayer;
 
-impl WorldModel {
-    pub fn update_state(
-        &mut self,
-        event: SystemEvent,
-    );
-    
-    pub fn infer_context(
-        &self,
-        raw_context: &Context,
-    ) -> EnhancedContext;
-    
-    pub fn predict_actions(
-        &self,
-    ) -> Vec<PendingAction>;
-    
-    pub fn get_state(&self,
-    ) -> &CoreState;
+impl PromptLayer for GraphTopologyLayer {
+    fn name(&self) -> &'static str { "graph_topology" }
+    fn priority(&self) -> u32 { 1754 }                 // 排在 standing_goal 之前
+    fn paths(&self) -> &'static [AssemblyPath] {
+        &[AssemblyPath::Basic, AssemblyPath::Cached]
+    }
+    fn stability(&self) -> LayerStability { LayerStability::Dynamic }
+    fn supports_mode(&self, mode: PromptMode) -> bool { mode != PromptMode::Minimal }
+
+    fn inject(&self, output: &mut String, input: &LayerInput) {
+        let Some(ctx) = input.context else { return };
+        let Some(topology) = ctx.graph_topology.as_deref() else { return };
+        if topology.is_empty() { return };
+        output.push_str("<loop_graph_context>\n");
+        output.push_str(&crate::thinker::xml_util::escape_xml(topology));
+        output.push_str("</loop_graph_context>\n\n");
+    }
 }
 ```
 
-### CoreState
+被治理的会话每个 turn 都会被告知自己在治理拓扑中的位置——谁在监督它、谁拥有它的引用（以及修改引用的 proposal-note 路径）、哪些锚点约束它、根引用原文是什么。模型不需要「记住」这个图。
 
-表示当前系统状态：
+缓存纪律：渲染内容**仅来自 graph 行**——没有时钟、没有计数器——所以未变更的 graph 字节稳定。**未治理的会话（`None`）不输出任何东西**：零成本，对所有不在图中的会话不产生影响。
 
-```rust
-// src/daemon/worldmodel/mod.rs
-pub struct CoreState {
-    pub system_load: SystemLoad,
-    pub active_sessions: Vec<SessionId>,
-    pub recent_events: Vec<SystemEvent>,
-    pub user_presence: PresenceStatus,
-}
-```
-
-### EnhancedContext
-
-带有推断的丰富上下文：
-
-```rust
-pub struct EnhancedContext {
-    pub raw: Context,
-    pub inferred_intent: Option<Intent>,
-    pub predicted_needs: Vec<Need>,
-    pub confidence: f32,
-}
-```
-
-### PendingAction
-
-排队执行的行动：
-
-```rust
-pub struct PendingAction {
-    pub id: ActionId,
-    pub action_type: ActionType,
-    pub priority: Priority,
-    pub scheduled_at: DateTime<Utc>,
-    pub confidence: f32,
-}
-```
-
-## 活动类型
-
-世界模型跟踪不同的活动类型：
-
-```rust
-pub enum ActivityType {
-    UserMessage,
-    SystemEvent,
-    ScheduledTask,
-    ExternalTrigger,
-}
-```
-
-## 与分派器集成
-
-世界模型为主动分派器提供信息：
+## 与 1-2-3-4 模型的关系
 
 ```
-观察 → WorldModel.update_state() → infer_context()
-                                              │
-                                              ▼
-                                       predict_actions()
-                                              │
-                                              ▼
-                                       Dispatcher.dispatch()
+┌───────────────────────────────────────────────────────────────┐
+│   1. 核心 (alephcore)                                          │
+│      ├── harness/        Think→Act 循环                       │
+│      ├── thinker/        提示组装（含 GraphTopologyLayer）    │
+│      └── ...                                                    │
+│                                                                  │
+│   ▲ loop_graph 叠加在 1 之上（不改变 1-2-3-4）                 │
+│   │   - 拓扑存储 + Lint + 事实渲染                              │
+│   │   - 语义裁决交给 LLM turn                                   │
+│   ▼                                                              │
+│   loop_graph/  (src/loop_graph/)                                 │
+│      ├── store.rs       LoopGraphStore (SQLite)                  │
+│      ├── service.rs     GraphService                             │
+│      ├── templates.rs   模板提示                                │
+│      └── types.rs       NodeKind / EdgeKind / Origin            │
+└───────────────────────────────────────────────────────────────┘
 ```
+
+graph 与完成度判断**无关**——它只描述关系，不告诉 harness 何时停止。`AgentHarness` 仍然由 `TurnState::Done` / `max_iterations` / `ToolLoopVerifier` / 连续失败上限来决定停手。
+
+## 多代理 × graph 融合
+
+- **团队节点（team node kind）** —— `NodeKind::Team`，把多代理系统融合进 graph。
+- **审计环（audit ring）** —— 闭合审计动作日志。
+- **客观 ACL** —— 按图节点身份授权（`origin=human` 不可绕过）。
+- **胜利声明 watcher** —— 团队 / 循环完成触发审计。
+- **内置 `loop-auditor` agent** —— 审计 / 监督默认走独立上下文证据。
 
 ## 配置
 
-```toml
-[daemon.worldmodel]
-enabled = true
-inference_timeout = 5000  # 毫秒
-max_pending_actions = 20
-confidence_threshold = 0.7
-```
+graph 是**进程内全局**（`OnceCell<Arc<LoopGraphStore>>`），不在 TOML 中配置。其生命周期与 store 数据库一致：
+
+- 启动期：`LoopGraphStore::open(&dir)` 安装到 `init_global(...)`。
+- 运行期：进程内任意处通过 `loop_graph::global()` 读访问。
+- 测试：`loop_graph::set_global_for_test(store)`。
 
 ## 代码位置
 
-- `src/daemon/worldmodel/mod.rs` —— WorldModel 外观和类型
-- `src/daemon/mod.rs` —— 守护进程模块入口
+- `src/loop_graph/mod.rs` —— `LoopGraphStore` + `NodeKind` / `EdgeKind` / `Origin` 重导出 + `init_global` / `global`。
+- `src/loop_graph/store.rs` —— SQLite 持久化层（节点 / 边 / origin=human 强制）。
+- `src/loop_graph/service.rs` —— `GraphService`（写入 / lint）。
+- `src/loop_graph/templates.rs` —— 模板提示（给 LLM turn 用）。
+- `src/thinker/layers/graph_topology.rs` —— 把拓扑注入系统提示的 `GraphTopologyLayer`。
 
 ## 另请参阅
 
-- [分派器](./dispatcher) —— 主动行动分派
-- [守护进程](../concepts/daemon) —— 后台服务管理
+- [架构概览](./overview) — 1-2-3-4 模型与 loop_graph 位置
+- [提示构建器](/docs/zh/concepts/prompt-builder) — 提示层注册块
+- [Loop / Goal / Strategy](/docs/zh/concepts/looping-goal-strategy) — 三个独立子系统
 
 ---
 
 ## 26.7.x 补充
 
-### 与治理拓扑层并列
+### `loop_graph` 是叠加层，不是替换
 
-26.7.21+：`worldmodel` 与 `loop_graph` 并列——前者追踪环境状态（用于主动行为），后者追踪图节点 / 治理事件。两者均不参与完成度判断。
+26.7.21+：`loop_graph` 不改变 1-2-3-4 模型——它叠加在核心之上，给多代理系统补上治理拓扑（团队节点 / 审计环 / 客观 ACL / 胜利声明 watcher）。harness 不知道 graph 的存在。
 
-### 系统状态总线
+### graph_topology = 唯一进入提示的形态
 
-`SystemStateBus` 集成：
-
-- PII 过滤
-- 稳健性 + 隐私层
-- 动作调度器
-- 平台抽象层（PAL）macOS 特定传感器
-
-### Heartbeat 主动唤醒
-
-基于世界状态 + Guardian Judge 决策的主动任务。
+26.7.21+：graph 不让 harness「询问」拓扑（会破坏缓存纪律）；相反，`GraphTopologyLayer` 在每个 turn 把当前 topology 渲染成 `<loop_graph_context>` 段，让模型读到。
 
 ### 详见
 
-- [主动调度器](/docs/zh/architecture/proactive-dispatcher)
-- [守护进程](/docs/zh/concepts/daemon)
+- [架构 1-2-3-4 模型](/docs/zh/architecture/1-2-3-4-model) — 稳定骨架
+- [架构红线 R1–R10](/docs/zh/philosophy/redlines) — 硬约束

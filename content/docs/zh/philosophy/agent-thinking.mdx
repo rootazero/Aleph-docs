@@ -46,8 +46,8 @@ Act 阶段通过工具系统执行计划：
 - **资源并发声明**：工具声明 fs/network/process 资源冲突；Act 按声明分桶并行调度，桶内并发、桶间串行
 - **去重与备忘**：相同 `(name, args)` 在批次内或跨批次的二次调用复用首次结果
 - **响应生成**：为用户生成文本、代码或结构化输出
-- **状态修改**：更新记忆、会话状态、签名操作账本
-- **子任务编排**：通过 FlowRunTool / Team 创建子代理
+- **状态修改**：更新记忆、会话状态、命令签名账本（`src/builtin_tools/command_ledger.rs`）
+- **子任务编排**：通过 `FlowRunTool` / Team 创建子代理
 
 所有操作都通过安全守卫系统。潜在危险的操作在执行前需要显式审批（Ask / Auto / Full 三级执行权限 + `[sandbox.command_policy]` 硬底）。
 
@@ -90,8 +90,8 @@ Aleph 中有三个用户可调的维度，构成分类用户偏好的核心轴�
 
 | 维度 | 范围 | 默认 | 控制什么 |
 |------|------|------|---------|
-| `exec_tier`（执行等级） | ask / auto / full | ask | 权限 |
-| `thinking`（思考级别） | off → xhigh | medium | 推理预算 |
+| `exec_tier`（执行等级） | ask / auto / full | auto | 权限 |
+| `thinking`（思考级别） | off / minimal / low / medium / high / xhigh | minimal | 推理预算 |
 | `session_mode`（会话模式） | chat / work / code | work | 工具呈现 |
 
 三者是**正交**的。`session_mode` 只对工具**呈现**面做静态分区（progressive-disclosure 核心集 + deferred-tool 层级），**不影响权限**——权限仍由 `exec_tier` 与审批门控制。可在运行时通过 `session_set_mode` 工具切换。
@@ -108,13 +108,7 @@ Harness 不参与判断意图、不做完成度判断、不做内容审查、不
 
 ## 自我学习
 
-思维模型不是静态的。每个成功的任务完成都通过经验固化管道反馈回系统（受 SkillOpt 纪律约束的自我演化）：
-
-1. **记录**：完整的执行跟踪被存储为经验条目
-2. **检测**：当积累若干个类似经验时，系统检测到一个重复模式并创建一个候选技能
-3. **提升**：当候选技能已被成功重用足够多次且可靠性高时，它被提升为永久技能
-
-永久技能成为系统 1 模式库的一部分，允许模型以更快的思考级别处理以前复杂的任务。这就是代理如何随着时间的推移变得更快、更有能力。
+思维模型不是静态的。系统的自我演化由 `src/memory/dreaming/` 的 SkillOpt 纪律承担——它把每次成功执行记录进 dreaming 管线，按 `evolution gate` / `edit budget` / `recall-evidence gate` / `health score` 四原语约束晋升（详见 [DREAM_DAEMON.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/memory/DREAM_DAEMON.md)）。晋升后的技能进入系统 1 模式库，让模型在更低的思考级别上处理以前复杂的任务；这就是代理随时间变得更快、更有能力的路径。
 
 ## 整合所有内容
 
@@ -131,6 +125,6 @@ Harness 不参与判断意图、不做完成度判断、不做内容审查、不
 
 - [设计理念](./overview) —— Aleph 背后的基本原则
 - [五层涌现](./five-layers) —— 思维模型如何适应 L1–L5 智能栈
-- [领域建模](./domain-modeling) —— 如何使用 DDD 模式建模 POE 上下文
+- [领域建模](./domain-modeling) —— Aleph 的 DDD 基础结构
 - [架构红线](./redlines) —— R1–R10 不可违反的硬约束
 - [架构](/docs/zh/architecture) —— 代理循环的技术实现

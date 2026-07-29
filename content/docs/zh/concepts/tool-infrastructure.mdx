@@ -1,135 +1,77 @@
 ---
 title: "工具基础设施"
-description: "工具系统基础设施，包括模式生成、执行、修复、注册表和中间件管道。"
+description: "Aleph 工具的统一服务接口、请求范围执行、并发资源声明、渐进披露和权限边界。"
 ---
 
-`tools` 模块为 Aleph 的工具系统提供基础设施。它处理工具注册、模式生成、执行、修复和包装工具调用的中间件管道。
+Aleph 的生产工具栈以 `ToolService` 为消费接口，以 `ScopedToolService` 为 Gateway 的请求范围实现。内置、MCP、技能和扩展工具可以进入同一个请求视图，但每轮实际暴露的工具仍由允许集、拒绝策略、健康状态、延迟层和会话模式共同决定。
 
-## 设计理念
+## 生产服务接口
 
-1. **模式驱动** — 所有工具通过 JSON 模式声明其输入模式
-2. **修复友好** — 失败的工具调用可以自动修复并重试
-3. **中间件管道** — 权限检查、日志记录和指标发生在分层中间件中
-4. **类型安全执行** — 带有动态调度支持的强类型工具 trait
-
-## 架构
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                      工具基础设施                            │
-├──────────────────────────────────────────────────────────────┤
-│  注册表                                                      │
-│  ├─ register() — 向注册表添加工具                            │
-│  ├─ get() — 按名称查找                                       │
-│  └─ list() — 所有已注册工具                                  │
-├──────────────────────────────────────────────────────────────┤
-│  模式                                                        │
-│  ├─ 从 Rust 类型生成 JSON 模式                               │
-│  ├─ 严格化 (移除 LLM 不友好的字段)                           │
-│  └─ 带有注入保护的 YAML 序列化                               │
-├──────────────────────────────────────────────────────────────┤
-│  执行                                                        │
-│  ├─ ToolExecutor — 带有超时的异步执行                        │
-│  ├─ ExecutionContext — 工作区、环境、权限                      │
-│  └─ Repair — 自动修复常见失败 (大小写, snake_case)            │
-├──────────────────────────────────────────────────────────────┤
-│  中间件管道                                                  │
-│  ├─ 权限层 — 能力检查                                        │
-│  ├─ 审计层 — 日志记录和指标                                  │
-│  └─ 速率限制层 — 限流                                        │
-├──────────────────────────────────────────────────────────────┤
-│  运行时                                                      │
-│  ├─ Docker 沙箱 — 容器化执行                                 │
-│  ├─ VirtualFs — 环境级隔离                                   │
-│  └─ 作用域执行 — 临时权限提升                                │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## 工具 Traits
+`src/tools/service.rs:152` 定义了主要操作：
 
 ```rust
-/// 核心工具 trait
-pub trait AlephTool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn schema(&self) -> Value; // JSON 模式
-    async fn execute(&self, input: Value, ctx: &ExecutionContext) -> ToolResult;
+pub trait ToolService: Send + Sync + 'static {
+    async fn execute(&self, name: &str, input: serde_json::Value) -> Result<ToolOutput, ToolError>;
+    async fn list(&self) -> Vec<ToolDefinition>;
+    async fn dispatchable_list(&self) -> Vec<ToolDefinition>;
+    async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+    fn metadata_schema(&self) -> Arc<[ToolDefinition]>;
 }
 ```
 
-## 模式生成
+`list` 是模型当前看到的工具数组；`dispatchable_list` 还包含被延迟展示但仍可执行的工具，供名称修复使用；`describe` 返回单个定义；`metadata_schema` 对模型提供缓存的定义数组。生产实现位于 `src/tools/scoped/`。
 
-工具模式使用反射从 Rust 类型生成：
+## 注册与定义
 
-```rust
-// 派生宏生成 JSON 模式
-#[derive(ToolSchema)]
-pub struct SearchInput {
-    pub query: String,
-    pub limit: Option<u32>,
-}
-```
+- `BUILTIN_TOOL_DEFINITIONS` 是内置名称、描述和配置要求的单一来源。
+- `ToolCatalog` 聚合内置、技能、插件和自定义命令，并负责冲突处理、健康探针和查询。
+- Gateway 的运行时 `LoopToolRegistry` 再合并请求所需的子代理、MCP 和扩展工具。
+- `ScopedToolService` 在执行前应用允许集、拒绝策略、健康过滤、确认门和工具定义重写器。
 
-`schema_strictify` 模块移除 LLM 不友好的字段（如复杂类型上的 `format`、`pattern`）以减少 token 使用。
+权限过滤同时作用于展示和执行：拒绝的工具不会进入 `list`，即使模型直接提交名称，`execute` 仍会再次拒绝。`ask` tier 对未知或未声明工具失败关闭。
 
-## 修复系统
+## Schema 与渐进披露
 
-当工具调用失败时，修复系统尝试常见修复：
+工具定义包含名称、描述、输入 Schema、来源和元数据。`ProgressiveDisclosureRewriter` 是请求级的静态展示重写器，而不是按消息猜测意图：
 
-1. **大小写纠正** — `getMP3File` → `get_mp3_file`
-2. **Unicode 处理** — 非 ASCII 的适当 `to_lowercase()`
-3. **模式验证** — 执行前根据模式检查输入
+1. 核心集合中的工具保留完整 Schema；
+2. 其他工具保留名称和描述，将 Schema 折叠为可接受对象，并提示调用 `get_tool_schema`；
+3. `get_tool_schema` 使用折叠前的请求快照返回完整参数；
+4. `tool_search` 对延迟工具的名称和描述做无依赖 BM25 检索，返回完整 Schema，并把命中工具提升回工具数组；
+5. 核心集合为空或含 `*` 时不挂载这套重写器，工具面保持字节级旧行为。
 
-## 中间件管道
+`get_tool_schema` 只在渐进披露启用时注册；`tool_search` 只在存在延迟工具时注册，并在启用披露时固定进入核心集合，避免它自己被折叠。MCP 延迟由 `[tools] defer_mcp_tools` 控制；会话模式使用相同的延迟集合。
 
-工具调用流经中间件层：
+## `ConcurrencyClaim` 与并行分区
 
-```
-用户请求
-    │
-    ▼
-┌─────────────┐
-│  权限       │ ← 能力检查
-│   层        │
-└─────────────┘
-    │
-    ▼
-┌─────────────┐
-│   审计      │ ← 日志记录, 指标
-│   层        │
-└─────────────┘
-    │
-    ▼
-┌─────────────┐
-│   工具      │ ← 实际执行
-│  执行       │
-└─────────────┘
-    │
-    ▼
-  结果
-```
+`src/tools/concurrency.rs:30` 用资源声明替代单一的 `concurrent_safe` 布尔值：
 
-## Docker 沙箱
+- `Shared`：面向调度的只读或无副作用调用；只与另一个 `Shared` 无冲突；
+- `Exclusive { scope: Global }`：资源集合未知或无界，例如 `bash`，与任何声明冲突；
+- `Exclusive { scope: Paths(...) }`：规范化路径集合，只有相同路径或祖先/后代路径重叠时冲突；
+- `Exclusive { scope: Nodes(...) }`：集群节点集合，只有目标节点重叠时冲突；
+- `Exclusive { scope: Sessions(...) }`：本机代理会话集合，不同会话可并行，但与其他资源范围保守地冲突。
 
-对于不受信任的工具，Docker 提供容器化执行：
+`call_concurrency_claim` 根据工具名称和本次输入计算实际声明，因此同一个 `file_ops` 工具的读取、单路径写入和未知操作可以得到不同结果。路径比较按组件进行：`src/a` 与 `src/ab` 不冲突，`src/a` 与 `src/a/b.rs` 冲突；无法提取范围时退化为 `Global`。
 
-- **允许列表** — 仅允许显式允许的 Docker 标志
-- **卷挂载** — 工作区目录以读写方式挂载
-- **网络** — 可配置的网络访问（启用/禁用）
+`partition_parallel_groups` 从左到右生成连续、保持顺序的区间。当前组中的新调用若与任一成员冲突，就开启下一组；组之间串行完成，组内才并发。于是多个读取可以先并发，之后的 `bash` 单独串行，而不同文件或不同节点的有界写入可以保持并行。它不是把所有调用粗略分成一个并发桶和一个串行桶。
 
-## 关键源文件
+## 执行与错误
 
-- `src/tools/mod.rs` — 模块概览
-- `src/tools/traits.rs` — 核心工具 traits
-- `src/tools/registry.rs` — 工具注册表
-- `src/tools/schema_strictify.rs` — 模式优化
-- `src/tools/repair.rs` — 失败修复
-- `src/tools/execution_context.rs` — 执行上下文
-- `src/tools/middleware/permission/` — 权限中间件
-- `src/tools/runtime.rs` — Docker 沙箱
+`ScopedToolService` 将 `TURN_CONTEXT`、取消令牌、确认流程、扩展 hook、重试和工具结果预算汇聚到一次调用。`ToolError` 区分未找到、权限拒绝、输入校验、执行、超时、确认过期、传输和重复名称等情况；调用者可据此决定重试、请求批准或报告失败。
+
+## 代码位置
+
+- `src/tools/service.rs` — `ToolService`、`ToolDefinition` 和并发声明接口
+- `src/tools/scoped/` — `ScopedToolService`、权限、延迟层和定义重写
+- `src/tools/concurrency.rs` — `ConcurrencyClaim`、冲突判定和分区
+- `src/tools/tool_search.rs` — `tool_search`
+- `src/tools/schema_lookup.rs` — `get_tool_schema`
+- `src/tool_metadata/registry/` — `ToolCatalog` 聚合与查询
+- `src/executor/builtin_registry/definitions.rs` — 内置工具清单
 
 ## 另请参阅
 
-- [内置工具](/docs/zh/concepts/builtin-tools) — 特定工具实现
-- [能力系统](/docs/zh/concepts/capability-system) — 权限框架
-- [执行引擎](/docs/zh/concepts/execution-engine) — 命令沙箱
+- [内置工具](/docs/zh/concepts/builtin-tools) — 工具名称和实现族
+- [MCP 集成](/docs/zh/concepts/mcp-integration) — MCP 能力与延迟工具
+- [协议适配器](/docs/zh/concepts/protocol-adapters) — 提供商协议和消息频道边界

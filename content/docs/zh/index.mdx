@@ -12,21 +12,26 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 
 > **一核多端，壳核分离；网关互通，权限控制。**
 >
-> 一个 `aleph-server` 核心驱动所有界面——桌面应用、CLI、Telegram、Discord、iMessage 等。原生桌面壳是零业务逻辑的薄容器；所有推理、工具和状态都在核心中。每个终端通过同一个经过认证的 WebSocket 网关连接，无论是本地还是远程。
+> 一个 `aleph-server` 核心驱动所有界面——桌面应用、CLI、Telegram、Discord、iMessage、iPhone / iPad Panel 等。原生桌面壳是零业务逻辑的薄容器；所有推理、工具和状态都在核心中。每个终端通过同一个经过认证的 WebSocket 网关连接，无论是本地还是远程。
 
 ## 主要特性
 
-- **多提供商 AI** — Claude、GPT、Gemini、Ollama，带原子计数器与原子 regen marker 的故障转移；`session.usage` 走核心定价
-- **多通道** — Telegram、Discord、iMessage、WebChat、桌面应用；Telegram/Discord 已对齐路由器单源
+- **多提供商 AI** — Claude、GPT、Gemini、Ollama（含多模），带原子计数器与原子 regen marker 的故障转移；`session.usage` 走核心定价
+- **多通道** — Telegram、Discord、iMessage、WebChat、桌面应用（macOS / Windows / Linux）、iPhone / iPad Panel；Telegram/Discord 已对齐路由器单源
 - **会话模式（chat / work / code）** — 与 `exec_tier`、`think_level` 并列的第三维，对工具**呈现**面做静态分区；可被 `session_set_mode` 工具动态切换
 - **原生性能** — 100% Rust 核心，无解释型语言
 - **壳核分离** — 桌面壳纯 OS 集成；核心可独立运行
-- **远程核心 + 自签名 TLS** — 桌面壳可通过 Tailnet/VPN 连接远程 `aleph-server`；SAN 自动覆盖本机非环回接口 IP
-- **TOFU 证书信任** — 桌面面板内完成指纹 + SAN 审批与本地固定
+- **远程核心 + 自签名 TLS** — 桌面壳可通过 Tailnet/VPN 连接远程 `aleph-server`；SAN 自动覆盖本机非环回接口 IP；漂移 sidecar 原子 regen
+- **TOFU 证书信任** — 桌面面板内完成指纹 + SAN 审批与本地固定（macOS WKWebView + iOS Keychain 适配器）
 - **集群联邦** — 一个中心核编排多台机器（节点）作为执行臂；节点键按 Unicode 归一化（CJK 节点名正确）
 - **三层安全模型** — 失败关闭的审批 / 沙箱 / 配对，加上 `exec_tier`、会话模式、能力账本
 - **治理拓扑层（loop_graph）** — 团队节点 / 独立证据审计员（`loop-auditor`） / 胜利声明 watcher / 客观 ACL
-- **可扩展** — MCP 集成（按需发现）、插件（plugin/install 统一入口）、Markdown 技能、自定义工具
+- **Loop / Goal / Strategy 三角** — 当前会话的持续循环 / 自主目标追求（客观 gate）/ 团队或裸循环的 plan（composite-keyed）
+- **Aleph Hub 单一源（`aleph-hub`）** — 官方 MCP / 插件 / 技能统一目录；`hub::primer` 冷启动投影
+- **Artifact / Deliverables** — 50 MB 上限 + 4 个 origin 的 artifact store；模型用 `artifact_publish` 发布可交付物，Panel 钉到顶部
+- **Vault 面板重构** — 卡片视图 + 双轨搜索 + 证据链 + 跨代理选择 + 来源三元组
+- **流式语音对话** — Deepgram / WhisperLiveKit 流式 ASR；TTS provider fallback 上限 2；Voice-as-Context 接入上下文聚合
+- **可扩展** — MCP 集成（按需发现）、Hub 单一源、Markdown 技能、自定义工具
 - **自托管** — 在你自己的硬件上运行，完全控制
 
 ## 架构
@@ -70,18 +75,17 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## 快速开始
 
 ```bash
-# 通过 cargo 安装
-cargo install aleph-cli
+# 从源码构建核心（Rust 1.95+）
+git clone https://github.com/rootazero/Aleph.git
+cd Aleph
+cargo build --bin aleph-server --release
 
-# 运行设置向导（新增 chat/work/code 会话模式与 TLS 选择）
-aleph wizard
-
-# 启动核心
-aleph-server start
-
-# 开始聊天
-aleph chat "你好, Aleph!"
+# 创建 ~/.aleph/config.toml，然后启动核心
+./target/release/aleph-server doctor
+./target/release/aleph-server start
 ```
+
+打开 `http://127.0.0.1:18790/`，或让 CLI 连接 `ws://127.0.0.1:18790/ws`。
 
 ## 文档章节
 
@@ -89,7 +93,7 @@ aleph chat "你好, Aleph!"
   <Card
     icon="🚀"
     title="快速上手"
-    description="安装、设置向导、初始配置和部署"
+    description="安装、首次配置、初始设置和部署"
     href="./getting-started/installation"
   />
   <Card
@@ -139,6 +143,24 @@ aleph chat "你好, Aleph!"
     title="自动化"
     description="Cron 作业（已实化）、Hooks（注入限额 + 同意 + 库存）和事件"
     href="./automation/cron-jobs"
+  />
+  <Card
+    icon="📦"
+    title="工件与可交付物"
+    description="Artifact store + Deliverable：50 MB 上限、4 个 origin、Panel 钉住 + 打开"
+    href="./concepts/artifacts-deliverables"
+  />
+  <Card
+    icon="🎙️"
+    title="语音对话运行时"
+    description="流式 ASR（Deepgram / WhisperLiveKit）+ TTS provider fallback + Voice-as-Context"
+    href="./concepts/voice-streaming"
+  />
+  <Card
+    icon="🔁"
+    title="Loop / Goal / Strategy"
+    description="三个独立子系统：当前会话循环 / 自主目标（客观 gate）/ 团队或裸循环 plan（composite-keyed）"
+    href="./concepts/looping-goal-strategy"
   />
   <Card
     icon="⌨️"

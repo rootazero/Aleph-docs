@@ -70,18 +70,17 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## Quick Start
 
 ```bash
-# Install via cargo
-cargo install aleph-cli
+# Build the core from source (Rust 1.95+)
+git clone https://github.com/rootazero/Aleph.git
+cd Aleph
+cargo build --bin aleph-server --release
 
-# Run the setup wizard (now includes chat/work/code mode and TLS selection)
-aleph wizard
-
-# Start the core
-aleph-server start
-
-# Start chatting
-aleph chat "Hello, Aleph!"
+# Create ~/.aleph/config.toml, then start the core
+./target/release/aleph-server doctor
+./target/release/aleph-server start
 ```
+
+Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
 
 ## Documentation Sections
 
@@ -89,7 +88,7 @@ aleph chat "Hello, Aleph!"
   <Card
     icon="🚀"
     title="Getting Started"
-    description="Installation, setup wizard, initial configuration, and deployment"
+    description="Installation, first-time configuration, initial setup, and deployment"
     href="./getting-started/installation"
   />
   <Card
@@ -139,6 +138,24 @@ aleph chat "Hello, Aleph!"
     title="Automation"
     description="Cron (now real), Hooks (bound context + consent + inventory), and events"
     href="./automation/cron-jobs"
+  />
+  <Card
+    icon="📦"
+    title="Artifacts & Deliverables"
+    description="Artifact store + Deliverable: 50 MB cap, 4 origins, Panel pin + open"
+    href="./concepts/artifacts-deliverables"
+  />
+  <Card
+    icon="🎙️"
+    title="Voice Conversation Runtime"
+    description="Streaming ASR (Deepgram / WhisperLiveKit) + TTS provider fallback + Voice-as-Context"
+    href="./concepts/voice-streaming"
+  />
+  <Card
+    icon="🔁"
+    title="Loop / Goal / Strategy"
+    description="Three independent subsystems: in-session loop / autonomous goal (objective gate) / team or naked-loop plan (composite-keyed)"
+    href="./concepts/looping-goal-strategy"
   />
   <Card
     icon="⌨️"

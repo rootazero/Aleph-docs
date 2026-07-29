@@ -19,13 +19,15 @@ description: "具有 Entity、AggregateRoot 和 ValueObject trait 的领域驱�
 
 ## 核心 Traits
 
+领域层以三个**最薄**的 marker trait（`src/domain/mod.rs`）建立通用语言 —— 不规定字段，只规定身份和等价的语义。
+
 ### Entity
 
 具有唯一、不可变标识的对象，该标识在状态更改期间保持不变。
 
 ```rust
 pub trait Entity {
-    type Id: Eq + Hash + Clone;
+    type Id: Eq + Clone + std::fmt::Display;
     fn id(&self) -> &Self::Id;
 }
 ```
@@ -39,12 +41,10 @@ pub trait Entity {
 聚合的入口点 —— 一个一致性边界，在多个实体之间强制执行领域不变量。
 
 ```rust
-pub trait AggregateRoot: Entity {
-    fn version(&self) -> u64;
-}
+pub trait AggregateRoot: Entity {}
 ```
 
-AggregateRoot 是外部代码可以直接引用的唯一对象。聚合中的所有其他对象都通过它访问。
+AggregateRoot 是外部代码可以直接引用的唯一对象。聚合中的所有其他对象都通过它访问。**注意：实际 trait 不带 `version()` 方法** —— 版本号由各聚合实现按需提供，不是 trait 的一部分。
 
 **示例：** `TaskGraph`（包含 Tasks 和 Dependencies）、`MemoryFact`（包含 ContextAnchors）
 
@@ -53,12 +53,10 @@ AggregateRoot 是外部代码可以直接引用的唯一对象。聚合中的所
 完全由其属性定义的不可变对象。具有相同属性的两个 ValueObject 相等且可互换。
 
 ```rust
-pub trait ValueObject: Eq + Clone {
-    fn validate(&self) -> Result<(), ValidationError>;
-}
+pub trait ValueObject: Eq + Clone {}
 ```
 
-ValueObject 没有身份 —— 它们是纯数据。更改任何属性都会创建一个新的 ValueObject。
+ValueObject 没有身份 —— 它们是纯数据。更改任何属性都会创建一个新的 ValueObject。**注意：实际 trait 不带 `validate()` 方法** —— 校验由具体类型的构造器（`parse, don't validate`）或领域用例承担，不在 trait 契约里。
 
 **示例：** `TaskStatus`, `FactType`, `GuestScope`, `FileContent`
 
@@ -68,48 +66,47 @@ ValueObject 没有身份 —— 它们是纯数据。更改任何属性都会创
 
 ### Credentials
 
-代表具有自动秘密修订的认证凭据。
+代表认证凭据的**枚举**，不是结构体（`src/a2a/domain/security.rs`）。
 
 ```rust
-pub struct Credentials {
-    pub username: String,
-    pub secret: String, // 在 Debug 输出中修订
+pub enum Credentials {
+    BearerToken(String),
+    ApiKey(String),
+    OAuth2Token(String),
+    None,
 }
 ```
 
-`Debug` 实现打印 `"[REDACTED]"` 而非实际秘密，防止日志中的意外暴露。
+`Debug` 实现把每种变体都打成 `[REDACTED]`，不让 secret 落进日志。`Credentials` 由 `A2A` 协议适配器在远端握手时使用，不属于本仓库的 `domain` 模块。
 
 ### TrustLevel
 
-基于连接源推断的信任级别。
+`skill` 模块用来决策技能安装的信任级别（`src/skill/guard.rs`）。
 
 ```rust
 pub enum TrustLevel {
-    Local,      // localhost / 环回
-    Private,    // 私有 IP 范围 (RFC 1918)
-    Public,     // 公共互联网
-    Untrusted,  // 已知的恶意行为者 / 阻止列表
+    Builtin,    // Aleph 自带，始终信任
+    Trusted,    // 已知/已策展的发布者
+    Community,  // 任意第三方（clawhub 默认）
 }
 ```
 
-自动从 IPv4/IPv6 地址或主机名推断。由 Gateway 的安全层用于确定默认权限范围。
+由 `install_allowed(ThreatLevel, TrustLevel)` 给出决策表 —— 不是从网络源自动推断。
 
 ### FileContent
 
-根据 A2A 规范不变量验证文件内容。
+`A2A` 规范下文件内容的载荷形式（`src/a2a/domain/message.rs`）。
 
 ```rust
 pub struct FileContent {
-    pub mime_type: String,
-    pub data: Vec<u8>,
-    pub name: String,
+    pub name: Option<String>,
+    pub mime_type: Option<String>,
+    pub bytes: Option<String>,  // Base64 编码
+    pub uri: Option<String>,
 }
 ```
 
-`validate()` 方法强制执行：
-- MIME 类型非空且可解析
-- 数据非空
-- 文件名有效（无路径遍历，无空字节）
+`validate()`（`pub const`，返回 `Result<(), &'static str>`）只检查 `bytes` 与 `uri` **恰好有一个**被设置 —— 既没有也不行，两个都有也不行。它**不**检查 MIME 解析、文件名转义或非空载荷：那些在序列化层处理。
 
 ---
 
@@ -119,12 +116,16 @@ Aleph 的领域被组织成限界上下文，每个上下文都有自己的通�
 
 | 上下文 | 关键类型 | 位置 |
 |---|---|---|
-| **Dispatcher** | `TaskGraph`, `Task`, `TaskStatus` | `src/dispatcher/` |
-| **Memory** | `MemoryFact`, `ContextAnchor`, `FactType` | `src/memory/` |
-| **Intent** | `AggregatedIntent`, `IntentSignal` | `src/intent/` |
-| **Identity** | `IdentityContext`, `GuestScope`, `TrustLevel` | `src/gateway/security/` |
+| **Memory** | `MemoryFact`, `ContextAnchor`, `NoteRelationArg` | `src/memory/` |
+| **Identity** | `IdentityContext`, `GuestScope`, `Role` | `shared/protocol/src/auth.rs`、`src/gateway/session_manager/` |
+| **Skill** | `TrustLevel`, `ThreatLevel` | `src/skill/guard.rs` |
+| **A2A** | `Credentials`, `FileContent`, `SecurityScheme` | `src/a2a/domain/` |
+| **Loop-Graph Governance** | `NodeKind`, `EdgeKind` | `src/loop_graph/types.rs` |
+| **Goal** | `Goal`, `GoalStatus`, `PursuitMode`, `GateOutcome` | `src/goal/types.rs` |
+| **Artifact** | `ArtifactRecord` | `src/artifacts/store.rs` |
+| **Team** | `TaskStatus`, `ArtifactType` | `src/teams/artifacts.rs` |
 
-每个上下文拥有自己的类型和不变量。跨上下文引用使用显式映射层，而非直接类型共享。
+跨上下文引用走显式映射层 —— `IdentityContext` 在 `aleph_protocol`（跨进程共享），而 `src/memory/` 持有自己的 `MemoryFact` 与 `ContextAnchor`，两者不直接共用类型。
 
 ---
 
@@ -142,16 +143,19 @@ fn load_session(id: SessionId) -> Option<Session> { ... }
 
 ### 枚举状态机
 
+`TaskStatus`（`src/teams/artifacts.rs`）的形态：
+
 ```rust
 pub enum TaskStatus {
     Pending,
-    Running { started_at: i64 },
-    Completed { result: TaskResult },
-    Failed { reason: String },
+    InProgress,
+    Completed,
+    Blocked,
+    Failed,
 }
 ```
 
-非法状态无法表示 —— 任务不能同时处于 Pending 和 Completed 状态。
+非法状态无法表示 —— 任务不能同时处于 `Pending` 和 `Completed` 状态。
 
 ### 解析，而非验证
 
@@ -168,7 +172,7 @@ impl Email {
 
 ## 代码位置
 
-- `src/domain/` — 领域类型和 traits
+- `src/domain/` — 三个 marker trait 与 `skill` 子模块
 - `docs/reference/DOMAIN_MODELING.md` — 扩展领域建模指南
 
 ## 另请参阅
@@ -183,17 +187,17 @@ impl Email {
 
 ### POE 上下文已退役
 
-POE（Principle-Operation-Evaluation）架构在 26.5+ 退役。其「智慧」已迁移到 system prompt 模板（R9）；成功定义、验证、评估现在由 LLM 一次调用自然完成。Harness 不做完成度判断（**R10「5 个不」之 3**），不参与评估。
+POE（Principle-Operation-Evaluation）运行时架构在 26.5+ 退役。其「智慧」已迁移到 system prompt 模板（R9）；成功定义、验证、评估现在由 LLM 一次调用自然完成。Harness 不做完成度判断（**R10「5 个不」之 3**），不参与评估。
 
-历史 POE 上下文中 `SuccessManifest` 聚合根、`ValidationRule` 与 `Verdict` 值对象（位于 `src/poe/types.rs`）仍可作为只读历史参考，但**不参与运行时评估**。
+历史 POE 类型已从当前源码移除；需要考古时应查阅对应版本的 Git 历史，而不是引用当前模块路径。
 
 ### 新增限界上下文
 
 - **Loop-Graph Governance 上下文**（`src/loop_graph/`）—— 团队节点 / 审计环 / 客观 ACL / 胜利声明 watcher / 内置 `loop-auditor`
-- **Goal 上下文**（`src/goal/`）—— 持久目标；由 GoalStore 管理
-- **Artifact 上下文**（`src/artifacts/`）—— 交付物（`tools.publish` 的产物）
-- **Signing 上下文**（`src/identity/signer.rs`）—— 每代理签名密钥 + 签名操作账本
+- **Goal 上下文**（`src/goal/`）—— 持久目标；由 `GoalStore` 管理；带 maker/checker 拆分的 `GateOutcome`
+- **Artifact 上下文**（`src/artifacts/`）—— 交付物（`artifact_publish` 的产物），`MAX_ARTIFACT_BYTES = 50 MiB` / `MAX_ARTIFACTS_PER_SESSION = 200`
+- **Signing 上下文**（`src/identity/`）—— 每代理 Ed25519 密钥（`AgentKeystore`）+ 哈希链签名账本（`AgentLedger`），由 `verify_chain` 校验
 
-### Harness 12 文件
+### Harness 文件与行数棘轮
 
-26.7.x：`src/harness/` 锁 **12 文件**，行数由 `src/harness/tests/budget.rs` 的棘轮守（**代码是权威**——任何文档数字都只是 `CEILING` 的副本）。详见 [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop)。
+26.7.x：`src/harness/` 锁 **12 文件**，行数由 `src/harness/tests/budget.rs` 的 `CEILING` 棘轮守。源码常量是唯一权威，文档不复制易漂移的当前行数。详见 [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop)。

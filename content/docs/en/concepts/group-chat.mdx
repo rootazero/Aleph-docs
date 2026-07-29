@@ -1,149 +1,59 @@
 ---
 title: "Group Chat"
-description: "The panel group-chat window: a three-panel team chat surface with attribution bubbles, sidebar history, and @-mention auto-complete."
+description: "Durable team conversation with attributed messages, participant status, mentions, task context, and cancellable fan-out."
 ---
 
-Group chat is the panel surface where a [team](/docs/en/concepts/teams) of agents converses in one shared, durable thread. It turns a team from "able to run" into "good to use, easy to revisit": speakers are visually distinct, history is resumable from the sidebar, and `@`-mentions are discoverable instead of hand-typed.
+Group chat is the conversational surface for a [team](/docs/en/concepts/teams). A message sent to a team starts a bounded fan-out tree: mentioned members, or the applicable roster, run concurrently and can mention other members in later replies. Messages and system notices are persisted so the conversation can be reopened and replayed.
 
-## Design Philosophy
+## Panel Experience
 
-1. **Identity-first** — every message is attributed to a speaker by emoji avatar + display name, not buried in metadata.
-2. **Resumable** — a team chat enters the sidebar history like a single-agent chat; you return to it any time.
-3. **Discoverable mentions** — typing `@` opens a roster palette, so you never silently lose a misspelled `@<id>`.
+Team chat uses the normal chat timeline rather than a separate three-column window:
 
----
+- Agent replies use attributed bubbles with a stable color derived from `agent_id`; consecutive replies from the same agent are visually grouped.
+- The participant cluster at the top left opens the roster and shows live member activity. It replaces the former permanent left roster rail.
+- The team task drawer keeps coordination tasks available from the conversation. The shared workspace remains the normal right-side workspace.
+- The sidebar lists teams returned by `agents.teams`, including member previews and the latest conversation snippet.
 
-## The Three-Panel Window
+A blank-named team receives a generated name on its first `teams.chat.send`.
 
-Opening a team enters the group-chat window, which is laid out in three panels:
+## Mentions and Fan-Out
 
-```
-┌──────────────┬─────────────────────────────────┬──────────────────┐
-│   Roster     │        Message Flow             │   Workspace      │
-│  (left)      │        (middle)                 │   (right)        │
-├──────────────┼─────────────────────────────────┼──────────────────┤
-│ 👑 leader    │  🦊 Fox                          │  [Artifacts]     │
-│  ● online    │   ┌──────────────────────────┐  │  [Tasks/Kanban]  │
-│ 🦉 Owl       │   │ message text             │  │                  │
-│  ● working   │   └──────────────────────────┘  │  ┌────────────┐  │
-│ 🐢 Turtle    │   │ merged follow-up message │  │  │ artifact   │  │
-│  ○ idle      │   └──────────────────────────┘  │  │ task card  │  │
-│              │  🦉 Owl                          │  │ ...        │  │
-│              │   ┌──────────────────────────┐  │  └────────────┘  │
-│              │   │ message text             │  │   (collapsible)  │
-│              │   └──────────────────────────┘  │                  │
-└──────────────┴─────────────────────────────────┴──────────────────┘
-```
+Typing `@` opens roster completion. Matching is case-insensitive by member name or id, and selection inserts the canonical `@<agent_id>`; `@all` addresses the roster. Unknown ids are not routed.
 
-### Left — Roster
+The broadcaster limits recursive conversation with operator-configured `[team_broadcast]` controls for chain depth, per-round width, total activations, transcript budget, and member-run timeout. The `run_id` returned by `teams.chat.send` identifies the entire fan-out tree. `teams.chat.cancel` first prevents new descendants and then cancels active member runs.
 
-The team roster, with a **leader badge** on the team leader and a **status dot** per member (online / working / idle). This is the live membership of the team for this thread.
+## Live State and History
 
-### Middle — Message Flow (attribution bubbles)
+The Panel subscribes to the `team.<id>.*` topic family:
 
-The conversation, rendered as **attribution bubbles** in a classic-IM layout:
+| Topic | Purpose |
+|---|---|
+| `team.<id>.message` | Final attributed member replies |
+| `team.<id>.system` | System notices rendered separately from agent bubbles |
+| `team.<id>.activity` | Member `working`, `done`, or `error` state |
+| `team.<id>.fanout` | Fan-out `started` and `settled` state |
+| `team.<id>.task.<verb>` | Task updates for the task strip and drawer |
 
-- Each incoming message shows an **avatar** (the agent's `emoji`, falling back to a name-initial monogram) outside the bubble, the **display name** above the bubble, and plain text inside the bubble.
-- The avatar's background is a **stable color derived from `hash(agent_id)`** — so a member keeps the same color regardless of roster order or membership changes.
-- **Consecutive same-agent messages merge**: when a message has the same `agent_id` as the one above it, the avatar and name are hidden (the bubble is indented under the first), so a run of replies reads as one block.
-- Your own messages stay right-aligned with no avatar or name.
+`teams.chat.history` returns only conversation rows from the shared team message store and labels them as `user`, `agent`, or `system`. Directed inbox traffic is excluded, so notifications and escalation hints do not appear as chat bubbles.
 
-> Avatar color is keyed on `agent_id`, not roster index — adding or removing a member never re-colors anyone else.
-
-### Right — Workspace
-
-A collapsible workspace with two tabs:
-
-- **Artifacts** — deliverables produced during the conversation.
-- **Tasks / Kanban** — the team's coordination tasks as a board.
-
----
-
-## Sidebar — Group Chats history
-
-The chat sidebar gains a **Group Chats** section above the single-agent chats, sharing one scroll list:
-
-- Each row shows a **member-preview avatar cluster** (the team's members, colored via `hash(agent_id)`) and a **last-message snippet** as the subtitle.
-- The section is **collapsible**; if the selected agent is in no teams, it hides entirely.
-- Clicking a row re-enters the team: it loads the roster, replays the chat history into the message flow, and subscribes to live team events. The sidebar row is the durable entry point — you come back by clicking the list.
-
----
-
-## @-Mentions
-
-Typing `@` in the composer (while in a team) opens a **roster auto-complete palette**:
-
-- Each entry renders the member's avatar + display name + a grey `id`, plus an **`@all`** special entry.
-- Filtering matches **name or id**, case-insensitively, against the text typed after `@`.
-- Selecting an entry inserts the canonical `@<id>` (or `@all`). Inside bubbles the literal `@<id>` token is kept and lightly highlighted — it is not rewritten to a name, so there is no ambiguity between same-named agents.
-
-Mentions are resolved against the roster's `agent_id`; a token that doesn't match a member is simply not delivered.
-
----
-
-## Auto-Naming
-
-A team created without a name (blank-named team) is **auto-named by the LLM on its first message**, so it shows a meaningful title in the Group Chats history instead of a placeholder.
-
----
-
-## RPC Layers
-
-Group chat sits on two distinct RPC layers — keep them separate:
-
-### Team work-thread
-
-The durable, per-team group-chat thread. Its history powers the attribution-bubble replay when you re-enter a team from the sidebar.
+## Team Chat RPCs
 
 | Method | Purpose |
-|--------|---------|
-| `teams.chat.send` | Send a message into the team's group-chat thread (fans out to members). |
-| `teams.chat.thread` | The team's work-thread (tasks / deliverables view). |
-| `teams.chat.history` | Replay the durable chat bubbles for a team, oldest-first. |
+|---|---|
+| `teams.chat.send` | Send a user message and start a team fan-out tree |
+| `teams.chat.cancel` | Cancel the fan-out tree named by its `run_id` |
+| `teams.chat.history` | Replay the durable conversation |
+| `teams.chat.thread` | Load the durable task and artifact work thread |
+| `agents.teams` | List an agent's teams for the sidebar |
+| `teams.usage` | Read aggregate team model usage |
 
-`agents.teams` returns each team's summary augmented with a small `members_preview` (for the avatar cluster) and `last_message` (for the row subtitle), so the sidebar avoids an N+1 of per-team lookups.
+There is no `teams.run` RPC. Team execution is driven by `teams.chat.send`, coordination tasks, and the team tools.
 
-### Group-chat session primitive
+## Separate Persona Group Chat
 
-The lower-level session primitive that drives a live multi-agent conversation:
-
-| Method | Purpose |
-|--------|---------|
-| `group_chat.start` | Begin a group-chat session. |
-| `group_chat.continue` | Advance the session with the next turn. |
-| `group_chat.end` | End the session. |
-| `group_chat.history` | Read the session's message history. |
-| `group_chat.list` | List active / known sessions. |
-| `group_chat.mention` | Resolve / route an `@`-mention within the session. |
-
----
+The `group_chat.start`, `group_chat.continue`, `group_chat.mention`, `group_chat.end`, `group_chat.list`, and `group_chat.history` RPCs belong to the separate persona-roundtable system under `src/group_chat/`. They do not back the Panel's team conversation, which uses `teams.chat.*`.
 
 ## See Also
 
-- [Teams](/docs/en/concepts/teams) — leader, Team Strata planning, and Coord Tasks
-- [Agent Runtime](/docs/en/concepts/agent-runtime) — how individual agents work
-- [Arena](/docs/en/concepts/arena) — multi-agent collaboration workspace
-
----
-
-## 26.7.x Addendum
-
-### Team Group-Chat Window
-
-26.6.29+: three-panel team group-chat window — roster / attribution-bubble message flow / workspace, powered by the **durable per-team thread** (`teams.chat.*`).
-
-### `teams.chat.*` Full RPC
-
-- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
-- `teams.usage` — team usage
-- `agents.teams` — list all teams
-
-### Group Chat (teams.chat.send) Replaces "teams.run"
-
-Historically there's a claim of a `teams.run` method (**never existed**) — teams use the chat thread + tasks. Coord Task state is reviewed by the leader via `task_review`.
-
-### See Also
-
-- [Teams](/docs/en/concepts/teams) — leader + members
-- [Coord Tasks](/docs/en/architecture/teams) — `task_review` flow
-- [Gateway RPC `teams.*`](/docs/en/gateway/methods/teams) — protocol
+- [Teams](/docs/en/concepts/teams) — task lifecycle, review, templates, and member tool surfaces
+- [Agent Runtime](/docs/en/concepts/agent-runtime) — individual agent execution

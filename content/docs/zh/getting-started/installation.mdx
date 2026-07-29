@@ -1,135 +1,80 @@
 ---
 title: "安装"
-description: "在你的系统上安装 Aleph"
+description: "安装 Aleph 桌面应用或从源码构建"
 ---
 
-本指南涵盖了在你的系统上安装 Aleph。
+## 桌面应用
 
-## 前置条件
+请从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) 选择当前版本实际发布的平台安装包。产物格式与平台覆盖会随 Release 变化，不应假设每个版本都同时包含 `.dmg`、`.msi`、`.deb` 或 `.AppImage`。
 
-- **Rust 1.95+** — 从源代码构建需要（参见 `Cargo.toml` 中的 `rust-version`）
-- **just** — 命令运行器（`cargo install just`）
-- **npm** — 用于构建 WASM 面板 UI
-- **wasm-bindgen** — WASM JS 绑定（`cargo install wasm-bindgen-cli`）
-- **macOS 14+**、**Linux** 或 **Windows** — 主要支持的平台
-- **SQLite** — 通过 `rusqlite` 捆绑（无需单独安装）
+桌面应用由薄系统壳和 `aleph-server` 核心组成。壳负责窗口、托盘、通知和平台集成；核心负责推理、工具、状态与 Gateway。
 
-### 平台特定要求
+## 从源码构建
 
-**macOS：**
-- Xcode 命令行工具
-- Swift 工具链（用于桌面桥接）
+### 要求
 
-**Linux：**
-- `build-essential` 或等效工具
-- `pkg-config`
-- `libssl-dev`（TLS 由 `ring` 提供；R3 重量级依赖已避免）
+- Rust 1.95+（以根 `Cargo.toml` 的 `rust-version` 为准）
+- 平台 C/C++ 构建工具
+- 使用仓库 `just` 任务时安装 `just`
+- 构建 WebChat/WASM 时安装 Node.js/npm 与 `wasm-bindgen-cli`
 
-**Windows：**
-- Visual Studio 生成工具
-- `windows-sys` 功能由 Cargo 自动处理
+SQLite 通过 `rusqlite` 的 bundled 功能构建，无需单独安装系统 SQLite 开发包。
 
-## 安装方法
-
-### 桌面应用（推荐）
-
-运行 Aleph 最简单的方式是使用原生桌面应用。它同时捆绑了核心服务器和 Tauri 壳——无需终端。
-
-| 平台 | 下载 | 说明 |
-|------|------|------|
-| **macOS** | `.dmg` 从 [Releases](https://github.com/rootazero/Aleph/releases) | 通用二进制文件（Intel 和 Apple Silicon） |
-| **Linux** | `.deb` / `.AppImage` 从 [Releases](https://github.com/rootazero/Aleph/releases) | Debian、Ubuntu、Fedora |
-| **Windows** | `.msi` 从 [Releases](https://github.com/rootazero/Aleph/releases) | Windows 10/11 |
-
-桌面应用：
-- 将 `aleph-server` 作为后台守护进程嵌入
-- 在原生 webview 中托管 Leptos Panel
-- 提供系统托盘、OS 通知、全局热键（`CmdOrCtrl+Shift+A`）
-- 通过 GitHub Releases 静默自动更新
-- 支持开机自启（Settings → General / 托盘菜单；Windows 通过 Task Scheduler）
-- 通过 `[gateway.tls] cert/key` 留空自动生成自签名证书；SAN 自动覆盖本机非环回接口 IP；Panel 端通过 TOFU 审批并固定指纹
-
-### 使用 Just（开发）
-
-用于开发或无头服务器部署：
+### 构建核心
 
 ```bash
-# 验证所有构建依赖已安装
-just deps
-
-# 以开发模式运行服务器（重建 WASM）
-just dev
-
-# 构建发布二进制文件
-just build
-
-# 运行测试
-just test
-```
-
-### 从源代码
-
-```bash
-# 克隆仓库
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
+cargo build --bin aleph-server --release
+```
 
-# 验证依赖
+产物位于 `target/release/aleph-server`。
+
+仓库开发任务：
+
+```bash
 just deps
-
-# 以开发模式运行
 just dev
-
-# 或构建发布二进制文件
-just build
-```
-
-发布二进制文件将位于 `target/release/aleph-server`。
-
-### 桌面壳（开发）
-
-```bash
-# 以开发模式运行桌面壳（重建守护进程 + 壳）
-just shell-dev
-
-# 构建平台安装程序（.app/.dmg、.msi、.deb）
-just shell-build
-```
-
-### 验证构建
-
-```bash
-# 快速编译检查
 just check
-
-# 运行核心测试
 just test
+```
 
-# 检查所有 crate，包括桌面端
-just check-desktop
+具体任务以当前 `Justfile` 为准。桌面壳和平台安装包需要额外的平台 SDK，并使用仓库当前的 shell 构建任务。
 
-# 提示词骨架大小（受 R9 两把尺约束）
+## 验证
+
+```bash
+aleph-server doctor
+aleph-server status
+```
+
+离线检查固定 system-prompt scaffold：
+
+```bash
 aleph-server prompt-size
 ```
 
-## 目录结构
+`prompt-size` 不启动 daemon、不访问网络，也不包含 identity files、memory、skills、MCP instructions 或工具 schema 等会话级内容。
 
-Aleph 在 `~/.aleph/` 创建以下目录：
+## 数据根目录
+
+Aleph 默认把配置和运行数据放在 `~/.aleph/`；`ALEPH_HOME` 可覆盖该根目录。稳定入口包括：
 
 | 路径 | 用途 |
-|------|---------|
-| `~/.aleph/` | 主配置目录 |
-| `~/.aleph/aleph.toml` | 主配置文件 |
-| `~/.aleph/logs/` | 服务器日志（day-boundary 自动轮转 + `ALEPH-BOOT` marker） |
-| `~/.aleph/skills/` | 用户安装的 Markdown 技能 |
-| `~/.aleph/plugins/` | 扩展插件 |
-| `~/.aleph/mcp/` | MCP 服务器配置与凭据 |
-| `~/.aleph/memory/` | 记忆存储（SQLite + sqlite-vec + 笔记） |
-| `~/.aleph/cron/` | Cron 作业持久化（实化） |
-| `~/.aleph/artifacts/` | 工件存储（交付物） |
-| `~/.aleph/ops.log` | 签名操作账本 |
+|------|------|
+| `config.toml` | 主配置文件 |
+| `defaults.toml` | 默认值覆盖 |
+| `data/` | 核心数据库与运行数据 |
+| `memory/` | 记忆与笔记数据 |
+| `artifacts/` | 工件与交付物 |
+| `skills/` | 用户技能 |
+| `plugins/` | 已安装插件 |
+| `logs/` | 文件日志 |
+
+其它子目录由启用的组件按需创建，应以当前运行版本实际生成的目录为准。
 
 ## 下一步
 
-- [快速上手](./quick-start) — 立即开始运行
-- [配置](./configuration) — 配置你的设置
+- [快速上手](./quick-start) —— 启动并验证 Gateway
+- [首次配置](./wizard) —— 当前配置流程
+- [配置](./configuration) —— 配置结构

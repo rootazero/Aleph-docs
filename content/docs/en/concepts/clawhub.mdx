@@ -1,26 +1,24 @@
 ---
 title: "ClawHub"
-description: "HTTP client and types for the ClawHub skill registry at clawhub.ai."
+description: "Historical reference for ClawHub (clawhub.ai), the OpenClaw skill registry whose HTTP client has since been retired from Aleph."
 ---
 
-> **Status (2026-06): ClawHub is no longer a first-class source.** Its Settings tab was removed and it has been subsumed into the [Extensions Store](/docs/en/concepts/extensions-store). ClawHub is no longer browsable in the main UI; the Store browses Skills, Plugins, and MCP servers from the Claude/Aleph plugin marketplaces, the Official MCP Registry, and the Docker MCP Catalog. The ClawHub HTTP API documented below is still reachable, but only via the Store Agent's long-tail install path (its `store_fetch_docs` tool reads a URL/repo) — not the main browse UI. This page is kept as historical reference.
+> **Status (2026-07): ClawHub is no longer reachable as a first-class source.** The dedicated `src/clawhub/` module has been retired; the Settings tab that pointed at it was removed and folded into Settings → Advanced. Browsing, searching, and installing ClawHub content now happens through the unified [Extensions Store](./extensions-store), which fronts the **aleph-hub** catalog (`https://hub.heyaleph.com/catalog.json`) plus the Claude / Aleph plugin marketplaces, the Official MCP Registry, and the Docker MCP Catalog. The only place `clawhub` appears in current source is as a `via` provenance label on a `HubCatalog` entry (when an artifact traces back to its original OpenClaw upstream) and as the OpenClaw `ClawHub` SKILL.md metadata namespace that the markdown-skill loader still recognises for backward-compatible installs. This page is kept as historical reference only.
 
-The `clawhub` module provides an HTTP client and type definitions for interacting with the ClawHub skill registry. ClawHub is a public repository where users can browse, search, and download skills for use with Aleph and compatible agents.
+## Design Philosophy (historical)
 
-## Design Philosophy
+The ClawHub integration, when it shipped, followed two principles:
 
-The ClawHub integration follows two principles:
-
-1. **Read-only access** — The client fetches skills from the registry; it does not upload or modify registry contents. Authentication is not required for public API access.
-2. **Clean type separation** — Raw API types are converted to internal unified types via `From` implementations, keeping the HTTP layer decoupled from domain logic.
+1. **Read-only access** — The client fetched skills from the registry; it never uploaded or modified registry contents. Public API access did not require authentication.
+2. **Clean type separation** — Raw API types were converted to internal unified types via `From` implementations, keeping the HTTP layer decoupled from domain logic.
 
 ---
 
-## Core Components
+## Historical HTTP Client
 
-### ClawHubClient
+The retired `clawhub` module exposed an HTTP client and type definitions for interacting with the ClawHub skill registry at `https://clawhub.ai`. It has since been removed from `src/`; the snippets below reflect the historical API and are kept for archival reference.
 
-The main HTTP client for registry operations:
+### ClawHubClient (historical)
 
 ```rust
 pub struct ClawHubClient {
@@ -30,32 +28,31 @@ pub struct ClawHubClient {
 
 impl ClawHubClient {
     pub fn new() -> Self { /* ... */ }
-    
+
     pub async fn browse(
         &self,
         category: Option<String>,
-    ) -> Result<Vec<SkillSummary>> { /* ... */ }
-    
+    ) -> Result<Vec<SkillSummary>, ClawHubError> { /* ... */ }
+
     pub async fn search(
         &self,
         query: &str,
-    ) -> Result<Vec<SkillSummary>> { /* ... */ }
-    
+    ) -> Result<Vec<SkillSummary>, ClawHubError> { /* ... */ }
+
     pub async fn download(
         &self,
         slug: &str,
-    ) -> Result<Vec<u8>> { /* ... */ }
+    ) -> Result<Vec<u8>, ClawHubError> { /* ... */ }
 }
 ```
 
-**Key behaviors:**
-- Browse falls back to search when the browse endpoint returns empty
-- Download sanitizes the slug (replacing `/` with `-`) before using it in temp filenames
-- All methods use `?` or `map_err` for error propagation
+**Historical behaviors:**
 
-### Types
+- `browse` falls back to `search` when the browse endpoint returns empty.
+- `download` sanitises the slug (replacing `/` with `-`) before using it in temp filenames.
+- All methods used `?` or `map_err` for error propagation.
 
-Core registry types:
+### Historical Types
 
 ```rust
 pub struct SkillSummary {
@@ -75,37 +72,23 @@ pub struct SkillDetail {
 
 ---
 
-## API Operations
+## Historical API Operations
 
 ### Browse
 
-Lists skills by category. Falls back to search if the category endpoint returns empty:
-
-```rust
-let client = ClawHubClient::new();
-let skills = client.browse(Some("productivity".to_string())).await?;
-```
+Lists skills by category. Falls back to search when the category endpoint returns empty.
 
 ### Search
 
-Full-text search across the registry:
-
-```rust
-let results = client.search("file organizer").await?;
-```
+Full-text search across the registry.
 
 ### Download
 
-Fetches a skill package as a ZIP archive:
-
-```rust
-let zip_bytes = client.download("aleph/file-organizer").await?;
-// slug "aleph/file-organizer" becomes temp file "clawhub-aleph-file-organizer-{uuid}.zip"
-```
+Fetches a skill package as a ZIP archive.
 
 ---
 
-## Utility Functions
+## Historical Utility Functions
 
 ### URL Encoding
 
@@ -113,7 +96,7 @@ let zip_bytes = client.download("aleph/file-organizer").await?;
 pub fn encode_slug_path(slug: &str) -> String
 ```
 
-Encodes the slug for use in URLs with per-segment percent-encoding.
+Per-segment percent-encoding for use in URLs.
 
 ### Version Comparison
 
@@ -133,9 +116,10 @@ Converts Unix milliseconds to RFC 3339 format. Returns empty string for invalid 
 
 ---
 
-## Error Handling
+## Historical Error Handling
 
-The client uses `reqwest` for HTTP and returns `Result<T, ClawHubError>` from all operations. Errors include:
+The client used `reqwest` for HTTP and returned `Result<T, ClawHubError>` from all operations. Errors covered:
+
 - Network failures
 - HTTP non-2xx status codes
 - Invalid response parsing
@@ -143,38 +127,26 @@ The client uses `reqwest` for HTTP and returns `Result<T, ClawHubError>` from al
 
 ---
 
-## Code Location
+## Where ClawHub Appears in Current Code
 
-- `src/clawhub/mod.rs` — Module entry point
-- `src/clawhub/client.rs` — HTTP client implementation
-- `src/clawhub/types.rs` — Registry types and conversions
+| Location | Role |
+|---|---|
+| `src/hub/catalog_client.rs` | `"via": "clawhub"` provenance label on `HubCatalog` entries whose upstream traces back to OpenClaw; the label is purely informational and never triggers a network fetch. |
+| `src/hub/types.rs` | `via` field on `ExtensionEntry`; same informational role. |
+| `src/tools/markdown_skill/spec.rs` | The `OpenClaw` metadata namespace (`ClawHub` SKILL.md compatibility) — the loader still parses legacy `ClawHub`-style SKILL.md frontmatter so existing skills keep installing. |
+| `src/skill/guard.rs` | Skips `.clawhub.json` sidecars when scanning skill directories. |
 
-## See Also
-
-- [Extensions Store](/docs/en/concepts/extensions-store) — The unified panel that replaced ClawHub as the way to browse and install Extensions
-- [Skills](./skills) — How skills work within Aleph
-- [Extensions](./extensions) — Plugin architecture for adding capabilities
+The ClawHub HTTP client itself is not present in `src/`; there are no `clawhub.*` gateway RPCs and no installer that talks to `clawhub.ai`.
 
 ---
 
-## 26.7.x Addendum
+## Code Location
 
-### ClawHub Demoted to Long-Tail
+- Historical module: `src/clawhub/` (removed) — `client.rs`, `types.rs`
+- Current appearances: `src/hub/catalog_client.rs`, `src/hub/types.rs`, `src/tools/markdown_skill/spec.rs`, `src/skill/guard.rs`
 
-ClawHub is **no longer a first-class extension source**:
+## See Also
 
-- The settings tab has been **removed** (folded into Settings → Advanced)
-- Demoted to long-tail, only read by the store-agent `store-agent` when browsing `/extensions`
-- No longer maintained as a separate panel mode
-
-### Full RPC (now real)
-
-- `clawhub.search` — search by source / keyword
-- `clawhub.browse` — browse by category
-- `clawhub.detail` — single-extension detail
-- `clawhub.install` — install (routes uniformly through `plugin.install` or `skills.install`)
-
-### See Also
-
-- [Extensions Store](/docs/en/concepts/extensions-store) — the replacement
-- [Gateway RPC `extensions.*`](/docs/en/gateway/methods/extensions) — protocol
+- [Extensions Store](./extensions-store) — The replacement: unified catalog covering Skills, Plugins, and MCP servers from the official Aleph Hub, plugin marketplaces, the MCP registry, and Docker MCP Catalog.
+- [Skills](./skills) — How skills work within Aleph
+- [Extensions](./extensions) — Plugin architecture for adding capabilities

@@ -1,0 +1,353 @@
+---
+title: "Loop / Goal / Strategy"
+description: "三个独立子系统：loop（持续循环）、goal（自主目标追求）、strategy（团队/裸循环策略）。共享 TreeBudget 单轨约束、跨会话 kill switch、四 composite key 命名空间，以及 9-action loop 工具 / 7-action goal 工具 / 3-action strategy 工具。"
+---
+
+> **当前状态（26.7.22+）。** 在 26.7.21 之前 Aleph 只有 cron（持久、跨会话、有自己的 session）和 heartbeat（短间隔心跳）。26.7.22+ 引入三个**独立子系统**，覆盖"现在这个会话里想持续做某事 / 想自己追求目标 / 团队需要按 plan 推进"的中间地带。三者**不互斥**——一个会话里可以同时有 loop + goal + 被某 strategy 引用。
+
+## 子系统定位
+
+| 子系统 | 模块 | 状态机 | 触发 | 停止条件 |
+|--------|------|--------|------|---------|
+| **Loop**（持续循环） | `src/looping/`（`types.rs` / `pursuit.rs` / `mod.rs`） | `Active` / `Paused` / `Stopped`（**进程内** `LoopRegistry`） | 每次 run 结束**续接钩子**根据 cadence 拉下一次 tick | `max_iterations` / `deadline_ms` / `token_budget` |
+| **Goal**（自主目标追求） | `src/goal/`（`pursuit.rs` / `store.rs` / `types.rs`） | `Active` / `Paused` / `Completed` / `Aborted`（**持久化**，DB-backed） | 客观 gate + stop_hooks | 客观 outcome（maker 模型自报 + checker 客观校验，**两者都成功**才 `Completed`） |
+| **Strategy**（团队/裸循环策略） | `src/strategy/`（`planner.rs` / `render.rs` / `store.rs` / `types.rs`） | `Draft` / `Active` / `Superseded`（**复合键存储**） | team_key / session_key 命名的 plan 触发 | 目标变更 / plan 完成 / 团队解散 |
+
+## Loop —— 当前会话的多轮 watch
+
+```rust
+// src/looping/types.rs
+pub enum Cadence {
+    Fixed { interval_ms: u64 },                                  // 每 N 毫秒 tick
+    ModelPaced { fallback_ms: u64 },                             // 模型每 tick 报 next_wake_ms
+}
+
+pub enum LoopStatus { Active, Paused, Stopped }
+
+pub struct LoopState {
+    pub session_id: String,
+    pub prompt: String,                  // 每 tick 原样回注
+    pub cadence: Cadence,
+    pub next_wake_ms: Option<u64>,       // model-paced 覆盖
+    pub pending_tick_wake_ms: Option<u64>,  // 已入队 tick 的 fire 时间
+    pub iterations_used: u32,
+    pub max_iterations: Option<u32>,
+    pub deadline_ms: Option<u64>,        // 绝对 epoch ms
+    pub token_budget: Option<u64>,       // 软 token 上限
+    pub tokens_at_start: u64,
+    pub baseline_captured: bool,
+    pub status: LoopStatus,
+    pub created_at_ms: u64,
+    pub stop_reason: Option<String>,     // 用户面理由：cap 触发 / 失败 / 手停
+}
+```
+
+### 关键不变量
+
+- **`LoopRegistry` 仅进程内**：daemon 重启清空所有 loop（"dies with the session"）—— 这是 loop 与 goal 的根本区别
+- **`pending_tick_wake_ms` 串行化**：每次 run 完成都进续接钩子，没这个闸门每个用户回合都会再开一条 tick 链
+- **`Paused` vs `Stopped`**：两者都 `is_active() = false`（无 tick 触发），但 `Paused.is_adjustable() = true`（可调 caps/cadence/prompt）；`Stopped` 不可复活，只能 `start` 新 loop
+- **`over_budget` 三态**：必须同时 `token_budget.is_some()` && `baseline_captured` 才生效；没 baseline 时返回 false（防"长会话第一 tick 立刻超预算"）
+- **`RearmDecision` 而非 `Exhausted`**：AgentBusy 撞期不浪费 iteration，重新 arm 同一 tick
+
+### 渲染分层（避免污染 prompt cache）
+
+- **`human_summary(now_ms)`**：用户面工具回复，**带倒计时**
+- **`stable_summary()`**：进 SYSTEM PROMPT 的部分——**不含倒计时**（prompt cache 按前缀键，每字节变动都让后续 history 重新写入 1.25× 而非 0.1× 读取）
+- **`live_status(now_ms)`**：倒计时搬到 transient trailing user message（cache 断点之后），字节变化只花自己
+
+### `loop` 工具（9 动作）
+
+```rust
+loop(action: "start",     prompt, cadence, max_iterations?, deadline_ms?, token_budget?)
+loop(action: "stop",      session_id)
+loop(action: "pause",     session_id)
+loop(action: "resume",    session_id)
+loop(action: "status",    session_id?, now_ms?)
+loop(action: "update",    session_id, prompt?, cadence?, max_iterations?, deadline_ms?, token_budget?)
+loop(action: "list",      session_id?)           // 列出当前会话 / 全部 loops
+loop(action: "claim_tick", session_id)          // 内部：续接钩子调用
+loop(action: "confirm_fire", session_id)        // 内部：tick 真触发后清除 pending
+```
+
+### `LoopRegistry`（进程内）
+
+`try_claim_tick(session, tokens, now)` 是**唯一**的原子声明点（`Arc<Mutex<HashMap<...>>>` 下的单锁保护）：
+
+```text
+1. session 不在或 !is_active() → Idle
+2. pending_tick_wake_ms 在「未到 stale grace」区间内 → Idle（fan-out gate）
+3. should_continue? (max_iterations / over_budget / past_deadline):
+   yes → spend_iteration(), 盖 next_wake_ms = None（防模型忘了重设的 busy-loop）, 盖 pending = Some(wake_ms), Fire
+   no  → exhausted? → Exhausted { note }, 否则 Idle
+4. over_budget_lazy_capture: budget.set + baseline_captured=false + tokens_total=Some(t) → with_baseline(t)（**只**capture 一次）
+5. past stale grace (60s): pending 视为 dead, 重 claim（不重 spend iteration）
+```
+
+`rearm_after_busy(session, now)`：唤醒的 tick 在 confirm_fire 后 pending 清空，但跑 session slot 已被 AgentBusy 抢了 —— 不重 spend、30 s 后重试同一 tick（`BUSY_RETRY_DELAY_MS`），同 goal 子系统的 `rearm_goal_after_busy` 镜像。
+
+`commit_field_update(next, reschedule)` 是**唯一**的工具写入点（防止 read→await→put 时间差里 `pending_tick_wake_ms` 被工具的 stale 快照覆盖），重读 live 的 `pending` 与 `continuations_used`、merged 进 `next` 后写。`reschedule = true`（用户改 cadence / 改 next_wake）才清 pending，否则保留。
+
+`transition(to, reason)` 是 lifecycle move 单点：`Stopped` 终态（拒绝任何 from-stopped move）、`Paused` 仅可从 `Active` 进入、`Active` 仅可从 `Paused` 进入；离开 `Active` 清 pending（pause / stop 立刻让 sleeping tick 的 confirm_fire 失配跳过）。
+
+`stop_all(reason)` 是 kill switch（跨会话）：单锁下把所有 != Stopped 改为 Stopped 并盖 reason，**已 Stopped 不动**——便于 incident response「全部暂停，逐一审视后 resume」。
+
+## Goal —— 自主目标追求 + 客观 gate
+
+```rust
+// src/goal/types.rs
+pub enum GoalStatus { Active, Paused, Completed, Aborted }
+
+pub struct Goal {
+    pub id: String,
+    pub session_id: String,
+    pub description: String,                  // 用户 / 模型陈述
+    pub success_criteria: Vec<String>,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub iterations_used: u32,                  // 在 types.rs 字段名为 continuations_used
+    pub deadline_ms: Option<u64>,
+    pub baseline_captured: bool,
+    pub objective_gate: GateConfig,           // 客观 gate 配置
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub note: Option<String>,
+    pub gate_outcome: GateOutcome,            // Unchecked / Passed
+    pub gate_command: Option<String>,
+    pub lessons: Vec<String>,                // 课程（ring 5，新保留）
+    pub pending_continuation_ms: Option<u64>,  // 在飞 continuation fire time
+    pub waiting_until_ms: Option<u64>,        // wait_minutes 屏障（hermes parity）
+    pub waiting_on_task: Option<String>,       // wait_for_task 屏障
+    pub waiting_reason: Option<String>,
+    pub budget_members: Vec<BudgetMember>,    // 树形 budget 成员
+    pub completed_at_ms: Option<u64>,         // 沉降通知的 CAS 章键
+}
+
+pub enum PursuitMode {
+    Passive,
+    Active { max_iterations: u32 },
+}
+
+pub enum GateOutcome {
+    Unchecked,   // 默认；未跑 gate
+    Passed,      // gate 通过 = completion 真确认
+}
+```
+
+### 客观 gate（**失败关闭**）
+
+goal 子系统的停止判定**永远不能只靠模型自己说"我做完了"**：
+
+- **`GateOutcome` 类型状态**：`maker`（模型自报）+ `checker`（客观校验）两者必须都成功才 `Completed`
+- **`stop_hooks` 全局钩子**：模型的自报完成要走 `process_global_stop_hooks`，按既定目标逐个客观校验
+- **失败关闭**（§goal 强化 ④）：任何 stop_hook 自身失败 → 默认 abort 而不是 continue（`goal_continuation::gate_veto` 把 `Error` 视为 veto，verifier 自身故障 = 不能宣称完成 = 不能验证通过 = 阻断 `complete`）
+- **跨会话 kill switch**：in-place `reconfiguration` 自动失效 welded strategy（`clear_goal_welded_strategy` 在 `commit_gate_pass` 成功后清，**不是** `uninstall` 路径）
+
+### `GoalStore` + TreeBudget 单轨
+
+```rust
+// src/goal/store.rs
+pub struct GoalStore {
+    conn: Mutex<rusqlite::Connection>,  // goals.db + settle_notified
+}
+
+impl GoalStore {
+    pub fn open(path: &Path) -> Result<Self>;
+    pub fn put(&self, goal: &Goal) -> Result<()>;
+    pub fn get(&self, session_id: &str) -> Result<Option<Goal>>;
+    pub fn try_claim_continuation(
+        &self, session_id: &str, tokens_total: Option<u64>,
+        now_ms: u64, gate_configured: bool,
+    ) -> Result<ContinuationDecision>;
+    pub fn rearm_after_busy(&self, session: &str, now_ms: u64) -> Result<RearmDecision>;
+    pub fn try_claim_settle_notify(&self, goal: &Goal) -> Result<bool>;  // CAS on (id, completed_at_ms)
+    pub fn commit_field_update(&self, next: &Goal) -> Result<bool>;     // 工具写入单点
+    pub fn pause_if_active / block_if_active / pause_all_active / supersede_wait_timer / clear_wait_barrier;
+}
+```
+
+**TreeBudget 单轨约束**（end-to-end 测试守）：goal 与 loop 共用同一棵 budget 树，**任何子目标超预算都强制停下整树**——避免一个目标消耗了 99% budget 而 sibling 目标饿死。`budget_members` 是 goal 注册的子 session 列表（delegation 加入时 `register_budget_member`），每个 member 的 `tokens_at_join` 是 join 时的 baseline——**只计 join 后的 spend**，首次加入前的 sibling 全部历史都忽略。
+
+`try_claim_settle_notify` 是**CAS 章键**——`stamp = "{id}@{completed_at_ms}"`，每次 `Completed` 转移 stamp 变；`Clear` / `uninstall` / `reopen` 都不再 mint stamp（status 离开 Complete 时清 `completed_at_ms`）。`loop_graph::service::notify_goal_settled` 每轮 attempt 都先调此函数，**只有 stamp 真变才触发 watcher**——避免 60 s debounce 内每次都烧一次 cron LLM run。Legacy 行的 fallback（stamp 缺则用 `updated_at_ms`）保证老数据也能"先 fire 一次"。
+
+### `goal` 工具（7 动作）
+
+```rust
+goal(action: "create", description, success_criteria, objective_gate?, token_budget?, deadline_ms?, pursuit_max_iterations?)
+goal(action: "update", goal_id, status?, note?, token_budget?, deadline_ms?, pursuit_max_iterations?, gate_command?, wait_minutes?, wait_for_task?, wait_reason?, lessons?)
+goal(action: "pause", goal_id)
+goal(action: "resume", goal_id)
+goal(action: "abort", goal_id, reason?)
+goal(action: "complete", goal_id, evidence?)     // 走 objective gate
+goal(action: "list", scope?: "session" | "cross_session")
+goal(action: "status", goal_id)
+```
+
+`pursuit_max_iterations = 0` 在工具边界被拒（**born-dead cap** 防 P7：goal 设了 0 后**永远**走 Blocked，浪费 autonomous run）。
+
+### Wait barriers
+
+- **`waiting_until_ms` + `waiting_reason`**：hermes `wait_for_seconds` parity，model 调 `goal(update, wait_minutes=...)` 自己 park，store 比较时钟；到时 claim 路径会 arm 一个**精确 timer**（同 Fire machinery：confirm_fire CAS + busy re-arm + stale-grace 自愈）
+- **`waiting_on_task`**：hermes `waiting_on_session` parity，park 直至 coordination task 进入 settled 状态；`GoalWakeService` 监听 GlobalBus 的 task-settle 事件自动清；**boot recheck** 兜底（重启后 task 可能已经 settled / vanished → fail-open clear）；未知 task_id 同 fail-open
+- 两者**互斥**（设一个会清另一个）
+- park 中的 goal 仍然 `Active`，execution cap / token budget **仍**强制停（**逃逸**：park 时 iteration 已满 → 立即 Block 而非 arm timer 永远等下去）
+
+### `Goal` 课程（state file）
+
+`lessons: Vec<String>` 由 `with_lesson_appended` 维护（ring cap `MAX_LESSONS = 5`，新保留）：自动收集客观 gate veto 的 `reason`，**也**供 LLM 通过 `goal(update, lessons=[...])` 主动追加。`GoalLessonsPromoteStage`（梦境守护进程）把这些课程从 `goal` 升级到 L1 长期笔记——是「同一个目标多次失败后的 wisdom 沉淀」。
+
+## Strategy —— 团队/裸循环的 plan
+
+```rust
+// src/strategy/types.rs
+pub struct Strategy {
+    pub objective: String,
+    pub approach: String,
+    pub phases: Vec<String>,         // 粗粒度 outcome-phrased arc
+    pub guardrails: Vec<String>,     // 1–3 具体可违反的 distractor
+    pub success_criteria: String,
+    pub goal_id: Option<String>,    // 绑定到某个 goal；goal 变更自动 invalidation
+}
+
+pub enum StrategyKey {
+    NakedLoop { session_key: SessionKey },  // 裸循环 plan
+    TeamChat { team_id: String },           // 团队 plan
+    GoalBound { goal_id: String },          // goal-绑定
+}
+```
+
+### Composite key 命名空间
+
+| Key 命名空间 | 谁触发 | 范围 |
+|--------------|--------|------|
+| `goal_key(goal_id)` | goal 状态变更时（`auto-invalidate welded strategy on objective change`） | 单 goal |
+| `loop_key(loop_id)` | loop tick 完成 | 单 loop |
+| `session_key(session_id)` | 裸循环 plan 触发（默认 on，`[strategy] plan_naked_loop = true`） | 单会话 |
+| `team_key(team_id)` | 团队聊天 planner（默认 on，`[strategy] plan_team = true`） | 整队 |
+
+四个 key **互不冲突**——同 session 可同时持有 goal strategy + loop strategy + 团队 strategy + 裸循环 strategy 互不覆盖（`composite_keys_do_not_clobber_each_other` 测试守）。
+
+### Planner + 原子 fire-once
+
+```rust
+// src/strategy/planner.rs
+pub struct PlannerNode { /* tool-free fail-soft */ }
+
+impl PlannerNode {
+    pub async fn plan_strategy(&self, ctx: PlannerContext) -> Option<Strategy> { /* ... */ }
+}
+
+// 团队聊天中：planner 必须 fire-once（防止 race）
+pub async fn try_fire_once(&self, key: &StrategyKey) -> Result<bool> {
+    self.store.put_if_absent(key, strategy).await    // → 仅一个 planner 触发成功
+}
+```
+
+Planner 是**tool-free 一次性 LLM 调用**（`ProviderRequest::new` 无 tool，含 curated `tool_descriptions` / `env_summary` / `lessons` 三块环境）。**自门控**：`strategy.guardrails` 全空 → `is_empty()` → planner 主动返回 None（不存，不污染 prompt 缓存）；同目标重 plan → `goal_id` 命中 → 跳过（已 plan 过）。输出**纯函数 / IO-free**——失败 fail-soft 永远不报错。
+
+`put_if_absent` 是**原子 fire-once** 原语——两个并发 first message 各自跑 planner，但只有一个真插入；`put` 的 last-write-wins 会让两人都付钱（+ 存 plan）。
+
+### `[strategy]` 配置
+
+```toml
+[strategy]
+plan_team = true               # 默认 on：团队聊天自动 plan
+plan_naked_loop = true         # 默认 on：裸 loop 自动 plan
+objective_change_invalidate = true   # 默认 on：goal 变化时失效 welded strategy
+```
+
+### `strategy` 工具（3 动作）
+
+```rust
+strategy(action: "revise", key, objective?, approach?, phases?, guardrails?, success_criteria?)  // 改写现有 strategy
+strategy(action: "show", key)                // 渲染当前 strategy
+strategy(action: "dumb_write", key, content) // 旁路校验的写入（仅供受信任调用方）
+```
+
+`revise` 走 `put`（覆写）；`show` 走 `render_strategy_summary`（cache-friendly stable 字节）；`dumb_write` 是**受信任调用方**旁路——R7 不让 LLM 自己绕过 planner 自门控，dumb_write 写在文档里只给受信任方（系统 / 治理层）。
+
+## 团队 run mode pin
+
+队长（team leader）在 `team.run` 时把 `usage_mode`（chat / work / code）**盖戳**并向子成员继承——`teams.run` 现在**拒绝**子成员发起 `session_set_mode` 工具调用：
+
+```rust
+// src/teams/runner.rs
+if turn.is_subagent() {
+    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
+    ensure!(request.action != Some("session_set_mode"),
+        "subagents inherit parent mode; cannot switch mid-team-run");
+}
+```
+
+`task_review` 审批可要求 `grounding` —— 接受元数据（acceptance metadata 通道，零迁移）携带 `[grounding]` 注释的证据（`exit_code` / `numeric` / `line_count`，**与 loop_graph anchor truth 闭集同词表**）。无 grounding 证据的 approve → bounce（`grounding_required`），reject 永不要求锚（拒绝天然保守）。
+
+## Loop / Goal / Strategy 的协作
+
+- **goal → strategy**：goal 状态变 → welded strategy 自动 invalidation（`objective_change_invalidate = true`），clear_goal_welded_strategy 路径单点（`builtin_tools/goal.rs` Passive / Blocked / clear / uninstall 与 `goal_continuation::post_run` 的 `Exhausted` / `AwaitingGate gate_veto no runway` / gate-pass 都走同条路径）
+- **strategy → loop**：planner 输出 plan → loop 用 prompt 续接；welded strategy 不再是「另一次 LLM 计划」——直接是 prompt cache 里的 stable 段
+- **team_chat → strategy**：队长 fire-once，原子 `put_if_absent`；`subagent_tree` 也走 team 维度的策略
+- **goal_budget → loop_budget**：tree budget 单轨（一个子超预算 → 整树停）
+
+## 关键源文件
+
+- `src/looping/mod.rs` — `LoopRegistry`（in-process `Arc<Mutex<HashMap>>`）+ 进程全局 `init_global` / `global`
+- `src/looping/types.rs` — `Cadence` / `LoopStatus` / `LoopState` + `human_summary` / `stable_summary` / `live_status` 三态渲染
+- `src/looping/pursuit.rs` — `exhausted` / `should_continue` / `tick_delay_ms` / `tick_prompt` / `cap_reached_note` / `deadline_reached_note` / `budget_reached_note` / `stop_reason_note`（纯函数，R7 智能在 prompt）
+- `src/builtin_tools/loop_manage.rs` — 9 动作 `loop` 工具 + `LoopManageTool`
+- `src/goal/mod.rs` — `init_global` / `global` 进程全局
+- `src/goal/types.rs` — `GoalStatus` / `PursuitMode` / `GateOutcome` / `Goal`（含 13 个字段：`id` / `session_id` / `objective` / `success_criteria` / `status` / `token_budget` / `continuations_used` / `deadline_ms` / `baseline_captured` / `pending_continuation_ms` / `waiting_until_ms` / `waiting_on_task` / `waiting_reason` / `budget_members` / `completed_at_ms` / `note` / `gate_outcome` / `gate_command` / `lessons` / `created_at_ms` / `updated_at_ms` / `permanent`）+ `BudgetMember` + `MAX_LESSONS = 5` + `MAX_BUDGET_MEMBERS = 32`
+- `src/goal/store.rs` — `GoalStore` + `ContinuationDecision` / `RearmDecision` 枚举 + `commit_gate_pass` / `claim_after_gate_veto` / `block_if_active` / `pause_if_active` / `pause_all_active` / `supersede_wait_timer` / `clear_wait_barrier` / `try_claim_settle_notify` 8 个原子方法
+- `src/goal/pursuit.rs` — `should_continue` / `continuation_prompt` / `exhausted_while_active` / `stop_reason_note` / `awaiting_gate` / `gateless_terminal_complete` / `reopen_after_gate_failure` / `gate_failure_prompt` / `wait_parked` / `wait_resume_prompt` / `confirm_complete`（hermes 风格纯函数）
+- `src/builtin_tools/goal.rs` — 7 动作 `goal` 工具 + `GoalTool`，含 `register_budget_member` (delegation 注册)
+- `src/strategy/mod.rs` — 4 个 key 构造函数 + `init_global` / `global`
+- `src/strategy/types.rs` — `Strategy` / `StrategyKey` / `is_empty` 自门控
+- `src/strategy/store.rs` — `StrategyStore` (SQLite, PK = `key`) + `put` / `put_if_absent`（原子 fire-once）/ `get` / `delete` / `list_all`
+- `src/strategy/planner.rs` — `PlannerNode` (tool-free 一次性 LLM) + `plan_strategy` + `try_fire_once`（atomic 防火 race）+ `env_summary` + `PLANNER_SYSTEM` prompt
+- `src/strategy/render.rs` — `render_strategy_summary` / `render_guardrails_only` / `render_workflow_global_frame`（纯函数，cache-friendly 字节确定，**不**含 now_ms / HashMap 迭代）
+- `src/builtin_tools/strategy_manage.rs` — 3 动作 `strategy` 工具
+- `src/teams/runner.rs` — `team.run` 模式盖戳 + subagent mode pin 守卫
+- `src/gateway/execution_engine/goal_continuation.rs` — `post_run` / `arbitrate_gate` / `block_goal_on_failure` / `rearm_goal_after_busy` / `clear_goal_welded_strategy` 五个执行点
+- `src/gateway/goal_budget.rs` — `tree_tokens`（tree budget 聚合）
+- `src/gateway/execution_engine/goal_wait.rs` — 屏障处理
+
+## 26.7.x 补充
+
+### Loop 工具的 9 动作
+
+26.7.x `loop` 工具补完到 9 动作（`start` / `stop` / `pause` / `resume` / `status` / `update` / `list` + 内部 `claim_tick` / `confirm_fire`），最后两个是续接钩子的 atomic 操作。`update` 走 `commit_field_update`（`reschedule = false` 保 live pending，true 清 live）——**不是**裸 `put`（裸 `put` 会与正在 fire 的 tick 抢 `pending` 字段）。
+
+### Goal 工具的 7 动作
+
+`goal` 工具：`create` / `update`（含 `pursuit_max_iterations` 边界校验、`wait_minutes` / `wait_for_task` 屏障、`lessons` 课程追加）/ `pause` / `resume` / `abort` / `complete`（走 objective gate）/ `list`（支持 `session` / `cross_session` 两种 scope）/ `status`。`pursuit_max_iterations = 0` 在工具边界被拒（born-dead cap P7）。
+
+### TreeBudget 单轨（end-to-end 测试守）
+
+goal 与 loop 共用同一棵 budget 树——任何子超预算 → 整树停。`budget_members: Vec<BudgetMember>` 存 delegated session 的 `tokens_at_join`，tree total = own session 累计 + Σ (member.now - member.tokens_at_join)。ring `MAX_BUDGET_MEMBERS = 32`，超容 `register_budget_member` 返 `Ok(false)` 警告不报错（delegation 仍可继续，只是这一支不计入 budget）。
+
+### `try_claim_settle_notify`（CAS 章键）
+
+settlement-notification 的 stamp 是 `(id, completed_at_ms)`—— `completed_at_ms` 只在进入 Complete 的转移瞬间盖、离开即清。完成后的 lesson / note 编辑（`bump updated_at_ms`）**不能再燃** settle stamp（避免一个 stale goal 反复 poke watcher cron）。legacy 行（无 `completed_at_ms`）fallback 到 `updated_at_ms`，保证老数据也能 fire 一次 watcher。
+
+### 屏障互斥 + fail-open
+
+`waiting_until_ms` 与 `waiting_on_task` 互斥（设一个清另一个）；`waiting_on_task` fail-open——未知 / vanished task 视为 settled（boot recheck 覆盖重启场景）。两者 **park 中 goal 仍 Active**——execution cap / token budget 仍 binding，**不是**无界 park。
+
+### 团队 run mode pin
+
+`teams.run` 拒绝 subagent `session_set_mode`——「队长盖戳，子成员继承」。`task_review` 接受元数据携带 `[grounding]` 注释（`exit_code` / `numeric` / `line_count`）作为 evidence，**与 loop_graph anchor truth 闭集同词表**。reject 永不要求锚（拒绝天然保守）；无 grounding 证据的 approve 在 `task_review(require_grounding=true)` 下 bounce（`grounding_required`）。
+
+### 跨任务 / 跨会话 kill switch
+
+- **loop**：`LoopRegistry::stop_all(reason)` 单锁下把所有 != Stopped 改 Stopped 并盖 reason（kill switch）
+- **goal**：`GoalStore::pause_all_active(note)` 单锁下把活跃 goal 改 Paused（`pause_all` 区别于 `uninstall`：pause 保留 goal 实体供 owner resume）
+- **strategy**：`auto_invalidate welded strategy on objective change`（goal 改时 welded strategy 自动失效，clear_goal_welded_strategy 单点）
+
+### 见另请参阅
+
+- [Loop 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/loop_manage.rs) — 9 动作实现
+- [Goal 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/goal.rs) — 7 动作 + register_budget_member
+- [Strategy 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/strategy_manage.rs) — 3 动作 + revise / show / dumb_write
+- [Goal continuation 驱动](https://github.com/rootazero/Aleph/blob/main/src/gateway/execution_engine/goal_continuation.rs) — post_run / gate_veto / clear_goal_welded_strategy
+- [Goal store 源码](https://github.com/rootazero/Aleph/blob/main/src/goal/store.rs) — `try_claim_settle_notify` CAS
+- [Loop registry 源码](https://github.com/rootazero/Aleph/blob/main/src/looping/mod.rs) — `stop_all` 跨会话 kill switch
+- [Goal tree budget](https://github.com/rootazero/Aleph/blob/main/src/gateway/goal_budget.rs) — `tree_tokens` 聚合

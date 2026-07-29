@@ -1,239 +1,160 @@
 ---
 title: "Daemon"
-description: "System service management for Aleph, enabling persistent background operation with resource governance and cross-platform service integration."
+description: "System service management, lifecycle, and log rotation for `aleph-server`."
 ---
 
-The `daemon` module manages Aleph as a persistent system service across platforms. It handles service installation, lifecycle management, resource monitoring, inter-process communication, and event-driven proactive actions.
+The `aleph-server` binary is itself both the foreground gateway and the daemon. It registers itself into the platform's native boot supervisor — macOS launchd LaunchAgent, Linux systemd --user, Windows Task Scheduler — through the `aleph-server service …` subcommand, instead of forking a second process.
 
 ## Design Philosophy
 
-The daemon follows three principles:
-
-1. **Cross-platform abstraction** — Platform-specific service APIs are hidden behind the `ServiceManager` trait
-2. **Resource awareness** — The daemon monitors system load and throttles operations when resources are scarce
-3. **Event-driven proactivity** — OS-level events trigger agent actions without user intervention
+- **Native supervisor** — no second fork; the service descriptor invokes `aleph-server start` directly and the OS watchdog handles restart on crash.
+- **Single-source subcommand** — `aleph-server service {install|uninstall|enable|disable|status}` is the only entry point for all start-on-boot / undo logic.
+- **Per-user registration** — no root-level units; each user installs into their own LaunchAgent / systemd-user unit / Scheduled Task.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│           Daemon Module                      │
-├─────────────────────────────────────────────┤
-│                                             │
-│  ┌──────────────┐  ┌──────────────────┐   │
-│  │ ServiceManager│  │ ResourceGovernor │   │
-│  │  (launchd)   │  │  (CPU/Mem/Bat)   │   │
-│  └──────────────┘  └──────────────────┘   │
-│                                             │
-│  ┌──────────────────────────────────────┐  │
-│  │        IPC Server                     │  │
-│  │  (Unix Socket + JSON-RPC 2.0)        │  │
-│  └──────────────────────────────────────┘  │
-│                                             │
-│  ┌──────────────────────────────────────┐  │
-│  │        Event Bus                      │  │
-│  │  (Process/File/Time/System)          │  │
-│  └──────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│             aleph-server                  │
+├──────────────────────────────────────────┤
+│                                          │
+│  ┌────────────────┐  ┌────────────────┐ │
+│  │  start cmd     │  │ service subcmd │ │
+│  │  (foreground / │  │  install /     │ │
+│  │   --daemon)    │  │  uninstall /   │ │
+│  └────────────────┘  │  enable /      │ │
+│                      │  disable /     │ │
+│                      │  status        │ │
+│                      └────────────────┘ │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │   Gateway WebSocket (JSON-RPC 2.0)│  │
+│  │   daemon.status / daemon.shutdown │  │
+│  │   daemon.logs                     │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │   Logs:                            │  │
+│  │   ~/.aleph/logs/aleph-server.log   │  │
+│  │   .YYYY-MM-DD (daily + 7d retain)  │  │
+│  │   + raw stdout/stderr redirect     │  │
+│  └────────────────────────────────────┘  │
+└──────────────────────────────────────────┘
 ```
 
 ---
 
-## Core Components
+## `service` Subcommand
 
-### ServiceManager
-
-Cross-platform trait for system service management:
-
-```rust
-pub trait ServiceManager: Send + Sync {
-    async fn install(&self, config: &DaemonConfig) -> Result<()>;
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn status(&self) -> ServiceStatus;
-}
-```
-
-**Implementations:**
-- `LaunchdService` (macOS) — Manages launchd plist and service lifecycle
-- `SystemdService` (Linux) — Planned
-- `WindowsService` (Windows) — Planned
-
-### ResourceGovernor
-
-Monitors system resources and makes execution decisions:
-
-```rust
-pub struct ResourceGovernor {
-    limits: ResourceLimits,
-}
-
-impl ResourceGovernor {
-    pub async fn is_safe_to_run(&self,
-    ) -> bool { /* ... */ }
-    
-    pub fn current_pressure(&self) -> PressureLevel { /* ... */ }
-}
-```
-
-**Monitors:**
-- CPU usage
-- Memory consumption
-- Battery level
-- System load average
-
-### IPC Server
-
-JSON-RPC 2.0 server over Unix Domain Socket:
-
-```rust
-pub struct IpcServer {
-    socket_path: PathBuf,
-}
-```
-
-**Socket path:** `~/.aleph/daemon.sock`
-
-**Methods:**
-- `daemon.status` — Get daemon status
-- `daemon.ping` — Health check
-- `daemon.shutdown` — Graceful shutdown
-
-### Event Bus
-
-Publishes OS-level events for the perception layer:
-
-```rust
-pub struct DaemonEventBus {
-    sender: broadcast::Sender<DaemonEvent>,
-}
-```
-
-**Event types:**
-- `ProcessEvent` — Application launch/exit
-- `FsEvent` — File creation/modification/deletion
-- `TimeTrigger` — Scheduled time-based events
-- `SystemEvent` — Battery, network, display state changes
-
----
-
-## CLI Commands
+`aleph-server` exposes a `service` subcommand that wraps every "start on boot" install/uninstall/toggle action. The installer calls `service install` once after placing the binary (`ALEPH_AUTOSTART=0` opts out).
 
 ```bash
-# Install daemon as system service
-aleph daemon install
-
-# Start daemon
-aleph daemon start
-
-# Check status
-aleph daemon status
-
-# Stop daemon
-aleph daemon stop
-
-# Uninstall daemon
-aleph daemon uninstall
-
-# Run in foreground (development)
-aleph daemon run
+aleph-server service install     # write descriptor + enable + start now (launchd LaunchAgent / systemd --user unit / Scheduled Task)
+aleph-server service uninstall   # stop + remove descriptor
+aleph-server service enable      # arm boot/login autostart (does not touch the running process)
+aleph-server service disable     # disarm boot/login autostart (does not touch the running process)
+aleph-server service status      # report whether the descriptor is installed and the current run state
 ```
 
----
+> There is no `start` subaction: `install` already starts the service immediately. Day-to-day start/stop is delegated to the native supervisor (`launchctl load/unload`, `systemctl --user start/stop`, `schtasks /Run`).
 
-## Configuration
+The implementation lives in `src/bin/aleph-server/commands/service/mod.rs` and branches per platform:
 
-Default configuration:
-
-```rust
-DaemonConfig {
-    socket_path: "~/.aleph/daemon.sock",
-    binary_path: "~/.aleph/bin/aleph-daemon",
-    log_dir: "~/.aleph/logs",
-    nice_value: 10,
-    soft_mem_limit: 512 * 1024 * 1024,  // 512MB
-    hard_mem_limit: 1024 * 1024 * 1024, // 1GB
-}
-```
+- **macOS**: `~/Library/LaunchAgents/ai.aleph.server.plist`, loaded with `launchctl load -w` to arm RunAtLoad and start now
+- **Linux**: `~/.config/systemd/user/aleph-server.service`, `systemctl --user enable --now`; best-effort `loginctl enable-linger $USER` so the service starts at boot without a login session (warns but does not fail if it requires polkit/root)
+- **Windows**: scheduled task `Aleph\aleph-server`, logon trigger, hidden-window launch via an `aleph-server-hidden.vbs` shim
 
 ---
 
-## Dispatcher
+## Daemon RPC (inside the gateway)
 
-The `Dispatcher` routes events to appropriate actions:
+These methods are registered on the gateway WebSocket and callable from clients or `aleph-server gateway call …`:
 
-```rust
-pub struct Dispatcher {
-    policy_engine: PolicyEngine,
-    action_executor: ActionExecutor,
-}
-```
+| Method | Description |
+|---|---|
+| `daemon.status` | Reports uptime, version, platform (`running` / `uptime_secs` / `version` / `platform`) |
+| `daemon.shutdown` | Graceful shutdown: sends the response, then `std::process::exit(0)` after a short delay |
+| `daemon.logs` | Reads the most recent `aleph-*.log` under `~/.aleph/logs/`, optionally filtered by `level`, returns the last `lines` entries |
 
-**Flow:**
-1. Raw OS event enters the event bus
-2. `PolicyEngine` evaluates risk and decides action
-3. `ActionExecutor` performs the action (or queues it if resources are constrained)
+There is no separate Unix-socket IPC — every call goes through the gateway WebSocket + JSON-RPC 2.0.
 
 ---
 
-## Safety Properties
-
-- **Minimal unsafe** — Only `libc::kill` for SIGTERM signaling
-- **UTF-8 safe** — No byte-level string slicing
-- **Lock recovery** — Uses `unwrap_or_else(|e| e.into_inner())` pattern
-- **No SQL injection** — Daemon does not use database queries
-
----
-
-## Code Location
-
-- `src/daemon/mod.rs` — Module entry point
-- `src/daemon/cli.rs` — CLI command definitions
-- `src/daemon/service_manager.rs` — Service management trait
-- `src/daemon/platforms/launchd.rs` — macOS launchd implementation
-- `src/daemon/resource_governor.rs` — Resource monitoring
-- `src/daemon/ipc/` — IPC server and protocol
-- `src/daemon/dispatcher/` — Event dispatch and policy engine
-- `src/daemon/event_bus.rs` — Event distribution
-- `src/daemon/worldmodel/` — World state tracking
-
-## See Also
-
-- [Event System](./event-system) — Event distribution patterns
-- [Configuration](./configuration) — Daemon configuration options
-
----
-
-## 26.7.x Addendum
-
-### `aleph-server service` Subcommand
-
-26.7.1+: the standalone `aleph-server` binary gains a `service` subcommand; the installer defaults to "launch at login":
+## Start and Foreground Run
 
 ```bash
-aleph-server service install     # install (launchd / systemd-user / Task Scheduler)
-aleph-server service start       # start immediately
-aleph-server service status      # check status
-aleph-server service enable      # enable auto-start
-aleph-server service uninstall   # uninstall
+aleph-server start               # foreground (default subcommand)
+aleph-server start --daemon      # fork into daemon mode
+aleph-server start --log-file ~/.aleph/server.log
+aleph-server stop                # stop a running daemon
+aleph-server status [--json]     # status query
 ```
 
-### Day-Boundary Log Rotation
+Selected flags:
 
-26.7.24+: the daemon supports day-boundary log rotation; on startup it writes an `ALEPH-BOOT` marker at the top of the log, so operators can locate each startup's boundary. The sleep inhibitor is silent on stderr, no more noise.
+| Flag | Default | Description |
+|---|---|---|
+| `-c, --config <path>` | `~/.aleph/config.toml` | Config file |
+| `--daemon` | `false` | Run via `daemonize()` |
+| `--pid-file <path>` | `~/.aleph/gateway.pid` | PID file for daemon mode |
+| `--log-file <path>` | — | stdout/stderr redirect target |
+| `--bind <addr>` / `--port <n>` | `127.0.0.1` / `18790` | Listen address and port |
+| `--force` | `false` | Try to start even if the port is busy |
+| `--log-level` | `info` | tracing log level |
+| `--max-connections` | — | Max concurrent connections |
 
-### Guardian Judge
+---
 
-26.7.21+: heartbeat probes use an LLM judge (`Guardian Judge`) to decide whether to wake proactively. **The payload must mask secrets** — secrets are no longer serialized into logs or read by the auditor.
+## Logs and Rotation
 
-### Heartbeat Refuses Dangerous Tools
+Aleph has two independent log streams:
 
-26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools. `Heartbeat` is now real (stubs → real) periodic daemon.
+- **Structured logs** at `~/.aleph/logs/aleph-server.log.YYYY-MM-DD`: written by `tracing`, **rotated daily with 7-day retention**, every line timestamped. Grep here first.
+- **Raw stdout/stderr stream** (`--log-file`, or a shell redirect of the foreground process): only banner / warnings / panics / child-process output; the tracing console layer is dropped when stdout is not a TTY.
 
-### See Also
+Every startup prints one grep-friendly boot marker to stdout, so operators can locate the current boot inside the raw stream (which appends across restarts):
 
-- [Automation / Heartbeat](/docs/en/automation/heartbeat) — `heartbeat.*` RPC
-- [Deployment `service` subcommand](/docs/en/getting-started/deployment#as-a-system-service-the-service-subcommand) — install and start
-- [Architecture Overview](/docs/en/architecture/overview) — where Heartbeat drives
+```
+ALEPH-BOOT ts=<RFC3339> pid=<pid> version=<ver>
+grep ALEPH-BOOT ~/.aleph/server.log | tail -1   # the lines after this = this run
+```
+
+Rotation of the raw stream depends on how it was opened:
+
+- **Daemon mode** (`--daemon --log-file <path>`): rotates on startup — if the file was last written on an earlier calendar day, or exceeds ~5 MB, it is archived as `<name>.YYYY-MM-DD` (the file's own last-write day) and aged out after 7 days. Same-day restarts keep appending; the per-boot `ALEPH-BOOT` marker separates runs. No in-flight rotation: while the daemon holds the fd open it is never rotated mid-run.
+- **Foreground / shell redirect**: the fd belongs to the shell, so Aleph cannot rotate it. Use system logrotate. The repo ships `scripts/aleph-server.logrotate` (`copytruncate` + daily + 7-day retention); copy it to `/etc/logrotate.d/` after editing the absolute paths.
+
+> **Sleep inhibitor**: `inhibit_sleep("Aleph agent loop")` is held by the harness for the duration of each Think→Act turn and is silent on stderr; it is not part of the daemon log stream.
+
+---
+
+## Heartbeat Probe
+
+`aleph-server start` initializes `HeartbeatService` from `[heartbeat]` config:
+
+- **Refuses dangerous / confirmation-gated tools**: `tasks/heartbeat/probe.rs` calls `is_denied_on_gateway_surface(tool_name)` before invoking any probe tool and rejects on a hit; there is no LLM in the loop and no approval transport.
+- **Guardian Judge scope**: Guardian Judge is the LLM risk assessor in the *approval* flow (`src/approval/guardian_requester.rs`); it is **not** part of the heartbeat probe — probes are pure L1 trigger evaluation.
+- **Payload masking**: the Guardian Judge prompt payload masks secrets — they are no longer serialized into logs or read by the auditor.
+
+---
+
+## Code Locations
+
+- `src/bin/aleph-server/cli.rs` — CLI definitions (`Start` / `Stop` / `Status` / `Doctor` / `PromptSize` / `Service` / `Hooks` / `Secret` / `Identity` / `Plugin(s)` / `Gateway` / `BootstrapRuntime` / `Pair` / `BootstrapToken` / `Update`)
+- `src/bin/aleph-server/main.rs` — Command dispatch and boot path
+- `src/bin/aleph-server/daemon.rs` — PID file / lock / log rotation / `daemonize()`
+- `src/bin/aleph-server/commands/service/mod.rs` — Cross-platform `service` implementation
+- `src/bin/aleph-server/commands/service/descriptors.rs` — launchd plist / systemd unit / scheduled-task XML / vbs shim
+- `src/bin/aleph-server/commands/start/helpers.rs` — `ALEPH-BOOT` startup marker
+- `src/gateway/handlers/daemon_control.rs` — `daemon.status` / `daemon.shutdown` / `daemon.logs` RPC
+- `src/tasks/heartbeat/probe.rs` — Heartbeat probe and dangerous-tool gate
+- `src/approval/guardian_requester.rs` — Guardian Judge approval reviewer
+
+## Related Pages
+
+- [Deployment](/docs/en/getting-started/deployment) — Actual install flow (autostart enabled by default)
+- [Workspaces](/docs/en/concepts/workspaces) — `~/.aleph/` directory layout and log paths
+- [Process Management](/docs/en/reference/process-management) — Process-level details (locks, logs, rotation)
+- [Heartbeat Automation](/docs/en/automation/heartbeat) — `heartbeat.*` RPC and probe configuration

@@ -3,7 +3,12 @@ title: "事件系统"
 description: "具有 EventBus、类型化事件、过滤器和处理程序的事件驱动架构。通过异步事件传递解耦子系统。"
 ---
 
-`event` 模块实现一个事件驱动架构，解耦 Aleph 的子系统。模块之间不是直接方法调用，而是组件将事件发布到中央总线并订阅它们关心的事件。
+`event` 模块实现一个事件驱动架构，解耦 Aleph 的子系统。模块之间不是直接方法调用，而是组件将事件发布到总线并订阅它们关心的事件。`src/event/` 包含两个不同但相关的总线：
+
+- **`EventBus`**（`src/event/bus.rs`）—— 每智能体内 tokio `broadcast` 通道；通过 `EventBus::new()` / `EventBus::with_buffer_size` / `EventBus::with_config` 创建，可选连上一个 `GlobalBus` 做跨智能体聚合。**它不是单例**。
+- **`GlobalBus`**（`src/event/global_bus.rs`）—— 进程级**单例**，由 `once_cell::sync::Lazy` 守门，通过 `GlobalBus::global()` 访问；聚合多个 `EventBus` 的事件，并按 `EventFilter` 路由回调。
+
+`AlephEvent`（`src/event/types.rs`）是两类总线共用的载荷类型；`#[serde(tag = "type", content = "data")]` 让它直接可 JSON 化。
 
 ## 设计理念
 
@@ -13,7 +18,7 @@ description: "具有 EventBus、类型化事件、过滤器和处理程序的事
 2. **可观察性** — 每个重要动作都会产生一个事件，可以被记录、审计或流式传输到客户端
 3. **可扩展性** — 新功能可以订阅现有事件而无需修改发布者
 
-EventBus 是一个单例（通过 `Lazy` 初始化），在进程的生命周期内存在。所有事件处理都是异步且非阻塞的。
+`EventBus` 默认 buffer 为 1024 条；保留历史 `MAX_HISTORY_SIZE = 10000`。`GlobalBus` 默认 buffer 同样为 1024。所有事件处理都是异步且非阻塞的。
 
 ---
 
@@ -21,177 +26,204 @@ EventBus 是一个单例（通过 `Lazy` 初始化），在进程的生命周期
 
 ```
 ┌─────────────────────────────────────────┐
-│           EventBus (单例)                │
+│           GlobalBus (单例, Lazy)          │
 │  ┌─────────────┐  ┌──────────────────┐ │
-│  │  EventQueue │  │  HandlerRegistry │ │
+│  │ broadcast   │  │  Subscription    │ │
+│  │ (GlobalEvt) │  │  Registry        │ │
 │  └─────────────┘  └──────────────────┘ │
-└─────────────────────────────────────────┘
-      │                           ▲
-      │ publish(Event)            │ dispatch(Event)
-      ▼                           │
-┌──────────┐              ┌──────────────┐
-│ Publisher │              │   Handler    │
-│ (任何     │              │ (实现        │
-│ 模块)     │              │ EventHandler)│
-└──────────┘              └──────────────┘
+│       ▲                                │
+│       │ 自动广播 (当 EventBus 设置时)     │
+│       │                                │
+│ ┌────────────────────────────────────┐ │
+│ │ EventBus (每个智能体一份, 非单例)    │ │
+│ │  broadcast(TimestampedEvent)        │ │
+│ │  + history ring                     │ │
+│ └────────────────────────────────────┘ │
+│       │                           ▲     │
+│       │ publish(AlephEvent)       │ recv│
+│       ▼                           │     │
+│ ┌──────────┐              ┌────────────┐
+│ │ Publisher │              │  Handler   │
+│ │ (任意    │              │ (impl       │
+│ │ 模块)    │              │ EventHandler│
+│ └──────────┘              └────────────┘
 ```
 
 ---
 
 ## 核心组件
 
-### EventBus
+### GlobalBus（单例）
 
-中央事件分发系统。
+进程级跨智能体聚合总线：
 
 ```rust
-// 单例访问
-let bus = event::bus();
-bus.publish(SessionCreated { session_id: id }).await?;
+use alephcore::event::global_bus::GlobalBus;
+use alephcore::event::filter::EventFilter;
+use alephcore::event::EventType;
+
+let bus = GlobalBus::global();
+let sub_id = bus.subscribe(
+    EventFilter::new(vec![EventType::ToolCallStarted, EventType::ToolCallCompleted]),
+    |event| println!("from agent={}", event.source_agent_id),
+).await;
 ```
 
-EventBus：
-- 维护每个事件类型的类型化事件队列
-- 异步地将事件分发给所有已注册的处理程序
-- 永远不会阻塞发布者 —— 事件被排队并并发处理
+`GlobalBus::broadcast(agent_id, session_id, event)` 负责把事件加上 `source_agent_id` / `source_session_id` / `timestamp` / `sequence` 后分发给匹配 filter 的订阅者。
+
+### EventBus（每智能体一份）
+
+```rust
+use alephcore::event::{EventBus, AlephEvent};
+
+let bus = EventBus::with_buffer_size(2048);
+bus.publish(AlephEvent::SessionCreated(
+    SessionInfo {
+        id: session_id.clone(),
+        parent_id: None,
+        agent_id: "main".into(),
+        model: "gpt-4-turbo".into(),
+        created_at: chrono::Utc::now().timestamp_millis(),
+    }
+)).await;
+```
+
+`EventBus`：
+
+- 维护一个 tokio `broadcast::Sender<TimestampedEvent>`，可选 buffer 容量（默认 1024）
+- 把每条事件包装成 `TimestampedEvent { event, timestamp, sequence }` —— sequence 由 `EventBus` 内单调 `AtomicU64` 自增
+- 历史 ring 上限 `MAX_HISTORY_SIZE = 10000`，可通过 `EventBusConfig { buffer_size, enable_history, max_history_size }` 关闭或调小
+- 可选连接 `GlobalBus`（设 `agent_id` / `session_id` 后）；连接时事件自动通过 `GlobalBus::broadcast` 广播
 
 ### EventHandler Trait
 
 ```rust
 #[async_trait]
-pub trait EventHandler<E: Event>: Send + Sync {
-    async fn handle(&self, event: &E) -> Result<(), EventError>;
+pub trait EventHandler: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn subscriptions(&self) -> Vec<EventType>;
+    async fn handle(
+        &self,
+        event: &AlephEvent,
+        ctx: &EventContext,
+    ) -> Result<Vec<AlephEvent>, HandlerError>;
 }
 ```
 
-实现者接收特定类型的事件并执行副作用：
+实现者接收 `AlephEvent` 并可以返回新事件供发布：
+
 - 日志处理程序写入磁盘
 - WebSocket 处理程序转发到连接的客户端
 - 内存处理程序更新知识图谱
 
+注意：trait **不是** `EventHandler<E: Event>` 泛型 —— 接收方签名是 `&AlephEvent`，订阅通过 `subscriptions() -> Vec<EventType>` 声明。`EventContext`（`src/event/handler.rs`）携带 `bus: EventBus` / `abort_signal: Arc<AtomicBool>` / `session_id: Arc<RwLock<Option<String>>>`。
+
 ### EventFilter
 
-选择性订阅 —— 处理程序仅接收与其过滤器匹配的事件。
+`EventFilter`（`src/event/filter.rs`）是**结构体**而不是枚举，三类过滤维度一起 AND：
 
 ```rust
-pub enum EventFilter {
-    All,                    // 接收所有事件
-    Type(EventType),       // 仅特定事件类型
-    Source(String),        // 仅来自特定源模块
-    Custom(Box<dyn Fn(&Event) -> bool>),
+pub struct EventFilter {
+    pub session_ids: Option<HashSet<String>>,   // None = 全部会话
+    pub agent_ids: Option<HashSet<String>>,     // None = 全部智能体
+    pub event_types: Vec<EventType>,            // 空 = 全部不匹配
 }
 ```
 
-**示例：** Gateway 的 WebSocket 处理程序过滤 `TraceEvent` 类型，以将代理执行跟踪流式传输到 Panel UI。
+构造方式：
+
+```rust
+let filter = EventFilter::new(vec![EventType::ToolCallStarted, EventType::ToolCallCompleted])
+    .with_session("session-123")
+    .with_agent("agent-1");
+// 或
+let filter = EventFilter::all();   // 等价于 EventFilter::new(vec![EventType::All])
+```
+
+**示例：** Panel 的 WebSocket 订阅走 `EventFilter::new(vec![EventType::ToolCallStarted, ...]).with_session(...)`，把与该会话相关的工具事件流给客户端。
 
 ---
 
 ## 事件类型
 
-### 核心事件
+`AlephEvent`（`src/event/types.rs`）的非穷举枚举变体（按用途分组）：
 
-| 事件 | 说明 | 发布者 |
+| 分类 | 变体 | 说明 |
 |---|---|---|
-| `SessionCreated` | 新会话已初始化 | SessionService |
-| `MessageReceived` | 用户消息已到达 | Gateway |
-| `ToolExecuted` | 工具已完成执行 | Engine |
-| `MemoryUpdated` | 事实已添加或失效 | Memory |
-| `ConfigReloaded` | 配置已热重载 | Config watcher |
+| Input | `InputReceived(InputEvent { text, session_id, context, timestamp })` | 用户输入 |
+| Tool | `ToolCallRequested(ToolCallRequest { tool, parameters })` | 工具调用请求 |
+| Tool | `ToolCallStarted(ToolCallStarted { call_id, tool, input, timestamp, session_id? })` | 工具调用开始 |
+| Tool | `ToolCallCompleted(ToolCallResult { call_id, tool, input, output, started_at, completed_at, token_usage, session_id? })` | 工具调用完成 |
+| Tool | `ToolCallFailed(ToolCallError { call_id, tool, input, error, error_kind, is_retryable, attempts, session_id? })` | 工具调用失败 |
+| Tool | `ToolCallRetrying(ToolCallRetry { call_id, attempt, delay_ms, reason? })` | 工具调用重试中 |
+| Loop | `LoopContinue(LoopState)` / `LoopStop(StopReason)` | 循环推进 / 停止 |
+| Session | `SessionCreated(SessionInfo)` / `SessionUpdated(SessionDiff)` / `SessionResumed(SessionInfo)` / `SessionCompacted(CompactionInfo)` | 会话生命周期 |
+| Sub-agent | `SubAgentCompleted(SubAgentCompletionEvent)` / `SubAgentTreeUpdate(...)` | 子代理终结 / 树更新 |
+| AI | `AiResponseGenerated(AiResponse { content, reasoning?, is_final, timestamp })` | 模型响应 |
+| Part | `PartAdded/Updated/Removed(crate::components::PartUpdateData)` | UI 消息流渲染 |
+| Team | `TeamCreated { team_id, name, member_ids }` / `TeamMemberAdded` / `TeamMemberRemoved` / `TeamTaskAssigned` / `TeamTaskUpdated` / `TeamTaskCompleted` / `TeamTaskFailed` / `TeamDisbanded` | 多智能体团队 |
 
-### 事件排序
+`EventType`（`src/event/types.rs`）是订阅过滤的 discriminant，**不含** `MemoryUpdated` 或 `ConfigReloaded`（后者是 `McpManagerEvent` 私有的，不挂在全局总线上）。
 
-每个事件携带单调序列号：
+### 事件排序与时间戳
+
+每个事件都被 `TimestampedEvent` 包装：
 
 ```rust
-pub struct EventMetadata {
-    pub sequence: u64,      // 全局排序
-    pub timestamp: i64,     // Unix 毫秒
-    pub source: String,     // 模块名称
+pub struct TimestampedEvent {
+    pub event: AlephEvent,
+    pub timestamp: i64,   // chrono::Utc::now().timestamp_millis()
+    pub sequence: u64,    // 由 EventBus 的 AtomicU64 自增
 }
 ```
 
-序列号启用：
-- 事件重放以进行调试
-- 确定性状态重建
-- 跨分布式处理程序的排序保证
-
----
-
-## 权限和安全
-
-### EventPermission
-
-并非所有处理程序都能看到所有事件。权限层检查处理程序授权：
-
-```rust
-pub enum EventPermission {
-    Owner,      // 完全访问
-    Guest,      // 仅他们会话的事件
-    System,     // 仅内部事件
-}
-```
-
-**示例：** 访客的 WebSocket 连接仅接收他们自己会话的事件，防止跨会话信息泄漏。
-
-### EventQuestion
-
-对于敏感操作，EventBus 可以暂停并请求确认：
-
-```rust
-pub enum EventQuestion {
-    Allow,      // 继续事件
-    Deny,       // 丢弃事件
-    Modify(Event), // 用修改后的事件替换
-}
-```
-
-**示例：** 在执行 `bash_exec` 工具之前，系统发布 `ToolExecutionRequested` 事件。如果审批模块拒绝它，执行会在任何损害发生之前被取消。
+`EventBus` 内置历史 ring（`Arc<RwLock<Vec<TimestampedEvent>>>`），新订阅者可回放；`GlobalEvent`（`src/event/global_bus.rs`）再叠加一层 `source_agent_id` / `source_session_id` / 自己的 `sequence`，序列号用于排序保证。
 
 ---
 
 ## 使用示例
 
 ```rust
-use aleph::event::{EventBus, EventHandler, Event};
+use alephcore::event::{EventBus, EventHandler, EventContext, EventType, AlephEvent, HandlerError};
+use async_trait::async_trait;
+use std::sync::Arc;
 
-// 定义一个事件
-#[derive(Clone, Debug)]
-pub struct MemoryCreated {
-    pub fact_id: String,
-    pub content: String,
-}
-
-impl Event for MemoryCreated {}
-
-// 实现一个处理程序
-pub struct MemoryLogger;
+struct MemoryLogger;
 
 #[async_trait]
-impl EventHandler<MemoryCreated> for MemoryLogger {
-    async fn handle(&self, event: &MemoryCreated) -> Result<(), EventError> {
-        tracing::info!("Memory created: {}", event.fact_id);
-        Ok(())
+impl EventHandler for MemoryLogger {
+    fn name(&self) -> &'static str { "MemoryLogger" }
+    fn subscriptions(&self) -> Vec<EventType> {
+        vec![EventType::ToolCallCompleted]
+    }
+    async fn handle(
+        &self,
+        event: &AlephEvent,
+        _ctx: &EventContext,
+    ) -> Result<Vec<AlephEvent>, HandlerError> {
+        if let AlephEvent::ToolCallCompleted(t) = event {
+            tracing::info!(call_id = %t.call_id, tool = %t.tool, "tool finished");
+        }
+        Ok(vec![])
     }
 }
 
-// 注册并发布
-let bus = event::bus();
-bus.register(MemoryLogger).await?;
-bus.publish(MemoryCreated {
-    fact_id: "fact-123".into(),
-    content: "User prefers dark mode".into(),
-}).await?;
+let bus = EventBus::new();
+let mut registry = EventHandlerRegistry::new();
+registry.register(Arc::new(MemoryLogger));
+let _handles = registry.start(EventContext::new(bus.clone())).await;
 ```
 
 ---
 
 ## 代码位置
 
-- `src/event/mod.rs` — EventBus 和核心类型
-- `src/event/handler.rs` — EventHandler trait
-- `src/event/filter.rs` — EventFilter 实现
-- `src/event/permission.rs` — 权限检查
-- `src/event/question.rs` — 交互式确认
+- `src/event/mod.rs` — 模块入口，重新导出
+- `src/event/bus.rs` — `EventBus`（每智能体）+ `EventBusConfig` + `EventSubscriber`
+- `src/event/global_bus.rs` — `GlobalBus` 单例 + `GlobalEvent` + `Subscription` + `SubscriptionId`
+- `src/event/handler.rs` — `EventHandler` trait + `EventHandlerRegistry` + `EventContext`
+- `src/event/filter.rs` — `EventFilter` 结构体
+- `src/event/types.rs` — `AlephEvent` + `EventType` + 各事件载荷
 
 ## 另请参阅
 
@@ -213,15 +245,15 @@ bus.publish(MemoryCreated {
 
 ### SessionEvent
 
-26.7.7+ `session_events` 是规范事件日志——`MessageProjector` 物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写。`SessionEventRecord` + `TurnId` 是新引入的载荷。
+26.7.7+ `session_events` 是规范事件日志——`MessageProjector` 物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写。`SessionEventRecord { seq, event, created_at_ms }` 是日志载荷；与 `AlephEvent` 是两套独立事件体系，分别承担「会话事件」与「运行事件」两种语义。
 
-### 死信与重投递
+### Gateway 死信取证
 
-26.7.17+：channel.* 未能成功下发的消息被收集在**死信**队列中，可在 Panel 内重投递。`channel.pairing_data` 提供配对上下文。
+26.7.17+：网关侧建立死信（dead-letter）取证通道——channel 路径下未能成功下发的消息可在 Panel 内被检查并安全重投递。
 
 ### Loop-Graph 治理事件
 
-26.7.21+ 治理事件（胜利声明、目标结算、团队解散、watcher 触发）通过同一事件总线传递，由 `loop_graph` 层的 watcher 订阅。
+26.7.21+ 治理事件（胜利声明、目标结算、团队解散、watcher 触发）通过同一事件总线传递，由 `loop_graph` 层的 watcher 订阅。`NodeKind::Team` 与 `NodeKind::LoopGoal` 节点是 `loop_graph/types.rs` 的 `non_exhaustive` 枚举成员。
 
 ### 见另请参阅
 

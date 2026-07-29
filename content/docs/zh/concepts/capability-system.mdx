@@ -1,174 +1,146 @@
 ---
 title: "能力系统"
-description: "插件能力声明和工具权限中间件，用于控制扩展可以做什么。"
+description: "能力声明、插件权限、动作感知的工具强制与运行时能力账本。"
 ---
 
-能力和权限模块控制插件和代理被允许做什么。能力系统声明插件贡献什么（工具、频道、技能），而权限系统在运行时强制执行访问控制。
+Aleph 把三个问题分开处理：
 
-## 设计理念
+1. 插件或扩展注册了什么。
+2. 插件声明需要哪些资源。
+3. 当前运行中的代理被允许执行什么。
 
-1. **声明式能力** —— 插件通过 `CapabilityDeclaration` 声明它们提供什么
-2. **分层权限** —— 全局默认值 + 每个代理覆盖，最严格者获胜
-3. **中间件执行** —— 权限检查在执行前发生在工具中间件层
-
----
+`src/extension/capability.rs` 回答第一个问题；插件清单的权限段以及共享的 scoped-tool、审批、沙箱层回答另两个问题。
 
 ## 能力声明
 
-插件通过统一枚举声明其贡献：
+生产中的声明枚举刻意保持精简：
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CapabilityDeclaration {
-    Tool(ToolDeclaration),
-    Hook(HookDeclaration),
-    Channel(ChannelDeclaration),
-    Provider(ProviderDeclaration),
-    GatewayMethod(GatewayMethodDeclaration),
-    HttpRoute(HttpRouteDeclaration),
-    Cli(CliDeclaration),
-    Service(ServiceDeclaration),
-    Command(CommandDeclaration),
-    Skill(SkillDeclaration),
-    Agent(AgentDeclaration),
-    McpServer(McpServerDeclaration),
+    Tool(ToolRegistration),
+    Hook(HookRegistration),
+    Service(ServiceRegistration),
+    Skill(SkillRegistration),
+    Agent(AgentRegistration),
+    McpServer(McpServerConfig),
 }
 ```
 
-每个变体与 PluginRegistry 中的注册类型 1:1 映射。`#[serde(tag = "type")]` 属性序列化为 `{ "type": "tool", "name": "my_tool", ... }`。
+每条声明由一个插件或运行时（针对 MCP server 配置）所有。注册器校验所有权并派发到 `PluginRegistry` 或 MCP 路径。
 
----
+| 变体 | 注册目标 | 层级 |
+|---|---|---|
+| `Tool` | 可调用工具注册表 | Core |
+| `Hook` | 钩子执行器 | Core |
+| `Skill` | 插件技能注册表与共享 SkillSystem | Core |
+| `Agent` | 代理注册表 | Important |
+| `Service` | 服务管理器 | Pluggable |
+| `McpServer` | MCP 管理器集成 | Pluggable |
 
-## 权限系统
+插件的 `commands/` Markdown 在技能注册表里以命令型技能存放。当前声明模型不再有独立的 channel、provider、HTTP-route、CLI、gateway-method 变体。
 
-### 分类
+`CapabilitySource` 记录插件 ID、发现来源与清单格式；支持的来源格式包含 Claude Code、Aleph TOML、Codex、Cursor、自动发现与运行时注册。
 
-工具调用被分类为三种结果：
+## 插件权限
 
-```rust
-pub enum Classification {
-    Allow,                       // 无需提示执行
-    Confirm { reason: String },  // 请求用户批准
-    Deny { reason: String },     // 无条件拒绝
-}
-```
-
-### SmartFilter
-
-```rust
-pub trait SmartFilter: Send + Sync {
-    fn classify(&self,
-        name: &str,
-        input: &Value,
-    ) -> Classification;
-}
-```
-
-### LayeredPermissionResolver
-
-使用最严格者获胜语义合并全局 + 每个代理权限：
-
-```rust
-pub struct LayeredPermissionResolver {
-    merged: Arc<ArcSwap<ToolPermissionsConfig>>,
-}
-```
-
-**合并规则：** `Deny > Ask > Allow`
-
-**Exec 类工具**（`code_exec`、`bash`）有特殊处理 —— 它们的审批由 `WorkspaceSandbox` 拥有，不是一般权限层。
-
-**实时重载：** 使用 `ArcSwap`，因此来自配置 RPC 处理程序的权限更新无需重新启动即可生效。
-
-### ApprovalGate
-
-对于 `Confirm` 分类，`ApprovalGate` 提示用户：
-
-```rust
-#[async_trait]
-pub trait Approver: Send + Sync {
-    async fn ask(
-        &self,
-        tool_name: &str,
-        reason: &str,
-    ) -> ApprovalOutcome;
-}
-```
-
-真实的 `ApprovalGate` 实现这一点；模拟实现支持无需完整审批 UI 管道的单元测试。
-
----
-
-## 权限配置
-
-权限在 `providers.toml` 中或通过配置 RPC 配置：
+Aleph 扩展清单在权限段声明资源需求：
 
 ```toml
-[permissions.tools]
-code_exec = "ask"
-bash = "deny"
-file_ops = "allow"
+[aleph.permissions]
+network = true
+filesystem = "read"
+env = true
+shell = false
+background = false
 ```
 
-**操作：**
-- `allow` —— 无需确认执行
-- `ask` —— 执行前提示用户
-- `deny` —— 阻止执行
+权限词汇：
 
----
+- `network`
+- `filesystem:read` / `filesystem:write` 或完整文件系统访问
+- `env`
+- `shell`
+- `background`
 
-## 安全属性
+`[[aleph.services]]` 声明需要 `background = true`。WASM 专属声明可以进一步约束工作区前缀、HTTP 端点、凭证、速率限制、工具调用与密钥注入。
 
-- **拒绝优先评估** —— 在任何 `Ask` 提示之前检查所有模式的 `Deny`
-- **确定性排序** —— 配置规则按键排序以实现可重现的评估
-- **无递归溢出** —— 模式匹配使用有界递归（模式来自配置，不是用户输入）
+这些是声明与宿主注册门，并不给代理无条件的执行权。调用仍会经过 scoped tool service、工具元数据、审批策略、执行档位与沙箱命令策略。
 
----
+## 工具强制
+
+工具策略是动作感知的，依赖工具自身声明的元数据，而不是从名字猜。有效权限合并显式工具规则、agent 与 channel 策略以及执行档位；最严格的适用规则胜出。
+
+用户视角的执行档位：
+
+| 档位 | 行为 |
+|---|---|
+| `ask` | 每次可变操作前询问；未知工具默认拒绝 |
+| `auto` | 幂等工具自动放行；破坏性操作仍需审批 |
+| `full` | 除独立安全硬底线外全部自动放行 |
+
+`[sandbox.command_policy]` 就是这条硬底线：任何执行档位与插件声明都不能压低它。动作感知审批把授权指纹绑定到具体命令，而不是仅绑定到工具名。
+
+operator 闸门是面向自身管理操作的另一道边界。例如 `hub_install_run`、技能管理、身份操作不能仅因为插件声明了能力就被普通 chat 档 channel 启用。
+
+## 运行时能力账本
+
+`node`、`uv`、`ffmpeg`、`playwright-cli` 等运行时二进制使用与扩展能力不同的账本：
+
+```text
+~/.aleph/runtimes/ledger.json
+```
+
+`CapabilityLedger` 是「Aleph 当前能否使用某个运行时可执行文件」的唯一持久化来源。它不下载也不安装任何东西。探测与引导模块负责这些动作，然后更新账本。
+
+账本条目记录：
+
+- 能力名
+- 可执行路径
+- 检测到的版本
+- 上次成功探测时间
+- 来源：`system` 或 `aleph_managed`
+- 状态：`missing` / `probing` / `bootstrapping` / `ready` / `stale`
+
+运行时安装流程：
+
+```text
+加载账本
+  → 探测 PATH 与 Aleph 管理路径
+  → 解析依赖
+  → 当有支持的安装规格时执行引导
+  → 校验产物二进制
+  → 原子写入 Ready 状态
+```
+
+`runtimes.list` 读取账本与运行时规格。`runtimes.refresh` 探测已知能力。`runtimes.install` 接受能力名，异步执行并发布进度事件；终态持久化在同一份 `ledger.json`。缺失或损坏的账本会被重建而不是被信任。
+
+这份运行时账本既不是 Hub 目录，也不是 Hub 信任披露，也不是每个插件的能力声明。Hub 条目在 `hub_catalog.db` 中自带 `InstallSpec`、信任层级、版本与可选 SHA-256 pin。
+
+## 安全边界
+
+- 清单在注册前经过校验。
+- 能力所有权阻止插件注册属于其他插件的组件。
+- 插件与技能内容在不可信安装前接受注入与危险模式扫描。
+- 密钥走加密保险库与运行时注入边界。
+- 工具执行在共享 scoped-tool 闸口强制。
+- 运行时安装按能力名串行化，仅记录经验证的可执行状态。
 
 ## 代码位置
 
-- `src/extension/capability.rs` —— `CapabilityDeclaration` 枚举
-- `src/tools/middleware/permission/mod.rs` —— 权限层
-- `src/tools/middleware/permission/resolver.rs` —— `LayeredPermissionResolver`
-- `src/tools/middleware/permission/agent_filter.rs` —— 每个代理过滤
-- `src/config/types/policies/tool_permissions.rs` —— 配置类型
+- `src/extension/capability.rs` — 声明枚举、层级与来源元数据
+- `src/extension/registrar/` — 声明校验与注册
+- `src/extension/registry/` — 插件注册
+- `src/extension/manifest/` — 权限解析
+- `src/tools/scoped/` — 工具策略强制
+- `src/config/types/policies/exec_tier.rs` — 执行档位合成
+- `src/sandbox/command_policy/` — 硬命令底线
+- `src/runtimes/ledger.rs` — 持久化运行时账本
+- `src/runtimes/ensure.rs` — 探测、引导与账本更新编排
+- `src/gateway/handlers/runtimes.rs` — 运行时列表、刷新与安装 RPC
 
-## 另请参阅
+## 相关页面
 
-- [扩展](./extensions) —— 插件架构
-- [审批](./approval) —— 桌面/浏览器审批系统
-
----
-
-## 26.7.x 补充
-
-### `CapabilityLedger`
-
-26.7.x 引入——每次安装时从磁盘**重建**的可见能力清单（用于 `plugin.install` / `runtimes.install` 的安装前披露）：
-
-- 重建逻辑在 `make_runtime_ledger()`
-- 与运行时的 `claim` 校验**分离**（不混为一谈）
-- 重建失败的插件在 install 之前就被拒
-
-### Action-aware Approval
-
-26.7.15+ `ApprovalPolicy` 是**动作感知的**——人看到真实命令且授权指纹键**绑定在命令上**。授权粒度从「工具级」升到「命令级」。
-
-### 三级执行权限
-
-| 等级 | 行为 |
-|------|------|
-| `ask` | 每次工具执行前请求审批；未知工具失败关闭 |
-| `auto` | 幂等工具自动放行，破坏性工具仍需审批 |
-| `full` | 全部自动放行（独立的安全硬过滤除外） |
-
-### `[sandbox.command_policy]` 硬底
-
-不能被任何 `exec_tier` 拉低。`fail-closed`（缺失/不一致拒绝授权）。
-
-### 详情
-
-- [安全概览](/docs/zh/security/overview) — 失败关闭原则
-- [执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与 action-aware
-- [扩展](/docs/zh/concepts/extensions) — 插件能力
+- [扩展](./extensions) — 插件能力与 runtime
+- [扩展系统](./extension-system) — 注册流程
+- [扩展商店](./extensions-store) — 受信扩展安装
+- [安全概览](/docs/zh/security/overview) — 执行与审批边界

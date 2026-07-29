@@ -1,15 +1,17 @@
 ---
 title: "PII 保护"
-description: "在到达 LLM API 提供商之前检测和编辑个人可识别信息的网关级 PII 过滤引擎。"
+description: "在到达 LLM API 提供商之前检测和编辑个人可识别信息的网关级 PII 过滤引擎，按类别与平台策略独立配置。"
 ---
 
-`pii` 模块提供网关级隐私保护，在到达 LLM API 提供商之前过滤出站消息。与日志清理工具（接受误报）不同，此引擎针对精度进行了调优 — 误报会降低 LLM 理解能力。
+`pii` 模块提供网关级隐私保护，在到达 LLM API 提供商之前过滤出站消息。该引擎以精度优先 —— 误报会直接劣化代理理解能力。
 
 ## 设计理念
 
-1. **精度优于召回** — 误报会损害代理性能；引擎偏向准确性
-2. **基于规则的检测** — 已知 PII 类型的正则模式，而非启发式 ML
-3. **允许列表豁免** — 已知安全值可以绕过过滤
+1. **精度优于召回** —— 误报损害代理表现；引擎偏向准确性
+2. **基于规则的检测** —— 已知 PII 类别的正则模式，配合用户自定义规则
+3. **按类别配置动作** —— 每个类别可独立选 `Block` / `Warn` / `Off`
+4. **平台覆盖** —— 单个平台可有独立规则集，覆盖默认动作
+5. **失败关闭** —— 检测器自身失败时 **拒绝放行**，而不是 fail-open
 
 ---
 
@@ -23,15 +25,11 @@ description: "在到达 LLM API 提供商之前检测和编辑个人可识别信
 pub struct PiiEngine {
     rules: Vec<Box<dyn PiiRule>>,
     allowlist: PiiAllowlist,
-    action: PiiAction,
-}
-
-impl PiiEngine {
-    pub fn filter(&self,
-        text: &str,
-    ) -> FilterResult { /* ... */ }
+    config: PrivacyConfig,
 }
 ```
+
+引擎通过 `OnceLock` 暴露全局单例（`PII_ENGINE`），由 `PiiEngine::init` 在启动期注入，运行期通过 `PiiEngine::global()` / `PiiEngine::reload` 替换配置。`process_outbound` / `process_inbound` 持有的是同步 `RwLock<PiiEngine>`，临界区短、不跨 await。
 
 ### PiiSeverity
 
@@ -44,14 +42,25 @@ pub enum PiiSeverity {
 }
 ```
 
+### PiiAction
+
+每个类别可选的处置动作：
+
+```rust
+pub enum PiiAction {
+    Block,   // 用占位符替换（默认）
+    Warn,    // 通过，但记录
+    Off,     // 不过滤
+}
+```
+
 ### FilterResult
 
 ```rust
 pub struct FilterResult {
-    pub text: String,           // 过滤后的文本（带替换）
-    pub blocked_count: usize,   // 替换的匹配数
-    pub warned_count: usize,    // 记录但未替换
-    pub matches: Vec<PiiMatch>,
+    pub text: String,           // 过滤后的文本（替换发生在这里）
+    pub blocked_count: usize,   // 替换过的匹配数
+    pub warned_count: usize,    // 记录但未替换的匹配数
 }
 ```
 
@@ -59,33 +68,56 @@ pub struct FilterResult {
 
 ## 检测规则
 
-内置规则检测：
+内置规则覆盖：
 
-| 类型 | 示例 | 严重性 |
-|---|---|---|
-| **电子邮件地址** | `user@example.com` | Medium |
-| **电话号码** | `+1-555-123-4567` | High |
-| **信用卡** | `4111-1111-1111-1111` | Critical |
-| **SSN / 身份证** | 中国身份证: `110101199001011234` | Critical |
-| **API 密钥** | `sk-abc123...` | Critical |
-| **SSH 密钥** | `ssh-rsa AAAA...` | High |
-| **IP 地址** | `192.168.1.1` | Low |
+| 类型 | 示例 | 默认动作 | 严重性 |
+|---|---|---|---|
+| **邮件地址** | `user@example.com` | `Block` | Medium |
+| **电话号码** | `+1-555-123-4567` | `Block` | High |
+| **银行卡** | `4111-1111-1111-1111` | `Block` | Critical |
+| **身份证** | `110101199001011234` | `Block` | Critical |
+| **API 密钥** | `sk-abc123…` | `Block` | Critical |
+| **SSH 密钥** | `ssh-rsa AAAA…` | `Block` | High |
+| **IP 地址** | `192.168.1.1` | `Block` | Low |
 
-### 身份证验证
+`api_key` 类别还会接住一般格式的 `Bearer` token（详细见 `leak_detector.rs` 与 `vendor_patterns.rs`）。
 
-中国身份证号码通过以下方式验证：
-- 长度检查 (18 位数字)
-- 省份代码验证 (前 2 位)
-- 日期验证 (第 7-14 位)
-- 校验和验证 (最后一位通过加权和)
+### 中国身份证校验
 
-**安全：** 使用 `.get(..n)` 而非字节切片以确保 UTF-8 安全。
+中国身份证号码通过：
+
+- 长度（18 位数字）
+- 省份代码（前 2 位）
+- 日期（位 7–14）
+- 加权和校验位（最后 1 位）
+
+字符串切片使用 `.get(..n)` 或 `char_indices()` 边界检查，不走 `&s[..n]`。
+
+### 冲突去重
+
+匹配集合在替换前按以下顺序排序：
+
+1. **`Block` 永远胜出** —— `Block` 命中必须赢得与 `Warn` 命中的重叠，避免高严重 `Warn` 吞掉低严重 `Block`（如 `api_key=warn` 压住 `phone=block`）
+2. 同动作时按严重性倒序
+3. 重叠区间去重
+4. 按 `start` 倒序替换，从文本尾部开始写，避免后续偏移失效
+
+### 自定义规则
+
+```toml
+[[privacy.custom_rules]]
+name = "internal_token"
+pattern = "IT-[A-Z0-9]{16}"
+placeholder = "[INTERNAL_TOKEN]"
+severity = "high"
+action = "block"
+```
+
+`build_rules(&config.custom_rules)` 在启动期编译正则字面量，编译失败报错退出。
 
 ---
 
 ## 允许列表
-
-已知安全值可以免于过滤：
 
 ```rust
 pub struct PiiAllowlist {
@@ -93,66 +125,82 @@ pub struct PiiAllowlist {
 }
 ```
 
-允许列表条目是在替换之前针对检测到的值匹配的正则模式。
+条目为正则模式，在替换发生前对比检测值 —— 命中的检测值会被跳过而不是替换。
 
 ---
 
-## 操作
+## 平台覆盖
+
+`PrivacyConfig.platform_policies` 让单平台拥有独立规则集：
 
 ```rust
-pub enum PiiAction {
-    Block,   // 用占位符替换
-    Warn,    // 记录但不替换
-    Allow,   // 忽略
+pub struct PlatformPiiPolicy {
+    pub pii_filtering: Option<bool>,
+    pub id_card: Option<PiiAction>,
+    pub bank_card: Option<PiiAction>,
+    pub phone: Option<PiiAction>,
+    pub api_key: Option<PiiAction>,
+    pub ssh_key: Option<PiiAction>,
+    pub email: Option<PiiAction>,
+    pub ip_address: Option<PiiAction>,
+    pub exclude_providers: Option<Vec<String>>,
 }
 ```
 
-**平台策略：** 不同的提供商可能有不同的 PII 要求。引擎遵循配置中的 `PlatformPiiPolicy`。
+`exclude_providers` 让特定 provider 跳过 PII 过滤；其余字段在 `filter_with_platform` 中覆盖默认动作。`effective_config` 构造副本再做覆盖，平台策略不会污染全局配置。
+
+---
+
+## 失败关闭
+
+检测器内部失败（regex 匹配 / 配置加载 / 状态读取）一律 **拒绝放行**。任何在没有合法检测结果下请求放行的调用都会被拒绝 —— 这与之前版本失败时仍放行的 fail-open 行为相反。
+
+---
+
+## 工具调用与上下文集成
+
+`RuntimeSecurityGuard::process_outbound` 把 PII 引擎串在密钥解析 → 泄漏检测 → PII 过滤 → 占位符替换的流水线里。出站消息先经过密钥检测（避免匹配到刚解出的密钥再发起 PII 过滤引入二次处理成本），再经过 PII 引擎，最后替换占位符。
+
+`process_inbound` 在 LLM 回灌回宿主之前再过滤一次，避免被 LLM 误重新引入的敏感数据回流。
+
+边界标记处理：transcript / focus / prior-summary 等喂入 prompt 的字段在做边界包裹前同样 escape 注入字符串，防止伪造的标记跨越到下一段会话。
+
+---
+
+## ToolAwareChunker
+
+`ToolAwareChunker` (`src/context/compact/tool_aware_chunker.rs`) 把段落切块用于压缩与回溯：
+
+```rust
+pub struct ToolAwareChunker {
+    pub chunk_token_limit: usize,
+    pub token_ratio: f64,
+}
+```
+
+`token_ratio <= 0.0` 或非有限值时 **回退到 `0.25`** 而不是 panic —— 之前的 `assert!` 在 MCP / Skill 注入错误 ratio 时会让 agent loop 直接崩。现在 graceful degrade。单个 `SemanticUnit` 永不被切分；超过限额的单元独占一块。
 
 ---
 
 ## 安全属性
 
-- **UTF-8 安全** — `.get(..n)` 用于所有字符串切片，`char_indices()` 用于边界检查
-- **锁恢复** — `unwrap_or_else(|e| e.into_inner())` 用于 RwLock
-- **无 `static mut`** — 使用 `OnceLock` 用于静态正则
-- **正则安全** — 所有正则字面量使用 `.expect("valid regex literal")`
+- **UTF-8 安全** —— `.get(..n)` 与 `char_indices()` 用于所有字符串切片
+- **锁恢复** —— `unwrap_or_else(|e| e.into_inner())` 用于 RwLock
+- **无 `static mut`** —— 使用 `OnceLock` 持有全局正则单例
+- **正则字面量编译** —— `expect("valid regex literal")` 用于启动期字面量；运行期 ratio 错误 fallback
+- **冲突去重** —— `Block` 始终胜过 `Warn` 解决重叠
 
 ---
 
 ## 代码位置
 
-- `src/pii/mod.rs` — 模块入口点
-- `src/pii/engine.rs` — 核心过滤引擎
-- `src/pii/rules/` — 检测规则 (电子邮件、电话、信用卡、身份证、API 密钥、SSH 密钥、IP)
-- `src/pii/allowlist.rs` — 豁免管理
+- `src/pii/mod.rs` —— 模块入口
+- `src/pii/engine.rs` —— 核心过滤引擎
+- `src/pii/rules/` —— 检测规则（email / phone / bank / id / api_key / ssh_key / ip）
+- `src/pii/allowlist.rs` —— 豁免管理
 
 ## 另请参阅
 
-- [安全基元](/docs/zh/concepts/security-primitives) — 运行时守卫集成
-- [秘密管理](/docs/zh/concepts/secret-management) — 加密凭据存储
-
----
-
-## 26.7.x 补充
-
-### 对抗性修复
-
-26.7.x PII 防护经历对抗性审查后修复（`pii:` 提交族），涵盖：
-
-- 模式识别（正则 / ML 混合）
-- 替换策略（保留语义 vs 完全替换）
-- 审计轨迹
-
-### 失败关闭
-
-26.7.21+：PII 检测器失败时**拒绝放行**——之前是 fail-open（检测失败仍放行），引入泄漏风险。
-
-### 与 Hooks 集成
-
-26.7.x：PII 清理可作为 `tool.invoke.post` Hook 钩入——审计轨迹完整记录每次清理。
-
-### 见另请参阅
-
-- [安全原语](/docs/zh/concepts/security-primitives) — 整套原语
-- [错误处理](/docs/zh/concepts/error-handling) — 失败关闭
+- [安全基元](/docs/zh/concepts/security-primitives) —— 运行时守卫集成
+- [秘密管理](/docs/zh/concepts/secret-management) —— 加密凭据存储
+- [配置](/docs/zh/concepts/configuration) —— `PrivacyConfig` 与平台策略

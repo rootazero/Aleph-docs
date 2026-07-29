@@ -1,185 +1,151 @@
 ---
 title: "Wizard"
-description: "Session-based wizard framework for guided onboarding and configuration flows."
+description: "Session-based, multi-step configuration wizard framework driven through gateway RPC."
 ---
 
-The `wizard` module provides a session-based wizard framework for onboarding and configuration flows. It guides users through multi-step setup processes with deferred promises and stateful sessions.
+The `wizard` module is a **session-based wizard framework** exposed as `wizard.*` JSON-RPC methods on the gateway WebSocket. Every interaction is RPC-driven — there is no `aleph` or `aleph-server` CLI subcommand for it.
 
 ## Design Philosophy
 
-1. **Session-based state machine** — Wizard progress is persisted across interactions
-2. **Deferred promises** — Each step can collect data without blocking the overall flow
-3. **Channel-agnostic** — Works via CLI, RPC, or any interface
+1. **Session-based state machine** — `session_id` keeps progress across multiple `wizard.next` / `wizard.answer` calls
+2. **`RpcPrompter` abstraction** — the flow implementation holds an `RpcPrompter`, pushes `WizardStep` to the client, waits for `wizard.answer` to deliver the value
+3. **Panel / desktop / any RPC client** can drive it; no terminal required
+4. **Sticky terminal states** — `cancel()` after `Done` does not overwrite the completed state or discard its `finish_data` payload
 
 ---
 
 ## Architecture
 
 ```
-Client                        WizardSession                     WizardFlow
-   │                               │                                │
-   │── wizard.start ──────────────▶│                                │
-   │                               │── run(prompter) ──────────────▶│
-   │◀── { step: intro } ───────────│◀── prompt(intro) ──────────────│
-   │                               │                                │
-   │── wizard.next { null } ──────▶│                                │
-   │◀── { step: select } ──────────│◀── prompt(select) ─────────────│
-   │                               │                                │
-   │── wizard.next { "local" } ───▶│                                │
-   │                               │── answer("local") ────────────▶│
-   │◀── { step: text } ────────────│◀── prompt(text) ───────────────│
-   │                               │                                │
-   │── wizard.cancel ─────────────▶│                                │
-   │◀── { done: true } ────────────│                                │
+Client (Panel/desktop)               WizardSession                  WizardFlow (background task)
+   │                                    │                                │
+   │── wizard.start ────────────────────▶│                                │
+   │    { wizard_type:"onboarding" }    │── new(flow) tokio::spawn ─────▶│
+   │◀── { session_id, step:welcome } ───│                                │
+   │                                    │◀── prompter.prompt(welcome) ───│
+   │                                    │                                │
+   │── wizard.answer ──────────────────▶│                                │
+   │    { session_id, step_id, value }  │── answer(step_id,value) ──────▶│
+   │                                    │◀── prompter.prompt(next) ──────│
+   │◀── { step:primary } ───────────────│                                │
+   │                                    │                                │
+   │── wizard.cancel ──────────────────▶│                                │
+   │    { session_id }                  │── cancel_tx.send(()) ─────────▶│
+   │◀── { cancelled:true } ─────────────│◀── settle(Cancelled) ──────────│
 ```
 
 ---
 
 ## Core Components
 
-### WizardSession
+### `WizardSession`
 
-Manages the wizard lifecycle:
+A session is created by `wizard.start` and runs the flow in a background tokio task; the client advances by calling `wizard.next` / `wizard.answer`:
 
 ```rust
 pub struct WizardSession {
-    flow: Box<dyn WizardFlow>,
-    state: WizardState,
-}
-
-impl WizardSession {
-    pub async fn start(
-        &mut self,
-    ) -> Result<WizardStep> { /* ... */ }
-
-    pub async fn next(
-        &mut self,
-        answer: Option<String>,
-    ) -> Result<WizardNextResult> { /* ... */ }
-
-    pub fn cancel(&mut self,
-    ) -> WizardStatus { /* ... */ }
+    id: String,
+    status: Arc<RwLock<WizardStatus>>,
+    current_step: Arc<RwLock<Option<WizardStep>>>,
+    step_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<WizardStep>>>,
+    answers: Arc<RwLock<HashMap<String, PendingAnswer>>>,
+    error: Arc<RwLock<Option<String>>>,
+    finish_data: Arc<RwLock<Option<serde_json::Value>>>,
+    cancel_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
 }
 ```
 
-### WizardFlow
+Key properties:
 
-Defines the sequence of steps:
+- `step_tx` is owned *only* by the `RpcPrompter` inside the spawned flow task. When the task ends the prompter is dropped, the last sender goes away, the channel closes, and `next()` receives `None` — that is how it surfaces `Done`/`Error`.
+- Terminal states are sticky. `settle()` only accepts transitions out of `Running`; a late `cancel()` (e.g. client-disconnect cleanup in the result-pending window) cannot clobber a completed `Done` and discard its `finish_data`.
+
+### `WizardFlow` trait
 
 ```rust
+#[async_trait]
 pub trait WizardFlow: Send + Sync {
-    async fn run(
-        &self,
-        prompter: &dyn WizardPrompter,
-    ) -> Result<()>;
+    async fn run(&self, prompter: &RpcPrompter) -> Result<(), WizardSessionError>;
+    fn name(&self) -> &str { "wizard" }
 }
 ```
 
-### WizardPrompter
+### `RpcPrompter`
 
-Abstracts user interaction:
+The only shipped prompter. `prompter.prompt(step)` pushes a `WizardStep` to the client and blocks until the matching `wizard.answer` arrives. `finish(data)` writes the terminal payload into `finish_data`, and the next `wizard.next` returns it as `WizardNextResult.data` on a `Done`.
 
-```rust
-pub trait WizardPrompter: Send + Sync {
-    fn intro(&self, title: &str, description: &str) -> ProgressHandle;
-    fn text(&self, prompt: &str) -> Result<String>;
-    fn select(&self, prompt: &str, options: &[WizardOption]) -> Result<String>;
-    fn confirm(&self, prompt: &str) -> Result<bool>;
-}
-```
+Supported step types:
 
-**Implementations:**
-- `CliPrompter` — Command-line prompts (stub, TODO: integrate dialoguer)
-- `RpcPrompter` — JSON-RPC based prompts for remote clients
-
-### WizardStep
-
-```rust
-pub struct WizardStep {
-    pub step_type: StepType,
-    pub prompt: String,
-    pub options: Vec<WizardOption>,
-}
-
-pub enum StepType {
-    Intro,
-    Text,
-    Select,
-    Confirm,
-    Complete,
-}
-```
+| `StepType` | Client interaction |
+|---|---|
+| `Note` | Display only |
+| `Select` | Single select |
+| `MultiSelect` | Multi-select |
+| `Text` | Free text (with `sensitive` / `validation`) |
+| `Confirm` | Yes/no (with default) |
+| `Progress` | Background progress (`StepExecutor::Gateway`, client just renders) |
+| `Action` | Server-executed action |
 
 ---
 
-## Onboarding Flow
+## Built-in Flows
 
-Built-in wizard for initial setup:
+| Flow | `wizard_type` | Purpose |
+|---|---|---|
+| `OnboardingFlow` | `onboarding` | First-launch: provider × 2, model, thinking, messaging, review (6 steps) |
+| `QuickSetupFlow` | `quick-setup` | One API key, skip the rest (re-install / quick path) |
+| `ProviderSetupFlow` | `provider-setup` | Add / reconfigure a single provider |
 
-```rust
-pub struct QuickSetupFlow;
-pub struct ProviderSetupFlow;
-```
+`OnboardingFlow::run` step sequence:
 
-**Collects:**
-- AI provider selection (OpenAI, Anthropic, etc.)
-- API key configuration
-- Messaging app preferences
-- Thinking level preference
+1. `welcome` — intro
+2. `configure_primary` — pick primary provider + model + API key
+3. `configure_secondary` — pick secondary provider + model + API key
+4. `configure_thinking` — thinking level (`low` / `medium` / `high`)
+5. `configure_messaging` — Telegram / Discord / iMessage (Slack is currently disabled)
+6. `review_and_finalize` — review and persist
 
----
-
-## Safety Properties
-
-- **Atomic counter** — `AtomicU64` for step counting (no lock overhead)
-- **Lock recovery** — `unwrap_or_else(|e| e.into_inner())` for RwLock
-- **Dynamic width** — Box width calculated from title length
-- **No unwrap in production** — All user paths return `Result`
+None of these are triggered from the CLI; the Panel settings page (or the post-install handshake window) calls `wizard.start` directly.
 
 ---
 
-## Code Location
+## RPC Protocol
 
-- `src/wizard/mod.rs` — Module entry point
-- `src/wizard/session.rs` — `WizardSession` and `WizardFlow` trait
-- `src/wizard/prompter.rs` — Prompter trait and implementations
-- `src/wizard/types.rs` — Step types and options
-- `src/wizard/flows/` — Built-in flows (onboarding, provider setup)
+Methods registered in the gateway handler set. `service_unavailable` placeholders are replaced with the real handlers via `install_wizard_handlers` once the boot path initialises the `WizardSessionManager`:
 
-## See Also
+| Method | Params | Returns |
+|---|---|---|
+| `wizard.start` | `{ wizard_type, initial_data? }` | `{ session_id, step, status }` |
+| `wizard.next` | `{ session_id, answer? }` | `WizardNextResult` (next step / done / cancelled / error) |
+| `wizard.answer` | `{ session_id, step_id, value }` | `WizardNextResult` |
+| `wizard.cancel` | `{ session_id }` | `{ cancelled }` |
+| `wizard.status` | `{ session_id }` | `{ status, error?, current_step? }` |
 
-- [Configuration](../getting-started/configuration) — Configuration system
-- [Installation](../getting-started/installation) — Initial setup
+The terminal `WizardNextResult` can carry a `data` payload that the flow sets via `RpcPrompter::finish(data)`; onboarding typically uses this to return the issued token or a config-write summary.
 
 ---
 
-## 26.7.x Addendum
+## Safety / Concurrency
 
-### 26.7.21+ New Stages
+- **`AtomicU64`** generates step IDs (`step-N`), lock-free
+- **`unwrap_or_else(|e| e.into_inner())`** lock-recovery pattern (poisoned-lock safe)
+- **Explicit step validation** — `answer` checks that `step_id` matches the current step; carrying an `answer` on `wizard.next` is rejected (`wizard.answer` is the only path that accepts values)
+- **Channel-leak guard** — `RpcPrompter::prompt` removes the pending sender from the `answers` map if the step push fails, so it cannot leak for the rest of the session
+- **No in-process `CliPrompter`** — terminal UIs go through RPC and are rendered by Panel; the CLI never drives the wizard directly
 
-The `aleph wizard` flow expands to 11 stages in 26.7.21, adding:
+---
 
-- **Stage 7 — Session Mode (chat / work / code)**: the third user-adjustable axis, orthogonal to `exec_tier` and `thinking`
-- **Stage 8 — Exec Tier (ask / auto / full)**: defaults to `ask`; unknown tools fail closed
-- **Stage 10 — Gateway TLS**: pick from loopback-only / self-signed / trusted-proxy
+## Code Locations
 
-### Subcommands
+- `src/wizard/mod.rs` — module entry point
+- `src/wizard/session.rs` — `WizardSession`, sticky terminal states, channel lifecycle
+- `src/wizard/prompter.rs` — `RpcPrompter`, `PendingAnswer`, `ProgressHandle`
+- `src/wizard/types.rs` — `WizardStep` / `WizardOption` / `WizardStatus` / `StepType` / `WizardNextResult` / `WizardAnswer`
+- `src/wizard/flows/onboarding.rs` — `OnboardingFlow` / `QuickSetupFlow` / `ProviderSetupFlow`
+- `src/gateway/handlers/wizard.rs` — `wizard.*` RPC handlers, `WizardSessionManager`, `install_wizard_handlers`
 
-```bash
-aleph wizard              # full 11-stage
-aleph wizard --quick      # quick setup
-aleph wizard --provider   # add / reconfigure a single provider
-aleph wizard --mode       # switch the default session mode only
-```
+## Related Pages
 
-### Gateway RPC
-
-The wizard flow can also be launched via gateway RPC:
-
-- `wizard.start` / `wizard.status` / `wizard.cancel`
-- Triggered from the Panel UI without a terminal
-
-### See Also
-
-- [Setup Wizard](/docs/en/getting-started/wizard) — user perspective
-- [Gateway RPC `wizard.*`](/docs/en/gateway/methods/wizard) — protocol layer
+- [Setup Wizard](/docs/en/getting-started/wizard) — User-facing onboarding flow
+- [Gateway RPC `wizard.*`](/docs/en/gateway/methods/wizard) — Protocol detail
+- [Deployment](/docs/en/getting-started/deployment) — Post-install handshake window

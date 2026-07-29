@@ -1,228 +1,100 @@
 ---
-title: "Setup Wizard"
-description: "Configure Aleph through its interactive onboarding wizard"
+title: "First-Time Configuration"
+description: "Configure Aleph with the current CLI, configuration file, and Panel"
 ---
 
-The setup wizard is the fastest way to get Aleph configured and ready. It guides you through every essential setting — from picking an AI provider to choosing your session mode, configuring gateway TLS, and connecting your messaging apps.
+The current `aleph-server` CLI does **not** expose a `wizard` subcommand. `src/wizard/` is a session-based framework for Gateway clients; it does not imply an `aleph wizard` command.
 
-## Launching the Wizard
+## 1. Create the Configuration File
 
-Run the onboarding wizard from the command line:
-
-```bash
-aleph wizard
-```
-
-The wizard opens an interactive session in your terminal. If you're building a client UI, you can also launch it via the gateway RPC (see [wizard RPC methods](/docs/gateway/methods/wizard)).
-
-### Wizard Variants
-
-| Command | Flow | Description |
-|------|------|------|
-| `aleph wizard` | `onboarding` | Full onboarding flow — recommended for first-time users |
-| `aleph wizard --quick` | `quick-setup` | Minimal setup — only needs an API key |
-| `aleph wizard --provider` | `provider-setup` | Add or reconfigure a single AI provider |
-| `aleph wizard --mode` | `mode-setup` | Switch the default session mode (`chat` / `work` / `code`) only |
-
-## The Full Flow
-
-The full onboarding wizard is 11 stages.
-
-### Stage 1 — Welcome
-
-The wizard greets you and explains what it will configure:
-
-- AI provider and model
-- Optional secondary model for failover
-- AI thinking level
-- **Session mode** (chat / work / code) — a static partition of the tool presentation surface
-- **Exec tier** (Ask / Auto / Full) — security tier for tool execution
-- Messaging app integrations
-- **Gateway TLS** — whether to enable self-signed TLS and bind to non-loopback
-
-No input needed — press **Enter** to continue.
-
-### Stage 2 — Provider
-
-Pick your primary AI provider. Use arrow keys to highlight, then **Enter** to select.
-
-| Provider | Notes |
-|--------|------|
-| **Anthropic (Claude)** | Recommended — best for coding and reasoning |
-| **OpenAI (GPT)** | GPT-4o and o3 series |
-| **Google (Gemini)** | Gemini Pro and Ultra |
-| **Ollama (local)** | Run models on your own hardware — no API key needed |
-| **OpenRouter** | Multi-provider access through a single key |
-
-### Stage 3 — Credentials
-
-If you picked a cloud provider, the wizard asks for your API key:
-
-```
-Enter your anthropic API key:
-> sk-ant-••••••••
-```
-
-Input is masked — your key never appears on screen. Aleph stores it securely in the local vault at `~/.aleph/`.
-
-If you picked **Ollama**, this step is skipped, and the wizard reminds you to make sure Ollama is installed and running locally.
-
-### Stage 4 — Primary Model
-
-Pick the default model for your chosen provider. Options vary by provider. For Anthropic, for example:
-
-| Model | Description |
-|------|------|
-| Claude Opus 4.5 | Most powerful — best for complex tasks |
-| Claude Sonnet 4 | Fast and capable (recommended) |
-| Claude Haiku | Fastest — fits simple tasks |
-
-### Stage 5 — Secondary Model (optional)
-
-The wizard asks whether you want to configure a failover model:
-
-```
-Would you like to configure a secondary model for failover? (y/N)
-```
-
-If **yes**, repeat the provider / credentials / model steps for the secondary. When the primary is unavailable, Aleph falls back automatically (an atomic counter and an atomic regen marker guard the switch — no whole-session clone).
-
-### Stage 6 — Thinking Level
-
-Pick how deeply Aleph reasons before replying:
-
-| Level | Description |
-|------|------|
-| Off | No extended thinking |
-| Minimal | Brief reasoning |
-| Low | Quick analysis |
-| **Medium** | Balanced — fits most tasks (recommended) |
-| High | Deep analysis for hard problems |
-| XHigh | Max depth — slower but thorough |
-
-Change at any time per session with `aleph chat --thinking high`.
-
-### Stage 7 — Session Mode (chat / work / code)
-
-Session mode is **orthogonal** to thinking level — it statically partitions the tool **presentation** surface only, never permissions:
-
-| Mode | Tool surface size | Best for |
-|------|------------------|----------|
-| **chat** | Minimal core | General chat, Q&A, light tools |
-| **work** | Medium (+ workflow tools) | Office work, document handling |
-| **code** | Full (+ dev tool set) | Coding, debugging, CI tasks |
-
-Switch at runtime via the `session_set_mode` tool. See [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode).
-
-### Stage 8 — Exec Tier
-
-| Tier | Behavior |
-|------|----------|
-| **Ask** | Prompt for approval before every tool execution; unknown tools fail closed |
-| **Auto** | Idempotent tools auto-allow; destructive tools still need approval |
-| **Full** | All auto-allow (besides the hard security filter) |
-
-Doesn't conflict with the `[sandbox.command_policy]` hard floor — the hard floor has the highest priority and can't be lowered by any tier. See [Execution Approval](/docs/en/security/exec-approval).
-
-### Stage 9 — Messaging Apps
-
-Pick the messaging platforms to connect. Optional — press **Enter** without selecting any to skip.
-
-| App | Status |
-|------|------|
-| Telegram | Available |
-| Discord | Available |
-| iMessage | Available (macOS sends gated on the BlueBubbles private API) |
-| WebChat | Built-in |
-
-The wizard **doesn't** collect bot tokens here. Configure them after the wizard in `~/.aleph/aleph.toml` or via `aleph config set`.
-
-### Stage 10 — Gateway TLS
-
-If your core needs to be reached from other machines (not just localhost), the wizard walks you through TLS:
-
-- **Loopback only**: keep `bind = 127.0.0.1`, skip TLS
-- **Self-signed**: enable `[gateway.tls]`; SAN auto-discovers the host's non-loopback interface IPs; the Panel approves via TOFU
-- **Trusted reverse proxy**: terminate TLS at the proxy; configure `[gateway] trusted_proxy` list
-
-See [Gateway Protocol](/docs/en/gateway/protocol#tls--tofu).
-
-### Stage 11 — Done
-
-The wizard shows a summary of everything you configured:
-
-```
-Configuration Summary:
-
-  Primary Provider:     anthropic
-  Primary Model:        claude-sonnet-4-20250514
-  Secondary:            openai/gpt-4o
-  Thinking Level:       medium
-  Session Mode:         work
-  Exec Tier:            ask
-  Messaging Apps:       telegram, discord
-  Gateway TLS:          self-signed (SAN auto)
-```
-
-Review carefully before continuing:
-
-```
-Apply this configuration? (Y/n)
-```
-
-If you confirm, the wizard validates your API keys and writes the config to `~/.aleph/aleph.toml`:
-
-```
-  Validating API keys...
-  Saving configuration...
-  Configuration saved
-```
-
-If you decline, the wizard exits without saving anything.
-
-```
-Aleph is ready! Run 'aleph-server start' (or 'aleph chat' for the CLI).
-```
-
-Done. Start the core with `aleph-server start`, or chat from the CLI with `aleph chat`.
-
-## Re-running the Wizard
-
-You can run the wizard again at any time:
+Aleph reads `~/.aleph/config.toml` by default. Set `ALEPH_HOME` to override the root directory.
 
 ```bash
-# Full onboarding — overwrites existing config
-aleph wizard
-
-# Add a new provider without changing other settings
-aleph wizard --provider
-
-# Switch the default session mode only
-aleph wizard --mode
+mkdir -p ~/.aleph
 ```
 
-Re-running the wizard replaces values for stages you complete. Stages you skip (e.g. declining a secondary model) are preserved from the current config.
+Minimal example:
 
-## Quick Setup
+```toml
+[general]
+default_provider = "claude"
 
-If you want to start with the recommended defaults (Anthropic Claude Sonnet 4, work mode, Ask tier, medium thinking), use quick setup:
+[providers.claude]
+provider_type = "claude"
+enabled = true
+api_key = "${ANTHROPIC_API_KEY}"
+models = ["<model ID from the current catalog>"]
+
+[policies]
+mode = "work"
+exec_tier = "auto"
+
+[gateway]
+host = "127.0.0.1"
+port = 18790
+```
+
+Model IDs change as providers evolve. Use the current model catalog or the provider list in Panel instead of copying stale static model names.
+
+## 2. Configure Credentials
+
+Use environment-variable interpolation for credentials:
 
 ```bash
-aleph wizard --quick
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-Quick setup asks only for your Anthropic API key and auto-configures everything else. Takes about 10 seconds.
+For production, prefer Aleph's encrypted secret management over plaintext values in the configuration file. See the current CLI surface with:
 
-## Tips
+```bash
+aleph-server secret --help
+```
 
-- **Wrong API key?** Re-run `aleph wizard --provider` to update credentials.
-- **Change thinking level later:** use `aleph config set agents.defaults.thinking high`, or pass `--thinking` per command.
-- **Switch session mode:** run `aleph wizard --mode`, or use the `/mode` slash command in the CLI/TUI, or ask the model to call the `session_set_mode` tool.
-- **Messaging tokens:** after the wizard, set bot tokens via `aleph config set channels.telegram.token "YOUR_TOKEN"`, then start the channel with `aleph channels start telegram`.
-- **Skip the wizard entirely:** advanced users can edit `~/.aleph/aleph.toml` directly — see [Configuration](./configuration) for the full reference.
+## 3. Diagnose and Start
+
+```bash
+aleph-server doctor
+aleph-server start
+```
+
+The Gateway listens on `127.0.0.1:18790` by default. Its WebSocket endpoint is `ws://127.0.0.1:18790/ws`; the browser Panel uses the HTTP page on the same port.
+
+## 4. Set Session Policies
+
+Global defaults live under `[policies]`:
+
+- `mode = "chat" | "work" | "code"` controls only the tool presentation surface and defaults to `work`
+- `exec_tier = "ask" | "auto" | "full"` controls approval policy and defaults to `auto`
+
+Session mode can also be changed in Panel or by the model through the `session_set_mode` tool. `[sandbox.command_policy]` remains a hard security floor that no execution tier can lower.
+
+## 5. Configure Remote Access
+
+A non-loopback bind requires native TLS, a trusted TLS reverse proxy, or an explicit insecure-remote opt-in. Native self-signed TLS is the recommended direct setup:
+
+```toml
+[gateway]
+host = "0.0.0.0"
+port = 18790
+
+[gateway.tls]
+enabled = true
+```
+
+When `cert_path` and `key_path` are empty, the core generates a self-signed certificate. Panel presents a TOFU approval and pins the certificate on first connection.
+
+## 6. Configure Messaging Channels
+
+Telegram, Discord, and iMessage fields and access policies are defined by the current channel schemas. Configure them in Panel or edit `config.toml` using the corresponding interface reference:
+
+- [Telegram](/docs/en/interfaces/telegram)
+- [Discord](/docs/en/interfaces/discord)
+- [iMessage](/docs/en/interfaces/imessage)
+
+After changing channel configuration, restart the core or follow the current reload-impact classification.
 
 ## Next Steps
 
-- [Configuration](./configuration) — fine-tune every setting manually
-- [Deployment](./deployment) — run Aleph as a persistent service
-- [Quick Start](./quick-start) — start chatting immediately
+- [Configuration](./configuration) — core configuration structure
+- [Deployment](./deployment) — run as a persistent service
+- [Quick Start](./quick-start) — start and verify the Gateway

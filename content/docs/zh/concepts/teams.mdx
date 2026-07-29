@@ -1,273 +1,84 @@
 ---
 title: "团队"
-description: "具有 SQLite 支持存储的代理团队管理，用于管理代理团队、成员资格、任务跟踪和生命周期管理。"
+description: "由队长主导的多代理协调，具备持久任务 DAG、看板生命周期、审查门、模板与成员级工具面。"
 ---
 
-`teams` 模块提供类型和 SQLite 支持存储，用于管理代理团队。它处理团队创建、成员资格、每团队任务跟踪、生命周期管理和计划审批工作流。
+团队由一名队长、具名成员、持久对话和共享的 `CoordTask` DAG 组成。队长拆解工作，成员执行任务，依赖关系控制调度，审查策略决定成功运行何时真正完成。
 
-团队是 **队长主导** 的。在团队的第一条消息上，队长会先于任何成员行动进行规划 —— 这一战略规划称为 **团队战略协调（Team Strata）**。该计划会被焊接进每个成员的提示词中，因此成员从共享的战略出发工作，而非各自孤立地即兴发挥。随后成员在带有显式审查关卡的状态流下执行分配的 **协调任务（Coord Task）**，队长通过 `task_review` 工具接受或拒绝每个交付物。
+## 协调模型
 
-## 设计理念
+团队工作包含三个相连层次：
 
-1. **持久优先** — 所有团队状态都存储在 SQLite 中以实现持久性
-2. **生命周期感知** — 团队具有显式状态（活跃、解散、归档）
-3. **任务集成** — 团队可以具有带有每成员分配的共享任务
-4. **队长主导的战略** — 队长先行规划（团队战略协调）；计划焊接进成员提示词，队长在交付物算作完成之前先行审查
+1. **任务与工件** — `CoordTask` 记录包含负责人、优先级、依赖、状态、结果、运行、评论、事件与工件。
+2. **消息** — SQLite 支持的团队收件箱提供 to/cc 路由与线程；成员通过 `message_send` 和 `inbox_read` 使用它。
+3. **协作会话** — 聚焦的多轮讨论是显式、有界的会话，通过会话工具管理。
 
----
+事件驱动的 `TeamDispatcher` 原子认领可运行任务，遵守任务 DAG 与并发限制，并在重启后协调中断的进行中任务。只有由 dispatcher 管理的任务会自主运行；`team_delegate` 是队长到成员的同步交接。
 
-## 核心类型
+## 看板
 
-### Team
+Panel 看板及其统计标签共用一份规范列定义：
 
-```rust
-pub struct Team {
-    pub id: TeamId,
-    pub name: String,
-    pub description: String,
-    pub status: TeamStatus,
-    pub members: Vec<TeamMember>,
-    pub created_at: DateTime<Utc>,
-}
+`Pending → Blocked → In Progress → Waiting Review → Paused → Completed → Skipped → Failed → Cancelled`
+
+`Unsatisfiable` 是派生的阻塞状态，会归入 **Blocked** 列而不会消失。看板支持拖放、卡片快捷操作，以及任务抽屉中的完整操作栏；三者共用相同的生命周期规则与后端派发点。
+
+重要转换包括：
+
+- `Pending` 可开始、暂停、跳过或取消。
+- `In Progress` 可完成、失败、暂停或取消。
+- `Waiting Review` 可批准、拒绝、跳过或取消。
+- `Paused` 恢复到 `Pending`；`Failed` 可重试到 `Pending`。
+- 终态 `Completed`、`Skipped` 与 `Cancelled` 卡片不可拖动。
+
+可能造成难以撤销结果的拖放需要确认。卡片显示优先级、负责人、依赖数量、审查状态、相对创建时间与简短描述预览。任务抽屉提供运行、评论、事件、工件、统一 trace 与退出 journal。
+
+## 审查与验收
+
+任务可在 metadata 中携带验收策略：
+
+- `acceptance_criteria` 描述完成定义。
+- `lead_review_required` 将成功运行路由到 `WaitingReview`。
+- `require_grounding` 要求批准前提供结构化审查证据。
+
+面向队长的 `task_review` 工具批准或拒绝提交的交付物。Panel 使用 `teams.workflow.approve_step` 与 `teams.workflow.reject_step` 处理同一审查边界。批准会完成任务并解除下游依赖；拒绝会记录 verdict，并让下游继续阻塞，直到任务被重试或重做。
+
+## 成员工具面
+
+内联创建的成员和模板角色可以声明：
+
+```toml
+tools = ["task_*", "message_send", "search", "web_fetch"]
+tools_denied = ["file_write"]
 ```
 
-### TeamStatus
+两个字段都支持末尾 `*` 前缀 glob。两者均省略时保留完整工具面；deny 项优先于 allow 项。`tools` 是按白名单 retain 的；被排除的工具不能通过 `tool_search` 等延迟机制恢复。`team_*` 不应被通配，因为它包含 `team_disband`、`team_create`、`team_from_template`、`team_member_remove` 等管理动作——需要时显式列出 `team_status` 与 `team_delegate`。
 
-```rust
-pub enum TeamStatus {
-    Active,
-    Disbanded,
-    Archived,
-}
-```
+声明通过共享的成员配置路径应用并持久化，使当前运行时工具面与重启后重建的工具面保持一致。如果受限 worker 缺少 `task_submit` 或 `message_send`，或者受限 leader 缺少 `task_create`、`team_delegate`、`task_read_artifact`、`task_review`、`team_status` 等必需协调工具，创建会提前失败。
 
-### TeamMember
+这属于展示与误操作范围收缩，不是安全边界：审批策略、执行等级、作用域工具服务与沙箱规则仍控制执行。模板复用的现有代理保留自己的工具面，`self` leader 也保留调用者的工具面。`role` 字段是自由文本，不会被用来推导工具面。
 
-```rust
-pub struct TeamMember {
-    pub id: MemberId,
-    pub name: String,
-    pub role: TeamRole,
-    pub status: MemberStatus,
-}
+四个内置模板中，`strategy-room` 与 `code-review` 在每个角色上显式声明工具面；`software-dev` 与 `research-paper` 故意不声明，由成员保留完整工具面。
 
-pub enum TeamRole {
-    Leader,
-    Member,
-    Observer,
-}
-```
+## 群聊
 
-### TeamTask
+`teams.chat.send` 启动有界、可取消的成员扇出并持久化带归属的回复。实时 Panel 消费 `team.<id>.*` 事件以获取消息、系统通知、成员活动、扇出状态与任务变化。详见[群聊](/docs/zh/concepts/group-chat)。
 
-```rust
-pub struct TeamTask {
-    pub id: TaskId,
-    pub title: String,
-    pub assignee: Option<MemberId>,
-    pub status: TeamTaskStatus,
-}
+## 主要 RPC 界面
 
-pub enum TeamTaskStatus {
-    Pending,
-    InProgress,
-    WaitingReview,
-    Completed,
-}
-```
+- 团队生命周期：`teams.create`、`teams.get`、`teams.list`、`teams.rename`、`teams.disband`、`teams.delete`、`teams.list_templates`
+- 任务：`teams.create_task`、`teams.update_task`、`teams.list_tasks`、`teams.list_task_runs`、`teams.list_task_comments`、`teams.list_task_events`、`teams.add_task_comment`，加上 `teams.task.pause`、`teams.task.resume`、`teams.task.retry`、`teams.task.skip`、`teams.task.trace`、`teams.task.journal.get`、`teams.task.journal.list`
+- 工作流：`teams.workflow.export_canvas`、`teams.workflow.import_canvas`、`teams.workflow.approve_step`、`teams.workflow.reject_step`、`teams.workflow.retry_step`
+- 对话：`teams.chat.send`、`teams.chat.cancel`、`teams.chat.history`、`teams.chat.thread`
+- 快照：`teams.snapshot.create`、`teams.snapshot.list`、`teams.snapshot.get`、`teams.snapshot.restore`、`teams.snapshot.delete`
+- ACP 成员：`teams.acp_member.add`、`teams.acp_member.remove`、`teams.acp_member.list`
+- 发现与用量：`agents.teams`、`teams.usage`
 
-协调任务在 `Pending → InProgress → WaitingReview → Completed` 之间流转。成员不会将自己的任务标记为完成 —— 当它提交时，任务进入 `WaitingReview`，并由一次合成的重新派发将交付物路由回队长。队长随后接受或拒绝它：
+`team_task_control`（暂停/恢复/重试/跳过/取消）、`task_exit_journal`、`team_workflow_canvas`、`team_snapshot` 等操作通过内置工具提供给代理。LLM 自身审批通过 `task_review`；管理员通过上述 RPC 处理任务级别控制。
 
-```text
-task_review { task_id, verdict: approve | reject, feedback? }
-```
-
-- **approve** → 任务推进到 `Completed`。
-- **reject**（带可选 `feedback`）→ 任务返回给成员进行修订。
-
-这使队长成为判定何为已完成工作的唯一关卡。
-
----
-
-## TeamStore
-
-SQLite 支持的持久化：
-
-```rust
-pub trait TeamStore: Send + Sync {
-    async fn create_team(
-        &self,
-        team: &NewTeam,
-    ) -> Result<TeamId>;
-
-    async fn add_member(
-        &self,
-        team_id: TeamId,
-        member: &NewTeamMember,
-    ) -> Result<()>;
-
-    async fn get_team(
-        &self,
-        team_id: TeamId,
-    ) -> Result<Option<Team>>;
-
-    async fn list_teams(
-        &self,
-    ) -> Result<Vec<TeamSummary>>;
-
-    async fn create_task(
-        &self,
-        team_id: TeamId,
-        task: &NewTeamTask,
-    ) -> Result<TaskId>;
-}
-```
-
-### SqliteTeamStore
-
-```rust
-pub struct SqliteTeamStore {
-    pool: SqlitePool,
-}
-```
-
-**安全：**
-- 所有查询使用参数化 `params![]`
-- `TeamStatus` 和 `TeamTaskStatus` 实现 `FromSql` 以进行适当的错误传播（无 `unwrap_or_default`）
-- 使用 `tokio::sync::Mutex`（无中毒）
-
----
-
-## 生命周期
-
-```
-已创建 → 活跃 → [已解散 | 已归档]
-```
-
-**转换：**
-- `已创建 → 活跃` — 团队已准备好使用
-- `活跃 → 已解散` — 团队已解散（成员已移除）
-- `活跃 → 已归档` — 团队已归档（只读）
-
-**验证：** 操作在继续之前检查团队状态。向已解散的团队添加成员会返回错误。
-
----
-
-## 团队战略协调（Team Strata）
-
-在团队的**第一条消息**上，队长会先于任何成员运行进行规划：
-
-```text
-第一条消息  → 队长规划（团队战略协调）
-           → 计划焊接进每个成员的提示词
-           → 成员执行分配的协调任务
-           → 提交 → WaitingReview → 队长 task_review（approve/reject）
-           → Completed
-```
-
-队长的战略计划会被注入该团队中每个成员的提示词，因此每个成员都共享对目标、拆解和各自分工的同一幅图景。成员在协调任务下工作并提交交付物以供审查；队长用 `task_review` 把守完成关卡。名称为空的团队会在其第一条消息上由 LLM 自动命名。
-
-> 在桌面面板中，团队从位于**侧边栏顶部**的 **ModelPicker 风格胶囊 + 弹出框** 中选择 —— 切换活跃团队只需一次点击，与团队的[群聊](/docs/zh/concepts/group-chat)窗口并列。
-
----
-
-## 事件
-
-```rust
-pub enum TeamEvent {
-    TeamCreated { team_id: TeamId },
-    MemberJoined { team_id: TeamId, member_id: MemberId },
-    MemberLeft { team_id: TeamId, member_id: MemberId },
-    TaskCreated { team_id: TeamId, task_id: TaskId },
-    TaskCompleted { team_id: TeamId, task_id: TaskId },
-}
-```
-
----
-
-## 工件
-
-团队可以生成共享工件：
-
-```rust
-pub struct TeamArtifact {
-    pub id: ArtifactId,
-    pub name: String,
-    pub content_type: String,
-    pub content: Vec<u8>,
-}
-```
-
----
-
-## 安全属性
-
-- **无 SQL 注入** — 整个参数化查询
-- **无锁中毒** — 使用 `tokio::sync::Mutex`
-- **类型安全状态** — `FromSql` 实现防止静默解析失败
-- **生产中无 unwrap** — 所有数据库操作返回 `Result`
-
----
-
-## 代码位置
-
-- `src/teams/mod.rs` — 模块入口点
-- `src/teams/store.rs` — `TeamStore` trait 和 SQLite 实现
-- `src/teams/types.rs` — 核心类型
-- `src/teams/lifecycle.rs` — 生命周期管理
-- `src/teams/events.rs` — 事件定义
-- `src/teams/artifacts.rs` — 工件管理
-- `src/teams/plans.rs` — 计划审批工作流
-- `src/teams/context.rs` — 代理的团队上下文
-- `src/teams/sessions/` — 会话管理
-- `src/teams/messages/` — 团队消息
+不存在 `teams.run` RPC，也不存在 `sequential | parallel | hierarchical` 协调模式。并行来自任务 DAG、dispatcher 限制与群聊扇出。
 
 ## 另请参阅
 
-- [代理运行时](/docs/zh/concepts/agent-runtime) — 代理如何生成和管理任务
-- [群聊](/docs/zh/concepts/group-chat) — 带归属气泡的三面板团队群聊
-- [竞技场](/docs/zh/concepts/arena) — 多代理协作工作区
-
----
-
-## 26.7.x 补充
-
-### Team 节点融合 Graph
-
-26.7.21+：图（loop_graph）与多代理系统融合——`team` 节点类型、图状态中实时加入的团队、团队配对目标、团队解散时胜利声明触发的 watcher。
-
-### Teams Kanban 深度重构
-
-26.7.24+：Panel 团队看板深度重构——拖放、共享生命周期/列源、更丰富的卡片、操作者可调的广播风暴防护。
-
-### 团队模板工具面
-
-26.7.25+：内置团队模板的工具面——成员**可声明**自己的工具面（`agents.tools_schema` 共享），不再硬编码。
-
-### `team` 内置的 `loop-auditor`
-
-26.7.21+：内置受保护智能体；审计 / 监督模板默认走独立上下文证据。
-
-### 接地证据门
-
-26.7.21+：`task_review` 审批现在可要求 grounding，并附带验收元数据辅助函数。
-
-### 完整 teams.* RPC
-
-- `teams.create` / `teams.delete` / `teams.disband` / `teams.rename`
-- `teams.get` / `teams.list` / `teams.list_templates` / `teams.usage`
-- `teams.create_task` / `teams.update_task` / `teams.list_tasks` / `teams.delete`
-- `teams.add_task_comment` / `teams.list_task_comments` / `teams.list_task_events` / `teams.list_task_runs`
-- `teams.chat.send` / `teams.chat.history` / `teams.chat.thread` / `teams.chat.cancel`
-- `teams.task.trace`
-- `agents.teams` —— 列出 agent 的团队
-
-### 协调任务
-
-Coord Task 状态：`Pending → InProgress → WaitingReview → Completed`，由队长通过 `task_review` 审核。历史虚构的「coordination: sequential|parallel|hierarchical」模式已删除。
-
-### 见另请参阅
-
-- [群聊](/docs/zh/concepts/group-chat) — 三面板 UI
-- [架构 / 团队](/docs/zh/architecture/teams) — 完整流程
-- [网关 RPC `teams.*`](/docs/zh/gateway/methods/teams) — 协议
+- [群聊](/docs/zh/concepts/group-chat) — 团队对话界面
+- [执行引擎](/docs/zh/concepts/execution-engine) — 运行与工具调用并发

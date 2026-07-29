@@ -210,6 +210,7 @@ Aleph 采纳 Anthropic 流派，运行时极简、信任模型。Harness 是脚�
 ### 核心边界
 
 - `src/harness/` 锁 **12 文件**；行数由 `src/harness/tests/budget.rs` 的棘轮守（实测非手算、只减不增、增必答下方 3 问）。**代码是权威**——任何文档数字都只是 `CEILING` 的副本
+- **行数单一真源**：`src/harness/tests/budget.rs::CEILING`（运行在 `cargo test -p alephcore --lib`）；`src/harness/CLAUDE.md` 是本地强化说明，根 `CLAUDE.md §R10` 给出最高级表述。本页不引用具体行数——任何时候「当前 X 行」应以 `budget.rs` 实测为准
 - 顶层 (8)：`mod.rs` / `agent.rs` / `deps.rs` / `trait_def.rs` / `callback.rs` / `chain_context.rs` / `trace.rs` / `trace_sink.rs`
 - `agent/` 子目录 (4)：`think.rs` / `act.rs` / `guardrails.rs` / `prompt.rs`（Task 8/9/10 把 `agent.rs` 按 Think/Act/Guardrails/Prompt 拆分为四个子职责）
 

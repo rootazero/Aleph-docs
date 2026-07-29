@@ -3,7 +3,7 @@ title: "Gateway Architecture"
 description: "WebSocket control plane on port 18790, JSON-RPC 2.0 protocol, multi-channel routing, middleware pipeline, event distribution, and connection lifecycle."
 ---
 
-The Gateway is the single entry point for all communication with Aleph. It runs a WebSocket server on `ws://127.0.0.1:18790/ws`, speaks JSON-RPC 2.0, and routes requests from any connected client -- whether a native macOS app, a Telegram bot, or the terminal CLI -- to the appropriate handler. This page covers the protocol layer, message pipeline, multi-channel routing, and the event system that powers real-time streaming.
+The Gateway is the single entry point for all communication with Aleph. It runs a WebSocket server on `ws://127.0.0.1:18790/ws`, speaks JSON-RPC 2.0, and routes requests from any connected client -- whether a native macOS app, a Telegram bot, or the terminal CLI -- to the appropriate handler. This page covers the protocol layer, message pipeline, multi-channel routing, the event system that powers real-time streaming, and hardening mechanisms such as self-signed TLS with client-side TOFU and single-source error receipts.
 
 For how sessions are managed once a request arrives, see [Session Service](./session-service). For what happens after routing reaches the agent, see [Agent Harness](./harness).
 
@@ -26,12 +26,12 @@ For how sessions are managed once a request arrives, see [Session Service](./ses
 │  └──────────────┘     └──────────────┘     └──────────────┘        │
 │                                                                     │
 │  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐        │
-│  │   Session    │     │    Event     │     │  Interface   │        │
-│  │   Manager    │     │     Bus      │     │   Registry   │        │
-│  │              │     │              │     │              │        │
-│  │ • SQLite     │     │ • Pub/Sub    │     │ • Telegram   │        │
-│  │ • Compaction │     │ • Topics     │     │ • Discord    │        │
-│  │ • History    │     │ • Subscribe  │     │ • iMessage   │        │
+│  │   Session    │     │    Event     │     │  Channel     │
+│  │   Manager    │     │     Bus      │     │   Registry   │
+│  │              │     │              │     │              │
+│  │ • SQLite     │     │ • Pub/Sub    │     │ • Telegram   │
+│  │ • Compaction │     │ • Topics     │     │ • Discord    │
+│  │ • History    │     │ • Subscribe  │     │ • iMessage   │
 │  └──────────────┘     └──────────────┘     └──────────────┘        │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -42,9 +42,9 @@ The Gateway has six core components:
 - **Inbound Router** -- Parses incoming JSON-RPC frames, validates structure, and dispatches to the correct handler
 - **Handler Registry** -- Maps method names (e.g., `agent.run`, `session.list`) to handler functions
 - **Outbound Emitter** -- Sends streaming events and final responses back to the client
-- **Session Manager** -- Persists conversation history in SQLite, handles compaction
+- **Session Manager** -- Persists conversation history in SQLite (`session.*` RPC still uses `SessionManager`; the `session_events` table is the single source of truth, written by the `src/session/` actor)
 - **Event Bus** -- Pub/sub system for real-time event distribution with glob-pattern subscriptions
-- **Interface Registry** -- Tracks active chat integrations (Telegram, Discord, iMessage)
+- **Channel Registry** (`ChannelRegistry`) -- Tracks active chat integrations (Telegram, Discord, iMessage, ...). The old `InterfaceRegistry` name is no longer used.
 
 ---
 
@@ -162,17 +162,28 @@ Events are server-initiated notifications (no `id` field). Clients subscribe to 
 
 ### Other Method Domains
 
-| Domain | Methods |
+> The full and authoritative list lives in [Gateway Methods Reference](/docs/en/gateway/methods) and the registration block at `src/gateway/handlers/mod.rs::HandlerRegistry::new`. Below is a domain-grouped summary:
+
+| Domain | Description |
 |--------|---------|
-| `auth.*` | `connect`, `pairing.approve`, `pairing.reject`, `devices.list` |
-| `interface.*` | `status`, `config`, `login` |
-| `mcp.*` | `start`, `stop`, `list`, `call` |
-| `plugins.*` | `install`, `uninstall`, `list`, `enable`, `disable` |
-| `skills.*` | `list`, `install`, `activate` |
-| `runs.*` | `list`, `status`, `wait`, `queue` |
-| `models.*` | `list`, `config` |
-| `generation.*` | `image`, `video` |
-| `cron.*` | `list`, `add`, `remove`, `run` |
+| `connect` | Top-level method (no prefix); the first frame on a `/ws` connection must be `connect`; carries `device_token` / `bootstrap_ticket` / `token` |
+| `pairing.*` | Channel sender approval (iMessage / Telegram unknown senders) -- **not** device auth |
+| `plugin.*` / `plugins.*` | Plugin install / enable / disable / call; CC-compatible dual prefix |
+| `mcp.*` | MCP server lifecycle + `call` + on-demand `list_*` resource / prompt discovery |
+| `skill.*` | Skill list / install / activate (v2 `SkillSystem`) |
+| `generation.*` | Image / video / voice generation |
+| `cron.*` | Scheduled tasks: list / add / remove / run |
+| `heartbeat.*` / `dreaming.*` | Background-task RPCs |
+| `artifacts.*` | Artifact store: list / get / put |
+| `voice.*` | Voice sessions + delta topics |
+| `hub.*` | Aleph Hub: `primer` / `catalog_client` / `install` / `verify` / `trust` |
+| `strategy.*` / `goal.*` / `loop.*` | Three independent long-task subsystems |
+| `graph.*` | Governance topology node / edge queries |
+| `cluster.*` | Cluster federation RPCs (`environments.list` / `node_invoke`, etc.) |
+| `identity.*` / `agent_identity.*` | Per-agent signed operation ledger |
+| `exec_approvals.*` / `secret_approvals.*` | Action / secret approval |
+| `gateway.*` | Gateway self: `credentials` / `identity.get` / `metrics.lanes` / `metrics.run_concurrency`, etc. |
+| `wizard.*` | Wizard sessions (RPC-driven, not a CLI subcommand) |
 
 ---
 
@@ -242,43 +253,48 @@ The middleware pipeline runs for every JSON-RPC request in this order:
 
 Aleph supports multiple chat interfaces simultaneously. Each interface (Telegram, Discord, iMessage, etc.) translates its platform-specific messages into the unified JSON-RPC protocol and forwards them to the Gateway.
 
-### Interface Trait
+### Channel Adapter (`src/gateway/channel.rs`)
 
-Every channel adapter implements the `Interface` trait:
+Every channel adapter implements the `Channel` trait; there are no compile-time feature flags -- channels are registered at runtime through `[channels.<type>]` into `ChannelRegistry`:
 
 ```rust
 #[async_trait]
-pub trait Interface: Send + Sync {
-    fn name(&self) -> &str;
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn send_message(
-        &self,
-        target: &InterfaceTarget,
-        message: &str,
-    ) -> Result<()>;
-    fn is_running(&self) -> bool;
+pub trait Channel: Send + Sync {
+    fn info(&self) -> &ChannelInfo;
+    fn state(&self) -> &ChannelState;
+    fn id(&self) -> &ChannelId;
+    fn capabilities(&self) -> &ChannelCapabilities;
+    async fn health(&self) -> ChannelHealth;
+    async fn start(&mut self) -> ChannelResult<()>;
+    async fn stop(&mut self) -> ChannelResult<()>;
+    async fn send(&self, message: OutboundMessage) -> ChannelResult<SendResult>;
+    async fn send_typing(&self, conversation_id: &ConversationId) -> ChannelResult<()>;
+    fn approval_capability(&self) -> Option<Arc<dyn ChannelApprovalCapability>>;
 }
 ```
 
+Built-in adapters are wired through `ChannelFactory` entries registered in `interfaces::register_channel_plugins`. An unregistered factory is unreachable from config. `imessage` and `cli` deliberately bypass that table -- iMessage is constructed directly in `initialize_channels`, and CLI is not a configurable channel type.
+
 ### Available Interfaces
 
-| Interface | Feature Flag | Platform |
-|-----------|-------------|----------|
-| CLI | `cli` | All platforms |
-| Telegram | `telegram` | All platforms |
-| Discord | `discord` | All platforms |
-| iMessage | (built-in) | macOS only |
-| WebChat | `gateway` | All platforms |
+| Interface | Location | Platform |
+|-----------|----------|----------|
+| CLI | `interfaces/cli/` | All platforms |
+| Telegram | `src/gateway/interfaces/telegram/` | All platforms |
+| Discord | `src/gateway/interfaces/discord/` | All platforms |
+| iMessage | `src/gateway/interfaces/imessage/` (Local + BlueBubbles transports) | Local: macOS only; BlueBubbles: any OS |
+| Slack / Matrix / Mattermost / Signal / IRC / Nostr / XMPP / Email / Webhook / WeChat / Feishu / Line / QQ / MS Teams | `src/gateway/interfaces/<name>/` | Per platform |
+| WebChat | Embedded in `aleph-server` (via `rust_embed`) | All platforms |
 
 ### Session Key Resolution
 
-Each channel produces a unique session key that determines whether conversations are shared or isolated:
+Each channel produces a unique session key that determines whether conversations are shared or isolated (format decided by `DmScope` and `PeerKind`, see [`src/routing/session_key.rs`]):
 
 | Session Key Format | Use Case |
 |-------------------|----------|
-| `agent:main:main` | Cross-channel shared session (Main) |
-| `agent:main:telegram:dm:user123` | Per-user Telegram DM (DirectMessage) |
+| `agent:main:main` | Cross-channel shared session (`DmScope::Main` or main session) |
+| `agent:main:dm:user123` | Per-user isolated DM (`DmScope::PerPeer`, **default**) |
+| `agent:main:telegram:dm:user123` | Per-channel per-user DM (`DmScope::PerChannelPeer`) |
 | `agent:main:discord:group:guild-id` | Discord server channel (Group) |
 | `agent:main:cron:daily-summary` | Cron job / webhook (Task) |
 | `subagent:agent:main:translator` | Sub-agent delegation (Subagent) |
@@ -342,32 +358,40 @@ Client WebSocket Connect
     │
     ▼
 ┌─────────────────────────────────┐
-│ require_auth enabled?           │
-│   Yes → First frame must be     │
+│ Loopback connection?            │
+│   Yes → Zero-config operator    │
+│         (no credentials)        │
+│   No  → First frame must be     │
 │         "connect" method        │
-│   No  → Direct access allowed   │
 └─────────────────────────────────┘
     │
-    ▼ (if auth required)
+    ▼ (remote)
 ┌─────────────────────────────────┐
-│ Validate credentials            │
-│   • Bearer token                │
-│   • Device fingerprint          │
-│   • Public key signature        │
+│ resolve_connect_auth            │
+│   1. Device token (aleph-dt-*)  │
+│      -- paired device, long-lived│
+│   2. Bootstrap ticket           │
+│      (aleph-bt-*) -- 5 min,    │
+│      single-use                 │
+│   3. Shared Gateway token       │
+│      (aleph-<uuid>, HMAC)       │
 └─────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────┐
-│ Grant session token             │
-│ Set client role (operator/node) │
+│ Authorized → role = operator    │
+│   WS dispatch accepts all       │
+│   Remote WS closed with 4001    │
+│   (token rotation / device      │
+│   revocation)                   │
 └─────────────────────────────────┘
 ```
 
-Authentication mode defaults to `Token`. Set `auth.mode = "none"` in config to disable authentication entirely. The legacy `require_auth` field is still accepted for backward compatibility.
+The default bind is `127.0.0.1` (loopback only); loopback is the zero-config operator and needs no credential. Set `[gateway] host = "0.0.0.0"` to open the LAN -- a remote device can then reach the socket but is **walled until it presents a valid credential** at `connect`. The `is_loopback` check reads the raw socket peer (not `X-Forwarded-For`), preventing forged headers from granting zero-config operator. A valid credential = full operator authority (identical to local); remote WS sockets are closed immediately on token rotation (`gateway.token.rotate`) or per-device revoke (`gateway.devices.revoke`), not at the next handshake.
 
 ### Connect Request
 
-When authentication is enabled, the client must send a `connect` message as the first frame:
+A remote client must send a `connect` message as the first frame:
 
 ```json
 {
@@ -380,19 +404,19 @@ When authentication is enabled, the client must send a `connect` message as the 
       "version": "1.0.0",
       "platform": "macos"
     },
-    "role": "operator",
-    "auth": {
-      "token": "bearer_token"
-    }
+    "device_token": "aleph-dt-...",
+    "bootstrap_ticket": "aleph-bt-..."
   }
 }
 ```
+
+> Loopback clients omit the credential fields entirely. A remote client sends `bootstrap_ticket` on first pairing (receiving a `device_token` back), then `device_token` on every reconnect. `token` (the legacy shared Gateway token) is accepted as a fallback. `device_id` is **client-asserted** and shares a namespace with cluster nodes, so the exchange refuses a `device_id` already naming a non-Panel device.
 
 ---
 
 ## OpenAI-Compatible Routes
 
-In addition to the WebSocket JSON-RPC API, the Gateway exposes an OpenAI-compatible HTTP API on the same port (`18790`). This allows existing clients and tools that speak the OpenAI API format to connect to Aleph without modification.
+In addition to the WebSocket JSON-RPC API, the Gateway exposes an OpenAI-compatible HTTP API on the same port (`18790`) via `src/gateway/openai_api/`. This allows existing clients and tools that speak the OpenAI API format to connect to Aleph without modification.
 
 | Route | Method | Description |
 |-------|--------|-------------|
@@ -403,16 +427,16 @@ In addition to the WebSocket JSON-RPC API, the Gateway exposes an OpenAI-compati
 | `/v1/responses` | POST | OpenAI Responses API |
 | `/v1/health` | GET | API health check |
 
-These routes support bearer token authentication (same token as WebSocket auth when `auth.mode = "token"`). In development mode (`auth.mode = "none"`), the endpoints are open.
+These routes share the WebSocket bearer-token mechanism. With `[gateway] allow_insecure_remote = false` (the default), remote HTTP access must arrive over TLS; plaintext to a non-loopback peer is refused.
 
 ---
 
 ## Hot Reload
 
-The Gateway watches `~/.aleph/config.toml` for changes and applies them without restarting:
+The Gateway watches `~/.aleph/config/aleph.toml` for changes and applies them without restarting:
 
 ```
-~/.aleph/config.toml modified
+~/.aleph/config/aleph.toml modified
     │
     ▼
 ┌─────────────────────────────────┐
@@ -427,13 +451,13 @@ The Gateway watches `~/.aleph/config.toml` for changes and applies them without 
                   ▼
 ┌─────────────────────────────────┐
 │ Apply changes:                  │
-│ • Restart affected interfaces   │
+│ • Restart affected channels     │
 │ • Update routing rules          │
 │ • Emit config.changed event     │
 └─────────────────────────────────┘
 ```
 
-Protocol adapter definitions in `~/.aleph/protocols/` are also hot-reloaded with a similar mechanism (see [Architecture Overview](./overview) for details on the protocol adapter system).
+The `[execution]` run caps (`max_runs_global` / `max_runs_per_agent`) hot-reload via an arc-swap global semaphore without restart.
 
 ---
 
@@ -494,34 +518,36 @@ Each interface has its own authentication and scope configuration. Telegram can 
 The in-process gateway in `aleph-server` handles:
 
 - **WebSocket protocol** (JSON-RPC 2.0 over ws/wss)
-- **TLS** (self-signed or user-supplied)
-- **Authentication** (TOFU, token, device ticket, pairing)
-- **Routing** (chat / config / memory / agents / tools / mcp / skills / plugins / extensions / channels / teams / projects / workspaces / runtimes / ...)
-- **Full ~265 RPCs**
+- **TLS** (self-signed or user-supplied, terminated in-process by `axum-server`)
+- **Authentication** (loopback zero-config operator / device token / bootstrap ticket / shared token / WS Origin check)
+- **Routing** (chat / config / memory / agents / tools / mcp / skills / plugins / extensions / channels / teams / projects / workspaces / runtimes / voice / artifacts / hub / strategy / goal / loop / ...)
+- **Full RPC surface** (see [Methods Reference](/docs/en/gateway/methods))
 
 ### Single-Source Error Receipt
 
-26.7.21+: the gateway returns a **single-source** user-readable error. The raw error chain never leaks to the Panel.
+26.7.21+: every execution error is normalized through `ExecutionError::user_receipt(locale)` in `src/gateway/execution_engine/` to a stable error code plus a localized short message. This is the **single source** the Panel and channels render -- the raw typed error chain never leaks. The bin-crate RPC handlers (`agent.run` / `chat.send` in `src/bin/aleph-server/server_init.rs`) and the inbound router's channel reply path both call the same function, so a single failure can never produce two error bubbles.
 
 ### WS Task-Leak Fixes
 
-26.7.21+: per-connection event-forward tasks no longer leak; `broadcast::RecvError::Lagged` recovers rather than dies permanently; webhook backpressure returns 503.
+26.7.21+ (see `src/gateway/server/handler.rs::forward_bus_to_client`): per-connection event-forward tasks exit on a failed `try_send` instead of holding a global `broadcast::Receiver` for the rest of the process; `RecvError::Lagged(n)` is non-fatal (counted into an overflow metric, with the idle/ping watchdog eventually closing the socket with code 1008); webhook backpressure returns 503 instead of silently dropping inbound messages.
 
-### Self-Signed TLS + TOFU
+### Self-Signed TLS + Client-Side TOFU
 
-- `[gateway] tls` — self-signed or user-supplied cert
+26.7.17 introduces in-process TLS (`src/gateway/tls.rs`); 26.7.18 adds SAN auto-discovery + drift sidecar; the Panel's WKWebView adapter (macOS reference platform, with iOS Keychain mirror) implements **TOFU certificate trust** (fingerprint + SAN approval + pinned trust store). Config:
+
+- `[gateway.tls]` — self-signed or user-supplied (`cert` / `key` empty → auto-generated)
 - `[gateway] trusted_proxy` — real reverse-proxy IP
-- `[gateway] allow_insecure_remote` — fail closed
-- Client-side TOFU: fingerprint + SAN approval
+- `[gateway] allow_insecure_remote = false` (default) — fail closed
 
-### Device / Credentials / Ticket / Token
+### Device / Credentials / Ticket / Token RPCs
 
-- `gateway.ticket.create`
-- `gateway.token.current` / `gateway.token.rotate`
-- `gateway.devices.list` / `gateway.devices.revoke`
+26.7.21 registers in `HandlerRegistry`:
+
 - `gateway.credentials`
 - `gateway.identity.get`
 - `gateway.metrics.lanes` / `gateway.metrics.run_concurrency`
+
+`gateway.token.current` / `gateway.token.rotate` / `gateway.devices.list` / `gateway.devices.revoke` are wired in via boot-phase injection (see the `gateway_state` registration block in `src/gateway/handlers/mod.rs`).
 
 ### See Also
 

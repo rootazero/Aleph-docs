@@ -1,289 +1,72 @@
 ---
 title: "内置工具"
-description: "内置工具系统实现 rig 的 Tool trait，用于 AI 可调用的函数，包括文件操作、代码执行、Web 获取、搜索、PDF 生成和进度回调。"
+description: "Aleph 内置工具的权威注册表、按请求执行面、工具发现和运行时能力边界。"
 ---
 
-`builtin_tools` 模块实现 Aleph 的内置工具系统。所有工具都实现 rig 的 `Tool` trait，使它们可以直接被 AI 代理调用。此模块包含 40 多个工具实现，涵盖文件操作、代码执行、Web 交互、媒体生成和系统管理。
+Aleph 的内置工具分为两层：`src/executor/builtin_registry/definitions.rs:63` 的 `BUILTIN_TOOL_DEFINITIONS` 是面向代理的权威名称与描述清单；`src/builtin_tools/` 和 `src/executor/builtin_registry/` 提供实际实现与分发。某项工具是否出现在当前请求中，还会受到依赖、健康状态、代理/频道权限和会话模式影响，因此“注册表中存在”不等于“每个会话都可见”。
 
-## 设计理念
+## 权威工具注册表
 
-工具系统遵循两个原则：
+注册表当前覆盖以下工具族；名称以源码清单为准：
 
-1. **统一接口** — 每个工具实现相同的 `Tool` trait，因此代理无论它们做什么都以相同的方式调用它们
-2. **进度可见性** — 工具执行发出回调以实现实时 UI 更新
+| 工具族 | 注册名称 |
+| --- | --- |
+| 网络与文件 | `search`、`web_fetch`、`file_ops`、`file_read`、`file_write`、`file_edit`、`apply_patch` |
+| 执行与检查 | `bash`、`code_exec`、`code_check`、`pdf_generate`、`image_generate` |
+| 工具与技能 | `skill_list`、`skill_read`、`skill_status`、`skill_install`、`skill_manage`、`read_config_guide` |
+| 桌面与浏览器 | `desktop`、`desktop_ax_query_focused`、`desktop_ax_query_tree`、`desktop_ax_query_by_role`、`desktop_ax_snapshot`、`desktop_som`、`desktop_gui_locate`、`desktop_check_permissions`；以及 `browser_open`、`browser_click`、`browser_type`、`browser_snapshot`、`browser_navigate`、`browser_tabs`、`browser_select`、`browser_evaluate`、`browser_fill_form`、`browser_press_key`、`browser_wait_for`、`browser_console`、`browser_hover`、`browser_scroll`、`browser_pdf`、`browser_network`、`browser_dialog`、`browser_drag`、`browser_upload`、`browser_resize`、`browser_emulate`、`browser_cookies`、`browser_session`、`browser_profile` |
+| 记忆与会话 | `memory_search`、`memory_browse`、`memory_explore`、`memory_timeline`、`memory_reflect`、`memory_trace`、`remember`、`recall_context`、`recall_events`、`ctx_search`、`session_list`、`session_send`、`session_new`、`session_compact`、`session_rename`、`session_set_mode`、`session_search`、`session_complete`、`user_profile`、`note_manage`、`note_orient`、`note_schema`、`note_graph_query` |
+| 自管理与运行时 | `self_manage`、`self_config`、`config_audit`、`doctor`、`hooks_manage`、`select_model`、`list_models`、`vault_store`、`gateway_route`、`agent_identity`、`agent_create`、`agent_list`、`agent_delete`、`agent_switch`、`agent_info` |
+| 集群、频道与媒体 | `node_list`、`node_invoke`、`node_invoke_many`、`node_file`、`node_manage`、`channel_pairing`、`media_understand`、`audio_transcribe`、`document_extract`、`media_send`、`artifact_publish`、`ask_user`、`google_meet` |
+| 自动化、团队与任务 | `cron_manage`、`heartbeat_list`、`heartbeat_create`、`heartbeat_update`、`heartbeat_delete`、`heartbeat_toggle`、`heartbeat_report`、`team_create`、`team_delegate`、`team_status`、`team_disband`、`team_set_protocol`、`team_member_add`、`team_member_remove`、`team_digest`、`team_from_template`、`team_snapshot`、`team_usage`、`team_workflow_canvas`、`message_send`、`inbox_read`、`plan_submit`、`plan_resolve`、`task_create`、`task_update`、`task_list`、`task_wait`、`task_comment`、`task_submit`、`task_read_artifact`、`task_review`、`workflow`、`workflow_step_review` |
+| 扩展与代理互操作 | `clawhub`、`hub_catalog_sync`、`hub_resolve_spec`、`hub_install_run`、`hub_install_verify`、`hub_fetch_docs`、`acp_delegate`、`acp_switch`、`a2a_delegate`、`a2a_agents`、`moa` |
 
----
+部分工具需要在启动时注入内存、频道、集群、团队、媒体、生成或扩展依赖；缺少依赖时，分发器会返回明确错误，而不是凭空创建一个可用实例。`scratchpad` 与 `voice_mode_set` 是运行时追加的 LLM 工具，不属于这张静态清单；`audio_generate`、`video_generate`、`speech_generate` 等也不是这张清单中的静态名称。
 
-## 工具类别
+## 工具实现与执行
 
-### 文件操作
+工具实现使用 `AlephTool` 的类型化调用和 JSON Schema，运行时由 `BuiltinToolRegistry` 的集中分发接收规范名称。Gateway 每个请求构造一个带权限、健康、确认、会话上下文和工具重写器的 `ScopedToolService`；它实现 `ToolService` 的 `execute`、`list`、`dispatchable_list`、`describe` 和 `metadata_schema`。
 
-用于读取、写入和操作文件的文件系统工具：
+工具名称修复只用于解析已有名称或给出建议，不会把不存在的工具变成注册工具。未知工具在 `ask` 执行层级下失败关闭。
 
-```rust
-pub struct FileOpsTool;
-pub struct FileReadTool;
-pub struct FileWriteTool;
-pub struct FileEditTool;
-```
+## 工具发现
 
-**能力：**
-- `list` — 列出目录内容
-- `read` — 读取文件内容
-- `write` — 写入或覆盖文件
-- `move` / `copy` — 文件重定位
-- `delete` — 删除文件和目录
-- `mkdir` — 创建目录
-- `search` — 按模式查找文件
+当前发现路径是：
 
-**安全：** 通过边界验证防止路径遍历 —— 在目录创建后调用 `canonicalize`，并针对允许的边界验证路径。
+- 启用渐进披露时，非核心工具保留名称和描述，但输入 Schema 被折叠；
+- `get_tool_schema(tool_name)` 按请求快照返回完整 Schema；
+- 延迟工具由 `tool_search(query, limit)` 以 BM25 按名称和描述检索，并返回可调用工具的完整参数；命中的工具会被提升回下一轮工具数组；
+- `[tools] defer_mcp_tools` 可将 MCP 工具放入延迟层；会话模式也使用同一延迟层；
+- 核心集合为空或包含 `*` 时关闭渐进披露，保持旧的工具面。
 
-### 代码执行
+这套机制优化的是工具展示和上下文成本，不替代权限检查；被隐藏的工具仍可能在执行层被拒绝。
 
-在沙箱环境中执行代码：
+## 进度回调
 
-```rust
-pub struct CodeExecTool;
-```
-
-**语言：** Python, JavaScript, Shell
-
-**安全：**
-- 在执行之前创建和验证工作目录
-- 通过规范化阻止路径遍历
-- 错误传播使用 `?` —— 永远不会静默吞咽失败
-
-### Web 获取
-
-检索网页内容：
-
-```rust
-pub struct WebFetchTool;
-```
-
-获取 URL 并返回清理后的文本内容供代理分析。
-
-### 搜索
-
-通过多个后端进行 Web 搜索：
-
-```rust
-pub struct SearchTool;
-```
-
-**提供商：** SearXNG（隐私优先，自托管）
-
-### PDF 生成
-
-从文本或 Markdown 生成 PDF：
-
-```rust
-pub struct PdfGenerateTool;
-```
-
-使用浏览器引擎渲染 HTML 并导出为 PDF。临时文件使用 `AtomicU64` 计数器作为唯一文件名，以防止并发调用中的竞争条件。
-
-### 媒体生成
-
-生成图像和语音：
-
-```rust
-pub struct ImageGenerateTool;
-pub struct SpeechGenerateTool;
-```
-
-**提供商：** DALL-E, Stable Diffusion, Midjourney, ElevenLabs, OpenAI TTS
-
-### 桌面操作
-
-与桌面环境交互：
-
-```rust
-pub struct DesktopTool;
-```
-
-**能力：**
-- 可访问性树查询（按角色、聚焦元素、完整树）
-- 权限检查
-- 截图捕获
-
-### 内存工具
-
-访问代理的内存系统：
-
-```rust
-pub struct MemorySearchTool;
-pub struct MemoryBrowseTool;
-pub struct MemoryReflectTool;
-pub struct MemoryExploreTool;
-pub struct MemoryTimelineTool;
-```
-
-### 元工具
-
-用于工具发现的工具：
-
-```rust
-pub struct ListToolsTool;      // 按类别列出可用工具
-pub struct GetToolSchemaTool;  // 获取特定工具的 JSON 模式
-```
-
-### MCP 包装器
-
-将 MCP 服务器工具包装为 rig 兼容的工具：
-
-```rust
-pub struct McpToolWrapper;
-```
-
----
-
-## 工具进度回调
-
-工具执行可以通过全局回调系统进行监控：
+`ToolProgressCallback` 位于 `src/builtin_tools/mod.rs:272`，提供工具开始、完成和流式块事件：
 
 ```rust
 pub trait ToolProgressCallback: Send + Sync {
     fn on_tool_start(&self, tool_name: &str, args_summary: &str);
-    fn on_tool_result(
-        &self,
-        tool_name: &str,
-        result_summary: &str,
-        success: bool,
-    );
-    fn on_tool_streaming_chunk(&self, tool_name: &str, chunk: &str,
-    );
+    fn on_tool_result(&self, tool_name: &str, result_summary: &str, success: bool);
+    fn on_tool_streaming_chunk(&self, tool_name: &str, chunk: &str);
 }
 ```
 
-**用法：**
-
-```rust
-let handler = Arc::new(MyHandler::new());
-set_tool_progress_handler(Some(handler));
-// ... 执行代理操作 ...
-set_tool_progress_handler(None); // 完成后清除
-```
-
-**线程安全：** 回调存储在 `Mutex<Option<Arc<...>>>` 中。对于流式块，`Arc` 在短暂的锁下克隆，以避免在回调期间持有互斥锁。
-
----
-
-## 工具输出压缩
-
-`tool_output` 模块在发送到 LLM 之前压缩冗长的工具输出：
-
-```rust
-pub fn compress_snapshot(output: &str, max_chars: usize) -> String
-```
-
-**策略：**
-- JSON 数组 —— 截断并带有元素计数
-- JSON 对象 —— 带有值截断的键摘要
-- 纯文本 —— 在边界处的字符安全截断
-- 空输入 —— 原样返回
-
-**安全：** 使用 `is_char_boundary()` 进行 UTF-8 安全截断。无字节级切片。
-
----
-
-## 错误处理
-
-所有工具返回 `Result<T, ToolError>`：
-
-```rust
-pub enum ToolError {
-    Execution(String),
-    InvalidArgs(String),
-    NotFound(String),
-    PermissionDenied(String),
-    Timeout,
-}
-```
-
----
-
-## 安全属性
-
-- **无路径遍历** — 文件操作中的 `canonicalize` + 边界验证
-- **无竞争条件** — 临时文件名的 `AtomicU64`
-- **UTF-8 安全** — 使用 `chars().count()` 获取长度，而非 `.len()` 字节
-- **锁恢复** — `unwrap_or_else(|e| e.into_inner())` 模式
-- **无 `static mut`** — 未找到
-
----
+全局处理器使用 `Mutex<Option<Arc<...>>>` 保存；流式回调会先克隆处理器，再在释放锁后调用。
 
 ## 代码位置
 
-- `src/builtin_tools/mod.rs` — 模块入口点和进度回调
-- `src/builtin_tools/file_ops/` — 文件操作工具
-- `src/builtin_tools/code_exec.rs` — 代码执行
-- `src/builtin_tools/web_fetch.rs` — Web 获取
-- `src/builtin_tools/search.rs` — 搜索工具
-- `src/builtin_tools/pdf_generate/` — PDF 生成
-- `src/builtin_tools/generation.rs` — 媒体生成包装器
-- `src/builtin_tools/browser_tools/` — 浏览器自动化
-- `src/builtin_tools/memory_*.rs` — 内存工具
-- `src/builtin_tools/meta_tools.rs` — 工具发现
-- `src/builtin_tools/mcp_wrapper.rs` — MCP 集成
-- `src/tool_output/compressor.rs` — 输出压缩
+- `src/executor/builtin_registry/definitions.rs` — 内置工具权威清单
+- `src/executor/builtin_registry/registry/tool_registry_impl.rs` — 内置工具分发
+- `src/builtin_tools/` — 工具实现
+- `src/tools/service.rs` — `ToolService` 与定义元数据
+- `src/tools/scoped/` — 生产请求范围执行面
+- `src/tools/tool_search.rs` — 延迟工具检索
+- `src/tools/schema_lookup.rs` — 按需加载完整 Schema
 
 ## 另请参阅
 
-- [生成](/docs/zh/concepts/generation) — 媒体生成提供商
-- [媒体处理](/docs/zh/concepts/media-processing) — 附件处理管道
-- [搜索](/docs/zh/concepts/search) — 搜索提供商实现
-
----
-
-## 26.7.x 补充
-
-### 工具集重组
-
-26.7.x 内置工具集重组（约 19+ 工具），`src/builtin_tools/` 重新分目录：
-
-- 浏览器工具（CDP 传输）
-- 桌面工具（通过 Bridge）
-- 文件操作工具（路径安全加固）
-- 搜索 / 网络抓取工具
-- 媒体处理工具
-- 视觉 / OCR 工具
-- 知识记忆工具
-
-### 并行执行
-
-`src/tools/concurrency.rs` 引入**资源声明**三态：
-
-- `Shared` —— 不冲突
-- `Exclusive{Global}` —— 独占整个执行
-- `Exclusive{Paths}` —— 独占特定路径
-
-Act 阶段按声明分桶并行，**桶内**并发、**桶间**串行。详见 [工具基础设施](/docs/zh/concepts/tool-infrastructure)。
-
-### 跨批次去重 / 备忘
-
-`Memo / Cross-batch Dedup`：相同 `(name, args)` 在一个批次或跨批次的二次调用复用首次结果。`McpResourceIndexLayer` 与 `tools.defer_mcp_tools` 协调。
-
-### `file_read` 支持图片
-
-26.6.29+：`file_read` 现在支持图片（`image_read`）；未变更的文件读取通过读缓存在轮次间去重。
-
-### 计算机使用语义交互
-
-26.7.7+ 语义交互：
-
-- `set_value` / `ax_action` 可访问性动作
-- 写入验证（无状态定位器评分）
-- `observe` 参数融合 act→observe（返回 post-state / 截图）
-- 恢复提示附加到工具失败后让模型自纠正
-- 密码管理器内 computer-use 被硬阻断
-
-### 失败关闭
-
-26.7.21+：未声明 / 未知工具在 `ask` tier 下**失败关闭**——之前是 default-allow 行为。
-
-### 见另请参阅
-
-- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 资源声明
-- [能力系统](/docs/zh/concepts/capability-system) — 权限
-- [执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与硬底
+- [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 执行、并发与展示层
+- [MCP 集成](/docs/zh/concepts/mcp-integration) — 外部 MCP 工具、资源和提示
+- [浏览器自动化](/docs/zh/concepts/browser-automation) — 浏览器工具后端

@@ -1,135 +1,80 @@
 ---
 title: "Installation"
-description: "Install Aleph on your system"
+description: "Install the Aleph desktop app or build from source"
 ---
 
-This guide covers installing Aleph on your system.
+## Desktop App
 
-## Prerequisites
+Choose an artifact actually published for the current version from [GitHub Releases](https://github.com/rootazero/Aleph/releases). Package formats and platform coverage vary by release; do not assume every release includes `.dmg`, `.msi`, `.deb`, and `.AppImage` files.
 
-- **Rust 1.95+** — needed to build from source (see `rust-version` in `Cargo.toml`)
-- **just** — command runner (`cargo install just`)
-- **npm** — needed to build the WASM panel UI
-- **wasm-bindgen** — WASM JS bindings (`cargo install wasm-bindgen-cli`)
-- **macOS 14+**, **Linux**, or **Windows** — primary supported platforms
-- **SQLite** — bundled via `rusqlite` (no separate install needed)
+The desktop application combines a thin system shell with the `aleph-server` core. The shell owns windows, tray, notifications, and platform integration; the core owns inference, tools, state, and the Gateway.
 
-### Platform-Specific Requirements
+## Build from Source
 
-**macOS:**
-- Xcode command-line tools
-- Swift toolchain (for the desktop bridge)
+### Requirements
 
-**Linux:**
-- `build-essential` or equivalent
-- `pkg-config`
-- `libssl-dev` (TLS uses `ring`; R3 keeps heavyweight deps out of core)
+- Rust 1.95+ as declared by `rust-version` in the root `Cargo.toml`
+- Platform C/C++ build tools
+- `just` when using repository `just` tasks
+- Node.js/npm and `wasm-bindgen-cli` when building WebChat/WASM
 
-**Windows:**
-- Visual Studio build tools
-- `windows-sys` features handled automatically by Cargo
+SQLite is built through the bundled `rusqlite` feature, so a separate system SQLite development package is not required.
 
-## Installation Methods
-
-### Desktop App (Recommended)
-
-The easiest way to run Aleph is the native desktop app. It bundles both the core server and the Tauri shell — no terminal required.
-
-| Platform | Download | Notes |
-|------|------|------|
-| **macOS** | `.dmg` from [Releases](https://github.com/rootazero/Aleph/releases) | Universal binary (Intel + Apple Silicon) |
-| **Linux** | `.deb` / `.AppImage` from [Releases](https://github.com/rootazero/Aleph/releases) | Debian, Ubuntu, Fedora |
-| **Windows** | `.msi` from [Releases](https://github.com/rootazero/Aleph/releases) | Windows 10/11 |
-
-The desktop app:
-- Embeds `aleph-server` as a background daemon
-- Hosts the Leptos Panel in a native webview
-- Provides system tray, OS notifications, global hotkey (`CmdOrCtrl+Shift+A`)
-- Silent auto-update through GitHub Releases
-- Supports launch-at-login (Settings → General / tray menu; Windows via Task Scheduler)
-- Auto-generates a self-signed cert when `[gateway.tls] cert/key` are left empty; SAN auto-discovers the host's non-loopback interface IPs; the Panel approves via TOFU and pins the fingerprint
-
-### Using Just (Development)
-
-For development or headless server deployment:
+### Build the Core
 
 ```bash
-# Verify all build dependencies are installed
-just deps
-
-# Run the server in dev mode (rebuilds WASM)
-just dev
-
-# Build a release binary
-just build
-
-# Run tests
-just test
-```
-
-### From Source
-
-```bash
-# Clone the repo
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
+cargo build --bin aleph-server --release
+```
 
-# Verify dependencies
+The binary is written to `target/release/aleph-server`.
+
+Repository development tasks:
+
+```bash
 just deps
-
-# Run in dev mode
 just dev
-
-# Or build a release binary
-just build
-```
-
-The release binary will be at `target/release/aleph-server`.
-
-### Desktop Shell (Development)
-
-```bash
-# Run the desktop shell in dev mode (rebuilds daemon + shell)
-just shell-dev
-
-# Build platform installers (.app/.dmg, .msi, .deb)
-just shell-build
-```
-
-### Verifying the Build
-
-```bash
-# Quick compile check
 just check
-
-# Run core tests
 just test
+```
 
-# Check all crates, including desktop
-just check-desktop
+Use the current `Justfile` as the source of truth for available tasks. The desktop shell and platform installers require additional platform SDKs and the repository's current shell build tasks.
 
-# Prompt scaffolding size (gated by R9's two rulers)
+## Verify
+
+```bash
+aleph-server doctor
+aleph-server status
+```
+
+To inspect the fixed system-prompt scaffold offline:
+
+```bash
 aleph-server prompt-size
 ```
 
-## Directory Layout
+`prompt-size` does not start the daemon or access the network. It excludes session-specific identity files, memory, skills, MCP instructions, and tool schemas.
 
-Aleph creates the following under `~/.aleph/`:
+## Data Root
+
+Aleph stores configuration and runtime data under `~/.aleph/` by default. `ALEPH_HOME` overrides this root. Stable entry points include:
 
 | Path | Purpose |
 |------|---------|
-| `~/.aleph/` | Main config directory |
-| `~/.aleph/aleph.toml` | Main config file |
-| `~/.aleph/logs/` | Server logs (day-boundary auto-rotation + `ALEPH-BOOT` marker) |
-| `~/.aleph/skills/` | User-installed Markdown skills |
-| `~/.aleph/plugins/` | Extension plugins |
-| `~/.aleph/mcp/` | MCP server configs and credentials |
-| `~/.aleph/memory/` | Memory store (SQLite + sqlite-vec + notes) |
-| `~/.aleph/cron/` | Cron job persistence (now real, not stubs) |
-| `~/.aleph/artifacts/` | Artifact store (deliverables) |
-| `~/.aleph/ops.log` | Signed operation ledger |
+| `config.toml` | Main configuration |
+| `defaults.toml` | Default-value overrides |
+| `data/` | Core databases and runtime data |
+| `memory/` | Memory and notes |
+| `artifacts/` | Artifacts and deliverables |
+| `skills/` | User skills |
+| `plugins/` | Installed plugins |
+| `logs/` | File logs |
+
+Other subdirectories are created on demand by enabled components; use the directories generated by the running version as the source of truth.
 
 ## Next Steps
 
-- [Quick Start](./quick-start) — get running in 5 minutes
-- [Configuration](./configuration) — configure your setup
+- [Quick Start](./quick-start) — start and verify the Gateway
+- [First-Time Configuration](./wizard) — current configuration flow
+- [Configuration](./configuration) — configuration structure

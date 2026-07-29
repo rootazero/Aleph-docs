@@ -185,6 +185,38 @@ pub struct AuditEntry {
 
 26.7.21+：频道本地 pairing store 已回退，**单源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
 
+### TLS / TOFU 完整流程（26.7.17 → 26.7.18）
+
+**服务端**（`src/gateway/tls.rs`）：
+
+- 进程内终止 TLS（用户提供证书或自动生成自签名）
+- 自签名证书 SAN **自动发现**主机非环回接口 IP（`[gateway.tls] san` 字段手动覆盖）
+- SAN-drift sidecar：不变或子集复用；漂移则原子 regen
+- 原子 regen marker + shrink-reuse 测试
+- `allow_insecure_remote = false`：非环回绑定失败关闭
+- Panel 强制远程使用 `wss://`
+
+**客户端**（`src/gateway/cert_trust.rs` + 共享决策核心）：
+
+- TOFU 信任：自签名证书首次连接时被应用**内**审批
+- 共享决策核心 + 已固定 TOFU 信任存储（`~/.aleph/data/security.db`）
+- SHA-256 指纹 + SAN/Subject 解析
+- 审批面板页面（指纹 + SAN + TOFU/change 警告）
+- pending-cert 状态与 approve/reject Tauri 命令
+- **macOS WKWebView** `respondsToSelector` 缓存失效；**绝对 URL** 跳转信任审批页
+- **iOS Keychain trust store + 决策镜像**——与 macOS 共享决策状态
+
+### Gateway 远程认证与 kill switch（26.7.22+）
+
+- **审计轨道接入**：远端认证轮换 kick + 设备复活
+- **`interpreter` 设置项**：决定认证决策由哪个组件发出（CLI vs Panel vs 远端）
+- **WebView 麦克风授权按 origin 限制**（Linux / Windows 修复）
+- **Lite supervisor relocation 在信任提示挂起时被抑制**（避免审批流程被中断）
+
+### 网关死信取证（26.7.17+）
+
+无法下发的消息可被检查并安全地重投递：`~/.aleph/data/security.db` 持久化死信；`/health` 暴露计数器；`replay` RPC 触发重投递。
+
 ### 真实客户端 IP
 
 26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。

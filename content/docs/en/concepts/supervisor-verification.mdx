@@ -1,117 +1,100 @@
 ---
 title: "Process Supervisor"
-description: "PTY-based process control for external CLI tools and stop-hook verification infrastructure for agent self-checks."
+description: "PTY-based process control for external CLI tools, and the Turn-level verifier chain plus shell stop hooks for the agent loop."
 ---
 
-The `process_supervisor` and `verification` modules handle external process control and agent stop-time validation. The supervisor spawns CLI tools in pseudo-terminals and monitors their output, while verification provides hooks that run before the agent loop stops.
+The `gateway/pty` and `verification` modules split external process control and agent-loop verification: the gateway side runs an interactive CLI tool inside a pseudo-terminal (embedded terminal), and the verification side equips the agent loop with a Turn-level verifier chain and shell stop hooks. All verdicts remain LLM self-checks plus hook receipts — the code never substitutes its own completion judgment (R7/R10).
 
 ## Design Philosophy
 
-1. **PTY-based control** — External tools run in a pseudo-terminal for realistic I/O
-2. **Event detection** — Output is parsed for semantic events (approval requests, errors)
-3. **Prompt-level verification** — Agent self-checks live in prompts, not Rust code (R8, R10)
+1. **PTY-embedded terminal** — `gateway/pty/` wraps a local shell / `cmd.exe` via `portable-pty`; output is pushed over the WebSocket `pty.output` / `pty.exit` topics (no second port).
+2. **Turn-level verification** — `verification::VerifierChain` runs between Think and Act with `StopHookVerifier` (shell hooks), `ToolLoopVerifier` (death-loop watchdog), `ExtensionStopHookVerifier` (`HookEvent::Stop` extension hooks), `ScratchpadGoalVerifier` (block stop while the execution list has unchecked items), and `MutationEvidenceVerifier` (a one-shot nudge when a file mutation has no post-edit evidence).
+3. **Read-only shell hook** — `ShellStopHook` runs an external command; exit 0/2/3 = pass/block/halt; everything else (other exit codes, timeouts, signals, shell metacharacters) maps to `Error`, leaving fail-open vs fail-closed to the caller.
 
 ---
 
-## Process Supervisor
+## Embedded Terminal (`src/gateway/pty/`)
 
-### PtySupervisor
+```text
+pty/
+├── mod.rs        # entry + public re-exports
+├── session.rs    # PtySession: portable_pty master/child wrapper, Send + Sync
+├── manager.rs    # process-global PtyManager: 64-session cap, TTL + FIFO eviction
+└── handler (in gateway/handlers/pty.rs)
+```
 
-Spawns and controls external CLI tools:
+`PtySession::spawn(opts)` builds a `portable_pty::native_pty_system()` session, clones the writer / reader / killer halves, and pushes base64 `pty.output` frames onto the gateway event bus; `PtyManager` is a process-global singleton (`OnceLock`), and concurrent `pty.spawn` calls that overflow the 64-session cap evict the oldest entry. The RPCs are `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list`; the streaming `pty.output` / `pty.exit` events are delivered via `events.subscribe("pty.*")`.
+
+---
+
+## Verifier Chain (`src/verification/`)
+
+`VerifierChain` is an `Vec<Arc<dyn TurnVerifier>>` + `AtomicBool` kill-switch built during `Orchestrator::build`; the verifiers run in order between Think and Act, and the **first non-`Continue` verdict wins**:
 
 ```rust
-pub struct PtySupervisor {
-    master: Box<dyn MasterPty>,
-    reader: mpsc::Receiver<String>,
-    running: AtomicBool,
-}
-
-impl PtySupervisor {
-    pub fn spawn(command: &str) -> Result<Self> { /* ... */ }
-
-    pub fn send_input(&self,
-        input: &str,
-    ) -> Result<()> { /* ... */ }
-
-    pub fn read_output(&self) -> Option<String> { /* ... */ }
+pub struct VerifierChain {
+    verifiers: Vec<Arc<dyn TurnVerifier>>,
+    enabled: AtomicBool,
 }
 ```
 
-**Capabilities:**
-- Spawn processes in a pseudo-terminal
-- Read output in real-time via a background reader thread
-- Inject input (commands, approvals)
-- Detect semantic events in output
+Default chain (order = precedence):
 
-### Event Detection
+| Verifier | Triggered when | Verdict | Failure semantics |
+|----------|----------------|---------|-------------------|
+| `StopHookVerifier` | `stop_reason.is_some()` | Runs the `ShellStopHook` set; exit 2 → `Veto` (retry), exit 3 → `Halt` (exit loop), other → `Error` | Harness side fail-open, goal side fail-closed |
+| `ExtensionStopHookVerifier` | `stop_reason.is_some()` and `hooks.json` configured `HookEvent::Stop` | block → `Veto`, halt → `Halt`, action_failed → `Allow` (infra failure does not block) | Yields after 5 consecutive vetoes from the same session (so a broken hook cannot wedge the loop) |
+| `ToolLoopVerifier` | `stop_reason.is_none()` (mid-turn) | Same `name` + `args_hash` ≥ 5 consecutive → `Veto`; ≥ 8 → `Halt`; same name + low distinctness + no narration → `Veto` | Pure structural check on `(name, args_hash)` |
+| `ScratchpadGoalVerifier` | `stop_reason.is_some()` and the session has an active execution list with unchecked items | `Veto` (auto-injects "execution list still has N unchecked items") | Fail-open (fatal is cancellation) |
+| `MutationEvidenceVerifier` | `stop_reason.is_some()` and the most recent `file_write / file_edit / apply_patch` had no `bash / code_exec / code_check` evidence | `Veto`, but only once per session (nudge, not a gate) | warn + soft-block once |
 
-Output is scanned for patterns indicating:
-- Approval requests (e.g., "Allow this action?")
-- Error conditions
-- Completion signals
+Construction lives in `bin/aleph-server/commands/start/orchestrator_init.rs::build_verifier_chain`:
 
-**Thread safety:** Reader thread communicates with the main thread via `mpsc` + `AtomicBool` with correct `Acquire/Release` ordering.
+```rust
+let verifier_chain = VerifierChain::builder()
+    .with(StopHookVerifier::new(hooks))      // user [[stop_hooks]] → ShellStopHook set
+    .with(ExtensionStopHookVerifier::new())  // HookEvent::Stop (hooks.json / plugins)
+    .with(ToolLoopVerifier::new())           // death-loop watchdog
+    .with(ScratchpadGoalVerifier::new())     // execution list check
+    .with(MutationEvidenceVerifier::default()) // post-edit-evidence nudge
+    .build();
+```
+
+`TurnVerifyContext` carries per-turn state: `iterations`, `tool_calls_made`, `final_text`, `recent_tool_calls: &[ToolCallSummary]`, `stop_reason: Option<&str>`, `session_id: Option<&str>`, and `robustness_profile: ModelRobustnessProfile` (per-model thresholds handed to specific verifiers).
 
 ---
 
-## Stop Hooks
+## Shell Stop Hooks
 
-Stop hooks run before the agent loop terminates, enabling external validation:
+`StopHookHandler` is a `Send + Sync` async trait:
 
 ```rust
-#[async_trait]
 pub trait StopHookHandler: Send + Sync {
     fn name(&self) -> &str;
-
     async fn evaluate(
         &self,
         ctx: &StopHookContext,
         cancel: &CancellationToken,
     ) -> StopHookVerdict;
 }
-```
 
-### ShellStopHook
-
-Runs an external shell command:
-- **Exit 0:** Allow stop
-- **Exit 2:** Block stop (stdout = reason)
-- **Other:** Hook error (logged, does not block)
-
-```rust
-pub struct ShellStopHook {
-    hook_name: String,
-    command: String,
-    timeout: Duration,
-}
-```
-
-### StopHookContext
-
-Passed to hooks via stdin as JSON:
-
-```rust
-pub struct StopHookContext {
-    pub final_text: Option<String>,
-    pub iterations: usize,
-    pub tool_calls_made: usize,
-    pub stop_reason: String,
-}
-```
-
-### Verdict Aggregation
-
-```rust
 pub enum StopHookVerdict {
     Allow,
     Block { reason: String },
+    Halt  { reason: String },   // exit 3 — claude-code preventContinuation
     Error { hook_name: String, message: String },
 }
 ```
 
-Hooks run in parallel via `join_all`. The first `Block` verdict stops the agent; `Error` verdicts are logged but don't block.
+`ShellStopHook` pipes `StopHookContext` JSON (with `final_text`, `iterations`, `tool_calls_made`, `stop_reason`) over stdin and maps the exit code to a verdict: 0 = `Allow`, 2 = `Block`, 3 = `Halt`, anything else / signal / timeout / cancellation / spawn failure = `Error`.
 
-### Configuration
+**Fail-closed boundary**: the goal objective gate (`goal_continuation::gate_veto`) treats `Error` as a veto — the hook itself failed = completion cannot be verified = completion cannot be claimed. This is the fail-closed position, the dual of the harness's own `StopHookVerifier` (fail-open). The split exists because the same `ShellStopHook` impl is shared; the side-effect is the only thing that differs.
+
+**Shell-metacharacter rejection**: `is_shell_safe(&str)` is the gate on the goal tool's LLM-supplied `goal_gate_command` path — enabled via `ShellStopHook::shell_safe()`, allow-list `SAFE = "abc…ABC…0123…/-._:'="`. A `gate_command` carrying `&&` / `;` / `$()` / redirection routes to `Error` rather than `Allow`, preventing "verifier syntax error silently passing as verification".
+
+---
+
+## Configuration
 
 ```toml
 [[stop_hooks]]
@@ -120,43 +103,49 @@ command = "cargo clippy -- -D warnings"
 timeout_secs = 60
 ```
 
+`build_from_config` reads the `[stop_hooks]` array: each entry constructs a `ShellStopHook`, wraps it as `Arc<ShellStopHook> as Arc<dyn StopHookHandler>`, packs it into a `Vec<Arc<dyn ...>>`, then hands it to `StopHookVerifier::new(hooks)`. An empty array returns `None`; `AgentHarnessRunner::stop_hooks` stays `None` and the hook stage is skipped entirely.
+
 ---
 
-## Verification Model
+## Prompt-Level Verification
 
-Aleph's verification logic lives in prompts (see `src/thinker/layers/agent_role.rs`):
+Aleph's completion judgment lives in the prompt (`src/thinker/layers/agent_role.rs`), never in Rust code:
 
-Agents are instructed to emit a `VERDICT: PASS|FAIL|PARTIAL` block summarizing their self-checks before stopping. Per redlines R8 (LLM Sovereignty) and R10 (Intelligence Lives in the Prompt), no Rust-level verifier, judge, or critic is introduced.
+- Agents are instructed to emit a `VERDICT: PASS|FAIL|PARTIAL` block summarizing their self-checks before stopping.
+- Redlines R8 (LLM Sovereignty) and R10 (intelligence lives in the prompt) prohibit introducing `JudgeVerifier` / `ComputationalVerifier` style cognitive judges; every verifier in the table above is a **structural signal** (exit codes, argument hashes, execution-list row counts, post-edit evidence presence) — never a semantic verdict.
+- The 6a module comment in `src/verification/turn_verifier.rs` permanently bans the cognitive shape: "`JudgeVerifier` and `ComputationalVerifier` are permanently prohibited".
 
-**Note:** A `VerifyStopHook` Rust struct existed from April 2026 through P0 but was never wired into production. It was deleted in P4 because the prompt-level mechanism fully covers the use case.
+A `VerifyStopHook` Rust struct (a P0-era LLM-based verifier candidate) was never wired into production and was **deleted in P4** (commit b54877d7f is retrievable from `git log`), on the grounds that the prompt-level mechanism already covers the use case.
 
 ---
 
 ## Safety Properties
 
-- **No unwrap in production** — All error paths use `map_err` + `?`
-- **String::from_utf8_lossy** — Safe handling of potentially invalid UTF-8 output
-- **Atomic ordering** — `Acquire/Release` for reader thread synchronization
-- **Timeout** — Shell hooks have configurable timeouts (default 30s)
-- **Cancellation** — Hooks respect `CancellationToken` for graceful shutdown
+- **No unwrap in production** — every error path uses `map_err` + `?`; `stop_hooks.rs::is_shell_safe` never panics.
+- **Timeout and cancellation** — `ShellStopHook` uses `tokio::time::timeout(per_attempt)` paired with `CancellationToken`; all three signals (`join_all` result, `select! { _ = cancel }`, `Stop` frame) clean up the child.
+- **64 KB frame cap on realtime paths** — `pty.input` and `voice.stream.audio` both rely on `mpsc::error::TrySendError::Full` to silently drop frames — realtime audio congestion policy is "drop the newest frame, do not hang the RPC", not "wait for the consumer".
+- **Allow-listed `is_shell_safe`** — untrusted `gate_command` paths pass through `ShellStopHook::shell_safe`; metacharacters `; | & $ < > \` are all rejected.
+- **`unwrap_or_else(|e| e.into_inner())`** — lock-poison recovery (P7); every `Mutex` / `RwLock` uses it, never propagating poison upward.
 
 ---
 
-## Code Location
+## Code Locations
 
-**Supervisor:**
-- `src/process_supervisor/mod.rs` — Module entry point
-- `src/process_supervisor/pty.rs` — PTY spawn and I/O
-- `src/process_supervisor/types.rs` — Event types
+**PTY embedded terminal:**
+- `src/gateway/pty/mod.rs` — entry + `PtySession` / `SpawnOptions` re-exports
+- `src/gateway/pty/session.rs` — `PtySession::spawn` uses `portable_pty::native_pty_system()`
+- `src/gateway/pty/manager.rs` — process-global `PtyManager` (64-session cap + 10 min TTL + FIFO eviction)
+- `src/gateway/handlers/pty.rs` — RPCs: `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list`
 
-**Verification:**
-- `src/verification/mod.rs` — Module entry point
-- `src/verification/stop_hooks.rs` — Hook trait, ShellStopHook, execution
-
-## See Also
-
-- [Agent Runtime](./agent-runtime) — Agent lifecycle and stop conditions
-- [Task Scheduling](./task-scheduling) — Lane-based execution
+**Verifier chain:**
+- `src/verification/mod.rs` — module entry, re-exports the five verifier submodules
+- `src/verification/turn_verifier.rs` — `TurnVerifier` trait + `VerifierChain` + `TurnVerifyContext` + `hash_tool_args` + `TOOL_HISTORY_WINDOW = 8`
+- `src/verification/stop_hooks.rs` — `StopHookHandler` / `ShellStopHook` / `is_shell_safe` / `execute_stop_hooks_arc`
+- `src/verification/stop_hook_verifier.rs` — `StopHookVerifier`, the chain's stop-hook adapter
+- `src/verification/extension_stop_gate.rs` — `ExtensionStopHookVerifier`, hooks `HookEvent::Stop`
+- `src/verification/tool_loop_verifier.rs` — `ToolLoopVerifier`, the `ToolCallSummary` dimension
+- `src/verification/scratchpad_goal_verifier.rs` — `ScratchpadGoalVerifier`, execution-list check
+- `src/verification/mutation_evidence_verifier.rs` — `MutationEvidenceVerifier`, post-edit-evidence nudge
 
 ---
 
@@ -164,28 +153,28 @@ Agents are instructed to emit a `VERDICT: PASS|FAIL|PARTIAL` block summarizing t
 
 ### `DiminishingReturnsDetector` Removed
 
-26.7.20+: **`DiminishingReturnsDetector` hard stop is removed** — concrete form of R10 "Don't #3" (no completion judgment).
+26.7.20+ (see `git log`): the `DiminishingReturnsDetector` hard stop was removed wholesale from `src/context/budget/`, alongside its `StopDiminishing` directive, the `TurnMetrics` type, `src/thinker/nudges.rs::GRACE_NUDGE_DIMINISHING`, the `after_turn` consumer in `src/harness/agent/think.rs`, and the `GraceReason::Diminishing` grace-turn path.
 
-Historically in `src/context/budget/` (`StopDiminishing` / `TurnMetrics`); the hard stop was a deterministic completion judgment inside the loop, violating R10. The ratchet is currently 5,055 lines (**code is the authority** — every doc number is just a copy of `CEILING`).
+`src/harness/tests/budget.rs:280` is blunt about why: "R10 '5 don'ts' #3 — the loop must make no completion judgement of its own". In practice: `ToolLoopVerifier` (`repeat_threshold = 5` consecutive identical tool calls), `max_iterations`, the consecutive-failure watchdog, and the model's own judgement are what now decide a stop — never a middleware heuristic. The ratchet sits at **5,055 lines** today (`CEILING` in `src/harness/tests/budget.rs:335`); the code is the authority — every doc number is just a copy of `CEILING`.
 
-### Tool-Loop Verifier
+### Turn-Level Verifier Chain
 
-26.7.15+: `src/verification/` provides the Turn-level tool-loop verifier:
+26.7.15+: `src/verification/turn_verifier.rs` provides the `TurnVerifier` trait + `VerifierChain`; the shipping verifiers are all in the table above. Every verifier is a pure `async fn verify(&TurnVerifyContext, &CancellationToken) -> VerifierVerdict`, with no mutable state, so the chain can hold them as `Arc<dyn TurnVerifier>`.
 
-- `hash_tool_args` — tool-arg hash
-- `ToolCallSummary` — tool-call summary
-- `TurnVerifyContext` — turn verification context
-- `VerifierVerdict` — verdict
-- `TOOL_HISTORY_WINDOW` — history window
-
-Only the **model's explicit stop** ends a turn. `max_iterations` remains a safety cap.
+Only the **model's explicit stop** (`stop_reason.is_some()`) ends a turn; a death-loop mid-turn (`stop_reason.is_none()`) is caught by `ToolLoopVerifier`, which injects a feedback message and `Continue`s once on a `Veto`; only `halt_threshold` consecutive identical calls produce a `Halt` and exit the loop. `max_iterations` remains the hard safety cap.
 
 ### Context "Never-Break" Guarantee
 
-26.7.1+: turns that previously could end early via `FinalReply` now always route through `compact_to_fit` and continue. A deterministic `truncate_to_fit` floor is added as a last resort.
+26.7.1+: turns that previously could end early via `FinalReply` now always route through `compact_to_fit` and continue, with a deterministic `truncate_to_fit` floor as a last resort. The consecutive-failure watchdog in `think.rs` plus `ToolLoopVerifier` are the two gates: try `compact_to_fit` first, then `truncate_to_fit`, and only as a final fallback let a turn end without erroring.
+
+### Dual with the Goal Subsystem
+
+`StopHookVerifier` is fail-open (a broken script must not wedge the loop); `goal_continuation::gate_veto` is fail-closed (a broken script cannot certify completion). Both share the same `ShellStopHook` implementation; the side effect is the only difference. The `goal` tool uses `effective_gate(deps.gate, goal.gate_command)` to splice both sources (global hook + per-goal command), and each one runs through `is_shell_safe`.
 
 ### See Also
 
 - [Harness Architecture](/docs/en/architecture/harness) — verifier integration
 - [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop) — the five "Don'ts"
 - [Architecture Overview](/docs/en/architecture/overview) — where the verifier sits
+- [Tool-Loop Verifier source](https://github.com/rootazero/Aleph/blob/main/src/verification/tool_loop_verifier.rs) — full `ToolLoopVerifier`
+- [Shell stop hook source](https://github.com/rootazero/Aleph/blob/main/src/verification/stop_hooks.rs) — `ShellStopHook` + `is_shell_safe`

@@ -26,7 +26,9 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
-    pub source: String,      // 提供商名称
+    pub relevance_score: Option<f32>,   // 0.0–1.0，Tavily 原生；其他计算
+    pub full_content: Option<String>,   // 仅 Tavily 深搜索
+    pub provider: Option<String>,
 }
 ```
 
@@ -36,12 +38,17 @@ pub struct SearchResult {
 
 ```rust
 pub struct SearchOptions {
-    pub max_results: usize,
-    pub include_images: bool,
-    pub time_range: Option<TimeRange>,
-    pub safe_search: bool,
+    pub language: Option<String>,        // ISO 639-1
+    pub region: Option<String>,          // ISO 3166-1 alpha-2
+    pub date_range: Option<String>,      // "day" / "week" / "month" / "year"
+    pub safe_search: bool,               // 默认 true
+    pub max_results: usize,              // 默认 5，上限 50
+    pub timeout_seconds: u64,            // 默认 10，验证后 ≥ 1
+    pub include_full_content: bool,      // 仅 Tavily
 }
 ```
+
+`SearchOptions` 同时承载每个提供商的规范化映射（`language` / `region` / `date_range` / `safe_search` → 提供商原生参数），新增 provider 仅需扩展该映射表。
 
 ### SearchProvider Trait
 
@@ -55,8 +62,11 @@ pub trait SearchProvider: Send + Sync {
     ) -> Result<Vec<SearchResult>>;
 
     fn name(&self) -> &str;
-    fn test_connection(&self,
-    ) -> Pin<Box<dyn Future<Output = ProviderTestResult> + Send>>;
+    fn is_available(&self) -> bool;
+
+    async fn get_quota(&self) -> Result<QuotaInfo> {
+        Ok(QuotaInfo::unlimited())
+    }
 }
 ```
 
@@ -64,11 +74,15 @@ pub trait SearchProvider: Send + Sync {
 
 ## SearchRegistry
 
-管理具有故障转移的多个提供商：
+通过具名 default + fallback 链管理多个提供商：
 
 ```rust
 pub struct SearchRegistry {
-    providers: Vec<Box<dyn SearchProvider>>,
+    providers: HashMap<String, Arc<dyn SearchProvider>>,
+    default_provider: String,
+    fallback_providers: Vec<String>,
+    test_cache: Arc<Mutex<HashMap<String, (ProviderTestResult, Instant)>>>,
+    web_fetch_fallback: Option<Arc<WebFetchSerpFallback>>,
 }
 
 impl SearchRegistry {
@@ -77,25 +91,19 @@ impl SearchRegistry {
         query: &str,
         options: &SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        // 按顺序尝试每个提供商直到一个成功
-        for provider in &self.providers {
-            match provider.search(query, options).await {
-                Ok(results) => return Ok(results),
-                Err(e) => {
-                    tracing::warn!(
-                        provider = provider.name(),
-                        error = %e,
-                        "Search provider failed, trying next"
-                    );
-                }
-            }
-        }
-        Err(SearchError::AllProvidersFailed)
+        // 1. 尝试 default_provider
+        // 2. 顺序尝试 fallback_providers
+        // 3. 全部失败后尝试 web_fetch_fallback（默认武装）
+        // 4. 仍然失败：聚合错误信息
     }
 }
 ```
 
-**隐私说明：** 用户查询不包含在错误消息中，以防止敏感搜索词的意外记录。
+**错误分类：** `classify_search_error()` 把 `AlephError` 折叠成 `auth` / `rate-limit` / `timeout` / `network` / `cancelled` / `config` / `provider` / `other`，便于按 kind grep 日志。
+
+**聚合错误：** 所有提供商都失败时（包括最后的 WebFetch 回退），最终错误串以 `All search providers failed:` 为前缀并附上每一步的 kind + 错误信息——审计员能看出最后兜底是否真的被尝试。
+
+**隐私说明：** 用户查询文本不在注册表失败消息中；但每条提供商失败仍以结构化 `provider=... kind=...` 形式记录，供运维按 kind 检索。
 
 ---
 
@@ -103,12 +111,17 @@ impl SearchRegistry {
 
 | 提供商 | 自托管 | API 密钥 | 说明 |
 |---|---|---|---|
-| **Tavily** | — | ✅ | AI 优化搜索，推荐默认 |
+| **Tavily** | — | ✅ | AI 优化搜索，推荐默认；提供原生 relevance + 深搜索 full_content |
 | **SearXNG** | ✅ | — | 隐私优先，完全自托管 |
 | **Brave** | — | ✅ | 隐私 + 质量平衡 |
 | **Google CSE** | — | ✅ | 全面覆盖 |
 | **Bing** | — | ✅ | 成本效益高 |
 | **Exa.ai** | — | ✅ | 语义/神经搜索 |
+| **Jina** | — | ✅ | 神经搜索 |
+| **DuckDuckGo** | ✅ | — | HTML 抓取，无密钥 |
+| **Firecrawl** | — | ✅ | 搜索 + 全量抓取；与 fetch 共享配置 |
+
+`SearchProviderType` 枚举是单源；`from_config` 用 `ProviderFactoryRegistry` 实例化已配置的 backend，未知 / 缺凭据会被跳过并 WARN。
 
 ---
 
@@ -118,14 +131,14 @@ impl SearchRegistry {
 
 ```rust
 pub struct SearchProviderTestConfig {
-    pub provider_type: String,  // "tavily", "brave", "searxng" 等
+    pub provider_type: SearchProviderType,
     pub api_key: Option<String>,
     pub base_url: Option<String>,      // SearXNG 必需
-    pub engine_id: Option<String>,    // Google CSE 必需
+    pub engine_id: Option<String>,     // Google CSE 必需
 }
 ```
 
-返回带有延迟、错误类型和成功状态的 `ProviderTestResult`。
+返回带有延迟、错误类型和成功状态的 `ProviderTestResult`；测试结果缓存 5 分钟，失败结果不缓存。
 
 ---
 
@@ -151,11 +164,12 @@ for result in results {
 
 ## 安全属性
 
-- **无查询泄漏** — 错误消息使用固定字符串，而非用户查询
-- **安全截断** — 延迟使用 `.min(u32::MAX as u128)` 进行饱和
-- **无重复头** — `reqwest` 自动处理 `Content-Type`
-- **无锁问题** — 使用 `unwrap_or_else(|e| e.into_inner())`
-- **无 SQL 注入** — 无数据库查询
+- **错误聚合含 kind 标签** — `classify_search_error` 把 `AlephError` 折叠成稳定的 kind 字符串，便于按 kind grep 日志（不含用户查询文本）
+- **安全截断** — `latency_ms = elapsed.min(u32::MAX as u128) as u32` 防止延迟饱和到 `u32`
+- **无锁中毒** — 所有 `lock()` 调用都走 `unwrap_or_else(|e| e.into_inner())`
+- **max_results 上限** — `validated_max_results()` 把 `max_results` 夹到 `[1, 50]`
+- **timeout 验证** — `validated_timeout()` 把 `timeout_seconds` 钳到 ≥ 1
+- **测试缓存只缓存成功** — 失败结果不缓存（下次调用会重试）
 
 ---
 
@@ -179,35 +193,27 @@ for result in results {
 
 ### 记忆 `memory.retrieve_with_trace`
 
-26.7.21+：新增 `memory.retrieve_with_trace`——真实 scoring-pipeline trace 给 debug 面板。
+26.7.x：`memory.retrieve_with_trace` 暴露每阶段打分 trace（实现于 `src/gateway/handlers/memory_config.rs::handle_retrieve_with_trace`），给 debug 面板与 governance 视图使用。
 
 ### 知识图谱
 
-26.7.15+ `note_graph_query`：
+26.7.15+ `note_graph_query`（实现于 `src/memory/notes/`）：
 
 - 双向 BFS 路径查找
 - 类型化关系边
 - `[[wikilink]]` supersession 强制浮现纠正笔记
 - CJK 三元组全文搜索
-- 抗崩溃索引
-
-### 28.7.27 Vault 面板
-
-- 卡片视图（替代旧表格）
-- 批量操作栏
-- 深链锚点
-- 证据链（引用本笔记的其他笔记序列）
-- 跨代理选择（原子一致性）
-- 来源（writer / timestamp / source event）
-- 批量导出为交付物
-
-### 真实打分与混合检索
-
-26.7.15+: `ScoringPipeline` 接入 `HybridRetrieval` 搜索流；`NoiseFilter` 集成到摄取管道；`MemoryConfig` 中加自适应检索和备份设置。
+- 抗崩溃索引（`crash-safe index`）
+- 社区检测（手写 Louvain，26.7.x）
+- 关联图：4-signal 社区感知召回 + 图快照/缓存/insights 表 + 图健康洞察（isolated / sparse / bridge / surprising）暴露给 LLM
 
 ### 网页抓取
 
-26.6.29+ 一类 `crawl4ai` / `firecrawl` provider（URL → markdown），vault 存储密钥；自动在失败时回退到内置 fetch。
+26.6.29+ 一类 `crawl4ai` / `firecrawl` fetch provider（URL → markdown），vault 存储密钥；自动在失败时回退到内置 fetch。`Firecrawl` 搜索 provider 复用其 `/v2/search` 配置（date-range 映射 + Test Connection）。
+
+### 实时 WebFetch 兜底
+
+26.7.x：`SearchRegistry` 在 default + fallback 链全部耗尽后可武装 `WebFetchSerpFallback`（基于 DDG mirrors），由 `[search].web_fetch_fallback` 控制（默认 true）。`from_config` 也会把缺失凭据 / 未知 provider_type 的 backend 跳过而非 panic。
 
 ### 见另请参阅
 

@@ -1,168 +1,183 @@
 ---
 title: "A2A 协议"
-description: "用于跨代理通信和任务委托的代理到代理（A2A）协议适配器。"
+description: "A2A（代理到代理）协议适配器，通过 JSON-RPC 和已认证会面向远程代理委派任务。"
 ---
 
-`a2a` 模块实现 A2A（代理到代理）协议适配器。A2A 使 Aleph 能够与其他 AI 代理通信、将任务委托给外部代理系统，并以标准化格式接收结果。
+`a2a` 模块实现 A2A（代理到代理）协议适配器。Aleph 原生同时作为 **A2A 客户端**（向远程代理委派任务）和 **A2A 服务端**（接收其他代理的入站请求），由适配器在 A2A 线协议类型与 Aleph 内部类型之间做翻译。
 
 ## 设计理念
 
 A2A 集成遵循两个原则：
 
-1. **协议抽象** —— Aleph 原生讲 A2A；适配器处理与内部类型的翻译
-2. **信任边界** —— 外部代理使用与内部工具相同的权限模型对待
+1. **协议抽象** —— Aleph 原生讲 A2A；适配器负责内部类型与端口（port）之间的翻译。
+2. **信任边界** —— 远程代理按 `TrustLevel`（Local / Trusted / Public）分类，分别决定认证方案与 `A2AAuthenticator` 端口所暴露的动作面。
 
 ---
 
 ## 协议概览
 
-A2A 是一种代理到代理通信协议，定义了：
-- **任务委托** —— 一个代理如何请求另一个代理执行工作
-- **状态更新** —— 进度如何报告回来
-- **结果交付** —— 完成的工作如何返回
-- **能力发现** —— 代理如何宣传它们能做什么
+A2A 是一个基于 JSON-RPC 2.0 的代理到代理通信协议，定义了：
+
+- **任务委派** —— 一个代理通过 `message/send` 或 `message/stream` 请求另一个代理执行工作。
+- **状态更新** —— 进度以 SSE 事件（`status-update`、`artifact-update`）实时回传。
+- **结果交付** —— 完成的工作作为 artifact 落到最终的 `A2ATask` 上。
+- **能力发现** —— 代理通过 Agent Card（`agent_card`）在固定 URL 上公布自身能力。
 
 ```
 ┌─────────────┐         A2A 协议          ┌─────────────┐
-│   Aleph     │  ───────────────────────→ │ 外部        │
-│  代理       │  任务请求 + 上下文         │  代理       │
-│             │  ←─────────────────────── │             │
-│             │  状态更新 + 结果           │             │
-└─────────────┘                           └─────────────┘
+│   Aleph     │  ──────────────────────▶  │ 远程        │
+│   代理      │  message/send 或 /stream  │  代理       │
+│             │  ◀──────────────────────  │             │
+│             │  status-update + artifact │             │
+└─────────────┘                          └─────────────┘
 ```
 
 ---
 
 ## 核心类型
 
-### A2ATask
+### A2ARole
 
-表示委托给外部代理的任务：
+标识消息的发送方：
 
 ```rust
-pub struct A2ATask {
-    pub task_id: String,
-    pub description: String,
-    pub input: serde_json::Value,
-    pub deadline: Option<i64>,
+pub enum A2ARole {
+    User,
+    Agent,
 }
 ```
 
-### A2AResult
+### A2AMessage
 
-A2A 任务的结果：
+通信载荷。内容以 `Part`（文本 / 文件 / 结构化数据）的序列承载：
 
 ```rust
-pub struct A2AResult {
-    pub task_id: String,
-    pub status: A2AStatus,
-    pub output: Option<serde_json::Value>,
-    pub error: Option<String>,
+pub struct A2AMessage {
+    pub message_id: String,
+    pub role: A2ARole,
+    pub parts: Vec<Part>,
+    pub session_id: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub metadata: Option<Map<String, serde_json::Value>>,
 }
 
-pub enum A2AStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-    Cancelled,
+pub enum Part {
+    Text { text: String, metadata: Option<Map<String, serde_json::Value>> },
+    File { file: FileContent, metadata: Option<Map<String, serde_json::Value>> },
+    Data { data: Map<String, serde_json::Value>, metadata: Option<Map<String, serde_json::Value>> },
 }
 ```
 
 ### FileContent
 
-根据 A2A 规范不变量验证文件附件：
+文件引用 —— 按 A2A 规范，`bytes`（base64）与 `uri` 必须恰好设置其一：
 
 ```rust
 pub struct FileContent {
-    pub mime_type: String,
-    pub data: Vec<u8>,
-    pub name: String,
+    pub name: Option<String>,
+    pub mime_type: Option<String>,
+    pub bytes: Option<String>,  // base64 编码
+    pub uri: Option<String>,
 }
 
 impl FileContent {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        // 强制执行：非空 MIME 类型、非空数据、
-        // 有效文件名（无路径遍历、无空字节）
+    pub const fn validate(&self) -> Result<(), &'static str> {
+        match (&self.bytes, &self.uri) {
+            (None, None) => Err("FileContent must have either bytes or uri"),
+            (Some(_), Some(_)) => Err("FileContent cannot have both bytes and uri"),
+            _ => Ok(()),
+        }
     }
 }
 ```
+
+### A2ATask
+
+A2A 会话的聚合根。状态迁移由 `TaskState::can_transition_to` 强制约束：
+
+```rust
+pub struct A2ATask {
+    pub id: String,
+    pub context_id: String,
+    pub status: TaskStatus,
+    pub artifacts: Vec<Artifact>,
+    pub history: Vec<A2AMessage>,
+    pub metadata: Option<Map<String, serde_json::Value>>,
+    pub kind: String,  // 恒为 "task"
+}
+
+pub enum TaskState {
+    Submitted,
+    Working,
+    InputRequired,
+    Completed,
+    Canceled,
+    Failed,
+    Rejected,
+    AuthRequired,
+}
+```
+
+`AuthRequired` 是非终止状态，表示远端需要新的凭证。客户端可在重新认证后从 `AuthRequired` 恢复 —— 见[子代理授权恢复](#子代理授权恢复)。
 
 ---
 
 ## 信任等级
 
-A2A 连接使用与内部组件相同的 `TrustLevel` 系统：
+远程连接按 `TrustLevel` 分类（见 `src/a2a/domain/security.rs`），同时决定认证要求与暴露给对端的动作面：
 
-| 等级 | 行为 |
-|---|---|
-| `Local` | 完全访问，无需审批 |
-| `Private` | 标准审批流程 |
-| `Public` | 最严格的审批，所有行动都经过审计 |
-| `Untrusted` | 默认阻止 |
+| 等级 | 推断依据 | 认证方案 | 权限 |
+|---|---|---|---|
+| `Local` | 回环（`127.0.0.0/8`、`::1`） | 无需认证 | 完全 |
+| `Trusted` | 私网 IPv4（`10/8`、`172.16/12`、`192.168/16`）、LAN IPv6（ULA `fc00::/7`、link-local `fe80::/10`）、`.local` / `.lan` 主机名 | bearer / API key | 按 token 配置 |
+| `Public` | 其余（公网 DNS、公网 IP、无法解析的 URL） | OAuth2 / mTLS | 受限 |
 
-信任等级从连接来源（IP 地址、主机名或 mTLS 证书）推断。
+`TieredAuthenticator` 在 JSON-RPC 边界强制执行每等级的策略；`Authenticator` 端口 trait（`src/a2a/port/authenticator.rs`）基于 `A2AAction`（`SendMessage`、`GetTask`、`CancelTask`、`ListTasks`、`Subscribe`、`ManagePushConfig`、`GetExtendedCard`）定义 `authenticate` + `authorize(principal, action)`。
+
+当 A2A 前置同机反向代理时，所有经代理的 peer 都呈现为 `Local`。此时需设置 `[a2a.server.security] local_bypass = false` 以强制 loopback 仍要求凭证。
 
 ---
 
 ## 能力发现
 
-在委托任务之前，Aleph 查询外部代理的能力：
+远程代理通过 **Agent Card**（`src/a2a/domain/agent_card.rs` 中的 `AgentCard`）公布自身能力。Aleph 在每个 remote 的 `/.well-known/agent-card.json` URL 拉取 card，通过 `CardRegistry` 在本地缓存，并由 `CardRefresh` 按需刷新。按 id、name、URL 解析 card 的能力由 `AgentResolver` 端口提供。
 
-```rust
-pub async fn discover_capabilities(
-    &self,
-    endpoint: &str,
-) -> Result<Vec<Capability>, A2AError> {
-    let response = self.client
-        .get(format!("{}/capabilities", endpoint))
-        .send().await?;
-    
-    response.json().await
-}
-```
+发现通过 `SmartRouter`（`src/a2a/service/smart_router.rs`）收敛：给定一段 prompt，由 `LlmMatcher`（语义）或回退启发式挑出最匹配的注册代理，再交由 `A2AClientPool` 真正发出 `message/send` 或 `message/stream`。
 
-能力在本地缓存以避免重复发现调用。
+---
+
+## 子代理授权恢复
+
+A2A 子代理的授权不再是「一次性」。授权失败或过期进入 `TaskState::AuthRequired`，而非永久失败该任务；客户端可重新提交凭证，任务即可回到 `Working`（或迁移到终止态）。
+
+这与 `src/harness/chain_context.rs` 中的 `ChainContext` 一致：`ChainContext` 跟踪父子委派链，子层的重新授权不会让父链失效。chain id 在所有深度上共享，`depth >= max_depth` 被拒绝 —— 恢复保留原有 chain id，而非重新生成。
 
 ---
 
 ## 集成点
 
 A2A 适配器与以下组件集成：
-- **网关** —— 接收来自外部代理的 A2A 请求
-- **编排器** —— 决定在本地处理还是通过 A2A 委托
-- **审批** —— 将敏感 A2A 操作路由通过审批工作流
-- **会话** —— 在重新启动时持久化 A2A 任务状态
+
+- **网关** —— 通过 JSON-RPC 接收入站 A2A 请求；入站侧位于 `src/a2a/adapter/server/`（routes、request processor、task store、stream hub）。
+- **编排器 / Spawner** —— 决定本地处理（通过 `SubAgent` 走进程内）还是委派（通过 `A2ASubAgent::execute_delegation`，见 `src/a2a/sub_agent.rs`）。
+- **Authenticator 端口** —— `TieredAuthenticator` 在每个 JSON-RPC 请求上核对 trust level 与 per-token 权限。
+- **Card registry 与 smart router** —— 按意图发现并路由到正确的远程代理。
+- **记忆** —— `A2ASubAgent` 写出 `RawMemory(Delegation{child_agent_id})` 行，携带父 agent id 与 session id，使父代理的长期记忆吸收子代理的经验（`emit_delegation_primitives`）。
+- **会话服务** —— 跨重启持久化 A2A 任务状态与事件日志。
 
 ---
 
 ## 代码位置
 
 - `src/a2a/mod.rs` —— 模块入口点
-- `src/a2a/protocol.rs` —— A2A 消息类型
-- `src/a2a/client.rs` —— 外部代理客户端
-- `src/a2a/server.rs` —— A2A 请求处理程序
-- `src/a2a/discovery.rs` —— 能力发现
+- `src/a2a/domain/` —— 纯类型：`agent_card`、`error`、`events`、`message`、`security`（TrustLevel + SecurityScheme + Credentials）、`task`
+- `src/a2a/adapter/` —— 线协议适配：`client`（A2AClient + A2AClientPool + streaming）、`server`（HTTP routes + request processor + task store + stream hub）、`auth`（`TieredAuthenticator` + `TokenStore`）
+- `src/a2a/port/` —— 端口 trait：`agent_resolver`、`authenticator`、`message_handler`、`task_manager`、`streaming`
+- `src/a2a/service/` —— 高层服务：`card_builder`、`card_refresh`、`card_registry`、`llm_matcher`、`notification`、`smart_router`
+- `src/a2a/sub_agent.rs` —— `A2ASubAgent`（委派入口、记忆写出）
 
 ## 另请参阅
 
-- [代理运行时](./agent-runtime) —— 代理如何生成和管理任务
-- [编排器](./orchestrator) —— 任务路由和委托决策
-- [安全：概览](../security/overview) —— 信任等级和审批
-
----
-
-## 26.7.x 补充
-
-### A2A 中断 + 取消
-
-26.7.24+：A2A 流的中断与取消——`Interrupt` 真实取消 fan-out，**不再退化为入队**。长跑 detach 成员不再泄漏——detach 成员泄漏被修。
-
-### 子代理授权恢复
-
-A2A 子代理现在**可重新授权**——之前一旦授权失败就永久切断，现在由链路内闭包生命周期管理（与 `Identity` 委托链一致）。
-
-### 见另请参阅
-
-- [代理运行时](/docs/zh/concepts/agent-runtime) — 26.7.x 子代理可中断
-- [身份与签名](/docs/zh/concepts/identity-context) — 委托链
+- [代理运行时](./agent-runtime) —— 代理如何生成并管理子代理
+- [身份与签名](./identity-context) —— 通过 `ChainContext` 的委派链
+- [Hub](./extensions-store) —— 取代旧式技能注册表的统一扩展目录

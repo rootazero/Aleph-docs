@@ -51,6 +51,9 @@
     "thinker",
     "memory",
     "execution-engine",
-    "ai-providers"
+    "ai-providers",
+    "artifacts-deliverables",
+    "voice-streaming",
+    "looping-goal-strategy"
   ]
 }

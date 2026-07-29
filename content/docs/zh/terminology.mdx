@@ -99,7 +99,8 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Extension** | 扩展 | 面向用户的 Skill + Plugin + MCP 服务器统称——每个 Extension 恰好属于一种**类型**。参见[扩展商店](/docs/zh/concepts/extensions-store) |
 | **Extensions Store** | 扩展商店 | 顶层面板模式 (`/extensions`)，按功能类别浏览/安装扩展，附带信任层级与安装前披露 |
 | **ExtensionKind** | 扩展类型 | 面向商店的类型枚举 `{Skill, Plugin, Mcp}`——与插件宿主运行时的 `PluginKind {Wasm, Mcp, Static}` 不同 |
-| **Store Agent** | 商店智能体 | 内置受保护智能体，负责 discover→curate→install→verify；无法绕过系统约束（specs、信任裁决、SHA256、密钥） |
+| **Aleph Hub** | Aleph Hub | 单一扩展目录源 `aleph-hub`（`hub.heyaleph.com/catalog.json`）；启动时由 `hub::primer` 投影进 `~/.aleph/hub_catalog.db` |
+| **Hub 工具** | Hub 工具 | 注册在主内置工具注册表中的 `hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify`；安装受信任与用户同意关卡约束 |
 | **Trust Tier** | 信任层级 | 源的信任级别：Official / Verified / Community / Unverified |
 | **Disclosure** | 披露 | 强制的安装前摘要（command+args、密钥、网络/文件系统触达、固定版本 + SHA256、层级） |
 | **Source** | 源 | 目录提供方（插件市场、Official MCP Registry、Docker MCP Catalog），在 SQLite 中缓存以供离线浏览 |
@@ -171,10 +172,38 @@ description: "Aleph 概念的标准化术语和翻译"
 | **WorldModel** | 世界模型 | 用于主动行为的环境状态跟踪 |
 | **Proactive Dispatcher** | 主动调度器 | 基于世界状态调度主动任务的守护进程 |
 | **Desktop Bridge** | 桌面桥 | 用于桌面自动化的 UDS JSON-RPC 协议 |
-| **Deliverable** | 交付物 | 由 `tools.publish` 产出的工作产物——写入工件存储，Panel 可直接打开 |
-| **Artifact Store** | 工件存储 | `src/artifacts/`——交付物的统一存储后端 |
-| **Export Subsystem** | 导出子系统 | `src/export/`——把交付物渲染成独立的 HTML / 文档 |
-| **Voice Subsystem** | 语音子系统 | 语音转录（TWhisperLiveKit / WhisperLiveKit）与 TTS（多提供商含回退） |
+| **Deliverable** | 交付物 | 由 `artifact_publish` 工具产出的工作产物——落地为 `ArtifactOrigin::Deliverable`，Panel "Deliverables" 面板可钉住并打开 |
+| **Artifact Store** | 工件存储 | `src/artifacts/`——交付物的统一存储后端（`MAX_ARTIFACT_BYTES = 50 MB` + `MAX_ARTIFACTS_PER_SESSION = 200`） |
+| **ArtifactOrigin** | 工件来源 | `Inbound` / `Outbound` / `Export` / `Deliverable` 四种来源（wire-vocabulary 单一源：`aleph_protocol::artifact`） |
+| **Export Subsystem** | 导出子系统 | `src/export/`——把交付物渲染成独立的 HTML / Markdown 文档（自包含 CSS） |
+| **Voice Subsystem** | 语音子系统 | 流式 ASR（Deepgram / WhisperLiveKit，本地 `aleph-voice` sherpa-onnx + 模拟引擎）+ TTS（多提供商 + fallback 上限 2） |
+| **`TranscriptDelta`** | 转写增量 | 流式转写的契约类型（`committed` / `interim` / `utterance_end` / `error`）；Panel VAD 权威 |
+| **Vocabulary Biasing** | 域词偏置 | `[voice] vocabulary` 配置——按 ASR 后端差异翻译为 `hotwords` / `initial_prompt` / `prompt` / `keywords` |
+| **`StreamingTranscriber`** | 流式转写器 trait | `src/gateway/voice/streaming/mod.rs` 的 provider-neutral 契约 |
+| **Voice-as-Context** | 语音即上下文 | ASR 转写信号接到上下文聚合（`per-turn transient recall`），不持久化到用户消息 |
+| **Loop** | 循环 | `src/looping/`——当前会话的持续循环（9 动作）；`LoopRegistry` 仅进程内 |
+| **Goal** | 目标 | `src/goal/`——自主目标追求（持久化 `GoalStore` + 客观 gate + TreeBudget） |
+| **Strategy** | 策略 | `src/strategy/`——团队/裸循环的 plan（composite-keyed `StrategyStore`） |
+| **`LoopState`** | 循环状态 | `Active` / `Paused` / `Stopped` 三态（进程内） |
+| **`GoalStatus`** | 目标状态 | `Active` / `Paused` / `Completed` / `Aborted` |
+| **`GateOutcome`** | 门判定 | goal 子系统的客观 gate 类型状态（maker / checker 双确认） |
+| **TreeBudget** | 预算树 | goal 与 loop 共享的预算树；任何子目标超预算强制停下整树 |
+| **Composite Key** | 复合键 | `goal_key` / `loop_key` / `session_key` / `team_key` 四个命名空间 |
+| **Plan Team / Naked Loop** | 团队/裸循环策略 | `[strategy] plan_team` / `plan_naked_loop` 配置开关 |
+| **Atomic Put-if-Absent** | 原子首发 | `StrategyStore` 的 fire-once 机制（防 race） |
+| **Run Mode Pin** | 运行模式钉 | 队长盖戳 `usage_mode`；子代理继承；拒绝 `session_set_mode` mid-run |
+| **Loop Auditor** | 循环审计员 | 内置受保护智能体；审计 / 监督模板默认走独立上下文证据 |
+| **`loadable`** | 可加载容器 | `data.rs` + `loader.rs`——所有 fetch 路由走它；failed fetch 不可表示为空 |
+| **Vault Card View** | Vault 卡片视图 | `cards.rs`——三态 shell（Loading / Empty / Content） |
+| **Evidence Chain** | 证据链 | `notes_citing`——把反链渲染到 drawer |
+| **Provenance** | 来源三元组 | writer / timestamp / source event（`provenance.rs`） |
+| **`notes_sources` / `notes_provenance`** | 笔记溯源表 | 26.7.22+ 新增；图缓存与 insights 的基础 |
+| **Louvain** | Louvain 社区检测 | 手写实现（无外部 crate，R3 合规） |
+| **4-signal Recall** | 四信号召回 | 节点相关性 + Leiden 精炼 + wikilink 骨架 + 共召回 |
+| **Phone / Tablet Platform** | 手机 / 平板平台 | `interfaces/webchat/src/platform/{phone,tablet}/`——`phone` 8 个子模块；`tablet` 当前主要为骨架 |
+| **UnifiedSaveBar** | 统一保存条 | `interfaces/webchat/src/platform/wide/views/settings/`——所有设置页的统一保存模式 |
+| **Phase 3 / Phase 4 Settings** | 第三 / 四阶段设置 | SearchRegistry UI + PII 迁移 + Provider Presets Swift UI |
+| **`behavior.input_mode`** | 输入行为模式 | `cut` / `copy` / `halo` 三选一（CGEventTap hotkey + clipboard context） |
 
 ## 命名约定
 

@@ -13,7 +13,7 @@ A personal AI assistant is a complex domain. It involves conversations, memory, 
 
 DDD provides the organizational backbone:
 
-- **Bounded contexts** prevent cross-domain coupling. The Memory system does not know about the Dispatcher's task graph, and the Dispatcher does not know about the Gateway's session management.
+- **Bounded contexts** prevent cross-domain coupling. The Memory system does not know about teams/dispatcher scheduling, and teams/dispatcher does not know about the Gateway's session management.
 - **Aggregate roots** enforce consistency boundaries. Modifications to related objects go through a single entry point, preventing inconsistent state.
 - **Value objects** eliminate identity confusion. When two objects are equal if and only if their attributes match, making them value objects prevents bugs where identity is accidentally assumed.
 - **Entities** make identity explicit. When an object needs to persist across operations and be referenced by other objects, marking it as an entity makes this contract visible in the code.
@@ -94,6 +94,8 @@ impl AggregateRoot for TaskGraph {}
 
 A `TaskGraph` is an aggregate root because it manages a collection of `Task` entities and their dependency edges. Adding a task, removing a task, or modifying dependencies must go through the `TaskGraph` to ensure the graph remains valid (no cycles, no dangling references, proper ordering).
 
+> **Note**: the `TaskGraph` / `Task` snippet above is a teaching example. **No `TaskGraph` type exists in the current Aleph source** — the actual domain aggregate root in the codebase is `MemoryFact` (`src/memory/context/fact.rs`), which implements `pub trait AggregateRoot`.
+
 External code should never modify a `Task` directly — it should call methods on `TaskGraph` that maintain invariants:
 
 ```rust
@@ -150,22 +152,24 @@ A `TaskStatus` is a value object because we only care about what the status *is*
 
 Aleph's domain is partitioned into bounded contexts — cohesive areas of the domain that have their own ubiquitous language, their own models, and their own rules. Objects in different contexts may share names but have different meanings.
 
-### Dispatcher Context
+### teams/dispatcher Context
 
-**Responsibility**: DAG scheduling, tool orchestration, task state management.
+**Responsibility**: sub-task scheduling, parallel bucketing, Team coordination.
 
-The Dispatcher context handles the execution side of the agent — breaking requests into task graphs, managing dependencies, and tracking progress.
+The teams/dispatcher context handles the execution side of the agent — `TeamDispatcher` decomposes complex requests into sub-tasks, while `handoff.rs` / `runner.rs` / `schedule/{select,settle,reclaim,failure}.rs` manage dependencies, timeouts, and failure recovery. The Act stage partitions work via `src/tools/concurrency.rs::ConcurrencyClaim` resource declarations (intra-bucket concurrent, inter-bucket serial), with no middleware doing intent judgment (R7/R10).
+
+> **Important**: `src/dispatcher/agent_types/{graph,task,status}.rs` **does not exist**; no `TaskGraph` type exists in the source tree. The table below lists the real types and locations most relevant to concurrent / task-recovery work.
 
 | Type | DDD Role | Location |
 |------|----------|----------|
-| `TaskGraph` | AggregateRoot | `dispatcher/agent_types/graph.rs` |
-| `Task` | Entity | `dispatcher/agent_types/task.rs` |
-| `TaskStatus` | ValueObject | `dispatcher/agent_types/status.rs` |
+| `ConcurrencyClaim` | ValueObject (enum) | `src/tools/concurrency.rs` |
+| `TaskStatus` | ValueObject (enum) | `src/a2a/domain/task.rs` (A2A protocol domain, **not** the dispatcher core) |
+| `TeamDispatcher` | AggregateRoot | `src/teams/dispatcher/{mod,handoff,runner}.rs` |
 
-The `TaskGraph` aggregate root ensures that:
-- Tasks are executed in dependency order.
-- No circular dependencies exist.
-- Status propagation is consistent (a parent task cannot be "complete" while a child is still "running").
+The parallel-bucketing functions (`batch_parallelizable` / `partition_parallel_groups`) ensure:
+- Calls within a bucket run concurrently.
+- Buckets with conflicting resource declarations run serially.
+- `claims_conflict` backs off when declarations overlap.
 
 ### Memory Context
 
@@ -175,31 +179,26 @@ The Memory context manages the agent's persistent knowledge — storing facts, r
 
 | Type | DDD Role | Location |
 |------|----------|----------|
-| `MemoryFact` | AggregateRoot | `memory/context.rs` |
-| `ContextAnchor` | ValueObject | `memory/context.rs` |
-| `FactType` | ValueObject | `memory/context.rs` |
+| `MemoryFact` | AggregateRoot | `src/memory/context/fact.rs` |
+| `ContextAnchor` | ValueObject | `src/memory/context/mod.rs` |
+| `NoteType` | ValueObject (enum) | `src/memory/context/enums.rs` |
+
+> **Correction**: the paths and type names above are the real locations in the source tree (`memory/context` is a directory, not a file; the type is `NoteType`, not `FactType`). `MemoryFact`'s `impl Entity` and `impl AggregateRoot` live in `src/memory/context/fact.rs`.
 
 The `MemoryFact` aggregate root ensures that:
-- Facts are properly anchored to their context (conversation, topic, domain).
-- Fact types are consistent and valid.
-- Compression operations preserve essential information.
+- Facts are properly anchored to their context (conversation, topic, domain), expressed via `ContextAnchor`.
+- Fact types are consistent and valid, gated by the `NoteType` enum.
+- Compression operations preserve essential information (`src/memory/compression/` + `session_compactor/`).
 
-### Intent Context
+### Intent Context (does not exist)
 
-**Responsibility**: Intent detection, L1-L3 layered filtering.
-
-The Intent context handles the perception side of the agent — analyzing user input and classifying it into actionable intents.
-
-| Type | DDD Role | Location |
-|------|----------|----------|
-| `AggregatedIntent` | ValueObject | `intent/types.rs` |
-| `IntentSignal` | ValueObject | `intent/types.rs` |
-
-Note that the Intent context uses only value objects — intents are classified, not tracked. An intent does not have a lifecycle; it is a snapshot of the agent's understanding at a point in time.
+> **No standalone "intent detection" bounded context exists in the Aleph source**: `src/intent/` does not exist, and `AggregatedIntent` / `IntentSignal` return zero matches across the source tree. R7 explicitly lists "intent-detection rule engines" as usurping the LLM — intent classification is covered naturally by a single LLM inference call (R7 + R9). The only related runtime-config shell, `src/config/types/smart_flow.rs::IntentDetectionConfig`, has fallen into `INERT_SECTIONS` per `src/config/reload_impact.rs` and no longer drives runtime classification.
 
 ### POE Context (Retired)
 
-> **The POE (Principle-Operation-Evaluation) architecture was retired in 26.5+**. Its "intelligence" migrated to system prompt templates (R9); success definition, validation, and evaluation are now naturally covered by a single LLM call. The Harness does not judge completion (**R10's "Don't #3**), nor does it participate in evaluation. R10 deleted the historical `DiminishingReturnsDetector` hard stop because it was a deterministic completion judgment inside the loop.
+> **The POE (Principle-Operation-Evaluation) runtime architecture was retired in 26.5+**. Its "intelligence" migrated to system prompt templates (R9); success definition, validation, and evaluation are now naturally covered by a single LLM call. The Harness does not judge completion (**R10's "Don't #3"**), nor does it participate in evaluation. R10 removed the historical `DiminishingReturnsDetector` hard stop (note in `src/harness/tests/budget.rs:280`) because it was a deterministic completion judgment inside the loop.
+>
+> The database layer still carries `-- POE Event Sourcing / Trust Scores / Contracts` annotations in `src/resilience/database/state_database/schema.rs`; they remain as event-sourcing audit scaffolding (the runtime intelligence itself has moved to the prompt).
 
 Historical responsibility (archaeology only): success contracts, validation rules, evaluation results.
 
@@ -209,26 +208,27 @@ The bounded contexts interact through well-defined interfaces, not direct depend
 
 ```
                   ┌────────────────┐
-                  │  Intent Context │
-                  │  (Perception)   │
+                  │   Thinker /    │
+                  │   PromptLayer  │
+                  │  (Evaluation   │
+                  │   via prompt)  │
                   └───────┬────────┘
-                          │ classified intent
+                          │ covered by a single LLM inference call
                           v
 ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-│  Thinker/      │<──│  Dispatcher    │──>│  Memory Context│
-│  PromptLayer   │   │  Context       │   │  (Knowledge)   │
-│  (Evaluation   │   │  (Execution)   │   │                │
-│  via prompt)   │   │                │   │                │
+│   Harness      │<──│ teams/         │──>│  Memory Context│
+│  (Think→Act)   │   │  dispatcher    │   │  (Knowledge)   │
+│   R10 dumb loop│   │  (Execution)   │   │                │
 └────────────────┘   └────────────────┘   └────────────────┘
          │                                         ^
-         │          experience crystallization      │
+         │            dreaming feedback            │
          └─────────────────────────────────────────┘
 ```
 
-- **Intent --> Dispatcher**: Classified intents are passed to the Dispatcher for task graph construction.
-- **Dispatcher --> Memory**: The Dispatcher queries Memory for relevant context during execution.
-- **Dispatcher --> Thinker / PromptLayer**: LLM-driven evaluation replaces the old POE pipeline; the verdict is the model's natural output, not middleware output.
-- **Thinker / PromptLayer --> Memory**: Successful evaluations trigger experience crystallization into Memory.
+- **Harness ↔ teams/dispatcher**: the Act stage of Harness calls dispatcher; dispatcher returns the bucketed parallel-result back to Harness. Both are constrained by R10's "Dumb Loop" and never classify intent.
+- **teams/dispatcher ↔ Memory**: dispatcher queries Memory for relevant context during execution (`src/memory/retrieval.rs`).
+- **Harness → Thinker / PromptLayer**: the Think stage of the Think→Act loop calls the Thinker; the verdict is the model's natural output, not middleware output (R10's "Don't #5").
+- **Harness / Memory → dreaming**: every successful turn enters the dreaming pipeline (`src/memory/dreaming/`), which promotes skills under SkillOpt discipline; the promoted skills enrich Memory facts and give the next Think call denser context.
 
 Each context owns its models and does not import types from other contexts. Communication happens through shared interfaces (traits, message types) defined at the boundary.
 
@@ -273,32 +273,26 @@ Determine which bounded context the new type belongs to. If it does not fit any 
 
 ### Step 4: Add Tests
 
-Aleph uses a dual testing strategy for domain types:
+Domain invariants are expressed as plain Rust tests — invariants co-locate with the aggregate root inside `#[cfg(test)] mod tests`; cross-module behavior checks live in top-level `tests/<name>.rs` (they **must be top-level** — cargo auto-discovers only `tests/*.rs`; subdirectories require an explicit `mod` from a target to be compiled).
 
-**Gherkin tests** (in `core/tests/features/domain/`) for deterministic behavior:
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-```gherkin
-Feature: TaskGraph consistency
-  Scenario: Cannot add task with duplicate ID
-    Given a task graph with task "task-001"
-    When I add another task with ID "task-001"
-    Then the operation should fail with "duplicate ID"
+    #[test]
+    fn memory_fact_keeps_identity_after_validity_change() {
+        let fact = MemoryFact::new("user".into(), NoteType::Preference, vec![])
+            .with_valid_from(1000);
+        assert_eq!(fact.id(), "user");
+    }
+}
 ```
 
-**YAML spec tests** (in `core/tests/specs/`) for AI-related semantic behavior:
-
-```yaml
-scenarios:
-  - name: "SuccessManifest validates correctly"
-    given:
-      - success_manifest: { id: "sm-001" }
-    then:
-      - assertion_type: "deterministic"
-        check: "has_identity"
-        expected: true
-```
-
-This dual approach ensures both correctness (Gherkin) and semantic validity (YAML specs evaluated by LLM judge).
+Where invariant and identity tests live today (examples):
+- `src/memory/context/tests/fact_tests.rs` — `MemoryFact` identity stability, validity-window edges, aggregate-root invariants
+- `src/memory/context/tests/enum_tests.rs` — `NoteType` enum-derived `FromStr` consistency
+- `src/domain/mod.rs::tests` — minimal samples of the `Entity` / `AggregateRoot` / `ValueObject` traits
 
 ## Design Principles
 
@@ -324,12 +318,12 @@ Rust's ownership model, trait system, and type-level programming align naturally
 
 - **Ownership** enforces aggregate boundaries — if the aggregate root owns its children, external code cannot hold mutable references to them.
 - **Traits** express domain contracts without runtime cost.
-- **Enums** model discriminated unions (like `FactType` or `TaskState`) with exhaustive matching.
+- **Enums** model discriminated unions (like `NoteType` or `TaskState`) with exhaustive matching.
 - **Lifetimes** prevent dangling references across context boundaries.
 
 ## Further Reading
 
 - [Design Philosophy](./overview) — The foundational principles that DDD serves
-- [Agent Thinking Model](./agent-thinking) — How the Thinker / PromptLayer replaced the old POE pipeline
+- [Agent Thinking Model](./agent-thinking) — Thinker / PromptLayer and the Harness Think→Act loop
 - [Five Layers of Emergence](./five-layers) — How bounded contexts map to the L1-L5 model
 - [Architecture](/docs/en/architecture) — Technical system architecture

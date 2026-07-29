@@ -3,7 +3,7 @@ title: "Core Types"
 description: "Shared type definitions used across the Aleph codebase — MediaAttachment, CapturedContext, CompressionStats, and MemoryEntry."
 ---
 
-The `core` module provides pure data types that are shared across all layers of Aleph. It has no business logic, no platform-specific code, and only one external dependency: `serde`.
+The `core` module provides pure data types that are shared across all layers of Aleph. It has no business logic, no platform-specific code, and only external dependency is `serde` plus standard-library containers.
 
 ## Design Philosophy
 
@@ -18,22 +18,33 @@ This design ensures that:
 
 ## MediaAttachment
 
-Multimodal content support for images, documents, and video from clipboard or file uploads.
+Multimodal content support for images, documents, and video from clipboard or file uploads (`src/core/types.rs`).
 
 ```rust
+pub enum MediaType {
+    Image, Document, Video, File,
+}
+
+pub enum ContentEncoding {
+    Base64, Utf8,
+}
+
 pub struct MediaAttachment {
-    pub media_type: String,       // "image", "document", "video", "file"
-    pub mime_type: String,        // "image/png", "application/pdf"
-    pub data: String,             // Content (base64 or utf8)
-    pub encoding: String,         // "base64" | "utf8"
-    pub filename: Option<String>, // Original filename
-    pub size_bytes: u64,          // Original size
+    pub media_type: MediaType,
+    pub mime_type: String,
+    pub data: String,
+    pub encoding: ContentEncoding,
+    pub filename: Option<String>,
+    pub size_bytes: u64,
 }
 ```
 
 The `encoding` field determines how to interpret `data`:
-- `"base64"` — Binary content encoded as Base64 (images, PDFs)
-- `"utf8"` — Plain text content (markdown, extracted text)
+
+- `ContentEncoding::Base64` — Binary content encoded as Base64 (images, PDFs)
+- `ContentEncoding::Utf8` — Plain text content (markdown, extracted text)
+
+`MediaAttachment` carries a `Debug` impl that rewrites `data` to `<REDACTED: N bytes>` to keep payloads out of logs. Both `MediaType` and `ContentEncoding` are `#[non_exhaustive]`, so adding new variants is non-breaking.
 
 **Usage:** Used by `CapturedContext` to pass clipboard content from the Desktop Bridge to the Thinker, and by tool outputs that generate or receive files.
 
@@ -41,12 +52,12 @@ The `encoding` field determines how to interpret `data`:
 
 ## CapturedContext
 
-Context from the user's active application, bridged from the native desktop layer.
+Context from the user's active application, bridged from the native desktop layer (`src/core/types.rs`).
 
 ```rust
 pub struct CapturedContext {
     pub window_title: Option<String>,
-    pub attachments: Option<Vec<MediaAttachment>>,
+    pub attachments: Vec<MediaAttachment>,
     pub session_id: Option<String>,
 }
 ```
@@ -62,14 +73,14 @@ pub struct CapturedContext {
 
 ## CompressionStats
 
-Statistics about the memory compression state, used by the Settings UI to display memory health.
+Statistics about the memory compression state, used by the Settings UI to display memory health (`src/core/types.rs`).
 
 ```rust
 pub struct CompressionStats {
     pub total_raw_memories: u64,
     pub total_facts: u64,
     pub valid_facts: u64,
-    pub facts_by_type: HashMap<String, u64>,
+    pub facts_by_type: BTreeMap<String, u64>,
 }
 ```
 
@@ -77,7 +88,7 @@ pub struct CompressionStats {
 - `total_raw_memories` — Layer 1: raw user messages stored before compression
 - `total_facts` — Layer 2: compressed facts extracted from memories
 - `valid_facts` — Non-invalidated facts still considered active
-- `facts_by_type` — Breakdown by type (preference, plan, learning, etc.)
+- `facts_by_type` — Breakdown by type (preference, plan, learning, etc.); a `BTreeMap` rather than a `HashMap` to give deterministic iteration order
 
 **Usage:** Queried by the Gateway's config handlers to populate the memory dashboard in the Panel UI.
 
@@ -85,7 +96,7 @@ pub struct CompressionStats {
 
 ## MemoryEntry
 
-A memory record returned by the Memory system's API, suitable for serialization to clients.
+A memory record returned by the Memory system's API, suitable for serialization to clients (`src/core/types.rs`).
 
 ```rust
 pub struct MemoryEntry {
@@ -98,7 +109,11 @@ pub struct MemoryEntry {
 }
 ```
 
+`similarity_score` is filtered through `deserialize_with = "deserialize_finite_f32_opt"` — NaN/Inf values in payloads would poison the sort/rank downstream, so dropping them at deserialization is safer than keeping an invalid score.
+
 **Usage:** Returned by memory search queries. The `similarity_score` field is populated when the entry is retrieved via vector search, indicating relevance to the query.
+
+> The internal long-term-memory record is a separate `crate::memory::MemoryEntry` (`src/memory/context/mod.rs`) with `embedding` / `namespace` / `agent` / `context: ContextAnchor` fields for storage. The `core::MemoryEntry` described here is its wire/panel-facing projection.
 
 ---
 
@@ -130,19 +145,15 @@ pub struct MemoryEntry {
 
 ### New Types
 
-- **`SessionEvent` / `SessionEventRecord` / `TurnId`** (`src/session/events.rs`) — 26.7.7+ `session_events` is the canonical event log; `TurnId` distinguishes turns within a session.
-- **`UnifiedMessage` / `ProviderDelta`** (`src/providers/`) — 26.7.7+ LLM-agnostic intermediate message representation. `TextDelta` / `ThinkingDelta` / `ToolCallDelta` three variants cover streaming output.
-- **`LoopState`** (`src/looping/types.rs`) — 26.7.25+ loop state machine (Active / Paused / …). `Pause / Resume` for cross-session control.
-- **`Goal` / `GoalStore`** (`src/goal/types.rs`) — 26.7.x new goal subsystem.
-- **`ArtifactRecord`** (`src/artifacts/store.rs`) — the artifact store record type; the product of `tools.publish`.
-- **`SignerKey` / `OperationLedger`** (`src/identity/signer.rs`) — per-agent signing key + signed operation ledger.
-- **`NoteRelation`** (`src/memory/note_layer/`) — typed relation edge; the return of `note_graph_query` since 26.7.15.
-- **`EvidenceChainEntry`** — since 26.7.27, an evidence-chain entry in the panel Vault drawer.
-- **`CapabilityLedger`** — per-install visible capability list rebuilt from disk (underpins `plugin.install` / `runtimes.install`).
-
-### `MemoryEntry` Field Expansion
-
-26.7.x: `MemoryEntry` now carries a `session_id` field (previously selected by the dashboard query but dropped on serialization). `user_input` / `ai_output` stay separate so the panel can style the two halves independently.
+- **`SessionEvent` / `SessionEventRecord` / `TurnId`** (`src/session/events.rs`) — 26.7.7+ `session_events` is the canonical event log; `TurnId` distinguishes turns within a session. `SessionEvent` itself is `#[non_exhaustive]`, with variants covering `SessionCreated` / `RunStarted` / `TurnStarted` / `UserMessage` / `AssistantMessage` / `ToolCall*` / `Approval*` / `Compaction` and others.
+- **`UnifiedMessage` / `ContentBlock`** (`src/providers/message.rs`) — 26.7.7+ LLM-agnostic intermediate message representation. `UnifiedMessage` has three variants (`User` / `Assistant` / `ToolResult`) covering what a single turn may carry; `ContentBlock` has five variants (`Text` / `Json` / `Thinking` / `ToolCall` / `Image`).
+- **`ProviderDelta`** (`src/providers/delta.rs`) — streaming output events; variants include `TextDelta` / `ThinkingDelta` / `ThinkingSignatureDelta` / `ToolCallStart` / `ToolCallArgDelta` / `ToolCallArgsComplete` / `ToolCallEnd` / `Usage` / `Done` / `Error`.
+- **`LoopStatus` / `LoopState`** (`src/looping/types.rs`) — 26.7.25+ loop state machine: `LoopStatus` is the `Active` / `Paused` / `Stopped` tri-state enum; `LoopState` is the per-session serializable struct (`session_id`, `prompt`, `cadence`, `next_wake_ms`, `pending_tick_wake_ms`, `iterations_used`, etc.), updated immutably (`with_*` / `spent_*` return new copies).
+- **`GoalStatus` / `Goal` / `GoalStore`** (`src/goal/types.rs`) — 26.7.x new goal subsystem. `GoalStatus` is `Active` / `Paused` / `Blocked` / `Complete`; `PursuitMode` is `Passive` / `Active { max_iterations }`; `GateOutcome` splits the maker/checker confirmation (`Unchecked` / `Passed`).
+- **`ArtifactRecord`** (`src/artifacts/store.rs`) — the artifact-store record type; `MAX_ARTIFACT_BYTES = 50 MiB` and `MAX_ARTIFACTS_PER_SESSION = 200` are the gates, rooted at `<aleph_data_dir>/artifacts`.
+- **`AgentKeystore` / `AgentLedger` / `LedgerRecord` / `LedgerAction` / `LedgerOutcome` / `ChainReport` / `as_actor` / `current_actor`** (`src/identity/{keystore,ledger,record,verify,actor}.rs`) — per-agent Ed25519 key, hash-chained signed ledger, and the "act as" `task_local` for sub-agent / delegation attribution.
+- **`NoteRelationArg`** (`src/builtin_tools/note_manage.rs`) — typed relation edge; an input arg of the `note_manage` tool. The read side is the `note_graph_query` tool (`src/builtin_tools/note_graph_query.rs`).
+- **`CapabilityLedger`** (`src/runtimes/ledger.rs`) — per-install visible capability list rebuilt from disk (underpins `plugin.install` / `runtimes.install`); persisted as JSON.
 
 ### See Also
 

@@ -1,159 +1,97 @@
 ---
 title: "Quick Start"
-description: "Get Aleph running in 5 minutes"
+description: "Start Aleph and connect to a local or remote Gateway"
 ---
 
-Get Aleph running in 5 minutes.
+## Desktop App
 
-## Option 1: Desktop App (Fastest)
+Download an artifact actually published for the current version from [GitHub Releases](https://github.com/rootazero/Aleph/releases). Package formats vary by release and platform; use the files attached to that release as the source of truth.
 
-Download the latest version for your platform:
+The desktop shell handles windows, tray, notifications, and OS integration. The `aleph-server` core owns inference, tools, and state.
 
-| Platform | Download |
-|------|------|
-| **macOS** | `.dmg` from [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
-| **Linux** | `.deb` or `.AppImage` from [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
-| **Windows** | `.msi` from [GitHub Releases](https://github.com/rootazero/Aleph/releases) |
+## Run from Source
 
-1. Install and launch the app
-2. Complete the setup wizard (API keys, model selection, **session mode**, **exec tier**, **TLS**)
-3. Start chatting
-
-The desktop app bundles the core server as a background daemon. The shell lives in your system tray; closing the window **doesn't** stop the server.
-
-**Global hotkey:** `CmdOrCtrl+Shift+A` summons the window from anywhere.
-
-### Connecting to a Remote Core
-
-The desktop shell can connect to a remote `aleph-server` over Tailnet or VPN — **only** when the remote core uses self-signed TLS (SAN auto-discovers the host's non-loopback interface IPs; the Panel prompts TOFU fingerprint + SAN approval on first connect).
+Building from source requires Rust 1.95+. Building Panel or using repository development tasks also requires `just`, Node.js/npm, and `wasm-bindgen-cli`.
 
 ```bash
-# On the remote machine, enable self-signed TLS
-aleph-server start \
-  --gateway-bind 0.0.0.0 \
-  --gateway-port 18790 \
-  --gateway-tls-auto-cert
-```
-
-Then in the local shell, enter `wss://remote-host:18790` and approve the TOFU prompt.
-
----
-
-## Option 2: From Source (Development)
-
-### 1. Build & Run
-
-```bash
-# Clone the repo
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
-
-# Run in dev mode (auto-rebuilds WASM)
 just dev
+```
 
-# Or build & run manually
+To start only the core:
+
+```bash
 cargo run --bin aleph-server
 ```
 
-The server starts on `ws://127.0.0.1:18790` by default.
+The Gateway uses `127.0.0.1:18790` by default:
 
-### 2. Configure
+- Panel: `http://127.0.0.1:18790/`
+- WebSocket: `ws://127.0.0.1:18790/ws`
 
-Create `~/.aleph/aleph.toml`:
+## Minimal Configuration
 
-```bash
-mkdir -p ~/.aleph
-cat > ~/.aleph/aleph.toml << 'EOF'
-[agents.defaults]
-model = "anthropic/claude-sonnet-4"
-thinking = "medium"
-session_mode = "work"
-exec_tier = "ask"
+Create `~/.aleph/config.toml`:
 
-[provider.claude]
-protocol = "anthropic"
+```toml
+[general]
+default_provider = "claude"
+
+[providers.claude]
+provider_type = "claude"
+enabled = true
 api_key = "${ANTHROPIC_API_KEY}"
+models = ["<model ID from the current catalog>"]
+
+[policies]
+mode = "work"
+exec_tier = "auto"
 
 [gateway]
+host = "127.0.0.1"
 port = 18790
-bind = "127.0.0.1"
-EOF
 ```
-
-Set your API key:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
+aleph-server doctor
+aleph-server start
 ```
 
-### 3. Connect via WebChat
+`mode` defaults to `work` and affects only tool presentation. `exec_tier` defaults to `auto` and controls approval policy. The two axes remain orthogonal.
 
-Open `http://localhost:18790` in a browser (or whatever port `gateway.port` is set to).
-
-WebChat is a WASM-based UI that connects to the Gateway WebSocket.
-
-### 4. Connect Messaging Channels (optional)
-
-#### Telegram
-
-Add to `~/.aleph/aleph.toml`:
-
-```toml
-[channels.telegram]
-enabled = true
-token = "YOUR_BOT_TOKEN"
-```
-
-Restart the server to pick up the new channel.
-
-#### Discord
-
-```toml
-[channels.discord]
-enabled = true
-token = "YOUR_BOT_TOKEN"
-```
-
-#### iMessage (BlueBubbles)
-
-```toml
-[channels.imessage]
-enabled = true
-server_url = "http://127.0.0.1:1234"
-password = "${BLUEBUBBLES_PASSWORD}"
-```
-
-### 5. Verify
-
-Check that the server is running:
+## Verify
 
 ```bash
-# Server log shows "Gateway listening on ws://127.0.0.1:18790"
-tail -f ~/.aleph/logs/aleph.log
-
-# Or query the RPC endpoint
-curl http://localhost:18790/health
+aleph-server status
+aleph-server gateway call health
 ```
 
-### 6. Session Mode and Exec Tier
+For a systemd user service, inspect logs with:
 
-After WebChat opens, switch **session mode** (chat / work / code) and **exec tier** (Ask / Auto / Full) in the top-right. You can also set global defaults in Settings → Policies.
+```bash
+journalctl --user -u aleph-server.service -f
+```
 
----
+## Remote Core
 
-## Architecture at a Glance
+Enable a non-loopback listener and native TLS in the remote machine's `~/.aleph/config.toml`:
 
-> **One core, many channels, shell-core separation, gateway interop, access control; three user-adjustable axes: exec_tier × thinking × session_mode.**
+```toml
+[gateway]
+host = "0.0.0.0"
+port = 18790
 
-- **One core** (`aleph-server`) drives every interface
-- **Shells** (desktop app) = pure OS integration; **core** = all business logic
-- Every terminal uses the same authenticated WebSocket protocol
-- The desktop shell can connect to a local or remote core (remote must use `wss://` + TOFU)
-- Three user-adjustable axes: `exec_tier` (permissions) / `thinking` (inference) / `session_mode` (tool presentation)
+[gateway.tls]
+enabled = true
+```
+
+When `cert_path` and `key_path` are empty, Aleph generates a self-signed certificate. The remote WebSocket URL is `wss://<host>:18790/ws`; Panel presents a TOFU approval for the certificate fingerprint and SANs on first connection.
 
 ## Next Steps
 
-- [Configuration](./configuration) — full config reference
+- [First-Time Configuration](./wizard) — current CLI and configuration flow
+- [Configuration](./configuration) — core configuration structure
 - [Gateway Protocol](../gateway/protocol) — WebSocket JSON-RPC API
-- [Interfaces](../interfaces/overview) — connect more platforms
-- [Architecture](../architecture/overview) — deeper shell-core separation
+- [Deployment](./deployment) — services, containers, and TLS

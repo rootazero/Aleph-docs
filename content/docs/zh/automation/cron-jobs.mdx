@@ -113,7 +113,7 @@ aleph cron create \
 
 ### 通过配置
 
-作业也可以在 `aleph.toml` 中定义以进行声明式管理：
+作业也可以在 `config.toml` 中定义以进行声明式管理：
 
 ```toml
 [[cron.jobs]]
@@ -133,7 +133,7 @@ tags = ["maintenance"]
 ```
 
 <Callout type="warn">
-`aleph.toml` 中定义的作业在启动时同步。如果数据库中已存在同名作业，则配置版本优先并覆盖它。
+  `config.toml` 中定义的作业在启动时同步。如果数据库中已存在同名作业，则配置版本优先并覆盖它。
 </Callout>
 
 ## 管理作业

@@ -1,185 +1,151 @@
 ---
 title: "向导"
-description: "用于引导式入门和配置流程的基于会话的向导框架。"
+description: "基于会话的多步配置向导框架，通过 gateway RPC 驱动。"
 ---
 
-`wizard` 模块为入门和配置流程提供基于会话的向导框架。它通过延迟承诺和有状态会话引导用户完成多步设置过程。
+`wizard` 模块提供**基于会话的向导框架**：在 gateway WebSocket 上以 `wizard.*` JSON-RPC 调用形式暴露。所有向导交互都走 RPC —— 没有 `aleph` / `aleph-server` CLI 子命令。
 
 ## 设计理念
 
-1. **基于会话的状态机** — 向导进度在交互之间持久化
-2. **延迟承诺** — 每个步骤可以在不阻塞整体流程的情况下收集数据
-3. **通道无关** — 通过 CLI、RPC 或任何接口工作
+1. **基于会话的状态机** —— 通过 `session_id` 在多次 `wizard.next` / `wizard.answer` 调用之间保持进度
+2. **RpcPrompter 抽象** —— flow 实现拿到 `RpcPrompter`，向客户端推 `WizardStep`，等 `wizard.answer` 把值送回
+3. **Panel / 桌面 / 任何 RPC 客户端**都能驱动，无需终端
+4. **终端状态 sticky** —— 完成后 `cancel()` 不会再覆盖 `Done` / 取消其 `finish_data` 载荷
 
 ---
 
 ## 架构
 
 ```
-客户端                        WizardSession                     WizardFlow
-   │                               │                                │
-   │── wizard.start ──────────────▶│                                │
-   │                               │── run(prompter) ──────────────▶│
-   │◀── { step: intro } ───────────│◀── prompt(intro) ──────────────│
-   │                               │                                │
-   │── wizard.next { null } ──────▶│                                │
-   │◀── { step: select } ──────────│◀── prompt(select) ─────────────│
-   │                               │                                │
-   │── wizard.next { "local" } ───▶│                                │
-   │                               │── answer("local") ────────────▶│
-   │◀── { step: text } ────────────│◀── prompt(text) ───────────────│
-   │                               │                                │
-   │── wizard.cancel ─────────────▶│                                │
-   │◀── { done: true } ────────────│                                │
+Client (Panel/桌面)                  WizardSession                   WizardFlow (后台 task)
+   │                                    │                                 │
+   │── wizard.start ────────────────────▶│                                 │
+   │    { wizard_type:"onboarding" }    │── new(flow) 启动 tokio::spawn ─▶│
+   │◀── { session_id, step:welcome } ───│                                 │
+   │                                    │◀── prompter.prompt(welcome) ────│
+   │                                    │                                 │
+   │── wizard.answer ──────────────────▶│                                 │
+   │    { session_id, step_id, value }  │── answer(step_id,value) ───────▶│
+   │                                    │◀── prompter.prompt(next) ───────│
+   │◀── { step:primary } ───────────────│                                 │
+   │                                    │                                 │
+   │── wizard.cancel ──────────────────▶│                                 │
+   │    { session_id }                  │── cancel_tx.send(()) ──────────▶│
+   │◀── { cancelled:true } ─────────────│◀── settle(Cancelled) ───────────│
 ```
 
 ---
 
 ## 核心组件
 
-### WizardSession
+### `WizardSession`
 
-管理向导生命周期：
+会话由 `wizard.start` 创建，在后台 tokio task 中运行 flow，前端每次 `wizard.next` / `wizard.answer` 推进一步：
 
 ```rust
 pub struct WizardSession {
-    flow: Box<dyn WizardFlow>,
-    state: WizardState,
-}
-
-impl WizardSession {
-    pub async fn start(
-        &mut self,
-    ) -> Result<WizardStep> { /* ... */ }
-
-    pub async fn next(
-        &mut self,
-        answer: Option<String>,
-    ) -> Result<WizardNextResult> { /* ... */ }
-
-    pub fn cancel(&mut self,
-    ) -> WizardStatus { /* ... */ }
+    id: String,
+    status: Arc<RwLock<WizardStatus>>,
+    current_step: Arc<RwLock<Option<WizardStep>>>,
+    step_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<WizardStep>>>,
+    answers: Arc<RwLock<HashMap<String, PendingAnswer>>>,
+    error: Arc<RwLock<Option<String>>>,
+    finish_data: Arc<RwLock<Option<serde_json::Value>>>,
+    cancel_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
 }
 ```
 
-### WizardFlow
+要点：
 
-定义步骤序列：
+- `step_tx` 仅由 `RpcPrompter` 持有；flow task 退出时 prompter 被 drop、channel 关闭、`next()` 收到 `None` 后正确返回终态。
+- 终态 `Done` / `Cancelled` / `Error` 是 sticky —— `settle()` 只接受从 `Running` 的迁移；客户端断开清理时晚到的 `cancel()` 不会覆盖已完成的 `Done`（避免丢掉 `finish_data`）。
+
+### `WizardFlow` trait
 
 ```rust
+#[async_trait]
 pub trait WizardFlow: Send + Sync {
-    async fn run(
-        &self,
-        prompter: &dyn WizardPrompter,
-    ) -> Result<()>;
+    async fn run(&self, prompter: &RpcPrompter) -> Result<(), WizardSessionError>;
+    fn name(&self) -> &str { "wizard" }
 }
 ```
 
-### WizardPrompter
+### `RpcPrompter`
 
-抽象用户交互：
+唯一的内置 prompter 实现。`prompter.prompt(step)` 把 `WizardStep` 推给客户端并阻塞等待对应 `wizard.answer`；`finish(data)` 把终值写进 `finish_data`，下一次 `wizard.next` 在 `Done` 状态把它作为 `WizardNextResult.data` 一并返回。
 
-```rust
-pub trait WizardPrompter: Send + Sync {
-    fn intro(&self, title: &str, description: &str) -> ProgressHandle;
-    fn text(&self, prompt: &str) -> Result<String>;
-    fn select(&self, prompt: &str, options: &[WizardOption]) -> Result<String>;
-    fn confirm(&self, prompt: &str) -> Result<bool>;
-}
-```
+支持的 step 类型：
 
-**实现：**
-- `CliPrompter` — 命令行提示（存根，TODO: 集成 dialoguer）
-- `RpcPrompter` — 用于远程客户端的基于 JSON-RPC 的提示
-
-### WizardStep
-
-```rust
-pub struct WizardStep {
-    pub step_type: StepType,
-    pub prompt: String,
-    pub options: Vec<WizardOption>,
-}
-
-pub enum StepType {
-    Intro,
-    Text,
-    Select,
-    Confirm,
-    Complete,
-}
-```
+| `StepType` | 客户端对应交互 |
+|---|---|
+| `Note` | 仅展示 |
+| `Select` | 单选 |
+| `MultiSelect` | 多选 |
+| `Text` | 自由文本（支持 `sensitive` / `validation`） |
+| `Confirm` | 是/否（可设默认值） |
+| `Progress` | 后台进度（`StepExecutor::Gateway`，客户端只渲染） |
+| `Action` | 后台执行 |
 
 ---
 
-## 入门流程
+## 内置 flow
 
-内置向导用于初始设置：
+| Flow | `wizard_type` | 用途 |
+|---|---|---|
+| `OnboardingFlow` | `onboarding` | 首次启动：provider × 2、模型、thinking、消息通道、复核（6 步） |
+| `QuickSetupFlow` | `quick-setup` | 仅问一个 API key，跳过其它（适合二次安装 / 重装） |
+| `ProviderSetupFlow` | `provider-setup` | 单个 provider 的添加 / 重配 |
 
-```rust
-pub struct QuickSetupFlow;
-pub struct ProviderSetupFlow;
-```
+`OnboardingFlow::run` 的步骤序列：
 
-**收集：**
-- AI 提供商选择 (OpenAI, Anthropic 等)
-- API 密钥配置
-- 消息应用偏好
-- 思考级别偏好
+1. `welcome` — 介绍
+2. `configure_primary` — 选主 provider + 模型 + API key
+3. `configure_secondary` — 选备用 provider + 模型 + API key
+4. `configure_thinking` — thinking 级别（`low` / `medium` / `high`）
+5. `configure_messaging` — Telegram / Discord / iMessage（Slack 当前 disabled）
+6. `review_and_finalize` — 复核 + 写入
+
+不在 CLI 上触发；由 Panel 设置页 / 安装后的握手窗口主动调 `wizard.start` 启动。
 
 ---
 
-## 安全属性
+## RPC 协议
 
-- **原子计数器** — `AtomicU64` 用于步骤计数（无锁开销）
-- **锁恢复** — `unwrap_or_else(|e| e.into_inner())` 用于 RwLock
-- **动态宽度** — 框宽度从标题长度计算
-- **生产中无 unwrap** — 所有用户路径返回 `Result`
+方法列表（gateway 注册顺序，`service_unavailable` 占位 → `install_wizard_handlers` 替换为真实 handler）：
+
+| 方法 | 入参 | 返回 |
+|---|---|---|
+| `wizard.start` | `{ wizard_type, initial_data? }` | `{ session_id, step, status }` |
+| `wizard.next` | `{ session_id, answer? }` | `WizardNextResult`（下一步 / 完成 / 取消 / 错误） |
+| `wizard.answer` | `{ session_id, step_id, value }` | `WizardNextResult` |
+| `wizard.cancel` | `{ session_id }` | `{ cancelled }` |
+| `wizard.status` | `{ session_id }` | `{ status, error?, current_step? }` |
+
+`WizardNextResult` 终态可携带 `data`，由 `RpcPrompter::finish(data)` 写入；典型用法是 onboarding 完成后返回已签发的 token / 已落盘的配置摘要。
+
+---
+
+## 安全 / 并发性质
+
+- **`AtomicU64`** 生成步 ID（`step-N`），无锁
+- **`unwrap_or_else(|e| e.into_inner())`** 锁恢复（Poisoned-lock 安全）
+- **显式 step 验证** —— `answer` 校验 `step_id` 与当前 step 匹配；`wizard.next` 携带 `answer` 被拒绝（`wizard.answer` 才接受）
+- **通道泄漏防护** —— `RpcPrompter::prompt` 失败时同步从 `answers` map 移除未消费的 pending sender，避免会话生命周期内的内存泄漏
+- **没有进程内 `CliPrompter`** —— 终端 UI 走 RPC 让 Panel 处理；CLI 不直接驱动 wizard
 
 ---
 
 ## 代码位置
 
-- `src/wizard/mod.rs` — 模块入口点
-- `src/wizard/session.rs` — `WizardSession` 和 `WizardFlow` trait
-- `src/wizard/prompter.rs` — Prompter trait 和实现
-- `src/wizard/types.rs` — 步骤类型和选项
-- `src/wizard/flows/` — 内置流程（入门、提供商设置）
+- `src/wizard/mod.rs` —— 模块入口
+- `src/wizard/session.rs` —— `WizardSession` 与 sticky 终态 / channel 生命周期
+- `src/wizard/prompter.rs` —— `RpcPrompter`、`PendingAnswer`、`ProgressHandle`
+- `src/wizard/types.rs` —— `WizardStep` / `WizardOption` / `WizardStatus` / `StepType` / `WizardNextResult` / `WizardAnswer`
+- `src/wizard/flows/onboarding.rs` —— `OnboardingFlow` / `QuickSetupFlow` / `ProviderSetupFlow`
+- `src/gateway/handlers/wizard.rs` —— `wizard.*` RPC handler + `WizardSessionManager` + `install_wizard_handlers`
 
-## 另请参阅
+## 相关页面
 
-- [配置](/docs/zh/getting-started/configuration) — 配置系统
-- [安装](/docs/zh/getting-started/installation) — 初始设置
-
----
-
-## 26.7.x 补充
-
-### 26.7.21+ 新增阶段
-
-`aleph wizard` 流程在 26.7.21 扩展为 11 阶段，新增：
-
-- **阶段 7 — 会话模式（chat / work / code）**：与 exec_tier、thinking 正交的第三维度
-- **阶段 8 — 执行等级（ask / auto / full）**：默认 `ask`；未知工具失败关闭
-- **阶段 10 — 网关 TLS**：仅环回 / 自签名 / 受信代理三选一
-
-### 子命令
-
-```bash
-aleph wizard              # 完整 11 阶段
-aleph wizard --quick      # 快速设置
-aleph wizard --provider   # 添加 / 重配单个 provider
-aleph wizard --mode       # 仅切换默认会话模式
-```
-
-### 网关 RPC
-
-向导流程也可通过网关 RPC 启动：
-
-- `wizard.start` / `wizard.status` / `wizard.cancel`
-- 由 Panel 端 UI 触发无需终端
-
-### 见另请参阅
-
-- [设置向导](/docs/zh/getting-started/wizard) —— 用户视角
-- [网关 RPC `wizard.*`](/docs/zh/gateway/methods/wizard) —— 协议层
+- [设置向导](/docs/zh/getting-started/wizard) —— 用户视角的入门流程
+- [网关 RPC `wizard.*`](/docs/zh/gateway/methods/wizard) —— 协议细节
+- [部署指南](/docs/zh/getting-started/deployment) —— 安装后的握手窗口

@@ -1,199 +1,171 @@
 ---
 title: "Discovery"
-description: "Unified component discovery system for finding configuration files, skills, commands, agents, and plugins across multiple directories."
+description: "Unified component discovery across multiple directories with upward traversal and on-demand MCP / tool discovery."
 ---
 
-The `discovery` module provides a unified discovery system for finding configuration files, skills, commands, agents, and plugins across multiple directories. It supports both global (user home) and project-level discovery with upward directory traversal.
+The `discovery` module provides a unified directory-scanning system that finds configuration files, skills, commands, agents, and plugins across multiple roots. It also owns the **on-demand discovery** contract — the model no longer relies on a pre-built index but reaches for `mcp_list_*` and `tool_search` at call time.
 
 ## Design Philosophy
 
-The discovery system follows three principles:
-
-1. **Multi-source resolution** — Components can live in multiple locations; later entries override earlier ones
-2. **Upward traversal** — Configuration files are found by searching from the working directory up to the git root
-3. **Claude Code compatibility** — Reads `.claude/` directories for seamless integration with Claude Code workflows
+1. **Multi-source resolution** — components can live in multiple locations; later entries override earlier ones
+2. **Upward traversal** — project-level config files are found by walking from the working directory up to the git root
+3. **Claude Code compatibility** — reads `.claude/` for interop with existing workflows; when both `.aleph/` and `.claude/` exist at the project level, the native `.aleph/` wins on a name clash (so a project's own skill isn't shadowed by a same-named `.claude/` entry)
+4. **On-demand MCP / tool discovery** — no eager indexing of MCP resources or prompts, no full schemas in the initial tool list; the model discovers on demand via `mcp_list_*` and `tool_search`
 
 ---
 
 ## Directory Strategy
 
-### Read Paths (by priority)
-
-Later entries override earlier ones:
+### Read Paths (by priority, later overrides earlier)
 
 | Priority | Path | Notes |
 |---|---|---|
-| 1 | `~/.claude/skills/` | Claude Code compatible (read-only) |
-| 2 | `~/.claude/commands/` | Claude Code compatible (read-only) |
-| 3 | `~/.aleph/skills/` | Aleph native |
-| 4 | `~/.aleph/commands/` | Aleph native |
-| 5 | `~/.aleph/plugins/` | Aleph native |
-| 6 | `./.claude/skills/` | Project-level Claude Code (read-only) |
-| 7 | `./.claude/commands/` | Project-level Claude Code (read-only) |
+| 0 | `~/.claude/` | Claude Code global (read-only) |
+| 10 | `~/.aleph/` | Aleph global |
+| 20+ | `<project>/.claude/` | Project-level Claude Code (read-only) |
+| 40+ | `<project>/.aleph/` | Project-level Aleph native (outranks the project `.claude/` on clash) |
+
+Each global / project root's `~/.aleph/{skills,commands,agents,plugins}` is scanned. On a same-ID clash between `.aleph/` and `.claude/`, the native `.aleph/` entry wins.
 
 ### Write Paths
 
-- Always use `~/.aleph/` for writing
+- Writes always go to `~/.aleph/`; `.claude/` is never written
 
 ---
 
 ## Core Components
 
-### DiscoveryManager
-
-Main entry point for the discovery system:
-
-```rust
-pub struct DiscoveryManager {
-    config: DiscoveryConfig,
-    scanner: DirectoryScanner,
-}
-
-impl DiscoveryManager {
-    pub fn new(config: DiscoveryConfig) -> DiscoveryResult<Self> { /* ... */ }
-    pub fn with_defaults() -> DiscoveryResult<Self> { /* ... */ }
-    
-    pub fn discover_skill_dirs(&self,
-    ) -> DiscoveryResult<Vec<DiscoveredPath>> { /* ... */ }
-    
-    pub fn discover_plugins(&self,
-    ) -> DiscoveryResult<Vec<DiscoveredPath>> { /* ... */ }
-    
-    pub fn find_config_files(
-        &self,
-        filename: &str,
-    ) -> DiscoveryResult<Vec<PathBuf>> { /* ... */ }
-}
-```
-
-### DiscoveryConfig
+### `DiscoveryManager`
 
 ```rust
 pub struct DiscoveryConfig {
     pub working_dir: PathBuf,
     pub scan_claude_dirs: bool,
     pub scan_project_dirs: bool,
-    pub max_upward_depth: usize,
+    pub max_upward_depth: usize,    // default 10
+}
+
+pub struct DiscoveryManager {
+    config: DiscoveryConfig,
+    scanner: DirectoryScanner,
 }
 ```
 
-**Defaults:**
-- `working_dir`: current directory
-- `scan_claude_dirs`: true
-- `scan_project_dirs`: true
-- `max_upward_depth`: 10
+Key entry points:
 
-### DirectoryScanner
+| Method | Description |
+|---|---|
+| `with_defaults()` | Build with the current directory + default depth |
+| `find_config_files(filename)` | Walk upward for `<filename>` (e.g. `aleph.jsonc`); returns `[global, …project]` — project entries come last and win |
+| `discover_skill_dirs()` / `discover_command_dirs()` / `discover_agent_dirs()` | Enumerate child directories under each scan root's `<root>/<component>/` |
+| `discover_plugins()` | Scan `~/.aleph/plugins/` only (with monorepo one-level descent) |
+| `discover_plugins_with_extra(parents)` | Also scan each project-level `<project>/.aleph/plugins/` |
+| `aleph_home()` / `working_dir()` / `git_root()` | Key path accessors |
+| `get_scan_directories()` | All scan roots in current priority order |
 
-Handles the actual filesystem scanning:
+### `DirectoryScanner`
 
-```rust
-pub struct DirectoryScanner { /* ... */ }
+The actual filesystem scan lives in `src/discovery/scanner.rs`:
 
-impl DirectoryScanner {
-    pub fn discover_component(
-        &self,
-        name: &str,
-    ) -> DiscoveryResult<Vec<DiscoveredPath>> { /* ... */ }
-    
-    pub fn discover_plugins(&self,
-    ) -> DiscoveryResult<Vec<DiscoveredPath>> { /* ... */ }
-    
-    pub fn find_upward(
-        &self,
-        filename: &str,
-    ) -> DiscoveryResult<Vec<PathBuf>> { /* ... */ }
-}
-```
+- Each child directory must be a *real* directory (`symlink_metadata`); symlinks pointing outside the expected tree are rejected
+- Hidden directories (`.git`, `.node_modules`, …) are skipped
+- An `agents/` subdirectory without an `agent.md` marker is not a valid extension agent (it could be an Aleph identity directory)
+- Plugin recognition accepts multiple manifest formats: `aleph.plugin.toml`, `aleph.plugin.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`, `.cursorrules`, `.mcp.json`, or the presence of any of `skills/` / `commands/` / `agents/` / `hooks/` directories, or `.cursor/rules/`
 
-**Plugin discovery** includes monorepo support — scans one level deep in `~/.aleph/plugins/` for cloned plugin repositories.
-
----
-
-## Discovery Result
+### `DiscoveredPath` / `DiscoverySource`
 
 ```rust
 pub struct DiscoveredPath {
     pub path: PathBuf,
     pub source: DiscoverySource,
-    pub priority: usize,
+    pub name: String,
+    pub priority: u32,
 }
 
 pub enum DiscoverySource {
-    Global,
-    Project,
+    AlephGlobal,    // ~/.aleph/
+    ClaudeGlobal,   // ~/.claude/
+    Project,        // <project>/.claude or .aleph
+    Plugin,         // provided by a loaded plugin
 }
 ```
 
-Results are returned in priority order (global first, project last).
+`is_read_only()` returns `true` for `ClaudeGlobal` and `Project`.
 
 ---
 
 ## Upward Traversal
 
-Finds configuration files by walking up the directory tree:
-
 ```rust
 let manager = DiscoveryManager::with_defaults()?;
 let configs = manager.find_config_files("aleph.jsonc")?;
-// Searches from working_dir up to git root or filesystem root
+// Walks from working_dir up to the git root (or max_upward_depth),
+// returning [global, …project].
 ```
 
-**Edge case:** `canonicalize()` may succeed for the stop directory but fail for the current directory (or vice versa), causing the stop comparison to never match. This is safely guarded by `max_depth`.
+**Edge case**: `canonicalize()` may succeed for the stop directory but fail for the current directory (or vice versa), causing the stop comparison to never match. `find_upward` tracks whether the stop was canonicalized and compares against both the raw and canonicalized form; `max_upward_depth` is the hard cap. `find_upward` also calls `validate_path_component`, which rejects empty strings, `/` / `\`, `..` segments, and `\0` — even when `scan_project_dirs = false` so the global branch cannot be exploited via path traversal.
+
+---
+
+## On-Demand MCP / Tool Discovery
+
+**MCP**: the old `McpResourceIndexLayer` (eager index layer) has been **retracted**. The model now discovers MCP resources and prompts through three capability-gated builtin tools:
+
+| Tool | Description |
+|---|---|
+| `mcp_list_resources` | List concrete resource URIs exposed by current MCP servers |
+| `mcp_list_resource_templates` | List URI templates (covers servers whose `resource_count == 0` and only expose templates) |
+| `mcp_list_prompts` | List prompt names available for `mcp_get_prompt` |
+
+Each `mcp_list_*` ships alongside its reader (`mcp_read_resource` / `mcp_get_prompt`) and is only registered in the tool registry while at least one connected server advertises that capability — the model never sees a tool that every call would reject. `mcp_tool_bridge` is the single channel that translates MCP manager events into registry mutations.
+
+**Tools / `tool_search`**: non-core tool schemas are *collapsed* — the model sees only `name + description`, and pulls the full schema back on demand via `get_tool_schema`. `tool_search` is a self-contained BM25 meta-tool (no new dependencies) covering every deferred tool: the model queries by capability, gets the top matches with full schemas, and calls them directly. `[tools] defer_mcp_tools` pushes MCP tools into the deferred tier as well. MCP-qualified names (`{server}__{tool}`) are exempt from the builtin collapse tables.
+
+---
+
+## Plugin Directory Recognition
+
+Each child of `~/.aleph/plugins/` is treated as a plugin root (direct manifest) or a monorepo (one more level down — scan subdirectories for a manifest). The presence of `path.join("skills")` / `commands` / `agents` / `hooks` is sufficient on its own, and the directory coexists with Claude Code's `.claude-plugin/plugin.json`.
+
+---
+
+## Plugin Marketplace
+
+- `plugin.marketplace.list` / `plugin.marketplace.add` manage marketplace sources
+- The unified `plugin.install` entry classifies by source (marketplace / zip / path)
+- Trust tiers: Official / Verified / Community / Unverified
+- Pre-install disclosure: command+args, secrets, network / filesystem reach, pinned version + SHA256, trust tier
+
+See [Extensions Store](/docs/en/concepts/extensions-store).
 
 ---
 
 ## Safety Properties
 
-- **No SQL injection** — No database queries (filesystem only)
-- **No lock issues** — No Mutex/RwLock usage
-- **No UTF-8 slicing** — No byte-level string operations
-- **Path traversal safety** — Hidden directory checks (`is_hidden()`) prevent scanning `.git`, `.node_modules`, etc.
+- **No SQL injection** — no database queries (filesystem only)
+- **No locks** — no Mutex / RwLock usage
+- **Path-traversal safe** — `validate_path_component` rejects empty strings, `/` / `\`, `..` segments, `\0`; `symlink_metadata` rejects symlinks pointing outside the expected tree; `is_hidden()` skips `.git` / `.node_modules`
+- **No UTF-8 slicing traps** — all operations stay on char boundaries
+- **Git root cannot be hijacked via symlink** — `find_git_root` delegates to `crate::utils::paths::find_git_root`; the start path is canonicalized before `.git` detection, so a `.git` symlink cannot mis-report an arbitrary ancestor as the repo root
 
 ---
 
-## Code Location
+## Code Locations
 
-- `src/discovery/mod.rs` — Module entry point and `DiscoveryManager`
-- `src/discovery/paths.rs` — Path constants and utilities
-- `src/discovery/scanner.rs` — Directory scanning implementation
-- `src/discovery/types.rs` — Core types
+- `src/discovery/mod.rs` — module entry + `DiscoveryManager`
+- `src/discovery/scanner.rs` — directory scan, upward traversal, plugin manifest recognition
+- `src/discovery/paths.rs` — path constants + `find_upward` + `validate_path_component`
+- `src/discovery/types.rs` — `DiscoveredPath` / `DiscoverySource` / `ScanDirectory`
+- `src/mcp/tool_bridge.rs` — MCP ↔ tool registry bridge + capability gates
+- `src/builtin_tools/mcp_resource.rs` — `mcp_list_resources` / `mcp_list_resource_templates` / `mcp_read_resource`
+- `src/builtin_tools/mcp_prompt.rs` — `mcp_list_prompts` / `mcp_get_prompt`
+- `src/tools/tool_search.rs` — `tool_search` BM25 retriever + `ToolSearchTool`
+- `src/tools/scoped/deferred.rs` — deferred tier + `tool_search` promotion
 
-## See Also
+## Related Pages
 
-- [Skills](./skills) — How discovered skills are used
-- [Extensions](./extensions) — Plugin architecture
-- [Configuration](./configuration) — Configuration file formats
-
----
-
-## 26.7.x Addendum
-
-### MCP Discovery: On-Demand
-
-26.7.17+ convergence: `McpResourceIndexLayer` (the eager index layer) has been **retracted** — `src/discovery/mcp.rs` no longer blindly indexes MCP resources/prompts. Replaced with **on-demand discovery tools**:
-
-- `mcp_list_*` tools let the model discover MCP resources/prompts on demand
-- A `cat`-guard read-steer routes to native MCP / skill / plugin reads
-- The model no longer `cat`s entire files to probe structure
-
-### Plugin Marketplace
-
-26.7.x introduces an **indexable plugin directory**:
-
-- `plugin.marketplace.list` / `plugin.marketplace.add` list / add marketplace sources
-- The unified `plugin.install` entry classifies by source (marketplace / zip / path)
-- Trust tiers: Official / Verified / Community / Unverified
-- Pre-install disclosure: command+args, secrets, network/fs reach, pinned version + SHA256, tier
-
-### Skill Discovery
-
-- Trigger-word enhancement (BM25 + edit distance) + Markdown skill author guide
-- Plugin-bundled skills folded into the skill mechanism (26.7.17+), unified with `skill_read`
-- Agent catalog revived
-
-### See Also
-
-- [MCP Integration](./mcp-integration) — on-demand discovery
-- [Extensions](./extensions) — `ExtensionKind` classification
-- [Extensions Store](./extensions-store) — trust tiers and disclosure
+- [Skills](/docs/en/concepts/skills) — How discovered skills are used
+- [Extensions](/docs/en/concepts/extensions) — Plugin architecture
+- [MCP Integration](/docs/en/concepts/mcp-integration) — MCP resources / prompts / tools end to end
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — Tool registry and tiering
+- [Extensions Store](/docs/en/concepts/extensions-store) — Trust tiers and disclosure

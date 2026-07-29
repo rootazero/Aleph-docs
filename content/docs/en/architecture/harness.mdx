@@ -1,44 +1,44 @@
 ---
 title: "Harness"
-description: "Think→Act loop, state machine, stop-hooks, context budget, and emergency compaction."
+description: "Think→Act loop driver, 12-file / line-count ratchet, resource-claim Act concurrency, and tool-loop verifier."
 ---
 
 # Harness
 
-The `AgentHarness` drives the **Think → Act** loop for all Gateway chat requests. It is constructed by the Orchestrator and receives pre-resolved dependencies (`SessionService`, `ToolService`, `Sandbox`, `AiProvider`).
+`AgentHarness` drives the **Think → Act** loop for every flow dispatched by the Orchestrator. All agent execution — including subagent spawning — routes through `Orchestrator::dispatch` → `AgentHarnessRunner::run` → `AgentHarness`. The harness is constructed by the orchestrator and receives pre-resolved dependencies (`SessionService`, `ToolService`, `Sandbox`, `AiProvider`, plus optional `PowerCapability`).
 
 **Location**: `src/harness/`
 
-> **Migration complete**: The legacy `src/agent_loop/` directory was deleted in Phase 7 (2026-04-21). All agent execution — including `SubagentTool` — now routes through Orchestrator → Harness.
-
 ---
 
-## Inner Loop Diagram
+## Inner Loop
 
 ```
-┌─────────────────────────────────────────┐
-│              AgentHarness                │
-├─────────────────────────────────────────┤
-│  ┌────────┐   ┌────────┐   ┌────────┐  │
-│  │PREPARE │──▶│ THINK  │──▶│RESOLVE │  │
-│  │• Budget│   │ • LLM  │   │• Parse │  │
-│  │• Context│  │ • Decide│  │• Decision││
-│  │• Preflight│ └────────┘   └────┬───┘  │
-│  └────────┘                      │      │
-│                             ┌────┴───┐  │
-│                             │  ACT   │  │
-│                             │• Execute│  │
-│                             │• Tools  │  │
-│                             └────┬───┘  │
-│                                  │      │
-│                             ┌────┴───┐  │
-│                             │FINALIZE│  │
-│                             │• Eval  │  │
-│                             │• Compress││
-│                             │• Decision││
-│                             └────────┘  │
-└─────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│                AgentHarness                    │
+├────────────────────────────────────────────────┤
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐    │
+│  │  PREPARE │──▶│  THINK   │──▶│ RESOLVE  │    │
+│  │ • Budget │   │ • LLM    │   │ • Parse  │    │
+│  │ • Context│   │ • Decide │   │ • Tools  │    │
+│  │ • Verify │   └──────────┘   └────┬─────┘    │
+│  └──────────┘                      │           │
+│                             ┌──────┴─────┐     │
+│                             │    ACT     │     │
+│                             │ • Execute  │     │
+│                             │ • Parallel │     │
+│                             └──────┬─────┘     │
+│                                    │           │
+│                             ┌──────┴─────┐     │
+│                             │ FINALIZE   │     │
+│                             │ • Trace    │     │
+│                             │ • Persist  │     │
+│                             │ • Decision │     │
+│                             └────────────┘     │
+└────────────────────────────────────────────────┘
 ```
+
+PREPARE asks the context budget for pressure signals, picks the right paradigm, and consults the verifier chain. THINK calls the provider, applies input/output guardrails, and folds back transient context. RESOLVE parses the response and decides whether to act. ACT executes tool calls — serial or parallel by resource claim. FINALIZE flushes trace events, persists events into `SessionService`, and emits a `TurnStep`.
 
 ---
 
@@ -46,50 +46,103 @@ The `AgentHarness` drives the **Think → Act** loop for all Gateway chat reques
 
 ```rust
 pub struct AgentHarness {
-    deps: HarnessDeps,              // All dependencies injected at construction
-    hit_limit: AtomicBool,          // Set when context budget forces early exit
+    deps: HarnessDeps,                         // All dependencies injected at construction
+    stall_tracker: Option<StallTracker>,       // Activity tracker for stall detection
+    hit_limit: AtomicBool,                     // Set when a cap forces early exit
+    total_tokens: AtomicU64,                   // Cumulative token usage across the run
+    terminate_reason: Mutex<TerminateReason>,  // Precise loop-exit cause
+    tool_timeline: Mutex<Vec<ToolInvocation>>,  // Per-tool duration / success
 }
 ```
 
-`AgentHarness` is stateless — all mutable state lives in `SessionService`. Dependencies are injected at construction via `HarnessDeps`:
+`AgentHarness` is stateless beyond counters — all real state lives in `SessionService`. Dependencies are injected at construction via `HarnessDeps`.
 
 ---
 
-## State Machine
+## Loop Outcome Types
 
-The `Harness` trait defines the Think→Act contract. `TurnState` is a simple binary outcome:
+`src/harness/trait_def.rs` defines the loop-control surface:
 
-| Variant | Meaning |
-|---------|---------|
-| `Continue` | The session should run another Think→Act turn |
-| `Done` | The session is complete; no further turns needed |
+```rust
+pub enum TurnState {
+    Continue,   // Run another Think→Act turn
+    Done,       // Loop is complete; no further turns needed
+}
 
-The outer loop (`Harness::run`) repeatedly calls `run_turn` until it returns `Done` or the cancel token fires.
+pub struct TurnStep {
+    pub state: TurnState,
+    pub executed: usize,         // Successful tool calls this turn
+    pub vetoed: bool,            // A verifier vetoed the turn (forces Continue + retry)
+    pub split_child: Option<SessionId>, // Sub-session id if the turn forked
+}
+
+pub enum HarnessError {
+    Llm(AlephError),
+    Tool(ToolError),
+    Session(SessionError),
+    Cancelled,
+    StalledTurn { elapsed: Duration }, // Think exceeded turn_timeout; Act has its own per-tool clock
+}
+```
+
+The polymorphic seams are `SessionDriver` and `Arc<dyn HarnessRunner>` (in the orchestrator) — there is **no** `Harness` trait. The earlier trait and its default `run()` were deleted as zero-consumer abstractions.
+
+The outer loop in `AgentHarness::run` repeatedly calls `run_turn_internal` until it returns `TurnState::Done` or the `CancellationToken` fires.
 
 ---
 
 ## Source Map
 
+`src/harness/` is locked at **12 files** by the `tests/budget.rs` ratchet (`CEILING = 5055`, 2026-07-26). A 13th file or any line growth fails `cargo test -p alephcore --lib`.
+
 | File | Role |
 |------|------|
-| `src/harness/agent.rs` | `AgentHarness` — concrete Think→Act implementation |
-| `src/harness/trait_def.rs` | `Harness` trait + `TurnState` + `HarnessError` |
+| `src/harness/mod.rs` | Module entry, re-exports |
+| `src/harness/agent.rs` | `AgentHarness` struct + outer `run()` loop + grace-turn slot |
+| `src/harness/agent/think.rs` | Think phase — LLM call, guardrails, verifier dispatch, reactive-compact rescue |
+| `src/harness/agent/act.rs` | Act phase — tool execution + resource-claim parallel dispatch |
+| `src/harness/agent/prompt.rs` | Per-turn prompt assembly |
+| `src/harness/agent/guardrails.rs` | Tool-call `Sanitize` / `Block` outcomes |
 | `src/harness/deps.rs` | `HarnessDeps` — dependency bundle |
-| `src/harness/callback.rs` | `HarnessCallback` trait for event streaming |
-| `src/harness/loop_callback.rs` | `LoopCallback` / `NoopCallback` |
-| `src/harness/trace.rs` | Trace event types |
+| `src/harness/trait_def.rs` | `HarnessError`, `TurnState`, `TurnStep` |
+| `src/harness/callback.rs` | `HarnessCallback` — event streaming to the gateway |
+| `src/harness/chain_context.rs` | Turn-to-turn state relay |
+| `src/harness/trace.rs` | Trace event types (DTO conversion lives in `src/gateway/trace_protocol.rs`) |
 | `src/harness/trace_sink.rs` | `TraceSink` trait for observability |
-| `src/harness/chain_context.rs` | Chain-of-thought context management |
+
+Inline tests were relocated to `src/harness/tests/` so the 12-file budget measures production code only.
+
+---
+
+## Act-Stage Parallel Groups
+
+Act partitions tool calls by **resource claim** and dispatches **intra-group** concurrently / **inter-group** serially. Tools declare one of three claim kinds:
+
+| Claim | Meaning |
+|-------|---------|
+| `Shared` | No conflict with any other claim |
+| `Exclusive { Global }` | Mutex over the entire execution (e.g. global config, worktree) |
+| `Exclusive { Paths }` | Mutex over a specific set of filesystem paths |
+
+Two calls admitted as disjoint on the model's **original** args stay disjoint: if any guardrail **rewrites** args (PII mask), the whole batch is serialized instead — otherwise two distinct paths can collapse onto the same placeholder and race.
+
+Cross-batch dedup: a duplicate `(name, args)` within or across batches reuses the first result instead of executing twice.
+
+Each call's wall-clock is bounded by its **tool's** budget in `src/tools/scoped/dispatch.rs::execute_inner`. The run-level `turn_timeout` only bounds Think; per-call overruns surface as `ToolError::Timeout` the next Think reads.
+
+---
+
+## Tool-Loop Verifier
+
+`src/verification/` provides a Turn-level post-validation chain consulted between Think and Act. A blocking verdict forces one more `Continue` so the model reacts to the failure. Verification is **not** a hard-stop heuristic: only the model's explicit `stop` ends a turn cleanly.
 
 ---
 
 ## Sleep Inhibitor
 
-Each Think→Act turn acquires an `IOPMAssertion` of type `PreventUserIdleSystemSleep` with the reason string `"Aleph agent loop"`. The assertion is held by an RAII `InhibitorGuard` whose `Drop` implementation releases it the moment the turn returns. Long-running agent turns can no longer be silently cut short by macOS putting the host to sleep mid-flight.
+Each Think→Act turn acquires a platform sleep-inhibit via `PowerCapability::inhibit_sleep("Aleph agent loop")`. On macOS this returns an `IOPMAssertion` of type `PreventUserIdleSystemSleep`; on Linux and Windows the equivalent is wired through the desktop platform layer. The returned RAII guard releases the assertion the moment it drops, so a long-running agent turn cannot be silently cut short by the host going idle.
 
-The guard is acquired at the start of `run_turn` in `src/harness/agent.rs` and released automatically when the function returns, whether it succeeds, returns an error, or is cancelled.
-
-To verify that an assertion is active while a turn is in flight:
+The guard is acquired at the top of the Think phase (`src/harness/agent/think.rs`) and released automatically when the turn returns — success, error, or cancel.
 
 ```bash
 pmset -g assertions | grep "Aleph agent loop"
@@ -100,49 +153,13 @@ The assertion disappears from the list the moment the turn completes.
 Implementation files:
 - `PowerCapability` trait: `desktop/shared/src/traits/power.rs`
 - macOS IOPMAssertion FFI: `desktop/macos/src/sleep_inhibitor.rs`
-- Agent loop wiring: `src/harness/agent.rs::run_turn`
+- Harness wiring: `src/harness/agent/think.rs`
 
 ---
 
 ## See Also
 
-- [Thinker](./thinker) — LLM interaction layer
-- [Dispatcher](./dispatcher) — Task orchestration
-- [Session Service](./session-service) — Append-only event log
-- Sandbox — Execution environment
-
----
-
-## 26.7.x Addendum
-
-### `src/harness/` Locked at 12 Files + Line-Count Ratchet
-
-**Code is the authority** — every doc number is just a copy of `CEILING`. Currently 5,055 lines (2026-07-26 revision).
-
-### Act-Stage Parallel Groups
-
-26.7.x: the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) drives **intra-group** concurrent / **inter-group** serial.
-
-### Tool-Loop Verifier
-
-`src/verification/` provides Turn-level post-validation: only the model's explicit stop ends a turn.
-
-### The Five "Don'ts"
-
-R10 in concrete form:
-
-1. Don't classify intent
-2. Don't filter tools / score relevance by message intent (progressive tool disclosure exception)
-3. Don't judge completion (other than the model's explicit stop)
-4. Don't do content moderation / safety scoring
-5. Don't pick an error-recovery strategy
-
-### `DiminishingReturnsDetector` Removed
-
-26.7.20+: the hard stop was removed (violates R10). Stuck is bounded by `max_iterations` + tool-loop verifier + the model's own stop.
-
-### See Also
-
-- [Harness Philosophy](/docs/en/philosophy/harness-philosophy) — full discussion
-- [Architectural Redlines R10](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop)
-- [Verifier](/docs/en/concepts/supervisor-verification)
+- [Thinker](./thinker) — Prompt assembly + LLM interaction
+- [Dispatcher](./dispatcher) — `Orchestrator::dispatch` (FlowRequest → HarnessRunner)
+- [Session Service](./session-service) — Append-only event log per session
+- [Memory](./memory) — Dream daemon + SkillOpt evolution gate

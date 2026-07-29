@@ -1,130 +1,108 @@
 ---
 title: "工作区"
-description: "Aleph 如何通过工作区目录组织每个代理的状态，包括配置文件、会话存储、插件目录和多代理隔离。"
+description: "Aleph 如何在 ~/.aleph/ 树中组织配置、会话、记忆、技能、插件、Hub、项目和日志。"
 ---
 
-Aleph 中的工作区是包含代理操作所需一切的磁盘状态目录：配置、会话历史、内存数据库、插件、技能和日志。工作区模型确保不同代理之间的干净分离，并为所有 Aleph 组件提供可预测的目录结构来读写状态。
+Aleph 把所有运行时状态收敛到一个**统一的家目录树** —— `~/.aleph/`（可通过 `ALEPH_HOME` 环境变量覆盖）。本目录描述当前的实际布局；旧的 `~/.config/aleph/`、`facts.lance/`、`evolution.db`、`providers.toml` 等历史约定已全部退役。
+
+> **单源约定**：所有平台统一使用 `~/.aleph/`，无 `XDG_CONFIG_HOME` 之分；测试 / 多副本场景通过 `ALEPH_HOME=/path/to/root` 完整隔离。
 
 ## 目录结构
 
-默认情况下，Aleph 将其工作区存储在 `~/.config/aleph/`（`~/.aleph/` 作为常见的符号链接或替代）。完整结构：
-
 ```
-~/.config/aleph/
-├── config.toml              # 主配置文件
-├── providers.toml           # AI 提供商凭据和设置
-├── sessions.db              # 会话历史的 SQLite 数据库
+~/.aleph/
+├── config.toml                  # 主配置（参见 [配置](/docs/zh/getting-started/configuration)）
+├── aleph.toml.bak               # 迁移前的自动备份
+├── cache/                       # 通用缓存（重启可丢）
 ├── memory/
-│   ├── facts.lance/         # 用于事实的 LanceDB 向量存储
-│   └── graph.db             # 知识图谱 (节点 + 边)
-├── skills/                  # 用户和演化技能
-│   ├── code-review/
-│   │   └── SKILL.md
-│   └── git-commit/
-│       └── SKILL.md
-├── plugins/                 # 已安装的扩展
-│   ├── my-plugin/
-│   │   ├── aleph_plugin.toml
-│   │   └── dist/
-│   └── another-plugin/
-├── protocols/               # 自定义协议定义 (YAML)
-│   └── my-custom-api.yaml
-├── soul.md                  # 全局身份/个性定义
-├── keys/                    # API 密钥和秘密库
-├── logs/                    # 网关和运行时日志
-│   ├── gateway.log
-│   └── agent.log
-└── evolution.db             # 技能演化跟踪数据库
+│   ├── note/                    # 知识笔记（Markdown + SQLite 索引 + sqlite-vec 向量）
+│   ├── raw/                     # 原始来源（用作笔记蒸馏的输入）
+│   └── *.db                     # 事实表、图缓存、insights 等 SQLite 数据库
+├── skills/                      # 用户级技能（Markdown skill）
+├── agents/<id>/skills/          # 当前活跃 agent 的私有技能（优先级最高）
+├── plugins/<plugin>/skills/     # 插件捆绑技能
+├── runtimes/                    # 能力账本 — 探测、引导、持久化外部工具状态
+├── hub_catalog.db                # Aleph Hub 缓存（hub::primer 冷启动填充）
+├── projects.json                # 项目存储（参见 projects.* RPC）
+├── projects.lock                # 项目存储文件锁
+├── data/                        # 运行时数据库（见下）
+│   ├── aleph.lock               # 实例锁（`aleph-server start` 入口处 flock；OS 自动释放）
+│   ├── sessions.db              # 会话事件日志（SessionEvent SSOT）
+│   ├── security.db              # 设备信任、证书指纹、TOFU 信任存储 + 加密 secret vault
+│   ├── pairing.db               # 配对与邀请码
+│   ├── devices.db               # 设备账本
+│   ├── heartbeat.db             # heartbeat 任务 / 探针历史
+│   └── scratchpad_bindings.json # session → active-plan 指针（daemon 重启后保持）
+├── logs/                        # 网关与运行时日志（tracing，按天轮转 + 7 天保留）
+│   ├── aleph-server.log.YYYY-MM-DD
+│   └── ...
+└── soul.md                      # 全局身份/个性定义（被 .soul/identity.md 等覆盖）
 ```
+
+> **历史迁移**：`facts.lance/`（LanceDB 旧向量存储）→ 已统一到 `memory/*.db` + `sqlite-vec`；`evolution.db`（技能演化旧库）→ 已统一到 `dream_*` 表；`providers.toml`（旧凭据文件）→ 已并入 `config.toml` 内 `[providers.*]`；`~/.config/aleph/` → 已统一到 `~/.aleph/`。
 
 ## 配置文件
 
-### config.toml
+### `config.toml`
 
-主配置文件控制所有运行时行为。它按部分组织：
+主配置文件控制所有运行时行为（参见 [配置](/docs/zh/getting-started/configuration) 的完整字段表）。所有字段都支持环境变量插值（`${VAR_NAME}`）。
 
 ```toml
-[agent]
-max_iterations = 25
-token_budget = 128000
-thinking_level = "medium"
-enable_compression = true
-compression_threshold = 100000
+# Agent 默认配置（agents_def.rs）
+[agents.defaults]
+model = "anthropic/claude-sonnet-4"
+thinking = "medium"
+session_mode = "work"   # chat / work / code（第三轴）
+exec_tier = "ask"        # ask / auto / full
 
+# Gateway 配置（含 TLS）
 [gateway]
-host = "127.0.0.1"
 port = 18790
+bind = "127.0.0.1"
 require_auth = false
 
-[interfaces.telegram]
-token = "BOT_TOKEN"
+[gateway.tls]
+# cert 与 key 留空时，核心自动生成自签名证书；
+# SAN 自动覆盖主机非环回接口 IP；远程客户端必须 wss
+cert = "/path/to/cert.pem"
+
+# 频道配置
+[channels.telegram]
+enabled = false
+token = "${TELEGRAM_BOT_TOKEN}"
 allow_from = ["+1234567890"]
 
-[interfaces.discord]
-token = "BOT_TOKEN"
-guilds = ["guild-id-1"]
+[channels.discord]
+enabled = false
+token = "${DISCORD_BOT_TOKEN}"
 
-[skills]
+# 行为 / 输入模式
+[behavior]
+input_mode = "halo"   # cut / copy / halo 三选一
+hotkey = "double_shift"
+
+# 语音
+[voice]
+provider = "deepgram"
+vocabulary_bias = ["Aleph", "sqlite-vec", ...]
+[voice.streaming]
+pcm_input = false    # WhisperLiveKit 必须设 true 才能跳过 FFmpeg 解码
+
+# Heartbeat
+[heartbeat]
 enabled = true
-skills_dir = "skills"
-auto_match_enabled = false
-
-[extensions]
-enabled = true
-hot_reload = true
-
-[memory]
-auto_extract = true
-max_facts = 10000
+# 详细配置见 [Heartbeat 自动化](/docs/zh/automation/heartbeat)
 ```
 
-### providers.toml
+### 凭据存储
 
-提供商凭据单独存储以确保安全。此文件永远不会提交到版本控制：
+API 密钥与秘密由 **OS 钥匙串** 保管，AES-256-GCM 加密存放在 `data/security.db`，从**不以明文**写入 `config.toml`。MCP 服务器通过 Aleph 的 WASM 凭据注入边界在启动时**逐服务器注入**，避免子进程原始继承。
 
-```toml
-[providers.claude]
-protocol = "anthropic"
-model = "claude-opus-4-20250514"
-api_key = "sk-ant-..."
-enabled = true
+## 会话存储（`data/sessions.db`）
 
-[providers.openai]
-protocol = "openai"
-model = "gpt-4o"
-api_key = "sk-..."
-enabled = true
+会话事件日志为**单源真值**（`session_events` 表）；`MessageProjector` 把事件物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写。Schema 由 `src/session/events.rs` 与 `src/session/projector.rs` 定义。
 
-[providers.ollama]
-protocol = "ollama"
-model = "llama3.2"
-base_url = "http://localhost:11434"
-enabled = true
-```
-
-## 会话存储
-
-所有对话会话都持久化在 `sessions.db` SQLite 数据库中：
-
-```sql
-CREATE TABLE sessions (
-    session_key TEXT PRIMARY KEY,
-    messages TEXT,           -- Message 对象的 JSON 数组
-    created_at INTEGER,
-    updated_at INTEGER,
-    message_count INTEGER,
-    token_count INTEGER
-);
-
-CREATE TABLE session_metadata (
-    session_key TEXT PRIMARY KEY,
-    agent_id TEXT,
-    channel TEXT,
-    last_compaction INTEGER
-);
-```
-
-会话密钥使用分层格式，对代理、通道和范围进行编码：
+**会话密钥**使用分层格式，对代理、通道和范围进行编码：
 
 | 密钥格式 | 示例 | 说明 |
 |------------|---------|-------------|
@@ -132,46 +110,79 @@ CREATE TABLE session_metadata (
 | `agent:main:telegram:dm:user123` | 每用户 DM | 隔离的 Telegram 对话 |
 | `agent:main:discord:group:guild-id` | 群组聊天 | Discord 公会对话 |
 | `agent:main:cron:daily-summary` | Cron 任务 | 计划任务会话 |
+| `agent:main:loop:<loop_id>` | 循环会话 | GoalLoop 上下文 |
+| `agent:main:goal:<goal_id>` | 目标会话 | GoalStore 上下文 |
+| `agent:main:heartbeat:<task_id>` | Heartbeat | 周期守护会话 |
 
-## 内存存储
+## 内存存储（`memory/`）
 
-内存子系统在工作区内使用两个存储后端：
+内存子系统只用一个存储后端：**SQLite + sqlite-vec**，加上笔记层（`memory/note/` 的 Markdown 文件 + SQLite 索引）。
 
-### LanceDB 向量存储
+- **事实表**：`memory/facts*.db` —— `notes`、`notes_sources`、`notes_provenance`、`notes_graph_cache`、`notes_graph_insights`（4-signal community-aware recall + Louvain refinement）
+- **原始来源**：`memory/raw/` —— 蒸馏输入；笔记层据此回填 `[[wikilink]]` 边
+- **图缓存 / insights**：每次 `GraphRecomputeStage` 后落地到 `notes_graph_cache` / `notes_graph_insights`（spawn_blocking，零 LLM）
 
-事实与向量嵌入一起存储在 `memory/facts.lance/` 目录中以进行语义搜索。这使代理能够使用相似性搜索从过去的对话中回忆相关信息。
+LanceDB 与旧 `graph.db` 单文件已被整合。
 
-### 知识图谱
+## 技能 / 插件目录
 
-`memory/graph.db` SQLite 数据库将实体之间的结构化关系存储为节点和边的图。这通过启用基于遍历的查询（如"关于项目 X 及其依赖项我知道什么？"）来补充向量存储。
+### 技能
 
-## 插件目录
+按优先级顺序扫描的根（详见 [发现](/docs/zh/concepts/discovery)）：
 
-扩展存储在 `~/.aleph/plugins/` 中，每个插件位于自己的子目录中：
+1. `~/.aleph/agents/<id>/skills/` —— **当前活跃 agent 的私有技能**（最高优先级）
+2. `~/.aleph/skills/` —— 用户级
+3. `<project>/.aleph/skills/` —— 项目级（原生）
+4. `<project>/.claude/skills/` —— 项目级 Claude Code 兼容（同冲突时被项目级 `.aleph/` 压制）
+5. `~/.aleph/plugins/<plugin>/skills/` —— 插件捆绑技能（由 `extension_manager` 权威拥有）
+
+每个技能位于自己的子目录中（OpenCode 兼容发现），并以 `SKILL.md` 标记文件为有效凭证：
 
 ```
-plugins/
+~/.aleph/skills/
+├── code-review/
+│   └── SKILL.md
+└── git-commit/
+    └── SKILL.md
+```
+
+### 插件
+
+```
+~/.aleph/plugins/
 ├── my-plugin/
-│   ├── aleph_plugin.toml    # 插件清单
+│   ├── aleph.plugin.toml    # V2 推荐清单
 │   ├── package.json         # (Node.js 插件)
 │   ├── dist/
-│   │   └── index.js         # 编译后的入口点
+│   │   └── index.js
 │   └── src/
-│       └── index.ts         # 源代码
+│       └── index.ts
 └── wasm-tool/
-    ├── aleph_plugin.toml
-    └── plugin.wasm          # 编译后的 WASM 模块
+    ├── aleph.plugin.toml
+    └── plugin.wasm
 ```
 
-扩展系统按顺序扫描三个搜索路径：
+文件监视器（`notify-debouncer-full`）在文件更改后 ~600 ms 内触发扩展系统的热重载 —— `reload` 在 load guard 下串行化（修复了并发重载竞态）。
 
-1. `~/.aleph/plugins/` -- 用户安装的插件（最高优先级）
-2. `/usr/local/share/aleph/plugins/` -- 系统范围的插件
-3. `./plugins/` -- 项目本地插件（相对于工作目录）
+## Hub 缓存（`hub/`）
 
-当启用热重载时，文件监视器监视这些目录，并在文件更改时自动加载、重新加载或卸载插件。
+`src/hub/primer.rs` 在启动时把官方 MCP 预设、官方插件与官方技能集合统一投影进 `hub_catalog.db`。每次启动合并条目并标 `via {source}` 印记；后台由 `hub_catalog_sync` 从 Aleph Hub 拉取增量更新。详见 [扩展商店](/docs/zh/concepts/extensions-store)。
 
-## 身份和 Soul 文件
+## 项目存储
+
+`projects.json` + `projects.lock` 存储项目元数据；RPC 入口 `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get`。文件锁防止并发损坏。
+
+## 工作区（Workspace）存储
+
+工作区是面向用户的「多工作区并存」抽象 —— 切换工作区即可切换默认通道 / 风格 / agent 绑定。RPC 入口：
+
+- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
+- `channels.set_agent` —— 绑定通道到指定 agent（**要求 agent 存在**；先前接受不存在 agent 的回归已修复）
+- `agents.bindings` —— 查询当前 agent ↔ channel 绑定
+
+后端为 SQLite `AgentEnvStore`（非 `~/.aleph/projects.json`）；定义在 `src/gateway/agent_env.rs`。
+
+## 身份 / Soul 文件
 
 Aleph 使用分层身份系统，可以在多个级别指定 soul 定义：
 
@@ -188,156 +199,49 @@ Aleph 使用分层身份系统，可以在多个级别指定 soul 定义：
 └─────────────┘
 ```
 
-工作区中的全局 `soul.md` 文件定义代理的默认个性：
+全局 `soul.md` 定义默认个性；委托角色链与签名者所有权由 `data/security.db` 中的设备/密钥记录支撑。
 
-```markdown
----
-relationship: mentor
-expertise:
-  - Rust
-  - System design
----
+## 日志
 
-# Identity
+运行时日志存放在 `logs/`：
 
-I am Aleph, your AI programming partner.
+- `aleph-server.log.YYYY-MM-DD` —— 按天轮转 + 7 天保留的 tracing 结构化日志
 
-## Directives
-
-- Be helpful and encouraging
-- Explain concepts clearly
-- Suggest best practices
-
-## Anti-Patterns
-
-- Never be condescending
-- Never make up information
-```
-
-## 日志文件
-
-运行时日志存储在 `logs/` 目录中：
-
-- `gateway.log` -- WebSocket 服务器事件、RPC 调用、连接生命周期。
-- `agent.log` -- 代理循环事件、工具执行、LLM 调用。
-
-Aleph 使用带有结构化日志的 `tracing` crate。可以通过 `RUST_LOG` 环境变量配置日志级别：
-
-```bash
-RUST_LOG=alephcore=debug cargo run -p alephcore --features gateway --bin aleph-gateway -- start
-```
-
-## 多代理工作区分离
-
-当运行多个代理时（例如，主代理和专门的子代理），每个代理可以在共享相同工作区根的同时维护自己的状态：
-
-```
-~/.config/aleph/
-├── config.toml                    # 共享配置
-├── sessions.db                    # 包含所有代理的会话
-│   ├── agent:main:main            # 主代理会话
-│   ├── agent:main:telegram:dm:*   # 主代理 Telegram 会话
-│   └── subagent:agent:main:translator  # 子代理会话
-└── evolution.db                   # 共享技能演化跟踪
-```
-
-子代理会话使用命名空间会话密钥 (`subagent:agent:main:translator`) 以在共享数据库中保持隔离。`SessionCoordinator` 管理子代理会话生命周期：
-
-```rust
-pub struct SessionCoordinator {
-    db: Arc<VectorDatabase>,
-    config: CoordinatorConfig,
-}
-
-impl SessionCoordinator {
-    pub async fn create_session(&self, agent_type: &str, parent_id: &str)
-        -> Result<SessionHandle, AlephError>;
-    pub async fn acquire_session(&self, agent_type: &str, parent_id: &str)
-        -> Result<SessionHandle, AlephError>;
-    pub async fn release_session(&self, session_id: &str)
-        -> Result<(), AlephError>;
-}
-```
-
-空闲的子代理会话可以被 `SwapManager` **交换到磁盘**以释放内存：
-
-```rust
-pub struct SwapManager {
-    db: Arc<VectorDatabase>,
-    swap_dir: PathBuf,
-    config: SwapConfig,
-}
-
-impl SwapManager {
-    pub async fn swap_out(&self, session_id: &str, context: &SwappedContext)
-        -> Result<SwapResult, AlephError>;
-    pub async fn swap_in(&self, session_id: &str)
-        -> Result<SwappedContext, AlephError>;
-}
-```
+Aleph 使用 `tracing` crate + 结构化日志；可通过 `RUST_LOG` 环境变量配置日志级别。`ALEPH-BOOT` marker 标记每次启动的边界（裸 stdout/stderr 流上），便于运维定位每次启动的窗口（详见 [守护进程](/docs/zh/concepts/daemon)）。
 
 ## 热重载
 
-配置更改通过文件监视自动检测：
+配置更改通过文件监视自动检测（去抖动 500 ms）：
 
 ```
 ~/.aleph/config.toml 已修改
     │
     ▼
-去抖动 (500ms)
-    │
-    ▼
-解析新配置 → 针对模式验证
+去抖动 (500ms) → 解析新配置 → schema 验证
     │
     ▼
 应用更改：
   • 重启受影响的接口
-  • 更新路由规则
+  • 更新路由规则（routing_rules.*）
+  • 热更 [execution] max_runs_global / max_runs_per_agent
   • 发出 config.changed 事件
 ```
 
-大多数配置更改不需要重启。提供商凭据、接口令牌、技能目录和扩展设置都支持热重载。
+**新增可热重载字段**：项目存储、Hub 同步 TTL、`[voice] vocabulary` 偏置词列表（限部分段）。
+
+## 多代理 / 集群工作区
+
+集群联邦（参见 [集群](/docs/zh/architecture/cluster)）中，**中心核**拥有完整 `~/.aleph/`；**节点**只持有受控子集（按 `[cluster.node].sync_paths`）。节点键按 **Unicode 归一化**，CJK 节点名正确工作（之前按字节切片会断裂）。
 
 ## 相关页面
 
-- [代理运行时](/docs/zh/concepts/agent-runtime) -- 代理如何在执行期间使用工作区状态
-- [消息](/docs/zh/concepts/messages) -- 会话存储和消息持久化
-- [扩展](/docs/zh/concepts/extensions) -- 插件目录布局和发现
-- [架构概览](/docs/zh/architecture/overview) -- 存储层的系统级视图
-
----
-
-## 26.7.x 补充
-
-### Workspace RPC
-
-26.7.x 工作区由以下 RPC 方法支撑：
-
-- `workspace.create` / `workspace.list` / `workspace.get` / `workspace.update` / `workspace.archive`
-- `channels.set_agent` —— 把通道绑到指定 agent（**现要求 agent 存在**——`channels.set_agent` 接受不存在的 agent 已被修复）
-- `projects.list` / `add` / `create_blank` / `remove` / `touch` / `get` —— 项目存储
-
-### 文件操作路径安全
-
-26.7.15+：
-
-- 符号链接安全的删除/移动
-- glob/deny 复检
-- 冲突去重
-- 逐路径锁
-- 加固路径 deny gate（`%APPDATA%` 展开、系统/proc 守卫）
-- `apply_patch` 前向游标诚实地失败
-
-### Cluster `file.write` 无 TOCTOU 窗口
-
-26.7.21 修复：集群 `file.write` 不再有存在检查与写入之间的 TOCTOU（time-of-check-to-time-of-use）窗口。
-
-### 节点键 Unicode 归一化
-
-26.7.20+：集群 `normalize_node_key` 现在按 Unicode 归一化，CJK 节点名正确工作。之前按字节切片，CJK 节点名断裂。
-
-### 见另请参阅
-
-- [网关 RPC `workspace.*`](/docs/zh/gateway/methods/workspace) — 完整 RPC
-- [网关 RPC `projects.*`](/docs/zh/gateway/methods/workspace#projects) — 项目存储
-- [集群](/docs/zh/architecture/cluster) — 节点键归一化
+- [配置](/docs/zh/getting-started/configuration) —— `config.toml` 全字段
+- [代理运行时](/docs/zh/concepts/agent-runtime) —— 代理如何使用工作区状态
+- [消息](/docs/zh/concepts/messages) —— 会话存储和消息持久化
+- [扩展](/docs/zh/concepts/extensions) —— 插件目录布局和发现
+- [发现](/docs/zh/concepts/discovery) —— 扫描策略与按需发现
+- [守护进程](/docs/zh/concepts/daemon) —— 日志轮转与 ALEPH-BOOT marker
+- [架构概览](/docs/zh/architecture/overview) —— 存储层系统级视图
+- [网关 RPC `workspace.*`](/docs/zh/gateway/methods/workspace) —— 完整 RPC
+- [网关 RPC `projects.*`](/docs/zh/gateway/methods/workspace#projects) —— 项目存储
+- [集群](/docs/zh/architecture/cluster) —— 节点键归一化

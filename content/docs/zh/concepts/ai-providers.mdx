@@ -1,216 +1,90 @@
 ---
 title: "AI 提供商"
-description: "具有重试逻辑、增量流式传输、认证配置文件和多提供商故障转移的 LLM 提供商抽象。"
+description: "具备流式传输、实时路由、有序故障转移、冷却、熔断与真实用量核算的统一模型提供商适配层。"
 ---
 
-`providers` 模块为 LLM 后端提供统一接口。它支持多个提供商（OpenAI、Anthropic、Ollama 等），具有重试逻辑、增量流式传输、认证配置文件管理和自动故障转移。
+Aleph 通过对象安全的 `AiProvider` trait 暴露模型后端。协议适配器把统一消息历史、工具、媒体与生成设置转换为各上游 API，而 decorator 在不把恢复策略放进代理循环的前提下增加模型覆盖、思考等级、计量、MoA 与提供商故障转移。
 
-## 设计理念
+## Provider 契约
 
-1. **提供商抽象** —— 所有 LLM 实现相同的 `LlmProvider` trait
-2. **弹性连接** —— 具有可配置策略的指数退避重试
-3. **流式优先** —— Token 级流式传输是默认的，不是事后考虑
+核心调用是 `AiProvider::process(RequestPayload) -> ProviderResponse`。Provider 还会报告协议以及实际服务的 provider/model hint，使行为选择、定价与归属使用真正处理请求的端点，而不是 wrapper 名称。
 
----
+流式路径使用 `execute_streaming_dyn` 与 `supports_streaming`。最外层 decorator 必须保持流式能力。默认实现会把完整响应重放到 sink，因此缺少专门实现时只会从实时流式降级为批量交付，而不会静默丢失输出。
 
-## 核心组件
+## 配置
 
-### LlmProvider Trait
+Provider 是复数顶层表中的条目：
 
-```rust
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse>;
+```toml
+[providers.primary]
+protocol = "anthropic"
+models = ["claude-sonnet-4-6"]
+enabled = true
 
-    async fn complete_stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Box<dyn Stream<Item = ProviderDelta>>>;
+[providers.local]
+protocol = "ollama"
+models = ["qwen3"]
+base_url = "http://127.0.0.1:11434"
+enabled = true
 
-    fn name(&self) -> &str;
-    fn capabilities(&self) -> ProviderCapabilities;
-}
+[general]
+default_provider = "primary"
+fallback_providers = ["local"]
 ```
 
-**能力：**
-- `streaming` —— 支持 token 级流式传输
-- `function_calling` —— 支持工具/函数调用
-- `vision` —— 支持图像输入
-- `json_mode` —— 支持结构化 JSON 输出
+`models` 有顺序，第一项是默认模型。`model = "..."` 仍是向后兼容的输入别名。常用字段包括 `protocol`、`models`、`base_url`、`enabled`、请求与流空闲超时、上下文窗口覆盖、采样控制、缓存保留、模型行为及协议特定选项。
 
-### ProviderRegistry
+API key 是从加密 vault 加载的仅运行时值，不会由 `ProviderConfig` 持久化。应使用 provider 设置或密钥管理界面，而不是把凭证写入 provider 表。
 
-管理具有故障转移的多个提供商：
+单数 `[provider.<name>]` 路径无效。Provider 条目也没有 `max_failures` 字段；故障转移成员关系与策略单独配置。
 
-```rust
-pub struct ProviderRegistry {
-    providers: HashMap<String, Arc<dyn LlmProvider>>,
-    default: String,
-}
+## 故障转移遍历
 
-impl ProviderRegistry {
-    pub fn get(
-        &self,
-        name: &str,
-    ) -> Option<Arc<dyn LlmProvider>> { /* ... */ }
+`FailoverProvider` 是包裹实时 primary 与有序 provider/model 候选链的 decorator。Harness 只看到一个 provider，不实现重试，也不选择 fallback。
 
-    pub fn list(&self,
-    ) -> Vec<String> { /* ... */ }
-}
-```
+每个请求中，provider 层会：
 
-**确定性：** 故障转移选择使用 `keys().min()` 进行字典序第一个提供商。
+1. 解析实时 primary 与有效 fallback 成员。
+2. 应用显式本地/云端路由策略与能力要求。
+3. 按配置顺序或负载均衡策略排列合格候选。
+4. 尽可能跳过已打开熔断器或处于 provider/model 冷却期的候选。
+5. 按类型化失败决策原地重试或推进到下一候选。
+6. 记录健康、冷却、负载、用量、实际 provider 与实际 model。
 
-### 重试逻辑
+配置的 fallback 名称引用 `[providers]` 中的 key。未配置显式链时，生产链可从实时 provider registry 派生 fallback 成员，因此新增或移除 provider 会影响下一个请求。遍历与 `route_status` 共用 `effective_fallback_names`，所以诊断描述的就是实际使用的链。
 
-```rust
-pub async fn retry_with_policy<F, Fut, T>(
-    operation: F,
-    policy: RetryPolicy,
-) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    let mut attempt = 0;
-    loop {
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(e) if attempt < policy.max_attempts => {
-                let delay = calculate_delay(attempt, &policy);
-                sleep(delay).await;
-                attempt += 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-```
+流式候选只能在尚未发出用户可见内容时故障转移。一旦内容到达 sink，emission guard 会停止遍历，避免把第二个 provider 的答案接到第一个 provider 的半截答案后面。
 
-**退避：** 带上限的指数退避（基于策略的最大 300 秒，简单退避的最大 30 秒）。
+## 实时路由状态
 
-**安全：**
-- 尝试计算的 `saturating_sub(1)`（防止下溢）
-- 退避上限的 `.min(300.0)`（防止无穷大/NaN）
+`[route]` 控制本地/云端偏好、可选云端升级、负载均衡、provider target 与速率上限。`RouteHandle` 把完整路由状态存入一个 `ArcSwap`：写入以原子方式发布一个完整 generation，每个请求读取一个一致快照。因此下一个请求要么看到全部旧字段，要么看到全部新字段，不会看到撕裂混合。
 
-### 增量流式传输
+候选槽位与端点 tier 是不同概念。Primary 槽拥有显式选择的模型；fallback 槽使用各自模型目录。本地/云端 tier 只用于路由策略与成本排序。
 
-将提供商特定的流式格式转换为统一的增量：
+## 可靠性与核算
 
-```rust
-pub struct ProviderDelta {
-    pub content: Option<String>,
-    pub tool_call: Option<ToolCallDelta>,
-    pub finish_reason: Option<String>,
-}
-```
+- 瞬时过载、超时与限流失败使用有界重试和退避决策。
+- 熔断器、provider 冷却与 model 冷却状态在全局链和单代理链之间共享。
+- Provider 错误响应体读取与流空闲间隔均有界。
+- 执行吞吐窗口时会计入 cache read 与 cache creation token。
+- Metering 将成本与用量归属到实际服务的 provider/model。
+- `route_status` 暴露链成员、健康、冷却、负载与路由决策。
 
-**支持的格式：**
-- OpenAI SSE (`data: {...}`)
-- Anthropic SSE (`event: content_block_delta`)
-- Ollama JSON 流式传输
-
-### 认证配置文件
-
-管理 API 凭证：
-
-```rust
-pub struct AuthProfile {
-    pub provider: String,
-    pub api_key: SecretString,
-    pub base_url: Option<String>,
-}
-
-pub struct AuthProfileRegistry {
-    profiles: HashMap<String, AuthProfile>,
-}
-```
-
-**安全：** API 密钥存储为 `SecretString`（在 drop 时清零，在 Debug 中编辑）。
-
----
-
-## 支持的提供商
-
-| 提供商 | 流式传输 | 工具 | 视觉 | JSON 模式 |
-|---|---|---|---|---|
-| **OpenAI** | ✅ | ✅ | ✅ | ✅ |
-| **Anthropic** | ✅ | ✅ | ✅ | — |
-| **Ollama** | ✅ | ✅ | — | ✅ |
-| **Azure OpenAI** | ✅ | ✅ | ✅ | ✅ |
-| **Google Gemini** | ✅ | ✅ | ✅ | ✅ |
-
----
-
-## 安全属性
-
-- **无锁问题** —— 使用带有恢复模式的 `tokio::sync`
-- **生产中无 unwrap** —— 所有重试返回 `Result`
-- **确定性故障转移** —— 排序的提供商选择
-- **有界退避** —— 防止无限延迟增长
-
----
+故障转移热路径借用请求对话，而不是为每次尝试克隆完整历史。Provider 重构还删除了约 2,000 行不可达的平行实现，使 `AiProvider`、协议适配器与 failover 路径成为受维护的运行时。
 
 ## 代码位置
 
-- `src/providers/mod.rs` —— 模块入口点
-- `src/providers/registry.rs` —— 提供商注册表
-- `src/providers/retry.rs` —— 重试逻辑
-- `src/providers/delta.rs` —— 增量流式传输
-- `src/providers/auth_profile_registry.rs` —— 认证管理
-- `src/providers/openai.rs` —— OpenAI 提供商
-- `src/providers/anthropic.rs` —— Anthropic 提供商
-- `src/providers/ollama.rs` —— Ollama 提供商
+- `src/providers/mod.rs` — `AiProvider` 与 provider 构建
+- `src/providers/protocols/` — 协议适配器
+- `src/providers/http_provider.rs` — HTTP 执行与实时流式
+- `src/providers/failover/` — 候选遍历、决策、熔断与冷却
+- `src/providers/route_policy.rs` — 候选门控与排序
+- `src/providers/route_handle.rs` — 原子实时路由快照
+- `src/providers/route_observe.rs` — `route_status` 渲染
+- `src/config/types/provider.rs` — `[providers.<name>]` 条目 schema
 
 ## 另请参阅
 
-- [思考器](./thinker) —— 提示词构造
-- [网关](./gateway) —— 执行引擎
-- [密钥管理](./secret-management) —— 凭证存储
-
----
-
-## 26.7.x 补充
-
-### Provider Failover 重构
-
-26.7.21+ 重大重构：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
-
-### 真实成本核算
-
-26.7.15+：`session.usage` 现在携带真实花费账本（之前成本与 token 数都是部分伪造的）。核心**单源**价格表，shell 不再持有重复价格表。
-
-### VESR 动态模型路由
-
-26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（**k-NN over sqlite-vec**），所以模型能看到哪些模型在此类工作上**实际**表现过。
-
-### 协议适配器
-
-`[provider.<name>]` 段配置：
-
-- `protocol` —— `anthropic` / `openai` / `gemini` / `ollama` / `openai_compat` / ...
-- `model` —— 默认模型
-- `api_key` —— API 密钥（支持 `${ENV_VAR}` 插值）
-- `base_url` —— 兼容 OpenAI 的自定义 base（Ollama、vLLM 等）
-- `max_failures` —— 失败转移阈值
-
-### `runtimes.install` / `list` / `refresh`
-
-26.7.x 运行时管理：自动发现与安装语言运行时（Node / Python / Bun / uv / ...）。能力账本从磁盘重建。
-
-### `embedding_providers.*` / `generation_providers.*` / `rerank_config.*`
-
-26.7.x 拆分类别——embedding、generation、rerank 各自独立的 provider 配置 RPC。
-
-### `route_config.*` / `routing_rules.*`
-
-26.7.x 路由规则（`routing_rules.create` / `list` / `get` / `update` / `delete` / `move`）——细粒度路由控制。
-
-### 见另请参阅
-
-- [生成](/docs/zh/concepts/generation) — 详细
-- [架构 / 提供商](/docs/zh/architecture/providers) — 架构
-- [网关 RPC `providers.*`](/docs/zh/gateway/methods/providers) — 协议
+- [执行引擎](/docs/zh/concepts/execution-engine) — provider 调用如何进入运行
+- [密钥管理](/docs/zh/concepts/secret-management) — 凭证存储
+- [生成](/docs/zh/concepts/generation) — 图像、音频与视频 provider

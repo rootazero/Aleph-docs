@@ -1,253 +1,139 @@
 ---
 title: "扩展系统"
-description: "具有 WASM 和 Node.js 运行时、清单驱动注册和统一钩子执行的插件和技能管理。"
+description: "Aleph 如何发现、注册、加载与重载插件组件，并与 Skill、MCP 后端共享运行时。"
 ---
 
-`extension` 模块为 Aleph 提供统一的扩展系统。它支持插件（WASM 和 Node.js 运行时）和技能，具有清单驱动注册、统一注册表和基于钩子的集成。
+Aleph 中 Extension 有两层含义：
 
-> **辨析。** 在代码库中，`extension`（本页所述的 `src/extension/` 模块）是**插件宿主**——负责加载、注册并运行 WASM/Node.js 插件的后端。它不同于面向用户的伞形概念“Extension（扩展）”，后者把技能、插件和 MCP 服务器统一为同一个理念，并通过**扩展商店**来浏览。该伞形概念及其商店位于独立的 `src/store/` 模块；参见[扩展商店](/docs/zh/concepts/extensions-store)。
+- 面向用户的 Hub 概念：把 Skill、Plugin、Mcp 统一成一种 Extension。
+- `src/extension/` 插件宿主：负责加载、注册、运行插件组件。
 
-## 设计理念
-
-1. **统一注册表** —— 插件可以提供的所有内容（工具、频道、HTTP 路由）都注册在单个 `PluginRegistry` 中
-2. **能力声明** —— 插件通过 `CapabilityDeclaration` 声明它们提供什么（参见[能力系统](./capability-system)）
-3. **沙箱运行时** —— WASM 插件在沙箱中运行；Node.js 插件在单独进程中运行
-4. **热重载** —— 扩展可以在不重新启动的情况下添加、更新或移除
-
----
+Hub 门面按 Kind 路由，插件宿主并不取代 `SkillSystem` 或 `McpManager`，而是与它们集成。
 
 ## 架构
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        ExtensionManager                                  │
-│  - 编排发现、加载、注册、集成                                             │
-└────────────────────────────┬───────────────────────────────────────────┘
-                             │
-           ┌─────────────────┼─────────────────┐
-           ▼                 ▼                 ▼
-      PluginRegistry      PluginLoader        SkillSystem
-    (统一注册表)          (Node.js、WASM)    (技能、代理)
-           │                   │                   │
-           └───────────────────┼───────────────────┘
-                             │
-                             ▼
-                       HookExecutor
-                      (统一钩子)
+```text
+ExtensionManager
+├── DiscoveryManager
+├── AdapterRegistry
+├── PluginRegistry
+├── PluginLoader
+├── 共享 SkillSystem
+├── HookExecutor
+├── ServiceManager
+└── ExtensionWatcher
 ```
 
----
+启动路径：
 
-## 核心组件
+```text
+扫描作用域
+  → 解析与归一化清单
+  → 校验候选
+  → 解决重复来源
+  → 注册静态能力
+  → 加载 Static / MCP / WASM runtime
+  → 发布技能与代理
+  → 同步插件 MCP server
+```
 
-### ExtensionManager
+进程级 `SkillSystem` 接收插件技能根，因此插件技能和文件技能共享来源优先级、快照、提示词 XML、`skill_read`、状态与生命周期操作。
 
-所有扩展的中央协调器：
+## 清单适配器
+
+首选格式是 `.claude-plugin/plugin.toml`，其次是只读兼容的 `.claude-plugin/plugin.json`。`aleph.plugin.toml` 是已废弃的兼容格式，会打印警告。适配器注册表也接受受支持的 Codex、Cursor 布局以及最后的自动发现适配器。
+
+自动发现会识别 `skills/`、`agents/`、`commands/`、`hooks/hooks.json`、`hooks.json` 与 `.mcp.json`。包含任一已识别组件的目录可被视作无清单的静态插件。
+
+## 统一能力注册
+
+`CapabilityDeclaration` 在生产中只有六种变体：
 
 ```rust
-pub struct ExtensionManager {
-    registry: PluginRegistry,
-    loader: PluginLoader,
-    skill_system: SkillSystem,
-}
-
-impl ExtensionManager {
-    pub async fn discover(&self,
-    ) -> Result<Vec<PluginManifest>> { /* ... */ }
-
-    pub async fn load(
-        &self,
-        manifest: &PluginManifest,
-    ) -> Result<LoadedPlugin> { /* ... */ }
-
-    pub async fn register(
-        &self,
-        plugin: LoadedPlugin,
-    ) -> Result<()> { /* ... */ }
+pub enum CapabilityDeclaration {
+    Tool(ToolRegistration),
+    Hook(HookRegistration),
+    Service(ServiceRegistration),
+    Skill(SkillRegistration),
+    Agent(AgentRegistration),
+    McpServer(McpServerConfig),
 }
 ```
 
-### PluginRegistry
+注册器校验所有权，划分能力层级，并派发到对应注册表。Tool、Hook、Skill 属于核心；Agent 属于重要；Service 与 McpServer 属于可插拔。命令 Markdown 以命令型技能存放。
 
-所有插件提供能力的统一注册表：
+`PluginRegistry` 记录插件及其注册的工具、钩子、服务、技能与代理。注册表同时保留 `plugin:diagnostics:check` 这类限定键与短名兼容键。注册行为并不授予插件绕过工具执行策略的权限。
 
-```rust
-pub struct PluginRegistry {
-    tools: HashMap<String, ToolRegistration>,
-    channels: HashMap<String, ChannelRegistration>,
-    hooks: HashMap<String, HookRegistration>,
-    http_routes: Vec<HttpRouteRegistration>,
-    providers: HashMap<String, ProviderRegistration>,
-}
+## Runtime 集成
+
+| 插件类型 | 宿主 |
+|---|---|
+| Static | 仅注册 Markdown 组件，不执行 |
+| MCP | `.mcp.json` 被翻译为限定命名的瞬态 MCP server |
+| WASM | Extism 加载模块并调用声明的导出 |
+
+MCP 插件 server ID 形如 `plugin:<plugin-id>/<server-name>`。MCP 管理器负责进程健康与工具发现。扩展管理器的同步是幂等的，且在 CLI/测试路径下没有实时 MCP handle 时是 no-op。
+
+WASM 工具发现基于插件注册路径。WASM 模块可通过 WASM 注册器声明能力；Node.js IPC runtime 已不再记录。
+
+## 钩子与服务
+
+钩子经共享 `HookExecutor` 执行：
+
+- `interceptor` 钩子按优先级顺序执行，可改写或停止被保护操作。
+- `observer` 钩子并行执行，不会成为阻塞决策点。
+- 允许的形态取决于事件触发点。
+- matcher 仅基于 `tool_name` 匹配。
+
+运行时清单展示解析后的形态、优先级、动作、同意状态以及钩子是否可达。钩子输出上限 64 KiB，钩子超时上限 300 秒。
+
+后台服务需要插件 `background` 权限以及同时声明 start 与 stop handler。服务生命周期在加载、启用、禁用、卸载、热重载与守护进程关闭时统一协调。
+
+## 发现优先级
+
+作用域目录按高到低检查：
+
+```text
+agent > local > project > user
 ```
 
-**注册类型：**
-- `Tool` —— 代理的可调用函数
-- `Hook` —— 事件拦截器
-- `Channel` —— 消息接口集成
-- `Provider` —— AI 模型后端
-- `HttpRoute` —— REST API 端点
-- `Cli` —— CLI 命令
-- `Service` —— 后台服务
-- `Command` —— 聊天中命令
-- `Skill` —— 基于提示的技能
-- `Agent` —— 代理定义
-- `McpServer` —— MCP 服务器配置
+重复插件 ID 按以下来源优先级解决：
 
-### PluginLoader
-
-从不同来源加载插件：
-
-```rust
-pub struct PluginLoader;
-
-impl PluginLoader {
-    pub async fn load_wasm(
-        &self,
-        path: &Path,
-    ) -> Result<WasmPlugin> { /* ... */ }
-
-    pub async fn load_nodejs(
-        &self,
-        path: &Path,
-    ) -> Result<NodeJsPlugin> { /* ... */ }
-}
+```text
+config > workspace > global > bundled
 ```
 
-**WASM 运行时：** 使用 Extism 进行沙箱执行。有限的 I/O，快速启动。
+被激活的记录被加载；overridden 记录保留以便诊断。`.disabled` 标记阻止目录成为候选。
 
-**Node.js 运行时：** 生成具有 IPC 通信的 Node.js 进程。完全访问 Node.js API。
+## 生命周期安全
 
-### Manifest
+`ExtensionManager::load_all` 由 load guard 保护。管理器同时维护活动插件工具快照与单调 revision，以便工具注册表在不变更循环其他部分的前提下刷新。并发 `reload` 调用是串行的。
 
-插件在清单文件中声明其能力：
+插件卸载在删除文件前完成运行时清理。对 MCP 插件而言，瞬态 server 会从实时管理器移除，进程与工具不会跨越插件生命周期。格式错误的插件结果会作为错误返回，而不是被上报为成功的服务结果。
 
-```toml
-[plugin]
-id = "my-plugin"
-name = "My Plugin"
-version = "1.0.0"
+## 与 Hub 的关系
 
-[[capabilities]]
-type = "tool"
-name = "my_tool"
-description = "Does something useful"
+Hub 目录在 `src/hub/` 实现，把归一化后的目录条目持久化到 `hub_catalog.db`。它提供一个 `InstallSpec`，并把选中的 `Plugin` 入口路由到市场安装器。扩展宿主随后发现并加载已安装插件。
 
-[[capabilities]]
-type = "hook"
-event = "message_received"
-```
-
-**清单格式：**
-- `plugin.toml` —— TOML 格式
-- `plugin.json` —— JSON 格式
-- `cc-plugin.json` —— Claude Code 兼容
-- `.mcp.json` —— MCP 服务器配置
-
-### Scope
-
-插件在限制其访问范围的范围内运行：
-
-```rust
-pub struct PluginScope {
-    allowed_apis: Vec<String>,
-    file_access: FileAccessPolicy,
-    network_access: NetworkAccessPolicy,
-}
-```
-
----
-
-## 钩子系统
-
-钩子允许插件拦截和修改系统事件：
-
-```rust
-pub enum HookEvent {
-    MessageReceived { message: Message },
-    ToolInvoked { name: String, args: Value },
-    ResponseGenerated { text: String },
-}
-
-pub trait HookHandler: Send + Sync {
-    async fn handle(
-        &self,
-        event: &HookEvent,
-    ) -> HookResult;
-}
-```
-
-**HookResult：**
-- `Continue` —— 继续事件
-- `Intercept { modified }` —— 用修改后的版本替换事件
-- `Block { reason }` —— 取消事件
-
----
-
-## 发现
-
-扩展从多个位置发现：
-
-1. `~/.aleph/plugins/` —— 用户安装的插件
-2. `./.aleph/plugins/` —— 项目级插件
-3. 与 Aleph 捆绑的内置插件
-
-`PluginWatcher` 监视这些目录的更改并触发热重载。
-
----
-
-## 安全属性
-
-- **沙箱 WASM** —— Extism 提供内存隔离和基于能力的安全
-- **范围执行** —— 插件只能访问声明的 API
-- **清单验证** —— 所有清单在加载前都经过验证
-- **无 `static mut`** —— 使用 `OnceLock` 进行延迟初始化
-
----
+Hub 是目录与受信边界，本模块是插件运行时与注册边界。两边都不构成多 provider 目录模型，清单里也没有插件 provider 段。
 
 ## 代码位置
 
-- `src/extension/mod.rs` —— `ExtensionManager`
-- `src/extension/registry.rs` —— `PluginRegistry`
-- `src/extension/loader.rs` —— `PluginLoader`
-- `src/extension/manifest/` —— 清单解析
-- `src/extension/runtime/` —— WASM 和 Node.js 运行时
-- `src/extension/hooks/` —— 钩子系统
-- `src/extension/watcher.rs` —— 热重载监视器
-- `src/extension/scope.rs` —— 权限范围
+- `src/extension/mod.rs` — 管理器与子系统连接
+- `src/extension/manifest/` — 适配器与归一化清单
+- `src/extension/discovery/` — 候选、作用域与冲突解决
+- `src/extension/capability.rs` — 声明与层级
+- `src/extension/registrar/` — 注册派发
+- `src/extension/registry/` — 组件注册表
+- `src/extension/loader.rs` — runtime 加载
+- `src/extension/hooks/` — 钩子执行与同意
+- `src/extension/watcher.rs` — 变更检测与重载
+- `src/hub/` — 面向用户的目录与安装路由
 
-## 另请参阅
+## 相关页面
 
-- [能力系统](./capability-system) —— 插件能力声明
-- [技能系统](./skill-system) —— 技能管理
-- [扩展商店](/docs/zh/concepts/extensions-store) —— 面向用户的伞形概念（技能 + 插件 + MCP）及其商店
-
----
-
-## 26.7.x 补充
-
-### 双名空间
-
-26.7.x 引入**单数 `plugin.*` 为规范名空间**，复数 `plugins.*` 保留向后兼容。规范名空间与 CC 兼容。
-
-### `plugin.reload` 串行化
-
-26.7.21+：并发 `reload` 现在在 load guard 下**串行**——之前是 race condition 的来源（两个 reload 并发执行，互相覆盖对方的状态）。
-
-### 插件加载器
-
-`src/extension/loader.rs` 的 `register_memory_extension_if_declared`——按声明把 memory 扩展挂上；只在声明了 `memory` 段时挂载，否则跳过。
-
-### 失败开放 → 失败关闭
-
-26.7.21 强化：插件/技能/MCP 服务器的失败默认行为**失败关闭**——之前部分场景是失败开放，引入安全风险。
-
-### 签名操作账本
-
-`~/.aleph/ops.log` 记录每代理签名的操作序列——见 [身份与签名](/docs/zh/concepts/identity-context#26.7.x-补充)。
-
-### 见另请参阅
-
-- [扩展](/docs/zh/concepts/extensions) — 伞形概念
-- [扩展商店](/docs/zh/concepts/extensions-store) — 用户视角
-- [技能系统](/docs/zh/concepts/skill-system) — 与插件平行
+- [扩展](./extensions) — 插件清单与 runtime 细节
+- [技能](./skills) — 共享的技能编写契约
+- [技能系统](./skill-system) — 技能后端
+- [扩展商店](./extensions-store) — 统一 Hub 界面
+- [能力系统](./capability-system) — 声明、权限与运行时账本

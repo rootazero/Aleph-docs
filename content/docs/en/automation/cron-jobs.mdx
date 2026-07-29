@@ -113,7 +113,7 @@ See [cron.* RPC methods](/docs/en/gateway/methods/cron) for the full API specifi
 
 ### Via Configuration
 
-Jobs can also be defined in `aleph.toml` for declarative management:
+Jobs can also be defined in `config.toml` for declarative management:
 
 ```toml
 [[cron.jobs]]
@@ -133,7 +133,7 @@ tags = ["maintenance"]
 ```
 
 <Callout type="warn">
-Jobs defined in `aleph.toml` are synced on startup. If a job with the same name already exists in the database, the config version takes precedence and overwrites it.
+Jobs defined in `config.toml` are synced on startup. If a job with the same name already exists in the database, the config version takes precedence and overwrites it.
 </Callout>
 
 ## Managing Jobs

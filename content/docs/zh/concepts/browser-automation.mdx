@@ -1,184 +1,68 @@
 ---
 title: "浏览器自动化"
-description: "使用 Playwright CLI 和 Chrome DevTools Protocol 后端进行浏览器自动化，用于网页抓取、截图捕获和页面交互。"
+description: "通过 Playwright CLI 或 Chrome DevTools MCP 进行文本优先的浏览器自动化，并明确两种后端的能力边界。"
 ---
 
-`browser` 模块为 Aleph 提供浏览器自动化，支持两个后端：Playwright CLI 驱动程序和通过 MCP 的 Chrome DevTools Protocol (CDP)。它使代理能够导航网站、捕获截图、提取内容和与网页交互。
+`src/browser/` 为浏览器工具提供统一的 `BrowserBackend`，当前由 `BrowserManager` 按 profile 选择两个后端：托管浏览器使用 `PlaywrightCliBackend`，已有 Chrome 会话使用 `ChromeMcpBackend`。浏览器自动化通过内置的 `browser_*` 工具暴露；它不是 Panel Canvas 或 Browser inspector 的 API。
 
-## 设计理念
+## 统一后端接口
 
-1. **后端抽象** —— 所有浏览器操作都通过 `BrowserBackend` trait；代理不关心使用哪个驱动程序
-2. **文本优先提取** —— 页面内容提取为干净文本，不是原始 HTML
-3. **基于快照的交互** —— 代理接收简化的页面快照（链接、按钮、输入），而不是完整的 DOM
+`BrowserBackend` 提供打开、关闭、列出和导航标签页，按快照引用点击、输入、填充、悬停、滚动、截图、快照、执行 JavaScript 和选择下拉项，并为历史导航、等待文本、控制台、网络日志、PDF、对话框、拖放、上传、调整窗口、模拟环境、Cookie 和存储状态提供可选能力。
 
----
+快照是面向模型的结构化页面视图，使用 `ActionTarget::Ref` 引用可交互元素。两个后端不承诺完全相同的动作集合；trait 默认对未实现动作返回 `Unsupported`，调用方必须遵循实际后端能力。
 
-## 核心组件
+## Playwright CLI 后端
 
-### BrowserBackend Trait
+`PlaywrightCliBackend` 通过 `playwright-cli` 驱动托管浏览器：
 
-```rust
-pub trait BrowserBackend: Send + Sync {
-    async fn navigate(&self, url: &str) -> Result<()>;
-    async fn click(&self, target: &ActionTarget) -> Result<()>;
-    async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
-    async fn screenshot(&self, opts: &ScreenshotOpts) -> Result<ScreenshotOutput>;
-    async fn snapshot(&self) -> Result<SnapshotOutput>;
-    async fn scroll(&self, direction: ScrollDirection) -> Result<()>;
-}
-```
+- 可启动受管的 Chromium/Chrome 等浏览器会话，并支持 headless/headed 配置；
+- 导航、截图、DOM/ARIA 快照和文本交互走 CLI 会话；
+- 点击等操作可使用快照引用，部分输入操作也支持当前焦点；
+- Cookie 管理以及 cookies + localStorage 的 storage state 保存/恢复由该后端提供；
+- 通过 profile/session key 隔离浏览器状态。
 
-### PlaywrightCliBackend
+## Chrome DevTools MCP 后端
 
-使用 Playwright 的 CLI 控制 headless 浏览器：
+`ChromeMcpBackend` 通过 Chrome DevTools MCP 操作已有 Chrome 会话：
 
-```rust
-pub struct PlaywrightCliBackend {
-    driver: PlaywrightCliDriver,
-    profile: BrowserProfile,
-}
-```
+- 页面 ID 是数字型 tab 标识，操作前选择目标页面；
+- 每个 profile 有串行锁，覆盖页面选择和动作调用，避免并发操作串页；
+- 元素操作使用 `browser_snapshot` 返回的 ref，不支持坐标点击；
+- 支持已有页面、标签页切换、控制台、网络、截图和 DevTools 提供的交互；
+- 导航前由浏览器 SSRF guard 检查 URL，并为 Chrome 连接准备 host resolver pin。
 
-**特性：**
-- 启动 Chromium/Chrome/Firefox/WebKit
-- 持久化配置文件（cookies、localStorage）
-- 截图捕获
-- 页面导航和交互
-- 内容提取
+因此，不能把 Playwright CLI 的坐标或存储状态能力假定为 Chrome MCP 后端能力，也不能绕过 snapshot ref 直接猜测元素定位。
 
-### ChromeMcpBackend
+## 文本优先与快照
 
-通过 MCP（模型上下文协议）使用 Chrome DevTools Protocol：
-
-```rust
-pub struct ChromeMcpBackend {
-    driver: ChromeMcpDriver,
-}
-```
-
-**特性：**
-- 连接到现有 Chrome 实例
-- 标签页管理
-- 网络拦截
-- 控制台日志捕获
-- 基于快照的交互
-
-### BrowserManager
-
-管理浏览器实例和配置文件：
-
-```rust
-pub struct BrowserManager {
-    backends: HashMap<String, Box<dyn BrowserBackend>>,
-    profiles: HashMap<String, BrowserProfile>,
-}
-```
-
----
-
-## 页面快照
-
-快照为代理提供页面的简化视图：
-
-```rust
-pub struct SnapshotOutput {
-    pub url: String,
-    pub title: String,
-    pub text: String,
-    pub links: Vec<Link>,
-    pub buttons: Vec<Button>,
-    pub inputs: Vec<Input>,
-}
-```
-
-代理接收这种结构化数据而不是原始 HTML，使其更容易推理页面结构。
-
----
+页面内容以文本和可操作元素快照为主，而不是把完整 HTML 注入上下文。典型流程是：打开或导航标签页，调用 `browser_snapshot`，使用返回的 ref 执行动作，再按需截图或重新快照。浏览器工具的具体名称由 `BUILTIN_TOOL_DEFINITIONS` 中的 `browser_*` 条目和运行时注册共同决定。
 
 ## 网络策略
 
-控制浏览器可以访问哪些 URL：
+两个后端都通过 `BrowserSsrfGuard` 检查导航目标。默认拒绝私有地址、localhost 和其他敏感目标；Chrome MCP 额外执行主机解析 pin。该策略是浏览器出站边界，不等同于 MCP 服务器的 SSRF/allowlist，也不等同于消息频道权限。
 
-```rust
-pub struct BrowserNetworkPolicy {
-    allowed_hosts: Vec<String>,
-    blocked_hosts: Vec<String>,
-}
-```
+## Profile 与并发
 
-默认阻止私有网络、localhost 和其他敏感 URL。
+`ProfileManager` 将托管会话和已有 Chrome profile 分开。Chrome MCP 对同一 profile 的页面选择与操作持有 profile 锁；这属于浏览器后端内部的状态一致性约束。工具调度层的 `ConcurrencyClaim` 仍负责跨工具调用的批次并发判断，不能只根据“浏览器读取”名称推断安全并行。
 
----
+## Panel 边界
 
-## 配置文件管理
-
-浏览器配置文件持久化 cookies、localStorage 和会话数据：
-
-```rust
-pub struct BrowserProfile {
-    name: String,
-    data_dir: PathBuf,
-}
-```
-
-配置文件是隔离的 —— 每个配置文件都有自己的 cookie 罐和存储。
-
----
+26.7.25 已撤回 Panel 的 Canvas / Browser inspector seams；它们没有消费者，也不是当前浏览器工具的可用界面。现行浏览器文档只描述 `BrowserBackend`、浏览器工具、页面快照、网络策略和 profile 管理。
 
 ## 代码位置
 
-- `src/browser/mod.rs` —— 模块入口点
-- `src/browser/backend.rs` —— 后端 trait
-- `src/browser/playwright_cli.rs` —— Playwright CLI 驱动程序
-- `src/browser/playwright_cli_backend.rs` —— Playwright 后端实现
-- `src/browser/chrome_mcp.rs` —— Chrome MCP 驱动程序
-- `src/browser/chrome_mcp_backend.rs` —— Chrome MCP 后端实现
-- `src/browser/manager.rs` —— 浏览器实例管理
-- `src/browser/network_policy.rs` —— URL 访问控制
-- `src/browser/profile.rs` —— 配置文件管理
+- `src/browser/backend.rs` — 统一后端 trait
+- `src/browser/manager.rs` — profile 到后端的路由
+- `src/browser/playwright_cli_backend.rs` — `playwright-cli` 后端
+- `src/browser/chrome_mcp_backend.rs` — Chrome DevTools MCP 后端
+- `src/browser/playwright_cli.rs` — CLI 驱动
+- `src/browser/chrome_mcp.rs` — Chrome MCP 驱动
+- `src/browser/network_policy.rs` — 浏览器 SSRF guard
+- `src/browser/profile.rs`、`src/browser/tab_registry.rs` — profile 与标签页状态
+- `src/builtin_tools/browser_tools/` — 面向代理的 `browser_*` 工具
 
 ## 另请参阅
 
-- [内置工具](./builtin-tools) —— 暴露给代理的浏览器工具
-- [安全原语](./security-primitives) —— 浏览器请求的 SSRF 保护
-
----
-
-## 26.7.x 补充
-
-### 计算机使用大幅硬化
-
-26.7.15 修复六处 P0 缺陷：
-
-- escape 陷阱
-- 键组合块
-- press-hold
-- 滚动单位
-- 粘贴
-- 退化帧
-
-macOS PIM 与 Chromium AX 接线；macOS 真正不能交付的后台鼠标动作被**前置拒绝**。
-
-### 非侵入式
-
-26.7.15+：桌面应用通过 **pid 定向的输入轨道** + 窗口范围捕获来驱动。自动化不再移动用户的鼠标；六处 P0 缺陷已修。
-
-### 窗口 / 屏幕
-
-26.7.21+：
-
-- macOS 通过 Accessibility 的窗口定位（CGWindowID → AX by geometry）
-- 焦点提升到**确切**的目标窗口
-- bounds 设在确切的窗口上
-- 屏幕录制裁剪到所请求区域（按物理像素而非点）
-- OCR / 窗口捕获 / 媒体 / 输入 / 截屏轨道的类型化 bridge 错误被保留（不再扁平化）
-
-### Canvas / Browser inspector 撤除
-
-26.7.25：Panel 的 Canvas / Browser inspector seams 撤回（R10 YAGNI——零消费者立即撤）。
-
-### 见另请参阅
-
-- [内置工具](/docs/zh/concepts/builtin-tools) — 浏览器工具位置
-- [安全原语](/docs/zh/concepts/security-primitives) — SSRF 保护
-- [桌面桥](/docs/zh/architecture/desktop-bridge) — macOS 平台桥
+- [内置工具](./builtin-tools) — 浏览器工具注册表
+- [工具基础设施](./tool-infrastructure) — 并发声明与请求范围执行
+- [MCP 集成](./mcp-integration) — Chrome MCP 与外部 MCP 的共同边界

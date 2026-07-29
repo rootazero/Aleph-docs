@@ -30,17 +30,50 @@ pub enum TaskStatus {
 }
 ```
 
+### Lane
+
+Execution lane for resource isolation — not Sequential/Parallel:
+
+```rust
+pub enum Lane {
+    Main,         // User interactions, abort commands (high priority)
+    Subagent,     // Background work (normal priority)
+}
+```
+
+### RiskLevel
+
+Risk level for task-recovery decisions — two tiers only:
+
+```rust
+pub enum RiskLevel {
+    Low,          // Read-only operations; safe to auto-resume
+    High,         // Write operations; requires user confirmation
+}
+```
+
 ### AgentTask
 
 A task with recovery checkpoints:
 
 ```rust
 pub struct AgentTask {
-    pub task_id: String,
+    pub id: String,                            // task_id
+    pub parent_session_id: String,
+    pub agent_id: String,
+    pub task_prompt: String,
     pub status: TaskStatus,
-    pub lane: Lane,           // Execution lane (Sequential/Parallel)
-    pub risk_level: RiskLevel,// Low/Medium/High/Critical
-    pub checkpoint_data: Option<String>,// Serialized state for recovery
+    pub risk_level: RiskLevel,
+    pub lane: Lane,
+    pub checkpoint_snapshot_path: Option<String>,  // Shadow Replay snapshot path
+    pub last_tool_call_id: Option<String>,
+    pub recursion_depth: u32,
+    pub parent_task_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub metadata_json: Option<String>,
 }
 ```
 
@@ -50,24 +83,33 @@ Structured execution traces for shadow replay:
 
 ```rust
 pub struct TaskTrace {
-    pub trace_id: String,
+    pub id: i64,
     pub task_id: String,
-    pub events: Vec<TaskTraceInfo>,
+    pub step_index: u32,
+    pub event: AgentTraceEvent,
+    pub timestamp: i64,
 }
 ```
 
-### SubagentSession
+`TaskTrace::with_timestamp` lets an ordered fixture override the `Utc::now()` stamp that `new()` writes, since the trace-listing cursor paginates on `timestamp` with strict less-than semantics.
 
-Long-lived subagent session management:
+### AgentEvent
+
+Tiered persistence (Skeleton / Pulse):
 
 ```rust
-pub struct SubagentSession {
-    pub session_id: String,
-    pub status: SessionStatus,
-    pub idle_since: Option<DateTime<Utc>>,
-    pub swapped_at: Option<DateTime<Utc>>,
+pub struct AgentEvent {
+    pub id: i64,
+    pub task_id: String,
+    pub seq: u64,                       // ordering for Gap-Fill
+    pub event_type: String,
+    pub payload_json: String,
+    pub is_structural: bool,            // true = skeleton, persisted immediately
+    pub timestamp: i64,
 }
 ```
+
+Long-lived subagent session management lives in `src/teams/sessions/store.rs` (`SessionStatus` / `CollaborativeSession` / `SessionTurn`), not in `resilience`.
 
 ## StateDatabase
 
@@ -75,10 +117,12 @@ SQLite database providing CRUD operations for:
 
 | Table | Purpose |
 |-------|---------|
-| `events` | Agent events (skeleton + pulse tiers) |
+| `events` | Agent events (skeleton + pulse tiers; `seq` for Gap-Fill ordering) |
 | `tasks` | Agent tasks with status and checkpoints |
-| `traces` | Task execution traces |
-| `sessions` | Subagent sessions |
+| `traces` | Task execution traces (`TaskTrace` carrying `AgentTraceEvent`) |
+| `channel_offsets` | Channel consumption offsets |
+| `paired_users` | Paired-user state |
+| `group_chat` | Group-chat state |
 | `memory_events` | Memory-backed event indexing |
 
 ### Schema
@@ -115,23 +159,23 @@ The schema is versioned with migration utilities in `migration.rs`. Key indexes:
 
 ### Guardian Judge Payload Masks Secrets
 
-26.7.21+: the LLM judge used by heartbeat probes (`Guardian Judge`) must mask secrets — secrets are no longer serialized into logs or read by the auditor.
+26.7.21+: `GuardianApprovalRequester` (the LLM judge in `src/approval/guardian_requester.rs`) runs the action description it sends to the judge LLM through `SecretMasker` (`src/exec/masker`) — both the summary and every parsed command segment pass through the same masker, so the redacted summary cannot leak what the per-segment `raw` text (built from the original argv by the shell parser) still carries (bearer tokens, URL basic-auth, generic password assignments). A circuit breaker escalates straight to the human without a judge call after sustained provider failures.
 
 ### Heartbeat Refuses Dangerous Tools
 
-26.7.21+: heartbeat probes refuse to use dangerous tools or confirmation-gated tools. `Heartbeat` is now real (stubs → real) periodic daemon.
+26.7.21+: `DefaultProbeExecutor::execute` (`src/tasks/heartbeat/probe.rs`) calls `is_denied_on_gateway_surface(tool_name)`. Probes run on a timer with no LLM in the loop, so any RCE / host-mutation / control-plane tool or confirmation-gated tool is rejected with an error pointing at `GATEWAY_TOOLS_ALLOW_ENV` (DANGEROUS only). The gate mirrors the one `tools.invoke` uses.
 
 ### Provider Error Reads Bounded
 
 26.7.15+: provider error response body reads are now bounded — previously they could hang on a stalled proxy.
 
-### Shadow-Mode Event Bus
+### Shadow-Mode System State Bus
 
-26.7.x shadow mode: the system state bus with PII filtering; a robustness and privacy layer; an action dispatcher for automated responses to system events; a platform abstraction layer (PAL) with macOS-specific sensors.
+26.7.x shadow mode: the System State Bus (SSB) with PII filtering; a robustness and privacy layer; an action dispatcher for automated responses to system events; a Platform Abstraction Layer (PAL) with macOS-specific sensors.
 
 ### Dreaming Daemon No Longer Burns Quota
 
-26.7.15 fix: the nightly dream run's retry storm is now bounded, so it no longer exhausts the provider quota.
+26.7.15 fix: the nightly dream run's retry storm is now bounded — `should_skip_scheduled_run` treats `error` and a leftover `running` row as "spent for today"; only `cancelled` earns a retry. The daemon no longer exhausts the provider quota.
 
 ### Fail-Closed
 

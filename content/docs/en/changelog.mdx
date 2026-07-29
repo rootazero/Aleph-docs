@@ -240,7 +240,121 @@ A big multi-day release. Headlines: a brand-new **iMessage channel via BlueBubbl
 
 ---
 
-## Historical Milestones
+## 26.7.22+ Rolling Updates (post-VERSION 26.7.21)
+
+> **Unreleased.** The commits since the 26.7.21 release tag roll densely into the next release tag — `VERSION` is still `26.7.21`, but `main` has accumulated ~12,500 commits. This section is a rolling summary from the 26.7.21 baseline, covering seven major work lines.
+
+### A. Aleph Hub Single Source (`aleph-hub`, replaces legacy `src/store/`)
+
+**New `src/hub/` module** (14 files): `cache.rs`, `catalog_client.rs`, `hub_catalog.rs`, `install.rs`, `official_mcp.rs`, `official_plugins.rs`, `official_skills.rs`, `primer.rs`, `reconcile.rs`, `secrets.rs`, `trust.rs`, `types.rs`, `verify.rs`, `mod.rs`.
+
+- **`hub::primer` cold-start projection**: projects official MCP presets, plugins, and skills into one `ExtensionEntry` cache (`~/.aleph/hub_catalog.db`)
+- **`hub::catalog_client` direct HTTP client**: fetches `https://hub.heyaleph.com/catalog.json`, validates the schema, scans for prompt injection, normalizes entries, and updates the cache
+- **Official MCP presets are visible through `aleph-hub`** without a manual `mcp.add`
+- **Retired**: `mcp.list_presets` / `mcp.install_preset`, the Settings → MCP "Recommended" section, and the legacy `src/store/` module
+
+**Hub built-in tools** are registered in the main tool registry; they are not owned by a separate Hub Agent:
+
+| Tool | Purpose |
+|------|---------|
+| `hub_catalog_sync` | synchronize the Aleph Hub catalog into the local cache |
+| `hub_fetch_docs` | fetch documentation under SSRF, injection-scan, and byte-limit controls |
+| `hub_resolve_spec` | read and validate a cached `InstallSpec` |
+| `hub_install_run` | install after trust and user-consent gates pass |
+| `hub_install_verify` | post-install verification |
+
+### B. Artifacts / Deliverables System
+
+**New `src/artifacts/` + `src/export/` modules** (artifact store + session HTML export + markdown export + page + collect + CSS).
+
+- **`artifact_publish` tool**: lets the model publish finished work products as `Deliverable`
+- **`artifacts.*` RPC** (`handlers/artifacts.rs`, ~650 lines): `read_text` / `export_html` / `list`, 512 KB cap + UTF-8 boundary
+- **`session.export_html` + `artifacts.read_text`**: read-only route lane fix (must not enter Mutate lane)
+- **Telegram / CLI / TUI** with `artifact_publish` must branch by `turn.channel_id` carrying substance; otherwise degrades to banner + auto-open pane
+- **Panel "Deliverables" pane** (`interfaces/webchat/src/components/artifacts/`): replaces old inspector; after 4 review rounds reaches text preview + artifact-driven badge + visible fallbacks
+- **Gateway capability byte route** (`src/gateway/server/artifact_route.rs`) exposes artifacts to remote clients
+
+### C. Vault Panel Refactor (`panel/memory` deep)
+
+13 `panel/memory:` commits + `platform/wide/views/memory/` 11 submodules + `platform/phone/memory/` 7 submodules.
+
+- **Card view** (`cards.rs`, three-state shell: `Loading` / `Empty` / `Content`)
+- **Bulk action bar** (`batch_bar.rs`): archive / export / tag across multiple cards
+- **Dual-track search**: `raw` rows vs `notes` rows; `hits invalidate`; facets chip
+- **Deep link / anchor**: `locate_note` page math correct after page-size selector
+- **Evidence chain / `notes_citing`**: render reverse links into drawer
+- **Provenance** (`provenance.rs`): writer / timestamp / source event triple
+- **Cross-agent selection** (`selection.rs`): atomic consistency, avoids lost updates on concurrent selection
+- **Pager** (`pager.rs`, with page-size selector)
+- **Loadable** (`data.rs` + `loader.rs`): all 4 fetches route through it; failed fetch unrepresentable as empty
+- **Toast** (`toast.rs`): per-push seq identity (module-private slot)
+- **Stats** (`stats.rs`): scoped to single agent; `raw_rows_total = filtered_count` (with regression test pin)
+
+**Memory RPC behavior changes** (`memory.listFacts` / `memory.search`):
+
+- `listFacts` returns `total` + carries `tags` / `link_count` / `updated_at`
+- `memory.search total = filtered count` (**not** store total)
+- `memory.search` returns raw rows only, **never** notes
+- `memory.graph` (`graph.query`) reports `null` on scoped fetch failure (not `0`)
+
+### D. Voice Conversation Round 2 / Round 2b
+
+**New `src/gateway/voice/` submodules**: `format.rs`, `hallucination.rs`, `inbound/{provider,stt}.rs`, `outbound.rs`, `sanitize.rs`, `state.rs`, `streaming/{mod.rs,whisperlive.rs,deepgram.rs,relay.rs}`, `voice_mode.rs`, `local_provider.rs`.
+
+- **`[voice] vocabulary` config**: vocabulary biasing, translated per ASR backend (whisperlive `hotwords` / `initial_prompt`, OpenAI `/audio/transcriptions prompt`)
+- **`[voice.streaming] pcm_input`**: WhisperLiveKit MUST be `true` to skip FFmpeg decode
+- **`[voice.format]` config**: fast-model speech regularization (display polish)
+- **`voice.stream.{start,audio,stop}` RPC** + delta topic, 64 KB cap + `try_send` to prevent blocking
+- **New TTS provider fallback** (`TTS_MAX_PROVIDERS = 2`); hop drops `voice_state.voice`
+- **`GenerationProviderRegistry::get_voices_for_provider`**: connects to `speech_generate` failure path (**single join point**: `src/generation/voice_catalog.rs`)
+- **WhisperLiveKit hardening**: `--pcm-input` precondition; `vocabulary biasing`; segment completion normalization
+- **Panel capture tap early-arm** + `Capture::pending` buffer; `streaming_off` uses `stream_id: null` latch
+- **`shared/protocol/src/voice_text.rs`**: hallucination filter + sentence assembly single source
+- **Voice-as-Context**: ASR-transcribed signal into context aggregation (§2.4)
+- **Interfaces `platform/wide/views/voice/`** (10 submodules): 16 kHz box-average resampling, caption_state, level, orb, sentence, vad, wav, voice_playback
+
+### E. Loop / Goal / Strategy Subsystems
+
+**New `src/looping/`, `src/goal/`, `src/strategy/` three independent subsystems**, each with own state machine, pause/resume, cross-session kill switch, tree-budget single-rail constraint.
+
+| Subsystem | Module | Tool |
+|-----------|--------|------|
+| **Loop** (sustained repetition) | `src/looping/` (`types.rs` / `pursuit.rs` / `mod.rs`) | `loop` (start/stop/status/update, 9 actions + token_budget) |
+| **Goal** (autonomous pursuit) | `src/goal/` (`pursuit.rs` / `store.rs` / `types.rs`) | `goal` (with cross-session list action) |
+| **Strategy** (team/naked-loop plan) | `src/strategy/` (`planner.rs` / `render.rs` / `store.rs` / `types.rs`) | `strategy` (revise/show, dumb-write) |
+
+- **LoopState state machine** (`Active` / `Paused` / `Stopped`) + cross-session kill switch
+- **GoalStore + TreeBudget single-rail**: end-to-end test guard
+- **StrategyStraTA pattern**: `goal_key` / `loop_key` / `session_key` / `team_key` four composite key namespaces; `objective + approach + phases + guardrails + success_criteria + goal_id`
+- **`[strategy] plan_team`** + **`plan_naked_loop`** config switches (default on)
+- **Team run mode pin** (leader stamps `usage_mode` and inherits to sub-members; `session_set_mode` rejected in team run)
+- **`task_review` grounding acceptance metadata** (`GroundingVerdict`)
+- **`team_chat` strategy with member `/loop` / `/goal` priority**: loop > session
+- **Team chat planner fire-once `atomic put_if_absent`**
+- **`/loop` and `/goal` pause / resume channels**
+
+### F. Memory Graph Expansion (§2.16 → §2.17)
+
+- **Hand-rolled Louvain community detection** (no external crate, R3 compliant)
+- **4-signal community-aware recall**: node relevance + Leiden refinement
+- **`notes_sources` / `notes_provenance` / `notes_graph_cache` / `notes_graph_insights` tables**
+- **graph-health insights**: `isolated` / `sparse` / `bridge` / `surprising`
+- **`notes_links` lifecycle**: `resolved_by` / `status` / `label` / edge confidence
+- **`[[wikilink]]` supersession closed loop + tombstone deletion**
+- **`GraphRecomputeStage`**: spawn_blocking trigger, zero LLM
+
+### G. Other (selected)
+
+- **iOS Panel Phase 1 / Phase 2 fixes**: default pairing switched to HTTPS + ATS; Keychain trust store; phone/tablet platform views 7 submodules
+- **Settings UI `UnifiedSaveBar`** unified save bar (`ProviderEditPanel` migrated to this bar)
+- **Search Registry + Phase 3 / Phase 4 Settings UI** (PII migration + provider presets Swift UI)
+- **Behavior `[behavior]` section**: cut / copy / halo three input modes + CGEventTap hotkey + clipboard context (10 sec)
+- **Multimodal providers**: Gemini / Ollama / custom endpoints multimodal; clipboard image extraction
+- **Routing rules refactor**: `command + keyword` two-phase matching; `context-aware` routing; `strip_prefix`; `routing_rules.move` / `intent_type` / `preferred_model`
+- **Tool registry enhancement**: `glob` pattern permission override; `tool_search` folded into request core set; `plugin.marketplace.*` folded into `extensions.*`
+- **Cross-module review**: gateway, providers, extensions, tasks, teams, sessions, skills, resilience, metrics, pii, orchestrator, memory, etc. multi-module adversarial review fixes
+
+---
 
 For all major changes before 26.6, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
 

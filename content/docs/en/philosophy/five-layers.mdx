@@ -79,9 +79,9 @@ Domain classification is what allows an AI to know that a question about "Python
 
 ### In Aleph
 
-L2 manifests through the intent detection system and the Memory system's contextual anchoring. When a user sends a message, the intent system classifies it into domains and routes it appropriately. The Memory system uses `ContextAnchor` value objects to tag facts with domain context, enabling relevant retrieval.
+L2 domain classification is handled naturally by a single LLM inference call (R7/R9), without a standalone intent-classification middleware layer. Structural domain annotation lives in the Memory system's `ContextAnchor` value object (`src/memory/context/mod.rs`): facts carry context anchors that retrieval can use for filtering.
 
-The domain classification also drives the agent's ability to select appropriate tools. A coding question routes to code-execution tools; a scheduling question routes to calendar tools; a research question routes to web-search tools.
+Tool routing follows the same rule — a coding question routes to code-execution tools, a research question to web-search tools, a scheduling question to calendar tools. The model sees the full tool schema and the memory context in its prompt and picks accordingly, governed by R10's five "Don'ts".
 
 ## L3: Atomic Skills
 
@@ -98,17 +98,9 @@ Atomic skills are the building blocks of intelligent behavior. They are small en
 
 ### In Aleph
 
-L3 manifests through the experience crystallization system. When the agent successfully completes a task, the result is recorded as an experience entry in the vector database. When similar tasks recur, these experiences are retrieved and applied:
+L3's "know-what becomes know-how" lives in `src/memory/dreaming/`, not in a standalone "experience crystallizer". The dreaming pipeline runs under [SkillOpt](https://arxiv.org/abs/2605.23904) discipline: every successful execution is logged, and promotion is gated by four primitives — `evolution gate` / `edit budget` / `recall-evidence gate` / `health score` — at `src/memory/dreaming/evolution/{gate,budget,evidence,score}.rs`, plus `stages/{note_consolidate,skill_distill,skill_lifecycle,feedback_distill,note_review}.rs`. Rejected edits enter a `rejected-edit buffer` that is fed back as negative signal into distill prompts (see [DREAM_DAEMON.md](https://github.com/rootazero/Aleph/blob/main/docs/reference/memory/DREAM_DAEMON.md)).
 
-```
-Single Success        -->  Experience Entry (stored in vector DB)
-3+ Similar Successes  -->  Candidate Skill (pattern detected)
-5+ Successes          -->  Permanent Skill (promoted to reusable)
-```
-
-The skill promotion pipeline transforms ad-hoc successes into reliable, reusable capabilities. This is how Aleph genuinely learns — not by accumulating chat history, but by crystallizing successful patterns into executable skills.
-
-Skills are also exposed through the Extension system, where developers can register custom skills that bypass the crystallization process and provide capabilities directly.
+Skills are also exposed via `src/extension/` — developers can register custom skills that bypass dreaming and provide capabilities directly, dispatched by the core through its tool system.
 
 ## L4: Functional Modules
 
@@ -125,13 +117,13 @@ Functional modules are the "plug and play" layer. They encapsulate workflows tha
 
 ### In Aleph
 
-L4 manifests through the Dispatcher's task graph system. The Dispatcher breaks complex requests into DAGs (Directed Acyclic Graphs) of subtasks, where each node is an atomic skill or tool invocation. The `TaskGraph` aggregate root manages the execution order, dependencies, and state of these composed workflows.
+L4 is carried by `src/teams/dispatcher/`: `TeamDispatcher` decomposes complex requests into concurrent subtasks, while `handoff.rs`, `runner.rs`, and `schedule/{select,settle,reclaim,failure}.rs` manage dependencies, timeouts, and failure recovery. Parallel dispatch uses `ConcurrencyClaim` and `partition_parallel_groups` in `src/tools/concurrency.rs` to partition calls by resource conflicts: calls run concurrently within a group and groups run serially. See [Agent Thinking Model](./agent-thinking).
 
 ```
 User Request: "Review this PR and fix any issues"
                     │
         ┌───────────┴───────────┐
-        │     TaskGraph (L4)    │
+        │   TeamDispatcher (L4) │
         ├───────────────────────┤
         │  1. Read PR diff      │ ─── L3 Skill
         │  2. Analyze changes   │ ─── L3 Skill
@@ -141,7 +133,7 @@ User Request: "Review this PR and fix any issues"
         └───────────────────────┘
 ```
 
-The MCP (Model Context Protocol) integration also operates at L4, allowing external tools and services to be composed into Aleph's workflows as functional modules.
+MCP (Model Context Protocol) also operates at L4 — the client / preflight / manager under `src/mcp/`, paired with the `src/tools/tool_search.rs` meta-tool for on-demand schema discovery; external tools and services compose into Aleph's workflows as functional modules.
 
 ## L5: Polymorphic Agents
 
@@ -159,14 +151,14 @@ The word "polymorphic" is key: the same underlying intelligence manifests differ
 
 ### In Aleph
 
-L5 is the complete system working in concert: the Gateway managing multi-channel connections, the Agent Loop orchestrating the observe-think-act-feedback cycle, the Memory system providing persistent context, the Dispatcher composing skills into workflows, and the Security system ensuring safe autonomous operation.
+L5 is the complete system working in concert: the Gateway (`src/gateway/`) manages multi-channel connections and JSON-RPC; `src/harness/` orchestrates the Think→Act loop (thin harness + dumb loop, R10); the Memory system (`src/memory/`) provides persistent context; `src/teams/dispatcher/` composes skills into concurrent workflows; the Security system (`src/{security,sandbox,approval,pii}/`) enforces the hard floor for autonomous operations.
 
 ```
-L5 Polymorphic Agent = Gateway + Agent Loop + Memory + Dispatcher + Security
-                       (I/O)     (Cognition)  (State)  (Action)    (Control)
+L5 Polymorphic Agent = Gateway + Harness (Think→Act) + Memory + teams/dispatcher + Security
+                        (I/O)   (Orchestration)    (State)  (Concurrent Action)  (Hard Floor)
 ```
 
-This is where the Think→Act loop, with its prompt-level first-principles anchoring and dual-process cognition, operates at its highest level. The agent does not just respond to prompts — it pursues goals with purpose, evaluates its own performance, and learns from the results. (The historical POE (Principle-Operation-Evaluation) architecture was retired in 26.5+; its "intelligence" migrated to system prompt templates (R9).)
+This is where the Think→Act loop, with its prompt-level first-principles anchoring and dual-process cognition, operates at its highest level. The agent does not just respond to prompts — it pursues goals with purpose, evaluates its own performance, and learns from the results. The historical POE (Principle-Operation-Evaluation) runtime pipeline was retired in 26.5+; its "intelligence" migrated to system prompt templates (R9). The `DiminishingReturnsDetector` hard-stop was removed under R10 as a deterministic completion judgment inside the loop.
 
 ## Emergence in Practice
 
@@ -175,20 +167,20 @@ The five-layer model is not just theoretical. It describes concrete mechanisms i
 | Layer | Aleph Component | Key Responsibility |
 |-------|----------------|-------------------|
 | L1 | Thinker + Memory Store | LLM access + raw fact storage |
-| L2 | Intent System + Context Anchors | Domain classification + routing |
-| L3 | Experience Crystallizer + Skills | Pattern extraction + skill promotion |
-| L4 | Dispatcher + TaskGraph + MCP | Task composition + workflow orchestration |
-| L5 | Harness (Think→Act) + Gateway | Autonomous behavior + multi-channel presence |
+| L2 | Single LLM inference + `ContextAnchor` | Domain classification + routing (no standalone subsystem) |
+| L3 | `src/memory/dreaming/` (SkillOpt discipline) | Pattern extraction + skill promotion |
+| L4 | `src/teams/dispatcher/` + `src/tools/concurrency.rs` | Task composition + parallel bucket dispatch |
+| L5 | `src/harness/` (Think→Act) + Gateway | Autonomous behavior + multi-channel presence |
 
 ### The Feedback Loop
 
 The layers are not a one-way stack. There is a continuous feedback loop where higher layers inform lower ones:
 
-1. L5 agent behavior generates new experiences
-2. L3 crystallization extracts skills from those experiences
-3. L2 classification is refined by the patterns discovered in L3
+1. L5 agent behavior generates new experiences (`session_complete` + the dreaming pipeline)
+2. L3 dreaming distills those experiences, gating promotion with SkillOpt's four primitives
+3. L2 domain annotation is refined by newly promoted skills (written into `ContextAnchor` and notes metadata)
 4. L1 memory is enriched with new facts from successful operations
-5. The enriched L1 feeds back into L2, starting the cycle again
+5. The enriched L1 feeds back into L5's next inference, starting the cycle again
 
 This feedback loop is what makes Aleph genuinely adaptive. The system does not just execute — it improves.
 
@@ -196,7 +188,7 @@ This feedback loop is what makes Aleph genuinely adaptive. The system does not j
 
 Beyond L5, the model acknowledges an asymptotic limit: **ℵ_omega**, the AGI horizon. This represents the theoretical endpoint where an AI system achieves fully general intelligence — infinite adaptation across all domains and contexts.
 
-Aleph does not claim to reach this horizon. But by building the infrastructure for emergence — the crystallization pipeline, the skill evolution system, the polymorphic architecture, and the loop-graph governance layer — it creates a foundation that can climb the ladder of aleph numbers as AI capabilities advance.
+Aleph does not claim to reach this horizon. But by building the infrastructure for emergence — the dreaming pipeline (SkillOpt discipline), `src/teams/dispatcher/` concurrent scheduling, the polymorphic architecture, and the loop-graph governance layer — it creates a foundation that can climb the ladder of aleph numbers as AI capabilities advance.
 
 ```
 ℵ₀  -->  Raw knowledge (L1-L2)

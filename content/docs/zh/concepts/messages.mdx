@@ -7,52 +7,28 @@ description: "消息如何从任何接口流经 Aleph 到达代理并返回，�
 
 ## 消息类型
 
-Aleph 使用受 LLM 聊天完成标准启发的基于角色的消息模型，扩展了用于工具交互的附加类型：
+Aleph 在不同边界用三种相关但不同的消息表示：
 
-| 角色 | 方向 | 说明 |
-|------|-----------|-------------|
-| `user` | 入站 | 来自人类用户的消息 |
-| `assistant` | 出站 | 来自 AI 代理的响应 |
-| `system` | 内部 | 系统提示词、环境合约、身份指令 |
-| `tool_call` | 代理到工具 | 代理调用特定工具的请求 |
-| `tool_result` | 工具到代理 | 工具执行返回的输出 |
+1. **`UnifiedMessage`**（`src/providers/message.rs`）—— LLM 无关的中间表示；协议适配器把它转成 OpenAI / Anthropic / Gemini / Ollama 的原生形态。三变体：`User { content }`、`Assistant { content }`、`ToolResult { tool_call_id, tool_name, content, is_error }`。
+2. **`MessageContent`**（`src/session/events.rs`）—— `session_events` 日志里一条消息的内容；`text` + 可选 `blocks: Vec<serde_json::Value>` + 可选 `thinking` / `thinking_signature`。
+3. **`AlephEvent`**（`src/event/types.rs`）—— 系统级事件总线载荷，覆盖 `InputReceived` / `ToolCallRequested` / `ToolCallStarted` / `ToolCallCompleted` / `ToolCallFailed` / `ToolCallRetrying` / `LoopContinue` / `LoopStop` / `SessionCreated` / `SessionUpdated` / `SessionResumed` / `SessionCompacted` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `AiResponseGenerated` / `PartAdded|Updated|Removed` / `Team*`。
 
-### 消息结构
+### 内容块（`UnifiedMessage`）
 
-会话中的每条消息都携带内容之外的元数据：
-
-```rust
-pub struct Message {
-    pub role: Role,
-    pub content: MessageContent,    // 文本、结构化块或工具负载
-    pub metadata: MessageMetadata,
-}
-
-pub struct MessageMetadata {
-    pub timestamp: i64,
-    pub source_channel: String,     // "telegram", "cli", "discord" 等
-    pub session_key: String,        // 此消息所属的会话
-    pub run_id: Option<String>,     // 产生此消息的代理运行
-    pub token_count: Option<u32>,   // 用于预算跟踪的 token 计数
-}
-```
-
-### 内容块
-
-助手消息可以包含多个内容块，支持丰富的多模态响应：
+助手消息可携带多个 `ContentBlock`，支持丰富多模态响应（`src/providers/message.rs`）：
 
 ```json
 {
   "role": "assistant",
   "content": [
-    { "type": "thinking", "text": "让我分析这段代码..." },
+    { "type": "thinking", "thinking": "让我分析这段代码...", "signature": "..." },
     { "type": "text", "text": "这是重构后的版本：" },
-    { "type": "tool_use", "id": "call_1", "name": "file_write", "input": { "path": "main.rs", "content": "..." } }
+    { "type": "tool_call", "id": "call_1", "name": "file_write", "arguments": { "path": "main.rs", "content": "..." }, "thought_signature": null }
   ]
 }
 ```
 
-`thinking` 块类型用于思维链透明度，允许客户端在启用扩展思考时显示代理的推理过程。
+`ContentBlock` 五变体：`Text { text, cache_control? }`、`Json { value }`、`Thinking { thinking, signature? }`、`ToolCall { id, name, arguments, thought_signature? }`、`Image { data, mime_type }`。`thinking`/`thought_signature` 字段由 Anthropic / Gemini 3 这类供应商用于把签名块原样回放给后续轮次；没有签名机制的供应商留空。
 
 ## 消息路由
 
@@ -62,127 +38,126 @@ pub struct MessageMetadata {
 用户发送消息 (例如 Telegram)
     │
     ▼
-接口层 (Telegram Bot)
-    │ 规范化为 ChannelMessage
+通道层 (Telegram Bot → InboundMessage)
+    │ 规范化为 InboundMessage { id, channel_id, conversation_id, sender_id, text, attachments, ... }
     ▼
-网关: 入站路由器
-    │ 解析 JSON-RPC，验证认证
+网关: 入站路由器 (inbound_router)
+    │ 解析 JSON-RPC，鉴权、配对、DM/群组策略门
     ▼
-会话密钥解析
-    │ 确定此消息属于哪个会话
+SessionKey 解析 (src/routing/session_key.rs)
+    │ SessionKey::Main | DirectMessage | Group | Task | Subagent | Ephemeral
     ▼
-会话管理器
-    │ 加载会话历史，追加新消息
+会话管理器 (SessionActor)
+    │ 加载 session_events 历史，追加新消息
     ▼
-代理循环
+Orchestrator::dispatch(FlowRequest)
+    │ FlowRequest { agent_id, input, channel, session_hint?, parent_session?, depth, tool_service?, trace_sink?, interaction_manifest?, ... }
+    ▼
+HarnessRunner::run(session_key, spec, input, sandbox, events, cancel, ...)
     │ 观察 → 思考 → 行动 → 反馈
     ▼
-网关: 出站发射器
-    │ 通过 EventBus 流式传输事件
+网关: 出站发射器 (GatewayEventBus)
+    │ 订阅 FlowStreamEvent 并广播到客户端
     ▼
-接口层
-    │ 为平台格式化响应
+通道层
+    │ OutboundMessage / Channel::send / NativeStreamHandler
     ▼
 用户接收响应
 ```
 
-### 通道抽象
+### Channel 抽象
 
-每个接口都实现 `Interface` trait，将平台特定的消息规范化为通用格式：
+每个接口实现 `Channel` trait（`src/gateway/channel.rs`），把平台特定的消息规范化为通用格式：
 
 ```rust
 #[async_trait]
-pub trait Interface: Send + Sync {
-    fn name(&self) -> &str;
-    async fn start(&self) -> Result<()>;
-    async fn stop(&self) -> Result<()>;
-    async fn send_message(
-        &self,
-        target: &InterfaceTarget,
-        message: &str,
-    ) -> Result<()>;
-    fn is_running(&self) -> bool;
+pub trait Channel: Send + Sync {
+    fn info(&self) -> &ChannelInfo;
+    fn state(&self) -> &ChannelState;
+    async fn start(&mut self) -> ChannelResult<()>;
+    async fn stop(&mut self) -> ChannelResult<()>;
+    async fn send(&self, message: OutboundMessage) -> ChannelResult<SendResult>;
+    // ...
 }
 ```
 
-这意味着代理永远不需要知道消息是来自 Telegram、Discord 还是 CLI。无论来源如何，它都接收相同规范化的消息结构。
+通道侧的核心数据结构：`ChannelId` / `ConversationId` / `UserId` / `MessageId`（newtype 字符串）、`InboundMessage` / `OutboundMessage`、`ChannelCapabilities`（附件/反应/编辑/删除/打字/已读/富文本/最大长度/最大附件/流协议）、`ChannelStatus`、`StreamProtocol::{None, EditBased, Native}`。
 
-### 交互清单
+### Interaction Manifest
 
-每个通道通过 `InteractionManifest` 声明其能力：
+每个通道声明其能力给 Thinker（`src/thinker/interaction.rs`）：
 
 ```rust
-InteractionManifest {
-    paradigm: InteractionParadigm::Messaging,
-    capabilities: [RichText, ImageInline],
-    constraints: { max_output_chars: Some(4096), supports_streaming: false }
-}
+InteractionManifest::new(InteractionParadigm::Messaging)   // 默认 RichText + ImageInline
+    .with_capabilities(my_set)                              // 覆盖默认能力集
+    .with_constraints(
+        InteractionConstraints::new()
+            .max_output_chars(4096)
+            .supports_streaming(true)
+            .prefer_compact(false)
+    );
 ```
 
-可用的范式：
+可用范式：
 
-| 范式 | 说明 | 典型能力 |
+| 范式 | 说明 | 默认能力 |
 |----------|-------------|---------------------|
 | `CLI` | 终端接口 | RichText, CodeHighlight, Streaming |
-| `WebRich` | 完整 Web 接口 | 包括 Canvas 的所有能力 |
-| `Messaging` | 聊天平台 (Telegram, Discord) | RichText, ImageInline |
+| `WebRich` | 完整 Web 接口 | RichText, CodeHighlight, MultiGroupUI, Streaming, MermaidCharts, ImageInline, Canvas |
+| `Messaging` | 聊天平台 (Telegram, Discord, iMessage) | RichText, ImageInline |
 | `Background` | 计划/cron 任务 | SilentReply |
-| `Embedded` | 受限环境 | 无 |
+| `Embedded` | 受限环境 | 空集 |
 
-思考器使用这些清单来调整其输出格式。例如，当通道不支持 Mermaid 图表时它会避免使用，并且对于消息长度受限的平台它会保持响应更短。
+`Capability` 完整集合：`RichText` / `InlineButtons` / `MultiGroupUI` / `Streaming` / `ImageInline` / `MermaidCharts` / `CodeHighlight` / `FileUpload` / `Canvas` / `SilentReply` / `NativeIdentity`。`paradigm_for_channel_type` 在 `src/gateway/channel.rs` 末尾给出通道字符串到范式的查表（`cli → CLI`、`telegram|feishu|slack|whatsapp|discord|irc|msteams|wechat|line → Messaging`、`webchat|webrich|web|webhook → WebRich`，未知落 `Background`）。
 
 ## 会话线程
 
-Aleph 使用分层会话密钥系统来隔离跨通道、用户和上下文的对话：
+Aleph 用一个分层的 `SessionKey`（`src/routing/session_key.rs`）枚举隔离跨通道、用户和上下文的对话 —— 不是自由字符串，而是结构化枚举。
 
-### 会话密钥变体
-
-| 变体 | 格式 | 用例 |
-|---------|--------|----------|
-| **Main** | `agent:main:main` | 跨通道共享会话 |
-| **DirectMessage** | `agent:main:telegram:dm:user123` | 特定平台上的每用户 DM |
-| **Group** | `agent:main:discord:group:guild-id` | 群组/频道聊天 |
-| **Task** | `agent:main:cron:daily-summary` | Cron 作业、Webhooks |
-| **Subagent** | `subagent:agent:main:translator` | 子代理委派 |
-| **Ephemeral** | `agent:main:ephemeral:uuid` | 临时会话，无持久化 |
-
-### DM 范围策略
-
-对于直接消息，Aleph 支持三种隔离策略：
+### SessionKey 变体
 
 ```rust
-pub enum DmScope {
-    Main,           // 所有 DM 共享主会话
-    PerPeer,        // 按用户隔离 (默认)
-    PerChannelPeer, // 按通道 + 用户隔离
+pub enum SessionKey {
+    Main { agent_id, main_key, epoch },
+    DirectMessage { agent_id, channel, peer_id, dm_scope, epoch },
+    Group { agent_id, channel, peer_kind: PeerKind, peer_id, thread_id? },
+    Task { agent_id, task_type, task_id },
+    Subagent { parent_key: Box<Self>, subagent_id },
+    Ephemeral { agent_id, ephemeral_id },
 }
 ```
 
-默认的 `PerPeer` 策略意味着每个与 Aleph 聊天的人都获得自己的对话历史，无论他们使用哪个平台。切换到 `Main` 让所有 DM 共享单个会话 -- 当你想要跨平台连续性时很有用。
+`SessionKey::Display` 把它们序列化成路径式字符串，便于人类阅读与持久化：
+
+| 变体 | 序列化形式示例 | 用例 |
+|---------|--------|----------|
+| **Main** | `agent:main:main` | 跨通道共享会话 |
+| **DirectMessage** | `agent:<id>:<channel>:dm:<peer>` | 每用户 DM |
+| **Group** | `agent:<id>:<channel>:group:<peer>[:thread:<id>]` | 群组/频道 |
+| **Task** | `agent:<id>:task:<type>:<id>` | Cron、Webhooks |
+| **Subagent** | `subagent:<parent>:<id>` | 子代理委派 |
+| **Ephemeral** | `agent:<id>:ephemeral:<uuid>` | 临时会话 |
+
+### DM 范围策略
+
+```rust
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum DmScope {
+    Main,             // 所有 DM 共享主会话
+    #[default]
+    PerPeer,          // 按用户隔离（默认）
+    PerChannelPeer,   // 按通道 + 用户隔离
+}
+```
+
+默认 `PerPeer` 意味着每个与 Aleph 聊天的人都获得自己的对话历史，无论他们使用哪个平台。`SessionKey::dm` 在 `dm_scope == Main` 时直接退化成 `Main`，让所有 DM 共享同一个会话。
 
 ## 消息持久化
 
-会话及其消息在 SQLite 中持久化：
+会话事件以 `SessionEventRecord { seq, event, created_at_ms }`（`src/session/events.rs`）的形态追加进 `session_events` 表。`MessageProjector`（`src/gateway/session_projector.rs`）观察事件流并物化到 `messages` 表；启动时 `ProjectionReconciler` 回填老会话。**两个表都不再被双写**——`session_events` 是单一来源（SSOT），`messages` 是只读投影。
 
-```sql
-CREATE TABLE sessions (
-    session_key TEXT PRIMARY KEY,
-    messages TEXT,           -- Message 对象的 JSON 数组
-    created_at INTEGER,
-    updated_at INTEGER,
-    message_count INTEGER,
-    token_count INTEGER
-);
-
-CREATE TABLE session_metadata (
-    session_key TEXT PRIMARY KEY,
-    agent_id TEXT,
-    channel TEXT,
-    last_compaction INTEGER
-);
-```
-
-### 会话压缩
+### Session Compaction
 
 当会话积累太多 token（超过配置的阈值）时，会话管理器触发压缩：
 
@@ -195,7 +170,7 @@ CREATE TABLE session_metadata (
 
 ## 事件流式传输
 
-当代理处理消息时，它通过网关的 EventBus 发出实时事件。客户端使用 glob 模式订阅事件主题：
+当代理处理消息时，它通过 `GatewayEventBus` 发出 `FlowStreamEvent`（`src/orchestrator/dispatch.rs`）实时事件，客户端用 JSON-RPC `events.subscribe` 订阅：
 
 ```json
 {
@@ -206,22 +181,23 @@ CREATE TABLE session_metadata (
 }
 ```
 
-关键事件主题：
+`FlowStreamEvent` 变体（面板/客户端主要消费的子集）：
 
-| 主题 | 负载 |
+| 主题/事件 | 负载 |
 |-------|---------|
-| `stream.chunk` | 代理响应的增量文本内容 |
-| `stream.tool_start` | 工具执行已开始通知 |
-| `stream.tool_end` | 工具执行结果 |
-| `agent.started` | 代理运行已开始处理 |
-| `agent.completed` | 代理运行已完成 |
-| `agent.error` | 处理期间发生错误 |
+| `Delta(text)` | 助手增量文本 |
+| `Reasoning(text)` | 思维链片段（当供应商回传 thinking） |
+| `ToolCallStart { id, name, args }` | 工具调用开始 |
+| `ToolCallDone { id, result?, error?, duration_ms }` | 工具调用结束（完成序而非输入序） |
+| `ContextGauge { context_tokens, context_window, total_tokens }` | 实时上下文窗口占用 |
+| `SafetyBlock { reason }` | 安全门阻断本轮 |
+| `Complete(FlowOutcome)` | 终态事件，必为最后一个 |
 
-这种流式模型在所有接口上启用响应式 UI -- CLI 可以在 token 到达时显示它们，桌面应用可以显示打字指示器，Telegram 可以发送分块消息。
+底层 `AlephEvent` 总线还携带 `InputReceived` / `ToolCallRequested` / `ToolCallRetrying` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `Team*` 等，供监视器与跨智能体路由使用。
 
 ## 安全上下文
 
-每条消息都携带一个流经整个执行链的身份上下文：
+每条消息都携带一个流经整个执行链的身份上下文（`shared/protocol/src/auth.rs`）：
 
 ```rust
 pub struct IdentityContext {
@@ -235,13 +211,12 @@ pub struct IdentityContext {
 }
 ```
 
-身份上下文一旦创建就不可变，并确定代理可以代表用户调用哪些工具。所有者会话具有不受限制的访问权限，而访客会话限于其 `GuestScope` 中指定的工具。有关权限模型的详细信息，请参阅[安全部分](/docs/zh/security/overview)。
+身份上下文一旦创建就不可变，并确定代理可以代表用户调用哪些工具。所有者会话具有不受限制的访问权限，而访客会话限于其 `GuestScope` 中列出的工具。详见[安全部分](/docs/zh/security/overview)。
 
 ## JSON-RPC 协议
 
-客户端和网关之间的所有消息交换都使用 JSON-RPC 2.0 over WebSocket：
+客户端和网关之间的所有消息交换都使用 JSON-RPC 2.0 over WebSocket。`chat.send` 的实际参数形态（`src/gateway/handlers/chat.rs`）：
 
-**发送消息：**
 ```json
 {
   "jsonrpc": "2.0",
@@ -250,11 +225,21 @@ pub struct IdentityContext {
   "params": {
     "message": "解释 Rust 借用检查器",
     "session_key": "agent:main:main",
-    "thinking": "medium",
-    "session_mode": "work"
+    "channel": "cli:term1",
+    "stream": true,
+    "thinking": null,
+    "attachments": [],
+    "agent_id": null,
+    "project_root": null,
+    "model_override": null,
+    "exec_tier": null,
+    "mode": null,
+    "voice_input": false
   }
 }
 ```
+
+字段说明：`stream` 默认 `true`；`thinking` / `mode` / `exec_tier` 都是 `Option<String>`（没有内嵌默认值，`mode` 字段而不是单独的 `session_mode`）；`mode` 在 Panel composer 里被选成 `chat` / `work` / `code` 三态，并由首条消息携带以避免覆盖。
 
 **接收流式响应：**
 ```json
@@ -287,16 +272,16 @@ pub struct IdentityContext {
 
 - `MessageProjector` 把 `SessionEvent` 物化到 `messages` 表
 - 启动时 `ProjectionReconciler` 回填转写
-- 消息携带 `tool_call_id` / `tool_name` + `AssistantRunMeta` 戳
-- 旧会话被回填并在锁定的 invariant 后读取
+- 消息携带 `tool_call_id` / `tool_name` + `AssistantMessage` 上的 token 戳
+- 旧会话被回填并在锁定的 invariant 后读取；不再有 `messages` 表的双写
 
 ### UnifiedMessage 与 ProviderDelta
 
 26.7.7+ 的 `src/providers/` 引入 `UnifiedMessage` 与 `ProviderDelta`：
 
-- `UnifiedMessage` 是 LLM 无关的中间消息表示（OpenAI / Anthropic / Gemini / Ollama 都适配到它）
-- `ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallDelta` / ...）
-- `MessageAssembler` 单一 reducer 拥有装配后的消息，实时剥离内联 `<think>` 块
+- `UnifiedMessage` 是 LLM 无关的中间消息表示（OpenAI / Anthropic / Gemini / Ollama 都适配到它），三变体 `User` / `Assistant` / `ToolResult`
+- `ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ThinkingSignatureDelta` / `ToolCallStart` / `ToolCallArgDelta` / `ToolCallArgsComplete` / `ToolCallEnd` / `Usage` / `Done` / `Error`）
+- `DeltaCollector` 单一 reducer 拥有装配后的消息，实时拼接 thinking 签名
 - 流式与最终文本通过同一个共享 sanitize atom 路由
 
 ### 消息流
@@ -306,7 +291,7 @@ pub struct IdentityContext {
 - 紧凑单行工具行（状态符号、实时用时）
 - 完成后 `✓N steps` 一行汇总
 - 工作区窗格变成 live-follow 前台会话（带 pin）的工具详情查看器
-- 工具事件以完成顺序（而非输入顺序）发出
+- 工具事件以完成顺序（而非输入顺序）发出（`buffer_unordered` 完成驱动环）
 
 ### Steering 中途
 
@@ -318,10 +303,10 @@ pub struct IdentityContext {
 
 ### iMessage tapback
 
-26.7.21 起：iMessage 入站 add-tapback（add-reaction）会上抛为模型上下文，而不是被丢弃。
+26.7.21 起：iMessage 入站 add-tapback（add-reaction）会上抛为模型上下文（通过 `InboundMessage::metadata` 携带），而不是被丢弃。
 
 ### 见另请参阅
 
 - [网关协议](/docs/zh/gateway/protocol) — JSON-RPC 与事件总线
-- [会话模式](/docs/zh/architecture/overview#第三双生子会话模式) — `session_mode` 字段
+- [会话模式](/docs/zh/architecture/overview#第三双生子会话模式) — `mode` 字段
 - [思考器](/docs/zh/concepts/thinker) — UnifiedMessage → ProviderDelta 的实际位置

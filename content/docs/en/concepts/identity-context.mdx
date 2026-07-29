@@ -7,7 +7,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-IdentityContext is an immutable identity snapshot that flows through the entire execution chain, enabling identity-based permission enforcement at the tool execution level.
+`IdentityContext` is an immutable identity snapshot that flows through the entire execution chain, enabling identity-based permission enforcement at the tool execution level.
 
 Every request that enters Aleph carries an identity -- whether from the owner, a guest with limited scope, or an unauthenticated caller. This identity is captured once at session creation and becomes read-only for the remainder of the request lifecycle. By making the identity immutable, the system prevents privilege escalation attacks where a caller might attempt to change roles mid-execution.
 
@@ -19,67 +19,43 @@ Every request that enters Aleph carries an identity -- whether from the owner, a
    ┌────────────────────────────────────────────┐
    │ Owner Session:                              │
    │   metadata = SessionIdentityMeta {          │
-   │     role: Owner,                            │
+   │     role: Role::Owner,                      │
    │     identity_id: "owner",                   │
-   │     scope: None                             │
+   │     scope: None,                            │
+   │     source_channel: "gateway",              │
    │   }                                         │
    │                                             │
    │ Guest Session:                              │
    │   metadata = SessionIdentityMeta {          │
-   │     role: Guest,                            │
-   │     identity_id: "guest-123",               │
-   │     scope: Some(GuestScope { ... })         │
+   │     role: Role::Guest,                      │
+   │     identity_id: "<guest-uuid>",            │
+   │     scope: Some(GuestScope { ... }),        │
+   │     source_channel: "telegram",             │
    │   }                                         │
    └────────────────────────────────────────────┘
             │
             ▼
-2. Request Processing
-   ExecutionEngine
-   ┌────────────────────────────────────────────┐
-   │ let identity = session_manager              │
-   │     .get_identity_context(&session_key)     │
-   │     .await?;                                │
-   │                                             │
-   │ // IdentityContext {                        │
-   │ //   request_id, session_key, role,         │
-   │ //   identity_id, scope, created_at,        │
-   │ //   source_channel                         │
-   │ // }                                        │
-   └────────────────────────────────────────────┘
+2. Resolved into IdentityContext
+   IdentityContext::owner(session_key, source_channel)
+   IdentityContext::guest(session_key, guest_id, scope, source_channel)
+   IdentityContext::anonymous(session_key, source_channel)
             │
             ▼
-3. Harness Execution
-   HarnessRunner::run(
-       FlowRequest {
-           agent_id, input,
-           identity,  // IdentityContext passed here
-           abort_signal,
-       }, ...
-   )
+3. Harness Execution (Orchestrator::dispatch)
+   FlowRequest { agent_id, input, channel, ... }
+   HarnessRunner::run(session_key, spec, input, sandbox, events, ...)
             │
             ▼
-4. Tool Execution
-   Executor::execute(&action, &identity)
+4. Tool Execution (ScopedToolService)
    ┌────────────────────────────────────────────┐
-   │ let normalized = normalize_tool_name(...);  │
-   │                                             │
-   │ let result = PolicyEngine::check_tool_permission(
-   │     &identity, &normalized                  │
+   │ let svc = ScopedToolService::new(           │
+   │     registry,                               │
+   │     allowed_tools,                          │
    │ );                                          │
    │                                             │
-   │ match result {                              │
-   │     Allowed => execute_tool(...),           │
-   │     Denied { reason } => ToolError { ... }  │
-   │ }                                           │
-   └────────────────────────────────────────────┘
-            │
-            ▼
-5. Permission Check
-   PolicyEngine::check_tool_permission
-   ┌────────────────────────────────────────────┐
    │ match identity.role {                       │
-   │     Role::Owner => Allowed,                 │
-   │     Role::Guest => { check scope },         │
+   │     Role::Owner => full tool set visible,   │
+   │     Role::Guest => scope.allows_tool(name), │
    │     Role::Anonymous => Denied,              │
    │ }                                           │
    └────────────────────────────────────────────┘
@@ -89,149 +65,139 @@ Every request that enters Aleph carries an identity -- whether from the owner, a
 
 | Component | Location | Responsibility |
 |-----------|----------|----------------|
-| **IdentityContext** | `src/identity/` | Immutable identity snapshot |
-| **SessionIdentityMeta** | `src/session/` | Persistent identity metadata |
-| **PolicyEngine** | `src/security/policy_engine.rs` | Stateless permission checker |
-| **SignerKey / OperationLedger** | `src/identity/signer.rs` | Per-agent signing key + signed operation ledger |
-| **IdentityLoader** | `src/gateway/identity_loader.rs` | Gateway-side identity loading |
-| **Orchestrator** | `src/orchestrator/` | Identity injection into FlowRequest |
+| **`IdentityContext` / `GuestScope` / `Role`** | `shared/protocol/src/auth.rs` (`aleph_protocol`) | Immutable identity snapshot, guest scope, role enum |
+| **`SessionIdentityMeta`** | `src/gateway/session_manager/mod.rs` | Persistent session identity metadata |
+| **`AgentKeystore` / `AgentLedger` / `LedgerRecord` / `LedgerAction` / `ChainReport`** | `src/identity/{keystore,ledger,record,verify}.rs` | Per-agent Ed25519 key + hash-chained ledger |
+| **`as_actor` / `current_actor`** | `src/identity/actor.rs` | Delegated-role `task_local` for sub-agent / delegation attribution |
+| **`SessionKey` / `DmScope`** | `src/routing/session_key.rs` | Hierarchical session keys and DM isolation strategy |
+| **`Orchestrator` / `HarnessRunner`** | `src/orchestrator/` | Session-key resolution, dispatch, `FlowRequest` assembly |
+| **`ScopedToolService`** | `src/gateway/execution_engine/` | Tool-execution-layer `allowed_tools` enforcement |
 
 ## Role Types
 
-Aleph defines three role tiers that determine what a caller is allowed to do:
+Aleph defines three role tiers (in `shared/protocol/src/auth.rs`) that determine what a caller is allowed to do:
 
 | Role | Permissions | Use Case |
 |------|-------------|----------|
-| **Owner** | Bypass all checks | Server owner with full access |
-| **Guest** | Scope-limited | Temporary access via invitation |
-| **Anonymous** | Denied unless auth disabled | Unauthenticated requests |
+| **`Owner`** | Skip tool filtering | Server administrator |
+| **`Guest`** | Constrained by `allowed_tools` | Temporary access via invitation |
+| **`Anonymous`** | Denied by default | Unauthenticated requests; the `#[default]` of `Role` |
 
 ### Owner
 
-The owner role is assigned to the server administrator. Owner sessions skip all permission checks -- the PolicyEngine returns `Allowed` immediately when `role == Owner`. This is appropriate because the owner already has full system access through the operating system.
+The owner role is assigned to the server administrator. `IdentityContext::owner` fills `role = Role::Owner`, `identity_id = "owner"`, `scope = None` at construction; the execution side skips `allowed_tools` filtering, so `ScopedToolService` forwards the full visible tool set.
 
 ### Guest
 
-Guest sessions are created through the invitation system. A guest receives a limited scope defining which tools they can invoke and when their access expires. The PolicyEngine validates all three dimensions: role, scope presence, and tool membership.
+Guest sessions are created through the invitation system. A guest receives a bounded `GuestScope` defining which tools they can invoke and when access expires. The guest tool path goes through `scope.allows_tool(name)` (the `GuestScope::allows_tool` method), which is an exact-match `==` comparison -- no wildcards or category prefixes.
 
 ### Anonymous
 
-Anonymous requests are rejected unless the server is running with authentication disabled (development mode). In production, all requests must carry either owner or guest identity.
+Anonymous requests follow `IdentityContext::anonymous`; the `Role` derive's `#[default]` picks the same path when no role is supplied. They are denied at the execution layer unless the call chain is running with authentication disabled in development mode.
 
 ## GuestScope
 
-When a guest session is created, it carries a `GuestScope` that bounds what the guest can do:
+When a guest session is created, `SessionIdentityMeta` carries a `GuestScope` (in `shared/protocol/src/auth.rs`):
 
 ```rust
 pub struct GuestScope {
-    pub allowed_tools: Vec<String>,  // Tool names the guest may invoke
-    pub expires_at: Option<i64>,     // Unix timestamp; None = no expiry
-    pub display_name: Option<String>,// Human-readable name for logs
+    pub allowed_tools: Vec<String>,   // Tool names (exact match)
+    pub expires_at: Option<i64>,      // Unix seconds; None = no expiry
+    pub display_name: Option<String>, // Human-readable name for audit logs
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed_tools` | `Vec<String>` | Exact tool names the guest may call |
-| `expires_at` | `Option<i64>` | Unix timestamp after which access is denied |
+| `allowed_tools` | `Vec<String>` | Exact-match tool names; the executor compares with `==` per element |
+| `expires_at` | `Option<i64>` | Unix timestamp; `GuestScope::is_expired(now)` triggers at `>=` |
 | `display_name` | `Option<String>` | Friendly name shown in audit logs |
 
 <Callout type="warn">
-Guest scope is enforced at the tool execution level, not at the API boundary. A guest can send any request, but the PolicyEngine denies tool calls that are not in `allowed_tools`.
+Guest scope is enforced at the `ScopedToolService` tool-execution layer, not at the API boundary. A guest can send any request, but any tool call not listed in `allowed_tools` is dropped at the execution layer.
 </Callout>
 
-## PolicyEngine
+## IdentityContext
 
-The PolicyEngine is a **stateless** permission checker. It has no mutable state, no database access, and no side effects. It takes an `IdentityContext` and a normalized tool name, and returns an `Allow` or `Deny` decision.
+`IdentityContext` embodies the "Certificate of Authority" pattern: permissions are frozen at construction, the value is immutable for its entire lifetime, all audit information is embedded, and no external queries are needed for independent verification.
 
 ```rust
-pub struct PolicyEngine;
-
-impl PolicyEngine {
-    pub fn check_tool_permission(
-        identity: &IdentityContext,
-        tool_name: &str,
-    ) -> PermissionResult {
-        match identity.role {
-            Role::Owner => PermissionResult::Allowed,
-            Role::Guest => { /* check scope, expiry, tool list */ }
-            Role::Anonymous => PermissionResult::Denied { reason: "auth required" },
-        }
-    }
+pub struct IdentityContext {
+    pub request_id: String,      // crate::ids::next_id()
+    pub session_key: String,
+    pub role: Role,
+    pub identity_id: String,     // Owner="owner" | Guest=<uuid> | Anonymous="anonymous"
+    pub scope: Option<GuestScope>,
+    pub created_at: i64,         // SystemTime::now().duration_since(UNIX_EPOCH).as_secs()
+    pub source_channel: String,
 }
 ```
 
-Because the PolicyEngine is stateless, it can be instantiated anywhere in the call chain without worrying about lifecycle or synchronization. The immutable `IdentityContext` provides all the data needed to make a decision.
+Factory methods:
+
+- `IdentityContext::owner(session_key, source_channel)`
+- `IdentityContext::guest(session_key, guest_id, scope, source_channel)`
+- `IdentityContext::anonymous(session_key, source_channel)`
+
+Each factory self-fills `request_id` and `created_at`, so two contexts built at the same call site never share a `request_id`.
+
+## Identity Ledger and Signing
+
+`src/identity/` provides the "who acted" + "what happened" ledger pair:
+
+- **`AgentKeystore`** (`src/identity/keystore.rs`) -- per-agent Ed25519 keypair; public half and fingerprint live in `security.db`, private half lives in the shared Vault. Rotation retires a key rather than replacing it, so records signed under the old key remain verifiable.
+- **`AgentLedger`** (`src/identity/ledger.rs`) -- per-agent hash-chained ledger; every tool call (the only choke-point is `tools::scoped::dispatch`) appends one signed record.
+- **`verify_chain`** (`src/identity/verify.rs`) -- returns `ChainReport` / `ChainFault` to confirm chain integrity.
+- **`as_actor` / `current_actor`** (`src/identity/actor.rs`) -- a `tokio::task_local` that lets a delegated role file its own records rather than the parent's.
+
+The ledger is not an impersonation defence: `agent_id` still arrives as a caller-supplied string on `chat.send` and is checked only for existence (`crate::gateway::router`). The ledger faithfully records the identity it was given (see `docs/reference/AGENT_IDENTITY.md`).
 
 ## Example: Owner Request
 
 ```rust
-// 1. Owner creates session (default)
-let session_key = "owner-session-1";
+use aleph_protocol::{IdentityContext, Role};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+let session_key = String::from("agent:main:main");
 let metadata = SessionIdentityMeta::owner("gateway");
 
-// 2. Request arrives
-let identity = session_manager
-    .get_identity_context(session_key, "gateway")
-    .await?;
-// identity.role = Role::Owner
-
-// 3. Execute tool
-let action = Action::ToolCall {
-    tool_name: "shell_exec".to_string(),
-    arguments: json!({"command": "ls"}),
-};
-
-let result = executor.execute(&action, &identity).await;
-// Result: ToolSuccess (Owner bypasses all checks)
+let identity = metadata.to_identity_context(session_key);
+// identity.role == Role::Owner
+// identity.identity_id == "owner"
+// identity.scope == None
 ```
 
 ## Example: Guest Request with Invitation
 
 ```rust
-// 1. Owner creates invitation
-let invitation = manager.create_invitation(CreateInvitationRequest {
-    guest_name: "Alice".to_string(),
-    scope: GuestScope {
-        allowed_tools: vec!["translate".to_string()],
-        expires_at: Some(now + 3600),
-        display_name: Some("Alice".to_string()),
-    },
-})?;
+use aleph_protocol::{GuestScope, IdentityContext, Role};
 
-let guest_token = manager.activate_invitation(&invitation.token)?;
-
-// 2. Guest creates session
-// SessionManager stores metadata with guest scope
-
-// 3. Request arrives
-let identity = session_manager
-    .get_identity_context(session_key, "gateway")
-    .await?;
-// identity.role = Role::Guest
-// identity.scope = Some(GuestScope { allowed_tools: ["translate"], ... })
-
-// 4. Execute allowed tool
-let action1 = Action::ToolCall {
-    tool_name: "translate".to_string(),
-    arguments: json!({"text": "Hello"}),
+let scope = GuestScope {
+    allowed_tools: vec!["translate".to_string()],
+    expires_at: Some(
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 3600
+    ),
+    display_name: Some("Alice".to_string()),
 };
-let result1 = executor.execute(&action1, &identity).await;
-// Result: ToolSuccess (tool in allowed_tools)
 
-// 5. Execute denied tool
-let action2 = Action::ToolCall {
-    tool_name: "shell_exec".to_string(),
-    arguments: json!({"command": "ls"}),
-};
-let result2 = executor.execute(&action2, &identity).await;
-// Result: ToolError { error: "Tool 'shell_exec' not in guest scope" }
+let session_key = String::from("agent:main:telegram:dm:<alice-uuid>");
+let metadata = SessionIdentityMeta::guest(
+    "<alice-uuid>".to_string(),
+    scope,
+    "telegram".to_string(),
+);
+
+let identity = metadata.to_identity_context(session_key);
+// identity.role == Role::Guest
+// identity.scope.allows_tool("translate")   == true
+// identity.scope.allows_tool("bash_exec")    == false
 ```
 
 ## See Also
 
-- [Tool System](/docs/en/concepts/tool-system) -- How tools declare capabilities and execute
-- [Security Overview](/docs/en/security/overview) -- Defense-in-depth security architecture
+- [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) -- how `ScopedToolService` enforces `allowed_tools`
+- [Security Overview](/docs/en/security/overview) -- defense-in-depth security architecture
+- [AGENT_IDENTITY.md](https://github.com/aleph/aleph/blob/main/docs/reference/AGENT_IDENTITY.md) -- identity ledger design
 
 ---
 
@@ -239,15 +205,15 @@ let result2 = executor.execute(&action2, &identity).await;
 
 ### Delegated Role Chain
 
-26.7.26+ introduces a delegated role chain:
+26.7.26+: the `as_actor` task-local gives every delegated role on a delegation chain its own signing identity:
 
-- The identity chain is **closed within the chain's lifecycle** — once a delegation is established, all signing happens within the chain
-- `SignerKey` is held by the corresponding Agent; the private key never leaves the node
-- `OperationLedger` is replay-verifiable against the chain the signer belongs to
+- The identity chain is **closed within the chain's lifecycle** -- once a delegation is established, all signing happens within the chain
+- Sub-agents are no longer filed on the parent ledger; `AgentKeystore` gives each agent role its own key, and the private half never leaves the node
+- `verify_chain` replays `LedgerRecord` entries against the chain the signer belongs to
 
 ### Fail-Closed
 
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, authorization **fails closed** rather than opens. The `[sandbox.command_policy]` hard floor has the highest priority; no `exec_tier` can lower it.
+26.7.21 hardening: authorization **fails closed** when a policy file is missing, unreadable, or invalid. The `[sandbox.command_policy]` hard floor has the highest priority; no `exec_tier` can lower it.
 
 ### Real Client IP
 

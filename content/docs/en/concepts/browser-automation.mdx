@@ -1,184 +1,68 @@
 ---
 title: "Browser Automation"
-description: "Browser automation with Playwright CLI and Chrome DevTools Protocol backends for web scraping, screenshot capture, and page interaction."
+description: "Text-first browser automation through Playwright CLI or Chrome DevTools MCP, with explicit backend capability boundaries."
 ---
 
-The `browser` module provides browser automation for Aleph, supporting two backends: Playwright CLI driver and Chrome DevTools Protocol (CDP) via MCP. It enables the agent to navigate websites, capture screenshots, extract content, and interact with web pages.
+`src/browser/` provides a unified `BrowserBackend` for browser tools. `BrowserManager` selects between two current backends by profile: managed browsers use `PlaywrightCliBackend`, while existing Chrome sessions use `ChromeMcpBackend`. Browser automation is exposed through built-in `browser_*` tools; it is not a Panel Canvas or Browser inspector API.
 
-## Design Philosophy
+## Unified Backend Contract
 
-1. **Backend abstraction** — All browser operations go through the `BrowserBackend` trait; the agent doesn't care which driver is used
-2. **Text-first extraction** — Page content is extracted as clean text, not raw HTML
-3. **Snapshot-based interaction** — The agent receives a simplified page snapshot (links, buttons, inputs) rather than full DOM
+`BrowserBackend` covers opening, closing, listing, and navigating tabs; clicking, typing, filling, hovering, scrolling, screenshots, snapshots, JavaScript evaluation, and select controls using snapshot references; and optional history navigation, text waits, console output, network logs, PDF, dialogs, drag-and-drop, uploads, resizing, emulation, cookies, and storage state.
 
----
+Snapshots are structured, model-facing page views using `ActionTarget::Ref` for interactive elements. The two backends do not promise identical action sets; the trait defaults unsupported actions to `Unsupported`, so callers must follow the selected backend's actual capabilities.
 
-## Core Components
+## Playwright CLI Backend
 
-### BrowserBackend Trait
+`PlaywrightCliBackend` drives a managed browser through `playwright-cli`:
 
-```rust
-pub trait BrowserBackend: Send + Sync {
-    async fn navigate(&self, url: &str) -> Result<()>;
-    async fn click(&self, target: &ActionTarget) -> Result<()>;
-    async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
-    async fn screenshot(&self, opts: &ScreenshotOpts) -> Result<ScreenshotOutput>;
-    async fn snapshot(&self) -> Result<SnapshotOutput>;
-    async fn scroll(&self, direction: ScrollDirection) -> Result<()>;
-}
-```
+- It can launch managed Chromium/Chrome sessions with headless or headed configuration.
+- Navigation, screenshots, DOM/ARIA snapshots, and text interaction use the CLI session.
+- Clicks can use snapshot references, while some typing operations can target the current focus.
+- Cookie management and saving/restoring cookies plus localStorage storage state are provided by this backend.
+- Browser state is isolated by profile and session key.
 
-### PlaywrightCliBackend
+## Chrome DevTools MCP Backend
 
-Uses Playwright's CLI to control a headless browser:
+`ChromeMcpBackend` operates an existing Chrome session through Chrome DevTools MCP:
 
-```rust
-pub struct PlaywrightCliBackend {
-    driver: PlaywrightCliDriver,
-    profile: BrowserProfile,
-}
-```
+- Page IDs are numeric tab identifiers, and the target page is selected before actions.
+- Each profile has a serialization lock spanning page selection and the action call, preventing interleaved operations on different tabs.
+- Element actions use refs returned by `browser_snapshot`; coordinate clicking is unsupported.
+- Existing pages, tab switching, console and network output, screenshots, and DevTools interactions are supported where the MCP driver provides them.
+- Navigation targets pass through the browser SSRF guard, which also prepares a host-resolver pin for Chrome.
 
-**Features:**
-- Launch Chromium/Chrome/Firefox/WebKit
-- Persistent profiles (cookies, localStorage)
-- Screenshot capture
-- Page navigation and interaction
-- Content extraction
+Playwright CLI coordinate or storage-state behavior must not be assumed for the Chrome MCP backend, and element locations must not be guessed instead of using snapshot refs.
 
-### ChromeMcpBackend
+## Text-First Snapshots
 
-Uses Chrome DevTools Protocol via MCP (Model Context Protocol):
-
-```rust
-pub struct ChromeMcpBackend {
-    driver: ChromeMcpDriver,
-}
-```
-
-**Features:**
-- Connect to existing Chrome instance
-- Tab management
-- Network interception
-- Console log capture
-- Snapshot-based interaction
-
-### BrowserManager
-
-Manages browser instances and profiles:
-
-```rust
-pub struct BrowserManager {
-    backends: HashMap<String, Box<dyn BrowserBackend>>,
-    profiles: HashMap<String, BrowserProfile>,
-}
-```
-
----
-
-## Page Snapshot
-
-Snapshots provide a simplified view of the page for the agent:
-
-```rust
-pub struct SnapshotOutput {
-    pub url: String,
-    pub title: String,
-    pub text: String,
-    pub links: Vec<Link>,
-    pub buttons: Vec<Button>,
-    pub inputs: Vec<Input>,
-}
-```
-
-The agent receives this structured data rather than raw HTML, making it easier to reason about page structure.
-
----
+Page content is represented primarily as text plus actionable elements rather than injecting the full HTML into context. A typical flow is to open or navigate a tab, call `browser_snapshot`, use the returned refs for actions, and take a screenshot or another snapshot when needed. Exact tool names come from the `browser_*` entries in `BUILTIN_TOOL_DEFINITIONS` and runtime registration.
 
 ## Network Policy
 
-Controls what URLs the browser can access:
+Both backends check navigation targets with `BrowserSsrfGuard`. Private addresses, localhost, and other sensitive targets are blocked by default; Chrome MCP additionally stages a host-resolver pin. This is the browser egress boundary, distinct from MCP server SSRF/allowlists and messaging-channel permissions.
 
-```rust
-pub struct BrowserNetworkPolicy {
-    allowed_hosts: Vec<String>,
-    blocked_hosts: Vec<String>,
-}
-```
+## Profiles and Concurrency
 
-Blocks private networks, localhost, and other sensitive URLs by default.
+`ProfileManager` separates managed sessions from existing Chrome profiles. Chrome MCP holds a profile lock across page selection and the action, preserving state consistency within a profile. The tool scheduler's `ConcurrencyClaim` still governs cross-tool batch parallelism; a tool name that looks read-only is not by itself proof that browser actions can run concurrently.
 
----
+## Panel Boundary
 
-## Profile Management
-
-Browser profiles persist cookies, localStorage, and session data:
-
-```rust
-pub struct BrowserProfile {
-    name: String,
-    data_dir: PathBuf,
-}
-```
-
-Profiles are isolated — each profile has its own cookie jar and storage.
-
----
+The Panel's Canvas / Browser inspector seams were withdrawn in 26.7.25. They had no consumers and are not a current browser-tool surface. Current browser documentation covers only `BrowserBackend`, browser tools, page snapshots, network policy, and profile management.
 
 ## Code Location
 
-- `src/browser/mod.rs` — Module entry point
-- `src/browser/backend.rs` — Backend trait
-- `src/browser/playwright_cli.rs` — Playwright CLI driver
-- `src/browser/playwright_cli_backend.rs` — Playwright backend impl
+- `src/browser/backend.rs` — unified backend trait
+- `src/browser/manager.rs` — profile-to-backend routing
+- `src/browser/playwright_cli_backend.rs` — `playwright-cli` backend
+- `src/browser/chrome_mcp_backend.rs` — Chrome DevTools MCP backend
+- `src/browser/playwright_cli.rs` — CLI driver
 - `src/browser/chrome_mcp.rs` — Chrome MCP driver
-- `src/browser/chrome_mcp_backend.rs` — Chrome MCP backend impl
-- `src/browser/manager.rs` — Browser instance management
-- `src/browser/network_policy.rs` — URL access control
-- `src/browser/profile.rs` — Profile management
+- `src/browser/network_policy.rs` — browser SSRF guard
+- `src/browser/profile.rs`, `src/browser/tab_registry.rs` — profile and tab state
+- `src/builtin_tools/browser_tools/` — agent-facing `browser_*` tools
 
 ## See Also
 
-- [Builtin Tools](./builtin-tools) — Browser tools exposed to agents
-- [Security Primitives](./security-primitives) — SSRF protection for browser requests
-
----
-
-## 26.7.x Addendum
-
-### Computer-Use Major Hardening
-
-26.7.15 fixes six P0 defects:
-
-- Escape trap
-- Key-combo block
-- Press-hold
-- Scroll units
-- Paste
-- Degenerate frames
-
-macOS PIM and Chromium AX wired; background mouse acts macOS can't actually deliver are **refused up front**.
-
-### Non-Intrusive
-
-26.7.15+: desktop apps driven through a **pid-targeted input rail** + window-scoped capture, so automation no longer moves the user's cursor; six P0 defects fixed.
-
-### Window / Screen
-
-26.7.21+:
-
-- macOS window targeting via Accessibility (CGWindowID → AX by geometry)
-- Focus raises the **specific** target window
-- Bounds are set on the exact window
-- Screen recording is cropped to the requested region (physical pixels, not points)
-- Typed bridge errors are preserved (not flattened) on OCR, window-capture, media, input, and screenshot rails
-
-### Canvas / Browser Inspector Seams Withdrawn
-
-26.7.25: the Panel's Canvas / Browser inspector seams were withdrawn (R10 YAGNI — zero-consumer, immediate withdrawal).
-
-### See Also
-
-- [Built-in Tools](/docs/en/concepts/builtin-tools) — where the browser tool lives
-- [Security Primitives](/docs/en/concepts/security-primitives) — SSRF protection
-- [Desktop Bridge](/docs/en/architecture/desktop-bridge) — the macOS platform bridge
+- [Builtin Tools](./builtin-tools) — browser tool registry
+- [Tool Infrastructure](./tool-infrastructure) — claims and request-scoped execution
+- [MCP Integration](./mcp-integration) — shared boundaries with Chrome MCP and external MCP

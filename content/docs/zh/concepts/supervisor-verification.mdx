@@ -1,117 +1,100 @@
 ---
 title: "进程监管器"
-description: "用于外部 CLI 工具的基于 PTY 的进程控制和用于代理自检的停止钩子验证基础设施。"
+description: "用于外部 CLI 工具的基于 PTY 的进程控制，以及代理循环的 Turn 级验证器与 shell 停止钩子。"
 ---
 
-`process_supervisor` 和 `verification` 模块处理外部进程控制和代理停止时间验证。监管器在伪终端中生成 CLI 工具并监控其输出，而验证提供在代理循环停止之前运行的钩子。
+`gateway/pty` 与 `verification` 模块共同承担外部进程控制与代理循环验证职责：网关侧把交互式 CLI 工具放进伪终端（embedded terminal），验证侧给代理循环装配 Turn 级验证器链与 shell 停止钩子。所有裁决仍是 LLM 自检 + 钩子回执，代码不替代理做完成度判断（R7/R10）。
 
 ## 设计理念
 
-1. **基于 PTY 的控制** — 外部工具在伪终端中运行以实现真实的 I/O
-2. **事件检测** — 输出被解析以获取语义事件（审批请求、错误）
-3. **提示级验证** — 代理自检存在于提示词中，而非 Rust 代码（R8, R10）
+1. **PTY 嵌入** — `gateway/pty/` 用 `portable-pty` 包装本地 shell / `cmd.exe`，输出经 WebSocket `pty.output` / `pty.exit` topic 推送（不走第二个端口）。
+2. **Turn 级验证** — `verification::VerfierChain` 在 Think→Act 之间跑，链上挂着 `StopHookVerifier`（shell 钩子）、`ToolLoopVerifier`（死循环看门狗）、`ExtensionStopHookVerifier`（`HookEvent::Stop` 钩子）、`ScratchpadGoalVerifier`（执行列表未完成就阻停）、`MutationEvidenceVerifier`（写入未取证柔阻一次）。
+3. **只读式 shell 钩子** — `ShellStopHook` 跑外部命令，exit 0/2/3 = 通过/阻停/退出循环；exit 其它、超时、信号、shell 元字符全部走 `Error`，由调用方决定 fail-open 还是 fail-closed。
 
 ---
 
-## 进程监管器
+## 嵌入终端（`src/gateway/pty/`）
 
-### PtySupervisor
+```text
+pty/
+├── mod.rs             # 模块入口 + 公共 re-export
+├── session.rs         # PtySession：portable_pty master/child 包装，Send + Sync
+├── manager.rs         # 进程级 PtyManager：64 个会话上限，TTL + FIFO 淘汰
+└── handler (in gateway/handlers/pty.rs)
+```
 
-生成和控制外部 CLI 工具：
+`PtySession::spawn(opts)` 创建 `portable_pty::native_pty_system()`，clone 出 writer / reader / killer，把 `pty.output` 帧 base64 推上事件总线；`PtyManager` 是 process-global 单例（`OnceLock`），并发的 `pty.spawn` 走到容量上限时淘汰最老会话。`commands`：`pty.spawn`、`pty.input`、`pty.resize`、`pty.close`、`pty.list`；流式事件 `pty.output` / `pty.exit` 经 `events.subscribe("pty.*")` 接收。
+
+---
+
+## 验证器链（`src/verification/`）
+
+`VerifierChain` 是 `Orchestrator::build` 阶段构造的 `Vec<Arc<dyn TurnVerifier>>` + `AtomicBool` kill-switch；Think→Act 之间按 `verifier.verify(&ctx)` 顺序调用，**首个非 `Continue` 裁决生效**：
 
 ```rust
-pub struct PtySupervisor {
-    master: Box<dyn MasterPty>,
-    reader: mpsc::Receiver<String>,
-    running: AtomicBool,
-}
-
-impl PtySupervisor {
-    pub fn spawn(command: &str) -> Result<Self> { /* ... */ }
-
-    pub fn send_input(&self,
-        input: &str,
-    ) -> Result<()> { /* ... */ }
-
-    pub fn read_output(&self) -> Option<String> { /* ... */ }
+pub struct VerifierChain {
+    verifiers: Vec<Arc<dyn TurnVerifier>>,
+    enabled: AtomicBool,
 }
 ```
 
-**能力：**
-- 在伪终端中生成进程
-- 通过后台读取器线程实时读取输出
-- 注入输入（命令、审批）
-- 检测输出中的语义事件
+链上默认装的实现（顺序即裁决优先级）：
 
-### 事件检测
+| 验证器 | 触发条件 | 裁决 | 失效语义 |
+|--------|----------|------|----------|
+| `StopHookVerifier` | `stop_reason.is_some()` | 跑 `ShellStopHook` 集合；exit 2→`Veto`（retry）、exit 3→`Halt`（永久退出）、其它→`Error` | harness 侧 fail-open，goal 侧 fail-closed |
+| `ExtensionStopHookVerifier` | `stop_reason.is_some()` 且 `hooks.json` 配了 `HookEvent::Stop` | block→`Veto`、halt→`Halt`、action_failed→`Allow`（基础设施故障不阻停） | 连续 5 次同会话 veto 后自动让路，防止坏钩子卡死循环 |
+| `ToolLoopVerifier` | `stop_reason.is_none()`（mid-turn） | 同名同参数工具连续 ≥ 5 次→`Veto`；≥ 8 次→`Halt`；同 name 但低 distinctness 且无文本→`Veto` | 纯结构判定，`(name, args_hash)` 维度 |
+| `ScratchpadGoalVerifier` | `stop_reason.is_some()` 且当前会话有活跃 execution list 且有未勾选项 | `Veto`（自动注入「执行列表仍有 N 项未完成」） | 失败 fail-open（fatal 是取消） |
+| `MutationEvidenceVerifier` | `stop_reason.is_some()` 且最近一次 `file_write/file_edit/apply_patch` 之后没有 `bash/code_exec/code_check` 证据 | `Veto` 但每会话只触发一次（nudge 形态，不是 gate） | warn 日志 + 软阻停一次 |
 
-扫描输出以查找指示以下内容的模式：
-- 审批请求（例如，"Allow this action?"）
-- 错误条件
-- 完成信号
+构造位置在 `bin/aleph-server/commands/start/orchestrator_init.rs::build_verifier_chain`：
 
-**线程安全：** 读取器线程通过 `mpsc` + `AtomicBool` 与主线程通信，具有正确的 `Acquire/Release` 排序。
+```rust
+let verifier_chain = VerifierChain::builder()
+    .with(StopHookVerifier::new(hooks))    // 用户 [[stop_hooks]] 转 ShellStopHook
+    .with(ExtensionStopHookVerifier::new()) // HookEvent::Stop（hooks.json / 插件）
+    .with(ToolLoopVerifier::new())          // 死循环看门狗
+    .with(ScratchpadGoalVerifier::new())    // 执行列表检查
+    .with(MutationEvidenceVerifier::default()) // 写入未取证 nudge
+    .build();
+```
+
+`TurnVerifyContext` 携带每轮状态：`iterations`、`tool_calls_made`、`final_text`、`recent_tool_calls: &[ToolCallSummary]`、`stop_reason: Option<&str>`、`session_id: Option<&str>`、`robustness_profile: ModelRobustnessProfile`（每模型一套防抖阈值，handoff 给具体 verifier 用）。
 
 ---
 
-## 停止钩子
+## shell 停止钩子
 
-停止钩子在代理循环终止之前运行，启用外部验证：
+`StopHookHandler` 是 `Send + Sync` 异步 trait：
 
 ```rust
-#[async_trait]
 pub trait StopHookHandler: Send + Sync {
     fn name(&self) -> &str;
-
     async fn evaluate(
         &self,
         ctx: &StopHookContext,
         cancel: &CancellationToken,
     ) -> StopHookVerdict;
 }
-```
 
-### ShellStopHook
-
-运行外部 shell 命令：
-- **退出 0:** 允许停止
-- **退出 2:** 阻止停止（stdout = 原因）
-- **其他:** 钩子错误（记录，不阻止）
-
-```rust
-pub struct ShellStopHook {
-    hook_name: String,
-    command: String,
-    timeout: Duration,
-}
-```
-
-### StopHookContext
-
-通过 stdin 作为 JSON 传递给钩子：
-
-```rust
-pub struct StopHookContext {
-    pub final_text: Option<String>,
-    pub iterations: usize,
-    pub tool_calls_made: usize,
-    pub stop_reason: String,
-}
-```
-
-### 裁决聚合
-
-```rust
 pub enum StopHookVerdict {
     Allow,
     Block { reason: String },
+    Halt  { reason: String },   // exit 3 — claude-code preventContinuation
     Error { hook_name: String, message: String },
 }
 ```
 
-钩子通过 `join_all` 并行运行。第一个 `Block` 裁决停止代理；`Error` 裁决被记录但不阻止。
+`ShellStopHook` 通过 stdin 投递 `StopHookContext` JSON 上下文（`final_text`、`iterations`、`tool_calls_made`、`stop_reason`），按 exit code 映射裁决：0=Allow、2=Block、3=Halt，其它 / 信号 / 超时 / 取消 / spawn 失败 = Error。
 
-### 配置
+**失败关闭边界**：goal 客观 gate（`goal_continuation::gate_veto`）把 `Error` 视为 veto —— 钩子自身故障 = 无法验证完成 = 不能宣称完成。这是「verifier 跑得通就放行、跑不通就阻断」的 fail-closed 立场，与 harness 自己的 `StopHookVerifier`（fail-open）的对偶。
+
+**shell 元字符拒绝**：`is_shell_safe(&str)` 在 `goal` 工具用 LLM 出参的 `goal_gate_command` 路径上把关 —— 通过 `ShellStopHook::shell_safe()` 标志启用，白名单 `SAFE = "abc…ABC…0123…/-._:'="`。带 `&&` / `;` / `$()` / 重定向的 `gate_command` 走 `Error` 而非 `Allow`，避免「verifier 自身语法错误被静默放行」的伪验证。
+
+---
+
+## 配置
 
 ```toml
 [[stop_hooks]]
@@ -120,43 +103,49 @@ command = "cargo clippy -- -D warnings"
 timeout_secs = 60
 ```
 
+`build_from_config` 读 `[stop_hooks]` 数组：每个 entry 构造一个 `ShellStopHook`，包成 `Arc<ShellStopHook> as Arc<dyn StopHookHandler>`，装入 `Vec<Arc<dyn ...>>`，再交给 `StopHookVerifier::new(hooks)`。空数组直接返回 `None`，`AgentHarnessRunner::stop_hooks` 字段保持 `None`，hook 阶段整段跳过。
+
 ---
 
-## 验证模型
+## 提示级验证
 
-Aleph 的验证逻辑存在于提示词中（参见 `src/thinker/layers/agent_role.rs`）：
+Aleph 的完成度判断**永远在提示词里**，不在 Rust 代码里（`src/thinker/layers/agent_role.rs`）：
 
-代理被指示在停止之前发出 `VERDICT: PASS|FAIL|PARTIAL` 块来总结其自检。根据红线 R8（LLM 主权）和 R10（智能存在于提示词中），不引入 Rust 级验证器、评判者或批评者。
+- 代理被指示在停止前发出 `VERDICT: PASS|FAIL|PARTIAL` 块做自检。
+- 红线 R8（LLM 主权）+ R10（智能存在于提示词）禁止引入 `JudgeVerifier` / `ComputationalVerifier` 这类认知判定器；上面那张表里所有验证器都是**结构信号**（exit code、参数哈希、scratchpad 行数、mutate 之后有没有 bash），不是语义判定。
+- 6a 阶段（`src/verification/turn_verifier.rs`）的注释永久封禁了「`Compute / Judge verifier`」形态：「`JudgeVerifier` and `ComputationalVerifier` are permanently prohibited」。
 
-**注意：** `VerifyStopHook` Rust 结构体从 2026 年 4 月到 P0 存在，但从未接入生产环境。它在 P4 中被删除，因为提示级机制完全覆盖了该用例。
+`VerifyStopHook` Rust 结构体（一个 P0 之前曾存在的 LLM-based 验证器候选）从未接入生产，**P4 阶段删除**（commit b54877d7f 起 git log 可查），删除理由与 prompt 级机制已覆盖该用例。
 
 ---
 
 ## 安全属性
 
-- **生产中无 unwrap** — 所有错误路径使用 `map_err` + `?`
-- **String::from_utf8_lossy** — 安全处理可能无效的 UTF-8 输出
-- **原子排序** — `Acquire/Release` 用于读取器线程同步
-- **超时** — Shell 钩子具有可配置的超时（默认 30s）
-- **取消** — 钩子尊重 `CancellationToken` 以实现优雅关闭
+- **生产无 unwrap** — 所有错误路径走 `map_err` + `?`，`stop_hooks.rs::is_shell_safe` 边界处不靠 panic。
+- **超时与取消** — `ShellStopHook` 的 `tokio::time::timeout(per_attempt)` 配 `CancellationToken`，三层信号（`join_all` 结果、`select! { _ = cancel }`、`Stop` 帧）都会清掉子进程。
+- **exit 64 KB 帧上限** — `pty.input` / `voice.stream.audio` 都用 `mpsc::error::TrySendError::Full` 静默丢帧 —— realtime 音频的拥塞策略是「丢最新帧而不是把 RPC 挂住」，不是「等消费者」。
+- **白名单 shell_safe** — 不可信 `gate_command` 路径在 `ShellStopHook::shell_safe` 处把关，元字符 `; | & $ < > \` 等全部拒绝。
+- **`unwrap_or_else(|e| e.into_inner())`** — 锁中毒恢复（P7 锁安全），每个 `Mutex` / `RwLock` 都用，绝不向上 propagate poison。
 
 ---
 
 ## 代码位置
 
-**监管器：**
-- `src/process_supervisor/mod.rs` — 模块入口点
-- `src/process_supervisor/pty.rs` — PTY 生成和 I/O
-- `src/process_supervisor/types.rs` — 事件类型
+**PTY 嵌入：**
+- `src/gateway/pty/mod.rs` — 模块入口 + `PtySession` / `SpawnOptions` re-export
+- `src/gateway/pty/session.rs` — `PtySession::spawn` 用 `portable_pty::native_pty_system()`
+- `src/gateway/pty/manager.rs` — 进程级 `PtyManager`（64 会话上限 + 10 min TTL + FIFO 淘汰）
+- `src/gateway/handlers/pty.rs` — RPC：`pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list`
 
-**验证：**
-- `src/verification/mod.rs` — 模块入口点
-- `src/verification/stop_hooks.rs` — Hook trait, ShellStopHook, 执行
-
-## 另请参阅
-
-- [代理运行时](/docs/zh/concepts/agent-runtime) — 代理生命周期和停止条件
-- [任务调度](/docs/zh/concepts/task-scheduling) — 基于车道的执行
+**验证器链：**
+- `src/verification/mod.rs` — 模块入口，列举 5 个 verifier 子模块并 re-export
+- `src/verification/turn_verifier.rs` — `TurnVerifier` trait + `VerifierChain` + `TurnVerifyContext` + `hash_tool_args` + `TOOL_HISTORY_WINDOW = 8`
+- `src/verification/stop_hooks.rs` — `StopHookHandler` / `ShellStopHook` / `is_shell_safe` / `execute_stop_hooks_arc`
+- `src/verification/stop_hook_verifier.rs` — 链上的 StopHook 适配
+- `src/verification/extension_stop_gate.rs` — `ExtensionStopHookVerifier`，把 `HookEvent::Stop` 钩入
+- `src/verification/tool_loop_verifier.rs` — `ToolLoopVerifier`，ToolCallSummary 维度
+- `src/verification/scratchpad_goal_verifier.rs` — `ScratchpadGoalVerifier`，执行列表检查
+- `src/verification/mutation_evidence_verifier.rs` — `MutationEvidenceVerifier`，写入未取证 nudge
 
 ---
 
@@ -164,28 +153,28 @@ Aleph 的验证逻辑存在于提示词中（参见 `src/thinker/layers/agent_ro
 
 ### `DiminishingReturnsDetector` 已删除
 
-26.7.20+：**`DiminishingReturnsDetector` 硬停被删除**——这是 R10「5 个不」之 3（不做完成度判断）的具体落实。
+26.7.20+（commit 历史可见）：`DiminishingReturnsDetector` 硬停机制从 `src/context/budget/` 整体删除，配套 `StopDiminishing` 指令与 `TurnMetrics` 类型同步下线、`src/thinker/nudges.rs::GRACE_NUDGE_DIMINISHING` 常量删除、`src/harness/agent/think.rs` 的 `after_turn` consumer + `GraceReason::Diminishing` 优雅轮路径全部清除。
 
-历史位置在 `src/context/budget/`（`StopDiminishing` / `TurnMetrics`）；硬停机制是循环内的确定性完成判断，违反 R10。Ratchet 当前 5055 行（**代码是权威**——任何文档数字都只是 `CEILING` 的副本）。
+`src/harness/tests/budget.rs:280` 写得很坦白：「R10 '5 don'ts' #3 — the loop must make no completion judgement of its own」。具体执行方式：`TokenLoopVerifier`（`repeat_threshold` = 5、连续同名同参数）和 `max_iterations` / `consecutive_failures` / 模型自评共同决定停；缺了「令牌减少就强制结束」这种循环内确定性完成判断。ratchet 当前 **5055 行**（`src/harness/tests/budget.rs:335` 的 `CEILING`），代码是权威——任何文档数字都只是 `CEILING` 的副本。
 
-### 工具循环验证器
+### Turn 级验证器
 
-26.7.15+：`src/verification/` 提供 Turn-level 工具循环验证器：
+26.7.15+：`src/verification/turn_verifier.rs` 提供了 `TurnVerifier` trait + `VerifierChain`，首批出厂的 verifier 都在上面那张表里。每个 verifier 都是纯 `async fn verify(&TurnVerifyContext, &CancellationToken) -> VerifierVerdict`，不持有 mutable state，便于链上 `Arc<dyn TurnVerifier>` 共享。
 
-- `hash_tool_args` —— 工具参数哈希
-- `ToolCallSummary` —— 工具调用摘要
-- `TurnVerifyContext` —— Turn 验证上下文
-- `VerifierVerdict` —— 验证裁决
-- `TOOL_HISTORY_WINDOW` —— 历史窗口
-
-只有**模型显式 stop**才会结束一个 Turn。`max_iterations` 仍是安全上限。
+只有**模型显式 stop**（`stop_reason.is_some()`）才会结束一个 Turn；中途死循环（`stop_reason.is_none()`）由 `ToolLoopVerifier` 兜底，命中后 `Veto` 让 harness 注入 feedback 消息并 Continue 一次，`halt_threshold` 达到才 `Halt` 永久退出。`max_iterations` 仍是安全上限。
 
 ### 上下文"永不破"保证
 
-26.7.1+：之前可能通过 `FinalReply` 提前结束的轮次现在总是路由过 `compact_to_fit` 然后继续。加一个确定性的 `truncate_to_fit` 底作为最后手段。
+26.7.1+：早期通过 `FinalReply` 提前结束的轮次现在总是路由过 `compact_to_fit` 然后继续；外加一个确定性的 `truncate_to_fit` 底作为最后手段（hard cap fallback）。`think.rs` 的连续失败 watchdog + `ToolLoopVerifier` 是这条保证的两道闸门：先尝试 `compact_to_fit` 收缩上下文，再尝试 `truncate_to_fit` 切到尾部，再不行就让轮次正常收尾而不报错。
+
+### 与 goal 子系统的对偶
+
+`StopHookVerifier` 走 fail-open（hook 跑挂 = 放行，避免坏脚本卡死循环）；`goal_continuation::gate_veto` 走 fail-closed（hook 跑挂 = 不能宣称完成，避免 verifier 自身语法错误伪装成验证通过）。两边共用同一份 `ShellStopHook` 实现，区分只在使用方。`goal` 工具走 `effective_gate(deps.gate, goal.gate_command)` 拼装两边（全局 hook + per-goal 命令），每条都过 `is_shell_safe`。
 
 ### see also
 
 - [Harness 架构](/docs/zh/architecture/harness) — 验证器集成
 - [架构红线 R10](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop) — 5 个「不」
 - [架构概览](/docs/zh/architecture/overview) — 验证器位置
+- [工具循环验证器源码](https://github.com/rootazero/Aleph/blob/main/src/verification/tool_loop_verifier.rs) — `ToolLoopVerifier` 完整实现
+- [shell 钩子源码](https://github.com/rootazero/Aleph/blob/main/src/verification/stop_hooks.rs) — `ShellStopHook` + `is_shell_safe`

@@ -1,239 +1,214 @@
 ---
 title: "Agent Runtime"
-description: "Agent runtime system with subagent spawning, state machines, and team coordination."
+description: "Orchestrator, AgentHarness (Think→Act), SubagentTool delegation, and per-channel busy-input policy."
 ---
 
-The `agents` module implements Aleph's agent runtime system. It manages the lifecycle of individual agents, supports spawning subagents for parallel tasks, and coordinates multi-agent teams.
+The agent runtime is the path between an inbound chat request and a stream of LLM
+turns: `Gateway` → `FlowRequest` → `Orchestrator` → `AgentHarnessRunner` →
+`AgentHarness`. The loop itself lives in `src/harness/`; prompt assembly in
+`src/thinker/`; delegation in `src/agents/`; sub-agent execution re-uses the same
+`AgentHarness` so a child session is structurally identical to a top-level run.
 
-## Design Philosophy
-
-The agent runtime follows three principles:
-
-1. **State machine lifecycle** — Every agent transitions through well-defined states (Pending → Running → Completed/Failed)
-2. **Deterministic execution** — Agent behavior is reproducible given the same inputs and state
-3. **Graceful degradation** — Failed subagents don't crash the parent; errors are collected and reported
-
----
-
-## Core Components
-
-### Agent State Machine
-
-Agents follow a strict state machine with validation at each transition:
+## Topology
 
 ```
-┌─────────┐    start()    ┌─────────┐   complete()  ┌──────────┐
-│ Pending │ ─────────────→│ Running │ ────────────→│ Completed│
-└─────────┘               └────┬────┘              └──────────┘
-                               │
-                               │ fail()
-                               ▼
-                          ┌─────────┐
-                          │ Failed  │
-                          └─────────┘
+Gateway (protocol adapters, inbound routing)
+   │ FlowRequest { agent_id, input, tool_service, trace_sink, identity, ... }
+   ▼
+Orchestrator (resolve AgentDef + FlowSpec, build HarnessDeps, dispatch)
+   │ AgentHarnessRunner::run
+   ▼
+AgentHarness (Think→Act loop, stop-hooks, context budget, compaction)
+   │ uses
+   ├── SessionService   (append-only history)
+   ├── ToolService      (tool catalog + execution)
+   ├── Sandbox          (exec environment, capability ledger)
+   └── AiProvider       (LLM — failover wrapped inside `provider`)
+   │
+   ▼
+FlowOutcome → Gateway renders response
 ```
 
-Each transition is validated via `can_transition_to()`:
+> Phase 7 (2026-04-21) migrated `SubagentTool` to route through `Orchestrator →
+> HarnessRunner → AgentHarness`. The legacy `src/agent_loop/` path has been deleted;
+> every agent run — top-level or sub-agent — uses the same harness.
+
+## Design Principles
+
+The runtime is built around four R10/R11-driven commitments:
+
+1. **Thin dumb-loop** — `src/harness/` schedules Think→Act turns. It does not
+   classify intent, score tool relevance, judge completion, or pick recovery
+   strategies. All of that lives in the LLM's single inference call (`src/harness/CLAUDE.md`
+   / `docs/reference/HARNESS_PHILOSOPHY.md`).
+2. **Tool-side resource claims** — concurrency comes from each tool declaring
+   `Shared` / `Exclusive{Global, Paths}` resource claims; intra-claim-group
+   parallel, inter-group serial. No task-dependency graph.
+3. **Event-sourced history** — every turn is a `SessionEvent` appended to
+   `SqliteEventStore`. Replay = the append log; checkpointing is not a separate
+   framework.
+4. **Compaction as a typed directive** — the LLM never frees context. The
+   `ContextBudget` consumer surfaces a `LoopDirective`; the harness carries out
+   `CompactToFit` / `SplitSession` mechanically.
+
+## The Loop
+
+`AgentHarness::run` is an `async fn` that loops on `run_turn_internal` until the
+state machine reports `Done` or a cap trips. Termination sites (every one of
+them writes the granular `TerminateReason`):
+
+| Cap                            | TerminateReason variant             | Outcome                     |
+|--------------------------------|-------------------------------------|-----------------------------|
+| Model says `Done`              | `Completed`                         | normal                      |
+| `cancel` token fires           | `Cancelled`                         | cooperative abort           |
+| `max_iterations` exceeded      | `MaxIterations`                     | `hit_limit = true`          |
+| `consecutive_failure_cap`      | `ConsecutiveFailures`               | `hit_limit = true`          |
+| `turn_timeout` on Think        | `TurnTimeout { phase: "Think" }`    | `hit_limit = true`          |
+| `StallTracker::is_stalled`     | `StallTimeout { elapsed_ms }`       | `hit_limit = true`          |
+| Verifier chain `Veto`          | `VerifierVeto { ... }`              | one extra Continue          |
+| `SplitSession` succeeded       | `Completed`                         | rebinds to child session    |
+
+`hit_limit` is set under the precision complement `terminate_reason` so callers
+that only look at the boolean keep working. After any cap, a `grace_turn`
+(`fire_boundary_grace_turn` with `GRACE_TIMEOUT_BUDGET = 30s`) lets the model
+produce a clean terminal summary before exit; the grace turn is fire-and-forget
+on its own budget so a hung provider can never block shutdown.
+
+Per-turn record (`src/harness/trait_def.rs`):
 
 ```rust
-impl Agent {
-    pub fn can_transition_to(&self, target: AgentState) -> bool {
-        match (self.state, target) {
-            (Pending, Running) => true,
-            (Running, Completed) => true,
-            (Running, Failed) => true,
-            _ => false,
-        }
-    }
+#[must_use]
+pub struct TurnStep {
+    pub state: TurnState,           // Continue | Done
+    pub executed: usize,            // successful tool calls this turn
+    pub vetoed: bool,               // verifier forced Continue
+    pub split_child: Option<SessionId>, // SplitSession rebind target
 }
+
+#[must_use]
+pub enum TurnState { Continue, Done }
 ```
 
-This prevents illegal transitions like moving from Failed back to Running.
+`Drop` of a `TurnStep` silently loses the loop-control signal, so both types
+carry `#[must_use]`. The 4-tuple of `(state, executed, vetoed, split_child)`
+replaced an anonymous positional tuple that had accrued the same four fields by
+successive bolt-ons.
 
-### Subagent Spawning
+### Hard and soft caps (HarnessDeps)
 
-Agents can spawn child agents for parallel task execution:
+`AgentHarness::new(deps: HarnessDeps)` carries the cap configuration. None of
+these are mandatory; defaults match the production gateway wiring.
 
-```rust
-pub struct Agent {
-    id: AgentId,
-    parent: Option<AgentId>,
-    children: Vec<AgentId>,
-    state: AgentState,
-}
+| Field                          | Default          | Effect on `Done` / `hit_limit`                       |
+|--------------------------------|------------------|------------------------------------------------------|
+| `max_iterations`               | unbounded        | `Done + hit_limit = true` after N Continuations      |
+| `consecutive_failure_cap`      | disabled         | `Done + hit_limit = true` after N turns with `errors > executed` |
+| `turn_timeout`                 | disabled         | `HarnessError::StalledTurn`, set `hit_limit = true`  |
+| `stall_config`                 | disabled         | `StallTimeout` + `hit_limit = true`; cross-turn watchdog |
+| `parallel_tool_concurrency`    | `Some(8)`        | Cap on intra-batch `join_all`                        |
 
-impl Agent {
-    pub async fn spawn_subagent(
-        &mut self,
-        task: Task,
-    ) -> Result<AgentId, AgentError> {
-        let child = Agent::new(task);
-        let id = child.id.clone();
-        self.children.push(id.clone());
-        registry.register(child).await?;
-        Ok(id)
-    }
-}
+`turn_timeout` deliberately bounds **only Think** — Act runs under each tool's
+own wall-clock budget, surfaced as a recoverable `ToolError::Timeout` rather
+than a stalled-turn error (Phase 3 wage-clock dissolution, June 2026). The
+turn-level stall watchdog and the tool-level execution budget are separate
+instruments with different authors; mixing them would let a slow human
+approval kill a run.
+
+## Sub-Agent Delegation
+
+The top-level agent spawns sub-agents via `SubagentTool`
+(`src/agents/subagent_tool/`). Sub-agent execution is the same `AgentHarness`
+the gateway chat path uses — only the wiring differs:
+
+- `SubagentTool::spawn` calls into `agent_runtime::execute_via_harness`, which
+  constructs an `AgentHarness` per child with `HarnessDeps` descended from the
+  parent's via `chain.child()`.
+- The child's session key is the parent's `SessionKey::Main` wrapped in
+  `SessionKey::Subagent { parent, subagent_id }` — serialised as
+  `subagent:agent:<main_agent_id>:<subagent_id>`.
+- Cancellation is cooperative through the harness's
+  `tokio_util::sync::CancellationToken` parameter; each `AgentHarness` checks
+  `cancel.is_cancelled()` at the top of every turn.
+- Sub-agent failure is collected by `AgentRuntime::run` and surfaced as
+  `Result<LoopRunResult, String>` — cancellation is an error string, not a
+  boolean on `LoopRunResult` (`src/agents/runtime.rs:28-37`).
+
+```
+Main Agent (claude-opus-4) — runs via AgentHarness (Gateway chat)
+    │
+    ├── Translator Sub-Agent (claude-haiku)
+    │       Session:  subagent:agent:main:translator
+    │       Runtime:  AgentHarness (via Orchestrator dispatch)
+    │
+    ├── Code Reviewer Sub-Agent (claude-sonnet)
+    │       Session:  subagent:agent:main:code-reviewer
+    │       Runtime:  AgentHarness (via Orchestrator dispatch)
+    │
+    └── Research Sub-Agent (gpt-4o)
+            Session:  subagent:agent:main:researcher
+            Runtime:  AgentHarness (via Orchestrator dispatch)
 ```
 
-**Key behaviors:**
-- Parent agents wait for all children to complete before completing themselves
-- Child failures bubble up to the parent via `ResultCollector`
-- Subagents inherit the parent's `IdentityContext` but can have restricted scopes
+`AgentRuntime` is the only layer above `AgentHarness` for sub-agent runs; it
+owns lifecycle tracing (`SubagentStart` / `SubagentStop` observer hooks),
+transcript persistence, and the descended `ChainContext`. It does not own the
+loop, the budget, or the recovery strategy — those stay on the harness.
 
-### Registry
+## Busy-Input Policy (Mid-Run Messages)
 
-The `AgentRegistry` maintains all active agents and provides lookup by ID:
+When a message lands on a session whose `AgentHarness::run` is already running,
+the gateway's busy branch selects one of three policies. The policy is
+**explicit per channel** (R7 — never inferred from message content) and stored
+on `ChannelPolicyConfig.busy_input_mode` as a wire string, stamped into run
+metadata under `BUSY_INPUT_MODE_KEY`. Absent on Panel/CLI paths → `Steer`.
 
-```rust
-pub struct AgentRegistry {
-    agents: RwLock<HashMap<AgentId, Agent>>,
-}
+| Wire value     | Mechanism                                                                                                                                                              |
+|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `steer` (default) | `steering::try_inject_steering` injects into the live event log; the running loop consumes it at its next turn boundary. Backpressure at `MAX_PENDING_STEERING = 16`; reconcile-preamble coalescing. |
+| `interrupt`    | `find_steering_target_id` → `ExecutionEngine::cancel` (`cancel_tx` → `CancellationToken` → `ExecutionError::Cancelled`) → the inbound router's busy/retry restarts the message as a fresh run on the same session. |
+| `queue`        | No mid-loop injection. The inbound router's per-session FIFO holds the message and delivers it as a fresh run after the current one finishes, bounded by a queue deadline. |
+
+Opt a channel into a non-default mode via its config block:
+
+```toml
+[channels.ops-bot]
+busy_input_mode = "interrupt"   # default is "steer"
 ```
 
-**Features:**
-- Sorted iteration for deterministic behavior (`registry.iter().sorted_by_key(|(id, _)| id)`)
-- Lock poisoning safety via `unwrap_or_else(|e| e.into_inner())`
-- Cleanup of completed agents after TTL expires
+Reference parity: hermes exposes `HERMES_GATEWAY_BUSY_INPUT_MODE`, openclaw
+exposes `QueueMode`, Pi exposes `streamingBehavior`; Aleph previously hardcoded
+`Steer`.
 
-### Result Collector
+### What's NOT wired today
 
-Aggregates results from subagents:
+- **Subagent-aware demotion** (hermes `#30170`): `interrupt` cancels in-flight
+  work including any sub-agents the running session spawned. Demoting to `steer`
+  when sub-agents are active needs per-session subagent detection — not wired.
+  Operators enabling `interrupt` accept this today.
+- **Follow-up lane** (defer-until-stop, Pi `followUp`): `steer` already lets the
+  model choose when to address an interjection; a separate defer-until-stop
+  queue would add loop-touching drain logic.
 
-```rust
-pub struct ResultCollector {
-    results: Vec<AgentResult>,
-    max_preview_len: usize,
-}
+## Code Locations
 
-impl ResultCollector {
-    pub fn add_result(&mut self,
-        result: AgentResult,
-    ) {
-        // Truncate previews using Unicode-safe truncation
-        let preview = safe_truncate(&result.output, self.max_preview_len);
-        self.results.push(AgentResult {
-            output: preview,
-            ..result
-        });
-    }
-}
-```
-
----
-
-## Team Coordination
-
-Multiple agents can form a team for collaborative tasks:
-
-```rust
-pub struct AgentTeam {
-    leader: AgentId,
-    members: Vec<AgentId>,
-    shared_context: SharedContext,
-}
-
-impl AgentTeam {
-    pub async fn broadcast(
-        &self,
-        message: TeamMessage,
-    ) -> Result<(), TeamError> {
-        for member in &self.members {
-            send_message(member, message.clone()).await?;
-        }
-        Ok(())
-    }
-}
-```
-
-**Patterns:**
-- **Leader election** — One agent acts as coordinator
-- **Shared context** — All team members access a shared knowledge base
-- **Broadcast/Multicast** — Messages can go to all members or specific subsets
-
----
-
-## Context Provider
-
-Agents receive context from multiple sources:
-
-```rust
-pub trait ContextProvider: Send + Sync {
-    fn get_context(
-        &self,
-        agent_id: &AgentId,
-    ) -> Context;
-}
-```
-
-**Providers:**
-- `MemoryContextProvider` — Relevant memories from the knowledge base
-- `SessionContextProvider` — Current session history
-- `ToolContextProvider` — Available tools and their schemas
-
-**Note:** The `get_context` method is synchronous (returns `Context`, not `Future<Context>`). For async context sources, use `block_in_place` — but note this requires a multi-thread Tokio runtime.
-
----
-
-## Agent Rules
-
-Behavior rules constrain what an agent can do:
-
-```rust
-pub struct AgentRules {
-    max_iterations: u32,
-    allowed_tools: Vec<String>,
-    forbidden_patterns: Vec<Regex>,
-}
-```
-
-Rules are enforced at the Harness layer and can be:
-- **Inherited** from the parent agent
-- **Overridden** per subagent
-- **Updated** at runtime via the Gateway API
-
----
-
-## Code Location
-
-- `src/agents/mod.rs` — Module entry point
-- `src/agents/run.rs` — State machine and transitions
-- `src/agents/registry.rs` — Agent registry
-- `src/agents/dispatcher.rs` — Subagent dispatch
-- `src/agents/result_collector.rs` — Result aggregation
-- `src/agents/context_provider.rs` — Context injection
-- `src/agents/rules.rs` — Rule enforcement
-- `src/agents/thinking.rs` — Agent reasoning
+- `src/harness/` — `AgentHarness` (Think→Act driver, 12-file budget ratcheted)
+- `src/harness/trait_def.rs` — `TurnState`, `TurnStep`, `HarnessError`
+- `src/harness/agent/{think,act,guardrails,prompt}.rs` — sub-step files
+- `src/orchestrator/` — AgentDef + FlowSpec resolution, `AgentHarnessRunner`
+- `src/agents/runtime.rs` — `AgentRuntime`, `LoopRunResult`, `SubagentTranscript`
+- `src/agents/subagent_tool/` — SubagentTool (spawn, parse, loop_tool)
+- `src/agents/registry.rs`, `src/agents/teammates.rs`, `src/teams/`,
+  `src/group_chat/` — multi-agent surfaces (kept separate per P5 retraction)
+- `src/session/` — `SessionService`, `SqliteEventStore`, `SessionEvent` log
+- `src/gateway/execution_engine/{mod.rs, steering.rs, gate.rs}` —
+  `BusyInputMode`, `BUSY_INPUT_MODE_KEY`, `try_inject_steering`
+- `src/gateway/inbound_router/{mod.rs, types.rs}` — `ChannelPolicyConfig`
 
 ## See Also
 
-- [Harness](./harness) — The Think→Act loop that drives agents
-- [Session Management](./session-service) — Session lifecycle and persistence
-- [Tools](./tools) — Tools available to agents
-- [Orchestrator](./orchestrator) — How agents are dispatched and coordinated
-
----
-
-## 26.7.x Addendum
-
-### Cross-Subagent Mid-Turn Interruptible
-
-26.7.x: delegated subagents are now **mid-turn interruptible** — `Interrupt` truly cancels fan-out, **not demoted to queue**. Long-running detached members no longer leak (the detached-member leak was fixed).
-
-### Subagent Tree
-
-The `subagent.tree` RPC (26.7.x) returns an agent's subagent tree (node identity + live events + tree RPC).
-
-### Real max_iterations Inheritance
-
-26.7.15+: spawned subagents **inherit** the operator's `[execution] max_iterations`. The `HarnessRunner::default_max_iterations` hook is now correctly overridden. Previously the child fell back to `FALLBACK_MAX_ITERATIONS=200`; the loop was never uncapped, the number just didn't match the config.
-
-### Subagent-Scoped Tool Output
-
-26.7.15+: child harnesses get a `ToolResultStore` handle **scoped to the parent session**. Previously they got the process-wide, *unscoped* store, so Layer-3 spills landed outside any session directory while their `ctx_search` looked in the (parent-scoped) session index — a silent zero-hit recall. The fix is a recall fix, not an isolation fix (before: the child saw nothing, never another session's data).
-
-### See Also
-
-- [Agent Components](/docs/en/concepts/agent-components) — subagent construction
+- [Agent Components](/docs/en/concepts/agent-components) — module map of the loop
+- [Orchestrator](./orchestrator) — AgentDef + FlowSpec dispatch
+- [Subagent Tree RPC](/docs/en/gateway/methods/agents) — live subagent tree
 - [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — resource claims
-- [Gateway RPC `subagent.tree`](/docs/en/gateway/methods/agents) — subagent tree query
+- [Harness Architecture](/docs/en/architecture/harness) — thin-harness philosophy
+- [Redlines R10 / R11](/docs/en/philosophy/redlines) — the five "Don'ts"

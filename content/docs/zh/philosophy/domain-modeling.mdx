@@ -13,7 +13,7 @@ Aleph 中的 DDD 不是仪式性的 —— 它服务于实际目的。通过使�
 
 DDD 提供了组织支柱：
 
-- **限界上下文**防止跨领域耦合。记忆系统不需要了解调度器的任务图，调度器也不需要了解网关的会话管理。
+- **限界上下文**防止跨领域耦合。记忆系统不需要了解 teams/dispatcher 的调度，teams/dispatcher 也不需要了解网关的会话管理。
 - **聚合根**强制执行一致性边界。对相关对象的修改通过一个入口点进行，防止不一致状态。
 - **值对象**消除身份混淆。当且仅当两个对象的属性匹配时它们才相等，使它们成为值对象可以防止意外假设身份的错误。
 - **实体**使身份显式化。当一个对象需要在操作之间持久化并被其他对象引用时，将其标记为实体使此契约在代码中可见。
@@ -94,6 +94,8 @@ impl AggregateRoot for TaskGraph {}
 
 `TaskGraph` 是一个聚合根，因为它管理 `Task` 实体集合及其依赖边。添加任务、移除任务或修改依赖项必须通过 `TaskGraph` 进行，以确保图保持有效（无循环、无悬空引用、正确排序）。
 
+> **注**：上面的 `TaskGraph` / `Task` 是教学示例，便于读者理解聚合根的形态。**当前 Aleph 源码中并不存在 `TaskGraph` 类型**——实际的领域聚合根是 `MemoryFact`（`src/memory/context/fact.rs`），它实现了 `pub trait AggregateRoot`。
+
 外部代码永远不应直接修改 `Task` —— 它应该调用维护不变量的 `TaskGraph` 方法：
 
 ```rust
@@ -150,22 +152,24 @@ impl ValueObject for TaskStatus {}
 
 Aleph 的领域被划分为限界上下文 —— 具有自己的通用语言、自己的模型和自己的规则的领域内聚区域。不同上下文中的对象可能共享名称但具有不同的含义。
 
-### 调度器上下文
+### teams/dispatcher 上下文
 
-**职责**：DAG 调度、工具编排、任务状态管理。
+**职责**：子任务调度、并发分桶、Team 协调。
 
-调度器上下文处理代理的执行端 —— 将请求分解为任务图、管理依赖项和跟踪进度。Act 阶段按**资源声明**分桶并行调度（`src/tools/concurrency.rs`），不靠中间件做意图判断（R7/R10）。
+`teams/dispatcher` 处理代理的执行端 —— `TeamDispatcher` 把复杂请求分解为子任务，`handoff.rs` / `runner.rs` / `schedule/{select,settle,reclaim,failure}.rs` 管理依赖、超时与失败回收。Act 阶段按 `src/tools/concurrency.rs::ConcurrencyClaim` 的资源声明分桶并行调度（桶内并发、桶间串行），不靠中间件做意图判断（R7/R10）。
+
+> **重要**：`src/dispatcher/agent_types/{graph,task,status}.rs` **不存在**；源码中也不存在 `TaskGraph` 类型。下列表格给出源码中与并发 / 任务回收最相关的类型与位置。
 
 | 类型 | DDD 角色 | 位置 |
 |------|----------|----------|
-| `TaskGraph` | 聚合根 | `dispatcher/agent_types/graph.rs` |
-| `Task` | 实体 | `dispatcher/agent_types/task.rs` |
-| `TaskStatus` | 值对象 | `dispatcher/agent_types/status.rs` |
+| `ConcurrencyClaim` | 值对象（enum） | `src/tools/concurrency.rs` |
+| `TaskStatus` | 值对象（enum） | `src/a2a/domain/task.rs`（A2A 协议域，**非** dispatcher 核心） |
+| `TeamDispatcher` | 聚合根 | `src/teams/dispatcher/{mod,handoff,runner}.rs` |
 
-`TaskGraph` 聚合根确保：
-- 任务按依赖顺序执行。
-- 不存在循环依赖。
-- 状态传播是一致的（父任务在子任务仍在"运行"时不能是"完成"）。
+并行分桶函数（`batch_parallelizable` / `partition_parallel_groups`）保证：
+- 同桶内调用并发执行。
+- 不同资源冲突声明的桶按串行顺序执行。
+- 资源声明冲突时 `claims_conflict` 退避。
 
 ### 记忆上下文
 
@@ -175,31 +179,26 @@ Aleph 的领域被划分为限界上下文 —— 具有自己的通用语言、
 
 | 类型 | DDD 角色 | 位置 |
 |------|----------|----------|
-| `MemoryFact` | 聚合根 | `memory/context.rs` |
-| `ContextAnchor` | 值对象 | `memory/context.rs` |
-| `FactType` | 值对象 | `memory/context.rs` |
+| `MemoryFact` | 聚合根 | `src/memory/context/fact.rs` |
+| `ContextAnchor` | 值对象 | `src/memory/context/mod.rs` |
+| `NoteType` | 值对象（enum） | `src/memory/context/enums.rs` |
+
+> **更正**：上表的路径与类型名是源码中的真实位置（`memory/context` 是一个目录而非文件，类型名是 `NoteType` 而非 `FactType`）。`MemoryFact` 的 `impl Entity` 与 `impl AggregateRoot` 见 `src/memory/context/fact.rs`。
 
 `MemoryFact` 聚合根确保：
-- 事实正确锚定到其上下文（对话、主题、领域）。
-- 事实类型一致且有效。
-- 压缩操作保留基本信息。
+- 事实正确锚定到其上下文（对话、主题、领域），由 `ContextAnchor` 表达。
+- 事实类型一致且有效，由 `NoteType` 枚举约束。
+- 压缩操作保留基本信息（`src/memory/compression/` + `session_compactor/`）。
 
-### 意图上下文
+### 意图上下文（不存在）
 
-**职责**：意图检测、L1-L3 分层过滤。
-
-意图上下文处理代理的感知端 —— 分析用户输入并将其分类为可操作的意图。
-
-| 类型 | DDD 角色 | 位置 |
-|------|----------|----------|
-| `AggregatedIntent` | 值对象 | `intent/types.rs` |
-| `IntentSignal` | 值对象 | `intent/types.rs` |
-
-注意，意图上下文仅使用值对象 —— 意图被分类，而非跟踪。意图没有生命周期；它是代理在某一时刻理解的快照。
+> **Aleph 源码中不存在独立的「意图检测」bounded context**：`src/intent/` 目录不存在，`AggregatedIntent` / `IntentSignal` 类型在全仓 grep 0 命中。R7 把「Intent Detection 规则引擎」明列为越俎代庖，意图分类由 LLM 一次推理自然完成（R7 + R9）。唯一相关的运行时配置壳 `src/config/types/smart_flow.rs::IntentDetectionConfig` 也已落入 `config/reload_impact.rs` 的 `INERT_SECTIONS`，不再驱动运行时分类。
 
 ### POE 上下文（已退役）
 
-> **POE（Principle-Operation-Evaluation）架构在 26.5+ 已退役**。其「智慧」已迁移到 system prompt 模板（R9）；成功定义、验证、评估现在由 LLM 一次调用自然完成。Harness 不做完成度判断（**R10「5 个不」之 3**），不参与评估。R10 删除了历史 `DiminishingReturnsDetector` 硬停，因为它是循环内的确定性完成判断。
+> **POE（Principle-Operation-Evaluation）运行时架构在 26.5+ 已退役**。其「智慧」已迁移到 system prompt 模板（R9）；成功定义、验证、评估现在由 LLM 一次调用自然完成。Harness 不做完成度判断（**R10「5 个不」之 3**），不参与评估。R10 删除了历史 `DiminishingReturnsDetector` 硬停（`src/harness/tests/budget.rs:280` 注释），因为它是循环内的确定性完成判断。
+>
+> 数据库层 `src/resilience/database/state_database/schema.rs` 仍保留 `-- POE Event Sourcing / Trust Scores / Contracts` 三段注释，作为事件溯源的审计底座（runtime 智能已迁至 prompt）。
 
 历史职责（仅供考古）：成功合约、验证规则、评估结果。
 
@@ -209,26 +208,27 @@ Aleph 的领域被划分为限界上下文 —— 具有自己的通用语言、
 
 ```
                   ┌────────────────┐
-                  │  意图上下文     │
-                  │  （感知）       │
+                  │   Thinker /    │
+                  │   PromptLayer  │
+                  │  （评估在      │
+                  │   prompt 中）  │
                   └───────┬────────┘
-                          │ 分类意图
+                          │ LLM 一次推理自然覆盖
                           v
 ┌────────────────┐   ┌────────────────┐   ┌────────────────┐
-│  Thinker /     │<──│  调度器        │──>│  记忆上下文    │
-│  PromptLayer   │   │  上下文        │   │  （知识）      │
-│  （评估在      │   │  （执行）      │   │                │
-│   prompt 中）  │   │                │   │                │
+│   Harness      │<──│ teams/         │──>│  记忆上下文    │
+│  (Think→Act)   │   │  dispatcher    │   │  （知识）      │
+│   R10 笨循环   │   │  （执行）      │   │                │
 └────────────────┘   └────────────────┘   └────────────────┘
          │                                         ^
-         │          经验固化                        │
+         │          dreaming 反馈                  │
          └─────────────────────────────────────────┘
 ```
 
-- **意图 --> 调度器**：分类意图被传递给调度器以进行任务图构建。
-- **调度器 --> 记忆**：调度器在执行期间查询记忆以获取相关上下文。
-- **调度器 --> Thinker / PromptLayer**：LLM 驱动的评估替代了旧 POE 流水线；裁决是模型的自然输出，而非中间件输出。
-- **Thinker / PromptLayer --> 记忆**：成功的评估触发经验固化到记忆中。
+- **Harness ↔ teams/dispatcher**：Harness 的 Act 阶段调用 dispatcher；dispatcher 把并发分桶结果回传 Harness；两者均由 R10「笨循环」约束，不做意图判断。
+- **teams/dispatcher ↔ Memory**：dispatcher 在执行期间查询记忆以获取相关上下文（`src/memory/retrieval.rs`）。
+- **Harness → Thinker / PromptLayer**：Think→Act 的 Think 阶段调 Thinker，裁决由 LLM 一次推理自然输出，而非中间件输出（R10 第 5「不」）。
+- **Harness / Memory → dreaming**：每轮成功完成进入 dreaming 管线（`src/memory/dreaming/`），按 SkillOpt 纪律晋升技能，反过来给 Memory 增加事实，给下一次 Think 提供更密集的上下文。
 
 每个上下文拥有自己的模型，不从其他上下文导入类型。通信通过边界处定义的共享接口（trait、消息类型）进行。
 
@@ -273,32 +273,26 @@ impl ValueObject for MyValue {}
 
 ### 步骤 4：添加测试
 
-Aleph 对领域类型使用双重测试策略：
+领域不变量一律用普通 Rust 测试表达——不变量与聚合根放在同文件 `#[cfg(test)] mod tests`；跨模块的行为验证放到顶层 `tests/<name>.rs`（**必须是顶层**——cargo 只自动发现 `tests/*.rs`，子目录需要某个 target 显式 `mod` 才会被编译）。
 
-**Gherkin 测试**（在 `core/tests/features/domain/` 中）用于确定性行为：
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-```gherkin
-Feature: TaskGraph 一致性
-  Scenario: 不能添加具有重复 ID 的任务
-    Given 一个带有任务 "task-001" 的任务图
-    When 我添加另一个带有 ID "task-001" 的任务
-    Then 操作应该失败并显示 "duplicate ID"
+    #[test]
+    fn memory_fact_keeps_identity_after_validity_change() {
+        let fact = MemoryFact::new("user".into(), NoteType::Preference, vec![])
+            .with_valid_from(1000);
+        assert_eq!(fact.id(), "user");
+    }
+}
 ```
 
-**YAML 规范测试**（在 `core/tests/specs/` 中）用于 AI 相关的语义行为：
-
-```yaml
-scenarios:
-  - name: "SuccessManifest 正确验证"
-    given:
-      - success_manifest: { id: "sm-001" }
-    then:
-      - assertion_type: "deterministic"
-        check: "has_identity"
-        expected: true
-```
-
-这种双重方法确保正确性（Gherkin）和语义有效性（由 LLM 评判评估的 YAML 规范）。
+不变量与 identity 测试现存放位置（举例）：
+- `src/memory/context/tests/fact_tests.rs` — `MemoryFact` 的 ID 稳定性、有效期边界、聚合根不变式
+- `src/memory/context/tests/enum_tests.rs` — `NoteType` 的枚举派生 / FromStr 一致性
+- `src/domain/mod.rs::tests` — `Entity` / `AggregateRoot` / `ValueObject` 三个 trait 的最小样例
 
 ## 设计原则
 
@@ -324,12 +318,12 @@ Rust 的所有权模型、trait 系统和类型级编程与 DDD 自然对齐：
 
 - **所有权**强制执行聚合边界 —— 如果聚合根拥有其子项，外部代码不能持有对它们的可变引用。
 - **Traits**表达没有运行时成本的领域契约。
-- **Enums**使用穷尽匹配对判别联合（如 `FactType` 或 `TaskState`）进行建模。
+- **Enums**使用穷尽匹配对判别联合（如 `NoteType` 或 `TaskState`）进行建模。
 - **生命周期**防止跨上下文边界的悬空引用。
 
 ## 进一步阅读
 
 - [设计理念](./overview) —— DDD 服务的基本原则
-- [代理思维模型](./agent-thinking) —— Thinker / PromptLayer 如何替代旧 POE 流水线
+- [代理思维模型](./agent-thinking) —— Thinker / PromptLayer 与 Harness Think→Act 循环
 - [五层涌现](./five-layers) —— 限界上下文如何映射到 L1-L5 模型
 - [架构](/docs/zh/architecture) —— 技术系统架构

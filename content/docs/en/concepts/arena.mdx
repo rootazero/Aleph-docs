@@ -1,136 +1,122 @@
 ---
-title: "Arena"
-description: "SharedArena — a structured workspace where multiple agents collaborate on a shared goal."
+title: "Cluster"
+description: "Cluster — center-side infrastructure: node enrollment / reverse RPC / command dispatch / file sandbox for LAN-trust multi-node federation."
 ---
 
-The `arena` module implements SharedArena, a structured workspace where multiple agents collaborate on a shared goal. It provides lifecycle management, state aggregation, event tracking, and persistent storage for collaborative agent sessions.
+The `cluster` module implements Aleph's center-side cluster infrastructure. Connected nodes are treated as trusted LAN federation members; the module owns node registration, lifecycle SSOT, reverse RPC, command dispatch, file-command sandboxing, and the node-approval loopback. Center-side LLM tools `node_list` / `node_invoke` / `node_invoke_many` / `node_file` drive nodes through these primitives.
 
 ## Design Philosophy
 
-SharedArena follows three principles:
+The cluster follows three principles:
 
-1. **Explicit lifecycle** — Arenas transition through well-defined states with validated transitions
-2. **Deterministic ordering** — All collections are sorted to ensure reproducible behavior
-3. **Permission isolation** — The Handle pattern restricts what each participant can access
+1. **Lifecycle SSOT** — registration / deregistration / online state live in exactly one place (`NodeRegistry`), avoiding duplicate rows and stale state
+2. **Authorized command table** — `CommandTable` is the authoritative allowlist of commands visible to nodes; commands not on it are refused
+3. **Fail-closed** — the node-approval loopback (`CenterApprovalRequester`) and the file sandbox default to deny; no tokens are issued to nodes
 
 ---
 
 ## Core Components
 
-### Arena State Machine
+### NodeRegistry
 
-Arenas follow a strict lifecycle:
-
-```
-Created ──▶ Active ──▶ Settling ──▶ Archived
-```
-
-Each transition validates the current state before proceeding. Invalid transitions are rejected.
-
-### ArenaManager
-
-Central coordinator for all arenas:
+The center-side registry with multi-level addressing, tag fan-out, and disconnect fail-fast:
 
 ```rust
-pub struct ArenaManager {
-    arenas: RwLock<HashMap<ArenaId, Arena>>,
-}
+pub struct NodeRegistry { /* … */ }
 
-impl ArenaManager {
-    pub async fn create(
-        &self,
-        config: ArenaConfig,
-    ) -> Result<ArenaId> { /* ... */ }
-    
-    pub async fn active_arenas_for(
-        &self,
-        agent_id: &AgentId,
-    ) -> Vec<ArenaId> { /* ... */ }
+impl NodeRegistry {
+    pub fn maybe_register_node(/* … */) -> NodeMatch { /* … */ }
+    pub fn match_id(/* … */) -> Option<&NodeSession> { /* … */ }
+    pub fn environments_list(/* … */) -> Vec<Environment> { /* … */ }
 }
 ```
 
-**Determinism:** `active_arenas_for` returns sorted `ArenaId` vectors (derived `Ord` on `ArenaId`).
+`Environment` is the serialized external view rendered by `environments.list` (a thin rendering contract).
 
-### ArenaHandle
+### Cluster Lifecycle
 
-Restricted view of an arena for participants:
+`NodeAdmission` is the admission entry point; `enroll_node_device` is the operator pre-enrollment (idempotent); `deregister_node` removes a node from `environments.list` and from `node_invoke` / `node_file` addressing. `DeregisterError` / `DeregisterOutcome` make the "deregistration sticks" semantics explicit.
+
+**Determinism:** `environments_list()` returns a sorted `Environment` vector; node keys run through `normalize_node_key` (Unicode normalization — CJK node names work) before lookup.
+
+### CommandTable
+
+The authoritative allowlist of commands visible to nodes:
 
 ```rust
-pub struct ArenaHandle {
-    arena_id: ArenaId,
-    permissions: HandlePermissions,
-}
+pub struct CommandTable { /* … */ }
+pub enum NodeCommand { /* … */ }
 ```
 
-The Handle pattern enforces P1 (low coupling) by isolating permissions — participants can only access what the handle allows.
+Commands not on `CommandTable` are refused — the same gate is checked at admit time and at invoke time.
 
-### Aggregate
+### FileReadCommand / FileWriteCommand
 
-State aggregation for collaborative progress tracking:
+The file-command sandbox:
 
-```rust
-pub struct ArenaAggregate {
-    completed_steps: u32,
-    total_steps: u32,
-    participants: Vec<AgentId>,
-}
-```
+- `MAX_FILE_BYTES` is the hard ceiling for a single read / write
+- Path restrictions are enforced by the center-side policy; `file.write` no longer has a check-then-write TOCTOU window
+- `sha256_hex` is used for consistency verification
 
-Step counts use `saturating_add` to prevent integer overflow.
+### CenterApprovalRequester
+
+Loopback for human-approval requests originating from nodes (fail-closed). The center-issued approval request comes back through this channel to the center-side LLM / user; `NODE_APPROVAL_TIMEOUT_MS` is the hard timeout.
+
+### ReverseRpcChannel / PendingInvokes
+
+Server → connected-client id-bearing request / response channel. Responses are matched to requests by structure (not by id), so concurrent calls need no caller-managed id.
 
 ---
 
-## Events
+## Events and State
 
-Arena events track collaboration activity:
+Nodes report state via the `cluster.*` RPCs; the center broadcasts connect / disconnect / offline transitions to the Panel (the live fleet feed).
 
 ```rust
-pub enum ArenaEvent {
-    AgentJoined { agent_id: AgentId, timestamp: DateTime<Utc> },
-    AgentLeft { agent_id: AgentId, timestamp: DateTime<Utc> },
-    StepCompleted { step: u32, agent_id: AgentId },
-    GoalUpdated { new_goal: String },
-}
+pub struct NodeSession { /* live node view */ }
+pub struct Environment { /* serialized external view */ }
 ```
 
-Events are persisted to storage for audit and replay.
+`environments.list` is a read-only view consumed by the Panel cluster pane. Connection protocol: the node's connect frame declares its command table + tags; the center completes admit + registration inside the connect handshake, avoiding a separate enrollment round-trip.
 
 ---
 
-## Storage
+## Persistence
 
-Arenas are persisted via `ArenaStorage`:
+`cluster.deregister` revokes the device row; the Panel's `last_seen_at` is no longer treated as an "online" signal:
 
-- Uses parameterized SQL queries (no injection risk)
-- Lock-safe with `unwrap_or_else(|e| e.into_inner())` pattern
-- All queries use `params![]` for binding
+- Parameterized SQL queries (no injection risk)
+- Locks use the `unwrap_or_else(|e| e.into_inner())` pattern
+- All queries bind with `params![]`
+- `cluster.file.write` no longer has a check-then-write TOCTOU
 
 ---
 
 ## Safety Properties
 
-- **State machine validation** — Illegal transitions rejected at compile/runtime
-- **No lock poisoning** — All locks use recovery pattern
-- **No SQL injection** — Parameterized queries throughout
-- **No UTF-8 slicing** — No byte-level string operations
-- **Overflow protection** — `saturating_add` for all accumulations
+- **Lifecycle SSOT** — registration / deregistration is single-sourced; `cluster.enroll` no longer mints a duplicate row per click
+- **Unicode node keys** — `normalize_node_key` performs Unicode normalization; CJK node names are no longer broken by byte-slicing
+- **Authorized command table** — `CommandTable` is the authoritative allowlist
+- **File sandbox** — `MAX_FILE_BYTES` hard cap + path restriction + no-TOCTOU writes
+- **LAN-trust** — nodes hold no tokens; connection identity is declared by the connect frame's `commands` + `tags` shape
+- **Fail-closed approval loopback** — `CenterApprovalRequester` defaults to deny
 
 ---
 
 ## Code Location
 
-- `src/arena/mod.rs` — Module entry point
-- `src/arena/manager.rs` — Arena lifecycle and coordination
-- `src/arena/handle.rs` — Permission-restricted arena access
-- `src/arena/aggregate.rs` — State aggregation
-- `src/arena/types.rs` — Core types and state machine
-- `src/arena/events.rs` — Event definitions
-- `src/arena/storage.rs` — Persistence layer
+- `src/cluster/mod.rs` — module entry point
+- `src/cluster/registry.rs` — `NodeRegistry` / `Environment` / node-key normalization
+- `src/cluster/enrollment.rs` — `NodeAdmission` / `enroll_node_device` / `deregister_node`
+- `src/cluster/node_runtime.rs` — `CommandTable` / `NodeCommand` / connection protocol
+- `src/cluster/node_file_cmd.rs` — `FileReadCommand` / `FileWriteCommand` / `MAX_FILE_BYTES`
+- `src/cluster/node_approval.rs` — `CenterApprovalRequester` / `ApprovalSlot`
+- `src/cluster/reverse_rpc.rs` — `ReverseRpcChannel` / `PendingInvokes`
 
 ## See Also
 
-- [Agent Runtime](./agent-runtime) — How agents spawn and manage tasks
-- [Event System](./event-system) — Event distribution patterns
+- [Agent Runtime](/docs/en/concepts/agent-runtime) — How agents spawn and manage tasks
+- [Event System](/docs/en/concepts/event-system) — Event distribution patterns
 
 ---
 
@@ -142,25 +128,36 @@ Arenas are persisted via `ArenaStorage`:
 
 ### Cluster Lifecycle SSOT
 
-26.7.x: cluster enroll / deregister introduces a lifecycle single-source-of-truth:
+26.7.x: cluster enroll / deregister / reverse RPC introduces a lifecycle single-source-of-truth:
 
 - Dead cold-start enrollment fixed
-- Deregistration made to stick
+- Deregistration made to stick (explicit `DeregisterError` / `DeregisterOutcome` semantics)
 - Reverse RPC hardened
-- `connect` handshake precedes the method in `gateway call`
+- `connect` handshake precedes the method in `gateway call` (admit completes registration)
 - Node keys are Unicode-normalized (CJK node names work)
+- Wedged reverse-RPC teardown (slow-consumer eviction)
 
 ### `cluster.deregister` / `enroll` / `environments.list`
 
-26.7.x full RPC. See [Cluster Architecture](/docs/en/architecture/cluster).
+26.7.x full RPC. `environments.list` is the serialized external view of `Environment`, rendered by the Panel cluster pane. See [Cluster Architecture](/docs/en/architecture/cluster).
 
 ### Real Cluster Fleet View
 
 - Live fleet feed
-- Node identity persistence
-- Cluster write R8 complete (previously half-done)
+- Node identity persistence (`last_seen_at` on the connect verdict)
+- Cluster write R8 complete (previously half-done; `cluster.file.write` no longer has a TOCTOU)
+
+### Dreaming / Insights Association
+
+The cluster does not directly drive the Dreaming Daemon; the link is indirect:
+
+- The Dreaming Daemon (`src/memory/dreaming/`) runs nightly without depending on the cluster; its retry storm is now bounded (`should_skip_scheduled_run`), so it no longer exhausts the provider quota
+- `DreamReport` fields (`links_purged`, `extra`, etc.) are produced by dreaming stages and consumed by downstream insights (`src/memory/insights.rs`)
+- `insights.tools` is a read-only per-tool aggregation computed from raw `ToolInvocation` rows, surfaced through the `insights.tools` admin RPC, and shown alongside the cluster fleet in the Memory Hub / governance views
+- The Memory Hub merges the graph canvas and the vault table into a single view, with new Dream Insights and Corrections governance views; `memory.retrieve_with_trace` provides per-stage scoring telemetry
 
 ### See Also
 
-- [Cluster](/docs/en/architecture/cluster) — full architecture
+- [Cluster Architecture](/docs/en/architecture/cluster) — full architecture
 - [Cluster R8 writes](/docs/en/gateway/methods/cluster) — protocol
+- [Memory System](/docs/en/concepts/memory) — dreaming / insights linkage

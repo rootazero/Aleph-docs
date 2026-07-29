@@ -1,174 +1,146 @@
 ---
 title: "Capability System"
-description: "Plugin capability declarations and tool permission middleware for controlling what extensions can do."
+description: "Capability declarations, plugin permissions, action-aware tool enforcement, and the runtime capability ledger."
 ---
 
-The capability and permission modules control what plugins and agents are allowed to do. The capability system declares what a plugin contributes (tools, channels, skills), while the permission system enforces access control at runtime.
+Aleph separates three questions:
 
-## Design Philosophy
+1. What a plugin or extension registers.
+2. What resources a plugin declares that it needs.
+3. What the running agent is allowed to execute now.
 
-1. **Declarative capabilities** — Plugins declare what they provide via `CapabilityDeclaration`
-2. **Layered permissions** — Global defaults + per-agent overrides, most-restrictive-wins
-3. **Middleware enforcement** — Permission checks happen in the tool middleware layer before execution
+`src/extension/capability.rs` answers the first question. Plugin manifest permissions and the shared scoped-tool, approval, and sandbox layers answer the other two.
 
----
+## Capability declarations
 
-## Capability Declarations
-
-Plugins declare their contributions via a unified enum:
+The production declaration enum is intentionally small:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CapabilityDeclaration {
-    Tool(ToolDeclaration),
-    Hook(HookDeclaration),
-    Channel(ChannelDeclaration),
-    Provider(ProviderDeclaration),
-    GatewayMethod(GatewayMethodDeclaration),
-    HttpRoute(HttpRouteDeclaration),
-    Cli(CliDeclaration),
-    Service(ServiceDeclaration),
-    Command(CommandDeclaration),
-    Skill(SkillDeclaration),
-    Agent(AgentDeclaration),
-    McpServer(McpServerDeclaration),
+    Tool(ToolRegistration),
+    Hook(HookRegistration),
+    Service(ServiceRegistration),
+    Skill(SkillRegistration),
+    Agent(AgentRegistration),
+    McpServer(McpServerConfig),
 }
 ```
 
-Each variant maps 1:1 to a registration type in the PluginRegistry. The `#[serde(tag = "type")]` attribute serializes as `{ "type": "tool", "name": "my_tool", ... }`.
+Each declaration is owned by a plugin or, for an MCP server configuration, by the runtime that supplies it. The registrar validates ownership and dispatches it to `PluginRegistry` or the MCP path.
 
----
+| Variant | Registration target | Tier |
+|---|---|---|
+| `Tool` | Callable tool registry | Core |
+| `Hook` | Hook executor | Core |
+| `Skill` | Plugin skill registry and shared SkillSystem | Core |
+| `Agent` | Agent registry | Important |
+| `Service` | Service manager | Pluggable |
+| `McpServer` | MCP manager integration | Pluggable |
 
-## Permission System
+Plugin `commands/` Markdown is represented as a command-type skill registration. There are no separate channel, provider, HTTP-route, CLI, or gateway-method variants in the current declaration model.
 
-### Classification
+A `CapabilitySource` records the plugin ID, discovery origin, and manifest format. Supported source formats include Claude Code, Aleph TOML, Codex, Cursor, auto-discovery, and runtime registration.
 
-Tool invocations are classified into three outcomes:
+## Plugin permissions
 
-```rust
-pub enum Classification {
-    Allow,                       // Execute without prompting
-    Confirm { reason: String },  // Ask user for approval
-    Deny { reason: String },     // Reject unconditionally
-}
-```
-
-### SmartFilter
-
-```rust
-pub trait SmartFilter: Send + Sync {
-    fn classify(&self,
-        name: &str,
-        input: &Value,
-    ) -> Classification;
-}
-```
-
-### LayeredPermissionResolver
-
-Merges global + per-agent permissions using most-restrictive-wins semantics:
-
-```rust
-pub struct LayeredPermissionResolver {
-    merged: Arc<ArcSwap<ToolPermissionsConfig>>,
-}
-```
-
-**Merge rules:** `Deny > Ask > Allow`
-
-**Exec-class tools** (`code_exec`, `bash`) have special handling — their approval is owned by `WorkspaceSandbox`, not the general permission layer.
-
-**Live reload:** Uses `ArcSwap` so permission updates from config RPC handlers take effect without restarting.
-
-### ApprovalGate
-
-For `Confirm` classifications, the `ApprovalGate` prompts the user:
-
-```rust
-#[async_trait]
-pub trait Approver: Send + Sync {
-    async fn ask(
-        &self,
-        tool_name: &str,
-        reason: &str,
-    ) -> ApprovalOutcome;
-}
-```
-
-The real `ApprovalGate` implements this; a mock impl enables unit testing without full approval UI plumbing.
-
----
-
-## Permission Config
-
-Permissions are configured in `providers.toml` or via the config RPC:
+The Aleph extension manifest declares resource requirements under its permission section:
 
 ```toml
-[permissions.tools]
-code_exec = "ask"
-bash = "deny"
-file_ops = "allow"
+[aleph.permissions]
+network = true
+filesystem = "read"
+env = true
+shell = false
+background = false
 ```
 
-**Actions:**
-- `allow` — Execute without confirmation
-- `ask` — Prompt user before executing
-- `deny` — Block execution
+The permission vocabulary is:
 
----
+- `network`
+- `filesystem:read`, `filesystem:write`, or full filesystem access
+- `env`
+- `shell`
+- `background`
 
-## Safety Properties
+A `[[aleph.services]]` declaration requires `background = true`. WASM-specific declarations can further constrain workspace prefixes, HTTP endpoints, credentials, rate limits, tool invocation, and secret injection.
 
-- **Deny-first evaluation** — All patterns checked for `Deny` before any `Ask` prompts
-- **Deterministic ordering** — Config rules are sorted by key for reproducible evaluation
-- **No recursion overflow** — Pattern matching uses bounded recursion (patterns come from config, not user input)
+These are declarations and host-registration gates. They do not grant an agent an unconditional execution right. Calls still pass through the scoped tool service, tool metadata, approval policy, execution tier, and sandbox command policy.
 
----
+## Tool enforcement
 
-## Code Location
+Tool policy is action-aware and uses the tool's declared metadata rather than guessing from a name. The effective permission combines explicit tool rules, agent and channel policy, and the execution tier; the most restrictive applicable rule wins.
 
-- `src/extension/capability.rs` — `CapabilityDeclaration` enum
-- `src/tools/middleware/permission/mod.rs` — Permission layer
-- `src/tools/middleware/permission/resolver.rs` — `LayeredPermissionResolver`
-- `src/tools/middleware/permission/agent_filter.rs` — Per-agent filtering
-- `src/config/types/policies/tool_permissions.rs` — Config types
-
-## See Also
-
-- [Extensions](./extensions) — Plugin architecture
-- [Approval](./approval) — Desktop/browser approval system
-
----
-
-## 26.7.x Addendum
-
-### `CapabilityLedger`
-
-26.7.x — per-install visible capability list rebuilt from disk (for `plugin.install` / `runtimes.install` pre-install disclosure):
-
-- Rebuild logic lives in `make_runtime_ledger()`
-- **Decoupled** from the runtime claim check (not the same thing)
-- Plugins that fail rebuild are refused before install
-
-### Action-Aware Approval
-
-26.7.15+ `ApprovalPolicy` is **action-aware** — the human sees the actual command and the grant fingerprint **keys on it**. Authorization granularity moves from "tool-level" to "command-level".
-
-### Three-Tier Execution Permissions
+The user-facing execution tiers are:
 
 | Tier | Behavior |
-|------|----------|
-| `ask` | Prompt for approval before every tool execution; unknown tools fail closed |
-| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
-| `full` | All auto-allow (besides the hard security filter) |
+|---|---|
+| `ask` | Ask before mutating tool calls; unknown tools fail closed |
+| `auto` | Auto-allow idempotent tools; destructive operations still require approval |
+| `full` | Auto-allow except for the independent hard security floor |
 
-### `[sandbox.command_policy]` Hard Floor
+`[sandbox.command_policy]` is that hard floor. No execution tier or plugin declaration can lower it. Action-aware approval binds a grant to the concrete command and its fingerprint rather than only to a tool name.
 
-Cannot be lowered by any `exec_tier`. `fail-closed` (missing/inconsistent refuses authorization).
+The operator gate is a separate boundary for self-management operations. For example, `hub_install_run`, skill management, and identity operations cannot be enabled by an ordinary chat-tier channel merely because a plugin declared a capability.
 
-### Details
+## Runtime capability ledger
 
-- [Security Overview](/docs/en/security/overview) — the fail-closed principle
-- [Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and action-aware approval
-- [Extensions](/docs/en/concepts/extensions) — plugin capabilities
+Runtime binaries such as `node`, `uv`, `ffmpeg`, or `playwright-cli` use a different ledger from extension capabilities:
+
+```text
+~/.aleph/runtimes/ledger.json
+```
+
+`CapabilityLedger` is the persisted source of truth for whether Aleph can use a runtime executable. It does not download or install anything itself. The probe and bootstrap modules perform those operations, then update the ledger.
+
+A ledger entry records:
+
+- capability name
+- executable path
+- detected version
+- last successful probe time
+- source: `system` or `aleph_managed`
+- status: `missing`, `probing`, `bootstrapping`, `ready`, or `stale`
+
+The runtime install flow is:
+
+```text
+load ledger
+  → probe PATH and Aleph-managed paths
+  → resolve dependencies
+  → bootstrap when a supported install spec exists
+  → verify the resulting binary
+  → write Ready state atomically
+```
+
+`runtimes.list` reads the ledger and runtime specifications. `runtimes.refresh` probes known capabilities. `runtimes.install` accepts a capability name, runs asynchronously, and publishes progress events; the final state is persisted in the same `ledger.json`. A missing or corrupt ledger is recreated rather than trusted.
+
+This runtime ledger is not the Hub catalog, not the Hub trust disclosure, and not a per-plugin capability claim. Hub entries carry their own `InstallSpec`, trust tier, version, and optional SHA-256 pin in `hub_catalog.db`.
+
+## Security boundaries
+
+- Manifest declarations are validated before registration.
+- Capability ownership prevents one plugin from registering another plugin's component.
+- Plugin and skill content is scanned for injection and dangerous patterns before untrusted installation.
+- Secrets use the encrypted vault and runtime injection boundary.
+- Tool execution is enforced at a shared scoped-tool choke point.
+- Runtime installation is serialized per capability and records only verified executable state.
+
+## Code locations
+
+- `src/extension/capability.rs` — declaration enum, tiers, and source metadata
+- `src/extension/registrar/` — declaration validation and registration
+- `src/extension/registry/` — plugin registrations
+- `src/extension/manifest/` — permission parsing
+- `src/tools/scoped/` — tool policy enforcement
+- `src/config/types/policies/exec_tier.rs` — execution-tier composition
+- `src/sandbox/command_policy/` — hard command floor
+- `src/runtimes/ledger.rs` — persisted runtime ledger
+- `src/runtimes/ensure.rs` — probe, bootstrap, and ledger update orchestration
+- `src/gateway/handlers/runtimes.rs` — runtime list, refresh, and install RPCs
+
+## Related pages
+
+- [Extensions](./extensions) — Plugin capabilities and runtimes
+- [Extension System](./extension-system) — registration flow
+- [Extensions Store](./extensions-store) — trust-gated extension installation
+- [Security Overview](/docs/en/security/overview) — execution and approval boundaries

@@ -1,156 +1,143 @@
 ---
 title: "ACP 协议"
-description: "用于标准化代理命令和控制的代理控制协议（ACP）实现。"
+description: "ACP（Agent Client Protocol）桥接器，将外部 CLI 代理（Claude Code、Codex、Gemini）作为 Aleph 子代理来管理。"
 ---
 
-`acp` 模块实现 ACP（代理控制协议），一个用于控制和监控代理行为的标准化接口。ACP 为外部系统与 Aleph 的代理运行时交互提供通用语言。
+`acp` 模块实现 **Agent Client Protocol**（ACP）桥接器 —— Aleph 作为 ACP **客户端**，将外部具备 ACP 能力的 CLI 工具（Claude Code、Codex、Gemini CLI）作为子代理拉起并驱动。桥接器在子进程内运行每个外部代理，通过 stdin/stdout 上的 NDJSON 编码 JSON-RPC 2.0 与之通信。
 
 ## 设计理念
 
-ACP 充当 Aleph 代理的"遥控器"：
+ACP 集成遵循三个原则：
 
-1. **标准化命令** —— 启动、停止、暂停、恢复、检查 —— 全部通过统一协议
-2. **可观察状态** —— 实时查看代理状态、进度和资源使用
-3. **默认安全** —— 所有 ACP 命令都需要认证并尊重权限边界
-
----
-
-## 协议命令
-
-### 生命周期命令
-
-| 命令 | 说明 | 所需权限 |
-|---|---|---|
-| `start` | 使用给定配置启动新代理 | `agent:write` |
-| `stop` | 优雅终止运行中的代理 | `agent:write` |
-| `pause` | 暂停代理执行（保留状态） | `agent:write` |
-| `resume` | 恢复暂停的代理 | `agent:write` |
-| `inspect` | 获取详细的代理状态和指标 | `agent:read` |
-| `logs` | 流式传输代理日志输出 | `agent:read` |
-
-### 状态检查
-
-```rust
-pub struct AgentStatus {
-    pub agent_id: AgentId,
-    pub state: AgentState,
-    pub progress: f32,           // 0.0 到 1.0
-    pub current_task: Option<String>,
-    pub metrics: AgentMetrics,
-}
-
-pub struct AgentMetrics {
-    pub cpu_time_ms: u64,
-    pub memory_kb: u64,
-    pub tokens_used: u64,
-    pub tool_calls: u32,
-}
-```
+1. **子进程隔离** —— 每个 ACP harness 都在 Aleph 拥有的独立 OS 进程中运行。一个代理异常不会波及其余 peer。
+2. **两种执行模式** —— `NativeAcp` 用于支持完整持续 ACP 的代理（Gemini CLI `--acp`）；`Oneshot` 用于单次 CLI 调用即可完成的代理（Claude Code `--print`、Codex `exec`）。
+3. **会话可恢复** —— 活跃会话快照到 `~/.aleph/data/acp_sessions.json`，启动时通过 `wire_persistence` 回放。
 
 ---
 
-## ACP 服务器
+## 协议概览
 
-ACP 服务器通过 WebSocket 暴露 JSON-RPC 接口：
+ACP 是以换行分隔 JSON（NDJSON）封装的 JSON-RPC 2.0。Aleph 在子进程 stdin 上发送请求、在 stdout 上读取响应：
 
-```rust
-pub struct AcpServer {
-    handlers: HashMap<String, Box<dyn AcpHandler>>,
-}
-
-impl AcpServer {
-    pub async fn handle_command(
-        &self,
-        cmd: AcpCommand,
-        auth: &IdentityContext,
-    ) -> Result<AcpResponse, AcpError> {
-        // 验证权限
-        if !auth.can(&cmd.required_permission()) {
-            return Err(AcpError::Forbidden);
-        }
-        
-        // 分派到处理程序
-        let handler = self.handlers.get(&cmd.name)
-            .ok_or(AcpError::UnknownCommand)?;
-        handler.execute(cmd.params).await
-    }
-}
+```
+┌─────────────┐           NDJSON / JSON-RPC 2.0          ┌─────────────┐
+│   Aleph     │  ──────────────────────────────────────▶  │  外部       │
+│  ACP 客户端 │  initialize → session/new → session/...  │  CLI 代理   │
+│             │  ◀──────────────────────────────────────  │ （claude、  │
+│             │  响应 + session/update 通知               │  codex、    │
+│             │                                          │  gemini）   │
+└─────────────┘                                          └─────────────┘
 ```
 
-**认证：**
-- ACP 命令使用与网关请求相同的 `IdentityContext` 流程
-- 所有者会话拥有完整的 ACP 访问权限
-- 访客会话只能检查自己的代理
+### Aleph 发出的核心方法
+
+| 方法 | 用途 |
+|---|---|
+| `initialize` | 协商协议版本与能力（Aleph 公布 `fs.readTextFile`、`fs.writeTextFile`、`session.requestPermission`）。 |
+| `session/new` | 在某个 `cwd` 下开启新的 ACP 会话。 |
+| `session/prompt` | 发送 prompt；通过 `AcpChunkCallback` 流式回传分片。 |
+| `session/cancel` | 协作式取消；通过 `CancelHandle` 写到 stdin，不会被 per-session mutex（被进行中的 prompt 持有）阻塞。 |
+| `fs/read_text_file`、`fs/write_text_file` | 双向 —— 代理可向 Aleph 请求在工程根目录下读写文件。 |
+| `session/request_permission` | 双向 —— 代理可在敏感操作前向用户请求授权。 |
+
+传输层（`src/acp/transport.rs`）将子进程的 stdin/stdout 包到一个后台读取任务中，把响应与通知分路到 mpsc 通道，并通过 `IncomingHandler`（`src/acp/incoming.rs`）应答入站 `fs/*` 与 `session/request_permission` 请求。
 
 ---
 
-## 事件流
-
-ACP 支持实时监控的事件流：
+## 执行模式
 
 ```rust
-pub enum AcpEvent {
-    StateChange {
-        agent_id: AgentId,
-        old_state: AgentState,
-        new_state: AgentState,
-    },
-    ProgressUpdate {
-        agent_id: AgentId,
-        progress: f32,
-    },
-    LogLine {
-        agent_id: AgentId,
-        level: LogLevel,
-        message: String,
-    },
+pub enum AdapterMode {
+    /// 持续 stdio ACP 子进程（如 Gemini CLI `--acp`）。
+    NativeAcp,
+    /// 每个 prompt 起一个新进程（如 Claude `--print`、Codex `exec`）。
+    Oneshot,
 }
 ```
 
-客户端通过网关的 WebSocket 事件总线订阅事件。
+- **`NativeAcp`** —— Aleph 在以 `(harness_id, cwd)` 为键的槽位（`SessionKey`）中持有子进程跨多个 prompt。懒启动，子进程死亡时自动重建。持续 stdio 意味着长会话可流式增量分片并在 prompt 中途出现 `fs/*` 请求。
+- **`Oneshot`** —— 每个 prompt 起一个新进程；Aleph 读完整 stdout 后清理。启动开销小，但无增量流式，也无 prompt 中途入站请求。
+
+Aleph 侧并不应用类似 `TieredAuthenticator` 的分层 —— 外部 CLI 的鉴权由 harness 自己执行。
+
+---
+
+## Preset 适配器
+
+`acp` 模块为最常见的外部 CLI 自带 preset（`src/acp/adapters/`）：
+
+| Preset id | 显示名 | 默认模式 | 备注 |
+|---|---|---|---|
+| `claude-code` | Claude Code | `Oneshot` | 使用 `claude --print ...`。 |
+| `codex` | Codex | `Oneshot` | 使用 `codex exec ...`。 |
+| `gemini` | Gemini CLI | `NativeAcp` | 使用 `gemini --acp`。 |
+
+额外的自定义 harness 可通过 `acp.create` 注册，与 preset 一起持久化到同一配置存储。
+
+---
+
+## Harness 生命周期 RPC
+
+网关为 harness 与活跃会话暴露完整的 CRUD + 操作面（`src/gateway/handlers/acp_config.rs`）：
+
+### Harness 配置
+
+| 方法 | 说明 |
+|---|---|
+| `acp.list` | 列出所有 ACP harness（preset + 自定义）。 |
+| `acp.get` | 按 id 取单个 harness。 |
+| `acp.create` | 注册新的自定义 harness。 |
+| `acp.update` | 更新已有 harness 配置。 |
+| `acp.delete` | 删除自定义 harness（preset 不可删除）。 |
+| `acp.test` | 探测 harness 可执行文件（`executable --version`，5s 超时）并报告成功与耗时。 |
+| `acp.set_enabled` | 启用或禁用某个 harness。 |
+| `acp.presets` | 列出所有内置 preset。 |
+| `acp.presets_meta` | preset 目录的静态元数据（显示名、可执行文件、支持模式）。 |
+
+### 活跃会话池
+
+| 方法 | 说明 |
+|---|---|
+| `acp.sessions.list` | 枚举活跃的 `NativeAcp` 会话。 |
+| `acp.sessions.cancel` | 向活跃会话发送 `session/cancel`，不阻塞 per-session prompt mutex。 |
+| `acp.sessions.shutdown` | 关闭会话并从池中移除。 |
+
+每次变更都在网关事件总线上发布 `acp.sessions.changed`，面板无需轮询即可感知。
+
+---
+
+## 进程隔离内核
+
+Aleph 服务端（`aleph-server` 二进制）是 ACP 子进程的 spawner。当子 harness 启动时，spawn 路径与 daemon 用于自身子进程的进程隔离内核一致 —— restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。这是 R1（大脑 / 四肢绝对分离）原则下的合法开口：ACP 子进程自 `Command::spawn` 起就是独立的 OS 进程，内核级隔离取代了系统其余部分所强制执行的 harness 级隔离。详见[架构红线 R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)。
 
 ---
 
 ## 集成点
 
 ACP 与以下组件集成：
-- **网关** —— 通过 JSON-RPC 暴露 ACP 端点
-- **代理运行时** —— 控制代理生命周期
-- **会话服务** —— 持久化代理状态
-- **指标** —— 收集和报告代理指标
+
+- **网关** —— `extensions.*` 不是 ACP；ACP harness 的 CRUD 在 `acp.*`（`acp.list`、`acp.create`、`acp.update`、`acp.delete`、`acp.test`、`acp.set_enabled`、`acp.presets`、`acp.presets_meta`、`acp.sessions.list`、`acp.sessions.cancel`、`acp.sessions.shutdown`）。
+- **Spawner / SubAgent** —— `acp_member` 内置工具把已配置的 harness 包成队伍成员；`acp_delegate` 工具把一次性任务分派给具名 harness。
+- **事件总线** —— 每次池变更发布 `acp.sessions.changed`。
+- **持久化** —— `~/.aleph/data/acp_sessions.json` 快照活跃会话，并在启动时回放。
 
 ---
 
 ## 代码位置
 
-- `src/acp/mod.rs` —— 模块入口点
-- `src/acp/server.rs` —— ACP 服务器实现
-- `src/acp/commands.rs` —— 命令定义
-- `src/acp/events.rs` —— 事件流
+- `src/acp/mod.rs` —— 模块入口点，`AcpSessionEvent`，`PersistenceHook`，`GatewayChangeHook`，`AcpChunkCallback`
+- `src/acp/adapter.rs` —— `AcpAdapter` trait，`AdapterMode`（`NativeAcp` / `Oneshot`）
+- `src/acp/adapters/` —— 内置 preset：`claude_code`、`codex`、`gemini`、`custom`、`generic`
+- `src/acp/manager/` —— `AcpAdapterManager`（`harness_admin`、`lifecycle`、`persistence`、`session_key`）
+- `src/acp/protocol.rs` —— JSON-RPC 请求 / 响应 / 通知类型
+- `src/acp/transport.rs` —— `StdioTransport`（NDJSON 帧、后台读取、`CancelHandle`）
+- `src/acp/session.rs` —— `AcpSession`、`AdapterConfig`、`PersistedAcpSession`
+- `src/acp/incoming.rs` —— `IncomingHandler`（服务来自代理的 `fs/*` + `session/request_permission`）
+- `src/acp/output_format.rs` —— `OutputFormat`（模型所见文本 / Markdown / JSON 形态）
+- `src/gateway/handlers/acp_config.rs` —— `acp.*` RPC handler
 
 ## 另请参阅
 
-- [代理运行时](./agent-runtime) —— 代理生命周期管理
-- [网关](../architecture/gateway) —— WebSocket JSON-RPC 接口
-- [事件系统](./event-system) —— 实时事件分发
-
----
-
-## 26.7.x 补充
-
-### ACP presets + test
-
-26.7.x 完整 RPC：
-
-- `acp.create` / `acp.delete` / `acp.get` / `acp.list` / `acp.update`
-- `acp.presets` / `acp.presets_meta` / `acp.test` / `acp.set_enabled`
-- `acp.sessions_list` / `acp.sessions_cancel` / `acp.sessions_shutdown`
-
-### 进程隔离内核
-
-26.7.x：ACP 会话由进程隔离内核支撑——沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。这是 R1 立意之外的合法开口（详见 [架构红线 R1 进程隔离内核例外](/docs/zh/philosophy/redlines#r1-大脑与四肢绝对分离brain-limb-separation)）。
-
-### 见另请参阅
-
-- [架构概览](/docs/zh/architecture/overview) — ACP 在系统中的位置
-- [沙箱](/docs/zh/concepts/sandboxing) — 进程隔离
+- [代理运行时](./agent-runtime) —— 子代理如何生成与管理
+- [扩展商店](./extensions-store) —— Skill / Plugin / MCP 的统一目录（与 ACP 不同：ACP 面向外部 CLI harness）
+- [多代理系统](./teams) —— ACP harness 如何作为队伍成员接入

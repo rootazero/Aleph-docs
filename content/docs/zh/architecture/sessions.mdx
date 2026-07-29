@@ -1,350 +1,254 @@
 ---
 title: "会话架构"
-description: "Session、Message 和 Participant 数据结构，以及会话生命周期、序列化、CRDT 状态和索引。"
+description: "SessionKey 分类、SessionService actor 管道、SessionEvent 日志、presence 显式启用、每会话运行注册表，以及模板环境的确定性排序。"
 ---
 
-会话是 Aleph 中用户与代理交互的基本单元。它封装了对话历史、参与者列表、配置和运行时状态。本页涵盖会话核心数据结构、消息模型、参与者角色、会话生命周期、CRDT 状态表示，以及会话如何被索引和查询。
+# 会话架构
 
----
+会话是每个 Aleph run 的有状态骨干。每个会话都有一个结构化的 `SessionKey`、一条通过 `SessionService` 持久化的仅追加 `SessionEvent` 日志、以及由 `SessionRunRegistry` 强制实施的每会话运行互斥。本页涵盖 key 分类、事件日志、actor 管道、presence 显式启用以及跨切面的生命周期问题。
 
-## 核心数据结构
-
-### Session
-
-```rust
-pub struct Session {
-    pub id: String,                    // UUID v4
-    pub owner_id: String,              // 创建者用户 ID
-    pub model_id: String,              // 使用的模型
-    pub title: Option<String>,        // 用户设置的标题
-    pub config: SessionConfig,         // 会话配置
-    pub state: SessionState,           // 运行时状态
-    pub created_at: DateTime<Utc>,    // 创建时间
-    pub updated_at: DateTime<Utc>,    // 最后更新时间
-    pub archived_at: Option<DateTime<Utc>>, // 归档时间
-}
-
-pub struct SessionConfig {
-    pub temperature: f32,              // 采样温度 (0.0-2.0)
-    pub max_tokens: Option<u32>,      // 最大生成 token 数
-    pub system_prompt: Option<String>, // 系统提示词
-    pub tools_enabled: Vec<String>,   // 启用的工具列表
-    pub context_window: u32,           // 上下文窗口大小
-    pub streaming: bool,               // 是否启用流式响应
-}
-```
-
-**位置**: `src/sessions/types.rs`
-
-### Message
-
-```rust
-pub struct Message {
-    pub id: String,                    // 消息 UUID
-    pub session_id: String,            // 所属会话
-    pub role: MessageRole,             // 角色
-    pub content: MessageContent,       // 内容
-    pub metadata: MessageMetadata,     // 元数据
-    pub created_at: DateTime<Utc>,    // 创建时间
-}
-
-pub enum MessageRole {
-    System,    // 系统提示词
-    User,      // 用户输入
-    Assistant, // 代理回复
-    Tool,      // 工具输出
-}
-
-pub enum MessageContent {
-    Text(String),                     // 纯文本
-    Multipart(Vec<ContentPart>),    // 多模态内容
-}
-
-pub struct ContentPart {
-    pub part_type: ContentType,      // text / image / audio / file
-    pub content: Vec<u8>,            // 二进制内容
-    pub mime_type: String,           // MIME 类型
-}
-```
-
-### Participant
-
-```rust
-pub struct Participant {
-    pub id: String,                    // 参与者 ID
-    pub user_id: String,               // 关联用户 ID
-    pub session_id: String,            // 所属会话
-    pub role: ParticipantRole,         // 角色
-    pub joined_at: DateTime<Utc>,     // 加入时间
-    pub last_seen: DateTime<Utc>,     // 最后活跃
-}
-
-pub enum ParticipantRole {
-    Owner,      // 所有者：完全控制
-    Admin,      // 管理员：管理参与者
-    Member,     // 成员：发送消息
-    Viewer,     // 观察者：只读
-}
-```
+关于如何在请求路由时创建会话，请参阅[网关架构](./gateway)。关于会话如何喂入工具链，请参阅[工具链](./harness)。
 
 ---
 
-## 会话生命周期
+## SessionKey 分类
 
+每个会话由 `SessionKey` 标识（`src/routing/session_key.rs`）。六种变体：
+
+```rust
+pub enum SessionKey {
+    Main {
+        agent_id: String,
+        #[serde(default = "default_main_key")]
+        main_key: String,
+        #[serde(default)]
+        epoch: u32,
+    },
+    DirectMessage {
+        agent_id: String,
+        channel: String,
+        peer_id: String,
+        #[serde(default)]
+        dm_scope: DmScope,
+        #[serde(default)]
+        epoch: u32,
+    },
+    Group {
+        agent_id: String,
+        channel: String,
+        peer_kind: PeerKind,
+        peer_id: String,
+        thread_id: Option<String>,
+    },
+    Task {
+        agent_id: String,
+        task_type: String,
+        task_id: String,
+    },
+    Subagent {
+        parent_key: Box<Self>,
+        subagent_id: String,
+    },
+    Ephemeral {
+        agent_id: String,
+        ephemeral_id: String,
+    },
+}
 ```
-创建
-  │
-  ▼
-┌─────────┐    首个参与者加入    ┌─────────┐
-│ Created │ ─────────────────→ │ Active  │
-└─────────┘                    └────┬────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-                    ▼               ▼               ▼
-              ┌─────────┐    ┌─────────┐    ┌─────────┐
-              │ Paused  │    │ Error   │    │Archived │
-              │(手动)   │    │(异常)   │    │(超时)   │
-              └────┬────┘    └────┬────┘    └─────────┘
-                   │              │
-                   │ resume()     │ retry()
-                   └──────────────┘
-                                  │
-                                  ▼
-                            ┌─────────┐
-                            │ Active  │
-                            └─────────┘
-```
 
-### 状态转换
+### 序列化形式
 
-| 转换 | 触发条件 | 说明 |
-|------|----------|------|
-| Created → Active | 首个参与者加入 | 会话开始接收消息 |
-| Active → Paused | 所有者调用 pause() | 暂停处理新消息 |
-| Paused → Active | 所有者调用 resume() | 恢复正常处理 |
-| Active → Error | 处理异常 | 进入错误状态，可重试 |
-| Error → Active | 调用 retry() | 从错误恢复 |
-| Active → Archived | 空闲超时或手动归档 | 软删除，可恢复 |
-| Any → Deleted | 调用 delete() | 硬删除，不可恢复 |
+| 变体 | 格式 | 示例 |
+|---------|--------|---------|
+| `Main` | `agent:{agent_id}:{main_key}[:s{epoch}]` | `agent:main:main` |
+| `DirectMessage`（`PerPeer`） | `agent:{agent_id}:dm:{peer_id}[:s{epoch}]` | `agent:main:dm:user123` |
+| `DirectMessage`（`PerChannelPeer`） | `agent:{agent_id}:{channel}:dm:{peer_id}[:s{epoch}]` | `agent:main:telegram:dm:user123` |
+| `Group` | `agent:{agent_id}:{channel}:{peer_kind}:{peer_id}[:thread:{thread_id}]` | `agent:main:discord:group:guild-abc` |
+| `Task` | `agent:{agent_id}:{task_type}:{task_id}` | `agent:main:cron:daily-summary` |
+| `Subagent` | `{parent_key.to_key_string()}:subagent:{subagent_id}` | `subagent:agent:main:translator` |
+| `Ephemeral` | `agent:{agent_id}:ephemeral:{ephemeral_id}` | `agent:main:ephemeral:a1b2c3` |
+
+仅当 `epoch > 0` 时附加 `:sN` 后缀，让会话可以重命名而不丢失历史。
+
+### DM 范围策略
+
+`[session] dm_scope` 控制直接消息如何坍缩：
+
+| 值 | 行为 |
+|-------|----------|
+| `per-peer`（默认） | 每个发送者独立会话（跨 channel 按 peer） |
+| `per-channel-peer` | 每个 channel × 发送者独立会话（多用户推荐） |
+| `main` | 所有 DM 坍缩到该 agent 的 `Main` 会话 |
+
+单一所有者的 bot 可以设置 `dm_scope = "main"`，使 Telegram / Slack / Panel 上的所有 DM 共享同一段 `agent:<id>:main` 上下文。allowlist 中存在多名用户时必须使用 `per-channel-peer`，因为 `main` 会把所有人合并到同一会话。
 
 ---
 
-## 序列化
+## SessionService
 
-会话数据使用 JSON 序列化存储，消息内容根据类型选择序列化方式：
+`SessionService`（`src/session/service.rs`）是事件日志的公共门面：
 
 ```rust
-impl Serialize for Message {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("Message", 6)?;
-        state.serialize_field("id", &self.id)?;
-        state.serialize_field("session_id", &self.session_id)?;
-        state.serialize_field("role", &self.role)?;
-
-        // 根据内容类型选择序列化格式
-        match &self.content {
-            MessageContent::Text(text) => {
-                state.serialize_field("content", text)?;
-                state.serialize_field("content_type", &"text")?;
-            }
-            MessageContent::Multipart(parts) => {
-                // 文本部分直接序列化
-                // 二进制部分存储引用（文件路径或 URL）
-                let serialized_parts: Vec<SerializedPart> = parts
-                    .iter()
-                    .map(|p| match p.part_type {
-                        ContentType::Text => SerializedPart::Text(
-                            String::from_utf8_lossy(&p.content).to_string()
-                        ),
-                        _ => SerializedPart::Ref(self.store_blob(&p.content, &p.mime_type)),
-                    })
-                    .collect();
-                state.serialize_field("content", &serialized_parts)?;
-                state.serialize_field("content_type", &"multipart")?;
-            }
-        }
-
-        state.serialize_field("metadata", &self.metadata)?;
-        state.serialize_field("created_at", &self.created_at)?;
-        state.end()
-    }
+#[async_trait]
+pub trait SessionService: Send + Sync + 'static {
+    async fn attach(&self, id: SessionId) -> Result<SessionHandle, SessionError>;
+    async fn get_events(
+        &self,
+        id: &SessionId,
+        from: Option<EventSeq>,
+        to: Option<EventSeq>,
+    ) -> Result<Vec<SessionEventRecord>, SessionError>;
+    async fn emit_event(
+        &self,
+        id: &SessionId,
+        event: SessionEvent,
+    ) -> Result<EventSeq, SessionError>;
+    async fn subscribe(
+        &self,
+        id: &SessionId,
+    ) -> Result<broadcast::Receiver<SessionEventRecord>, SessionError>;
+    async fn wake(&self, id: &SessionId) -> Result<SessionHandle, SessionError>;
+    async fn detach(&self, id: &SessionId) -> Result<(), SessionError>;
 }
 ```
 
-### 存储格式
+默认实现是 `InProcessActorSessionService`（`src/session/in_process.rs`），每个会话生成一个 tokio 任务。每个 actor（`src/session/actor.rs`）启动时从 SQLite 回放事件，然后服务命令直到收件箱关闭或空闲超时触发（默认 30 分钟）。`wake()` 关闭旧 actor（5 秒宽限期），生成从 SQLite 回放的新 actor，并写入一条 `SessionWoken { prior_head }` 事件——这是规范的崩溃恢复路径。
 
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "owner_id": "user-123",
-  "model_id": "anthropic/claude-3-5-sonnet-20241022",
-  "title": "Rust 项目讨论",
-  "config": {
-    "temperature": 0.7,
-    "max_tokens": 4096,
-    "system_prompt": "你是一个 Rust 专家...",
-    "tools_enabled": ["file_read", "bash_exec", "web_search"],
-    "context_window": 200000,
-    "streaming": true
-  },
-  "state": "Active",
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T14:45:00Z",
-  "archived_at": null
-}
+`SessionId = crate::routing::session_key::SessionKey`——会话由网关其他地方使用的同一个 key 标识。
+
+进程级 fallback（`set_global_session_service` / `global_session_service`）让没有本地引用的边缘路径调用者也能通过 actor 管道发出事件。
+
+### 存储
+
+```sql
+CREATE TABLE session_events (
+    session_id   TEXT    NOT NULL,
+    seq          INTEGER NOT NULL,
+    turn_id      TEXT,
+    event_type   TEXT    NOT NULL,
+    payload_json TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);
 ```
+
+写入是同步的；SQLite 以 WAL 模式运行；`(session_id, seq)` 主键强制每个会话的单调顺序。
 
 ---
 
-## CRDT 状态表示
+## SessionEvent 变体
 
-会话的 CRDT 状态是多个 CRDT 类型的组合：
+`src/session/events.rs::SessionEvent` 是一个 `#[non_exhaustive]` 枚举，覆盖完整的会话生命周期：
 
-```rust
-pub struct SessionCRDT {
-    // 消息列表：使用 LWW 元素集保证顺序
-    messages: ListCRDT<Message>,
+| 变体 | 用途 |
+|---------|---------|
+| `SessionCreated { identity, at }` | 日志上的首条事件；冻结 `SessionIdentityMeta` |
+| `SessionWoken { at, prior_head }` | `wake()` 之后的崩溃恢复检查点 |
+| `SessionDetached { at }` | actor 停止；事件保留在磁盘上 |
+| `RunStarted { run_id, at, project_root }` | harness run 开始；`project_root` 被盖戳以便崩溃恢复回到同一目录 |
+| `RunFinished { run_id, outcome, at }` | harness run 达到终止状态 |
+| `TurnStarted { turn_id, trigger, at }` | 一个 Think→Act 轮次开始；`trigger` 区分 user / synthetic / verifier-veto / grace |
+| `TurnEnded { turn_id, outcome, at }` | 轮次达到其终止结局 |
+| `UserMessage { turn_id, content, at, synthetic }` | 用户输入（当 `synthetic = true` 时为 verifier-veto nudge / grace 提示） |
+| `AssistantMessage { turn_id, content, usage, at }` | 每次调用的 LLM 输出；`usage` 是**每次调用**的 token 明细（调用与助手行是 1:1） |
+| `AssistantRunMeta { turn_id, run_id, context_tokens, context_window, total_tokens, input_tokens, output_tokens, … }` | 每个 run 的唯一权威账单；会话级计数器挂在这里，**且仅在这里** |
+| `SystemMessage { turn_id, content, at }` | 内部系统信号（如 split 子会话用来重建的 `[Context Summary]` 头） |
+| `ToolCallRequested { call_id, tool_name, args, at }` | 一个工具调用进入 Act |
+| `ToolCallApproved { call_id, source, approver, at }` / `ToolCallDenied { call_id, reason, at }` | 审批卡片裁决 |
+| `ToolResult { call_id, output, at }` / `ToolError { call_id, error, at }` | Act 结果（按 `call_id` 配对） |
+| `SubagentSpawned { subagent_id, parent_turn_id, at }` / `SubagentReturned { subagent_id, result, at }` | 子代理生命周期 |
+| `BudgetUpdated { kind, value, at }` | 上下文预算指令升级 |
+| `CompactionPerformed { kind, before_tokens, after_tokens, at }` | 压缩管道输出 |
+| `SessionForked { child_session_id, parent_turn_id, at }` | 一个轮次分裂出子会话（如 `SplitSession` 指令） |
+| `Error { kind, message, at }` | 域错误事件 |
 
-    // 元数据：使用 LWW 寄存器
-    metadata: MapCRDT<String, LWWRegister<Value>>,
-
-    // 参与者：使用 OR-Set（观察移除集合）
-    participants: ORSet<Participant>,
-
-    // 已读标记：使用 PN-Counter（正负计数器）
-    read_receipts: MapCRDT<String, PNCounter>,
-}
-```
-
-### CRDT 操作
-
-```rust
-impl SessionCRDT {
-    /// 添加消息
-    pub fn add_message(&mut self, message: Message) -> CRDTDelta {
-        let op = self.messages.append(message);
-        CRDTDelta::MessageAppend(op)
-    }
-
-    /// 更新元数据
-    pub fn update_metadata(
-        &mut self,
-        key: String,
-        value: Value,
-    ) -> CRDTDelta {
-        let op = self.metadata.update(key, value);
-        CRDTDelta::MetadataUpdate(op)
-    }
-
-    /// 添加参与者
-    pub fn add_participant(
-        &mut self,
-        participant: Participant,
-    ) -> CRDTDelta {
-        let op = self.participants.add(participant);
-        CRDTDelta::ParticipantAdd(op)
-    }
-
-    /// 合并远程 delta
-    pub fn merge(&mut self, delta: &CRDTDelta) {
-        match delta {
-            CRDTDelta::MessageAppend(op) => self.messages.merge_op(op),
-            CRDTDelta::MetadataUpdate(op) => self.metadata.merge_op(op),
-            CRDTDelta::ParticipantAdd(op) => self.participants.merge_op(op),
-            // ...
-        }
-    }
-}
-```
-
-**位置**: `src/sessions/crdt.rs`
+读取侧辅助函数 `src/session/projection.rs::project_messages` 把一段事件范围转换为 `Vec<ProjectedMessage>`，供需要经典消息历史视图而非原始事件的消费者使用。
 
 ---
 
-## 索引
+## 真多会话并行
 
-会话通过多个索引支持高效查询：
+`SessionRunRegistry`（位于网关执行引擎）是一个 per-session 互斥：一个 agent 可以在多个会话同时运行，但每个单独会话保持互斥。早先的 per-agent 锁让多会话用例挨饿，已在 26.7.7+ 替换。
+
+---
+
+## Presence 显式启用
+
+`src/tasks/presence/` 把 Slack 风格的主机 presence 快照送到 Gateway 事件总线：
 
 ```rust
-pub struct SessionIndex {
-    // 按用户索引：user_id → Vec<session_id>
-    by_user: DashMap<String, Vec<String>>,
-
-    // 按状态索引：state → Vec<session_id>
-    by_state: DashMap<SessionState, Vec<String>>,
-
-    // 按模型索引：model_id → Vec<session_id>
-    by_model: DashMap<String, Vec<String>>,
-
-    // 按时间索引：创建时间范围查询
-    by_time: BTreeMap<DateTime<Utc>, String>,
-
-    // 全文索引：标题和消息内容
-    full_text: TantivyIndex,
+pub struct PresenceSnapshot {
+    pub hostname: String,
+    pub username: String,
+    pub platform: PlatformTag,
+    pub idle_seconds: Option<u64>,
+    pub idle_state: IdleState,
+    pub captured_at: DateTime<Utc>,
 }
 ```
 
-### 查询示例
+`PresenceReporter::spawn` 以 `PresenceConfig::interval_secs`（默认 30 秒）的间隔 tick，通过 `SystemCapability` trait 收集 `(hostname, username, platform, idle_seconds)`，并按 `host.presence.update` 发布 `TopicEvent`。**默认禁用**——`PresenceConfig::enabled = false` 出厂默认关闭，避免在事件总线上泄漏 PII。由运维者按主机显式启用。
+
+brain 位于 `src/tasks/presence/`（策略、调度、发布格式）；limb 留在实现 `SystemCapability` 的 `desktop/` crate 中（与 cron / mic-level 的 brain–limb 分裂一致）。
+
+---
+
+## 哈希化 Carryover 文件名
+
+cron 作业的 carryover 文件（`src/tasks/cron/carryover.rs`）使用一个既能存活冲突又不掩盖冲突的名字写入：
 
 ```rust
-// 列出用户的活跃会话
-let active = index.by_user.get("user-123")
-    .map(|ids| ids.iter()
-        .filter(|id| index.by_state
-            .get(&SessionState::Active)
-            .map(|s| s.contains(id))
-            .unwrap_or(false))
-        .cloned()
-        .collect())
-    .unwrap_or_default();
-
-// 搜索会话内容
-let results = index.full_text.search("Rust 错误处理", 10);
+fn carryover_filename(job_id: &str) -> String {
+    let safe = sanitise_job_id(job_id);
+    let hash = short_hash(job_id.as_bytes());  // 32 位 FNV-1a，8 个十六进制字符
+    format!("{safe}-{hash}.json")
+}
 ```
+
+经清理的前缀保持 grep 友好；FNV-1a 后缀让冲突可区分。两个使用同一人类可读 id 的作业会落到不同的文件上，而不是静默互相覆盖。
+
+---
+
+## 模板环境确定性排序
+
+`NodeRegistry::list_environments()`（cluster 侧的模板环境投影）按 `(name, id)` 排序：
+
+```rust
+envs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+```
+
+`cluster.environments_list` handler 还会把在线节点排在离线节点之前，再按字母序。早先未排序的 `HashMap` 迭代会把注册表顺序泄漏到 Panel / node_list 视图；确定性排序由 `list_environments_is_sorted_by_name_then_id` 与 `environments_list_orders_online_before_offline_and_by_name` 锁定。
+
+---
+
+## SessionEvent 体系（高层）
+
+工具链为每个 Think 步骤发出一条 `SessionEvent`，每个 run 发出一条 `AssistantRunMeta`，因此调用与助手行 1:1，token 归属完全准确。`MessageProjector` 在每次写入时把事件物化进遗留的 `messages` 表；启动时 `ProjectionReconciler` 回填事件日志与投影之间的任何漂移。`tool_call_id` 与 `tool_name` 被盖到每条记录上，`AssistantRunMeta` 携带 `run_id` 让投影器挂上 run 级元数据，热路径无需耦合到存储。
+
+---
+
+## 会话 RPC 方法
+
+| 方法 | 说明 |
+|--------|-------------|
+| `session.get` | 获取会话信息 |
+| `session.list` | 列出会话（按活动、agent 等过滤） |
+| `session.history` | 获取消息历史（遗留投影） |
+| `session.compact` | 触发压缩 |
+| `session.delete` | 删除会话 |
+
+---
+
+## 实时热重载执行上限
+
+`[execution]` run-cap 段是 Live 的：arc-swap 全局信号量支撑 `max_runs_global` / `max_runs_per_agent`，运维者修改上限时无需重启守护进程。
 
 ---
 
 ## 相关页面
 
-- [会话服务](./session-service) — Actor 模型和 CRDT 持久化
-- [架构概览](./overview) — 会话在整体架构中的位置
-- [CRDT 数据结构](../concepts/crdt) — CRDT 的数学保证
-
----
-
-## 26.7.x 补充
-
-### 跨会话 Steering
-
-26.7.x：loop pause/resume 跨会话生命周期控制。
-
-### 真实成本与 token 核算
-
-26.7.15+：每条助手消息携带真实 per-message token 成本（不重复计算）。
-
-### SessionEvent 体系
-
-26.7.7+ 引入：
-
-- `SessionEvent` / `SessionEventRecord` / `TurnId`
-- `MessageProjector` 物化到 `messages` 表
-- 启动时 `ProjectionReconciler` 回填
-- `tool_call_id` / `tool_name` + `AssistantRunMeta` 戳
-
-### 实时 hot-reloadable 执行上限
-
-26.7.7+：`[execution]` run-cap 段 Live：arc-swap 全局信号量；改 `max_runs_global` / `max_runs_per_agent` 不需要重启。
-
-### 真多会话并行
-
-26.7.7+：运行闸门从 per-agent 锁移到 per-session `SessionRunRegistry`。一个代理可以在多个会话同时运行；单会话保持互斥。
-
-### 详见
-
-- [会话服务](/docs/zh/architecture/session-service)
-- [记忆（架构）](/docs/zh/architecture/memory)
-- [网关 RPC `sessions.*`](/docs/zh/gateway/methods/session)
+- [架构概览](./overview) — 运行时拓扑中会话的定位
+- [网关架构](./gateway) — 会话 key 如何从传入请求解析
+- [工具链](./harness) — 循环如何读写事件
+- [记忆系统](./memory) — 压缩后抽取的事实去往何处
+- [会话服务](./session-service) — 完整的 actor 管道 + `wake()` 语义

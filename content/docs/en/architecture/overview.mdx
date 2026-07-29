@@ -185,64 +185,75 @@ The following diagram shows how Rust modules depend on each other at compile tim
 
 ## Core Modules
 
+> As of 26.7.22+ the `aleph-server` process holds **70 `src/<module>` directories plus 6 top-level `.rs` files** (`canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`). The table below is grouped by purpose and stays in sync with the `src/` tree.
+
 | Module | Path | Purpose |
 |--------|------|---------|
-| **gateway** | `src/gateway/` | WebSocket server, JSON-RPC routing, interfaces |
-| **orchestrator** | `src/orchestrator/` | Resolve FlowSpec, build HarnessDeps, dispatch |
-| **harness** | `src/harness/` | Think→Act loop, stop-hooks, context budget, compaction |
-| **agents** | `src/agents/` | Agent runtime, subagent spawning, team coordination |
-| **thinker** | `src/thinker/` | LLM interaction, prompt building, streaming |
-| **dispatcher** | `src/dispatcher/` | Task orchestration, tool filtering |
-| **engine** | `src/engine/` | Tool execution engine |
-| **providers** | `src/providers/` | AI provider implementations |
-| **tools** | `src/tools/` | AlephTool trait, tool server |
-| **builtin_tools** | `src/builtin_tools/` | Built-in tool implementations |
+| **gateway** | `src/gateway/` | WebSocket server, JSON-RPC routing, channel adapters, TLS, OpenAI-compatible API |
+| **orchestrator** | `src/orchestrator/` | FlowSpec / FlowRequest resolution, `HarnessRunner` trait, `AgentHarnessRunner` |
+| **harness** | `src/harness/` | Think→Act loop, stop-hooks, context budget, compaction, `HarnessDeps` struct |
+| **agents** | `src/agents/` | Agent runtime, subagent spawning, `think_level` resolution, model binding |
+| **thinker** | `src/thinker/` | LLM interaction, prompt assembly (`PromptBuilder` / `PromptPipeline`), layer registry |
+| **tool_metadata** | `src/tool_metadata/` | Tool metadata + risk + unified index + slash aliases (replaces the retired `src/dispatcher/`) |
+| **providers** | `src/providers/` | AI provider implementations + failover chain + MoA aggregator |
+| **tools** | `src/tools/` | `AlephTool` trait, tool server, scoped tool service, turn budget |
+| **builtin_tools** | `src/builtin_tools/` | Built-in tools (`hub/` absorbs `store/`, `skill_reader/`, `browser_tools/` per-action) |
 | **memory** | `src/memory/` | Facts DB, hybrid retrieval (SQLite + sqlite-vec + markdown notes + wikilink graph) |
 | **extension** | `src/extension/` | Plugin system (WASM, Node.js) |
 | **exec** | `src/exec/` | Shell execution, approval system, OS-native sandboxing |
-| **sandbox** | `src/sandbox/` | Sandbox trait + WorkspaceSandbox — per-session workspace, capability ledger |
-| **mcp** | `src/mcp/` | MCP client implementation |
-| **routing** | `src/routing/` | Session key resolution |
-| **config** | `src/config/` | Configuration management |
+| **sandbox** | `src/sandbox/` | Sandbox trait + WorkspaceSandbox — per-session workspace, capability ledger, `ApprovalGate` escalation |
+| **mcp** | `src/mcp/` | MCP client implementation + on-demand discovery tools |
+| **routing** | `src/routing/` | Session key resolution + binding rules |
+| **config** | `src/config/` | Configuration management + reloader + typed policy |
 | **runtimes** | `src/runtimes/` | Capability ledger — probe, bootstrap, persist external tool status |
-| **session** | `src/session/` | Append-only session event log + in-process actor |
+| **session** | `src/session/` | Append-only session event log (`session_events` is the single source) + in-process actor |
+| **loop_graph** | `src/loop_graph/` | Governance topology store + service + templates (layered on top of the core) |
+| **looping** | `src/looping/` | Loop subsystem (in-process `LoopRegistry` + state machine) |
+| **goal** | `src/goal/` | Goal subsystem (persistent `GoalStore` + objective gate + TreeBudget) |
+| **strategy** | `src/strategy/` | Strategy subsystem (composite-keyed `StrategyStore` + planner + renderer) |
+| **hub** | `src/hub/` | **Aleph Hub single source** (replaces the retired `src/store/`) — `primer` / `catalog_client` / `official_*` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
+| **artifacts** | `src/artifacts/` | Artifact store (`ArtifactStore` + `MAX_ARTIFACT_BYTES = 50 MB` + 4 `ArtifactOrigin`s) |
+| **export** | `src/export/` | session HTML / Markdown export + CSS + collect + page + document |
+| **clipboard** | `src/clipboard/` | Clipboard context (10s) + multimodal image extraction |
+| **projects** | `src/projects/` | Project store (`projects.json` + lock) |
+| **vision** | `src/vision/` | Vision subsystem (claude / OpenAI-compat / multimodal) |
 | **a2a** | `src/a2a/` | A2A protocol adapter |
 | **acp** | `src/acp/` | ACP protocol implementation |
-| **approval** | `src/approval/` | Approval system |
-| **arena** | `src/arena/` | Arena functionality |
-| **browser** | `src/browser/` | Browser automation |
-| **capability** | `src/capability/` | Capability system |
-| **clawhub** | `src/clawhub/` | ClawHub integration |
-| **components** | `src/components/` | Shared components |
-| **compressor** | `src/compressor/` | Context compression |
+| **approval** | `src/approval/` | Approval system + action-aware grant |
+| **browser** | `src/browser/` | Browser automation (secret guard / PII single source) |
+| **cluster** | `src/cluster/` | Single-center node federation — reverse RPC, node registry, `node_invoke` / `node_file` |
+| **command** | `src/command/` | Lightweight command-completion aggregator (top-level `mod.rs` / `parser.rs`) |
+| **components** | `src/components/` | Shared domain types (only `types`; the legacy EventHandler chain was removed during the Harness migration) |
+| **context** | `src/context/` | Context management (`ContextBudget` / `ContextCompactor` / `PreflightPipeline`) |
 | **core** | `src/core/` | Core types and primitives |
-| **daemon** | `src/daemon/` | Background daemon |
+| **diagnostics** | `src/diagnostics/` | Diagnostics utilities |
 | **discovery** | `src/discovery/` | Service discovery |
+| **domain** | `src/domain/` | Shared domain types |
 | **event** | `src/event/` | Event system |
-| **generation** | `src/generation/` | Media generation |
+| **fetch** | `src/fetch/` | HTTP fetch (for tools) |
+| **generation** | `src/generation/` | Media generation (image / video / voice) |
 | **group_chat** | `src/group_chat/` | Group chat management |
-| **intent** | `src/intent/` | Intent recognition |
+| **guardrails** | `src/guardrails/` | Guardrail registry (input / output / tool-call) |
+| **identity** | `src/identity/` | Agent identity and signing |
+| **init_unified** | `src/init_unified/` | One-shot install coordinator (5 phases: dirs / config / DB / runtimes / skills) |
 | **logging** | `src/logging/` | Logging infrastructure |
 | **markdown** | `src/markdown/` | Markdown processing |
 | **media** | `src/media/` | Media processing |
 | **metrics** | `src/metrics/` | Metrics collection |
-| **permission** | `src/permission/` | Permission system |
 | **pii** | `src/pii/` | PII detection and handling |
-| **prompt** | `src/prompt/` | Prompt management |
+| **pricing** | `src/pricing.rs` (top-level) | Core-side pricing + cost estimation |
 | **resilience** | `src/resilience/` | State management (SQLite) |
-| **scheduler** | `src/scheduler/` | Job scheduling |
 | **search** | `src/search/` | Search providers |
 | **secrets** | `src/secrets/` | Secret management |
-| **security** | `src/security/` | Security utilities |
-| **skill** | `src/skill/` | Skill system |
-| **supervisor** | `src/supervisor/` | Execution supervision |
-| **tasks** | `src/tasks/` | Task management |
+| **security** | `src/security/` | Security utilities (SSRF, unicode guard) |
+| **skill** | `src/skill/` | Skill system (v2 `SkillSystem` + eligible-skill injection) |
+| **tasks** | `src/tasks/` | Task management (cron / heartbeat / dreaming / reaper) |
 | **teams** | `src/teams/` | Team coordination |
 | **workflow** | `src/workflow/` | Declarative workflow templates, compilation, and execution |
 | **tool_output** | `src/tool_output/` | Tool output handling |
 | **utils** | `src/utils/` | Utilities |
-| **vision** | `src/vision/` | Vision processing |
-| **wizard** | `src/wizard/` | Wizard flows |
+| **verification** | `src/verification/` | Verifier chain (`StopHookVerifier` / `ToolLoopVerifier` / model robustness profile) |
+| **wizard** | `src/wizard/` | Wizard flows (RPC-driven `wizard.next` sessions; no CLI `aleph wizard` subcommand) |
 
 ---
 
@@ -413,7 +424,7 @@ loom = ["dep:loom"]       # Concurrency testing
 test-helpers = []          # Integration test helpers
 ```
 
-Channels are enabled or disabled at runtime via `aleph.toml` configuration.
+Channels are enabled or disabled at runtime via `config.toml` configuration.
 
 ---
 
@@ -643,11 +654,11 @@ It gives the four single-loop failure modes (Goodhart, reference blindness, ring
 
 ### Full RPC Count
 
-26.7.x the gateway exposes **~265 RPC methods** — see [Gateway Methods Reference](/docs/en/gateway/methods).
+26.7.x the gateway exposes **~265 RPC methods** — see [Gateway Methods Reference](/docs/en/gateway/methods). Categories added after 26.7.22+ include `artifacts.*` (3 RPC), `voice.*` (6 RPC + 1 delta topic), `hub.*` (5 RPC), `strategy.*`, `goals.*`, `loop.*`, and others.
 
 ### Full Module Inventory
 
-The `aleph-server` process holds ~76 `src/<module>` directories plus a few top-level `.rs` files. See the `src/` directory tree.
+The `aleph-server` process holds **~70 `src/<module>` directories plus 6 top-level `.rs` files** (`canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`). See the `src/` directory tree.
 
 ### See Also
 
