@@ -1,245 +1,256 @@
 ---
 title: "安全概览"
-description: "纵深防御——认证、授权、沙箱和审计日志。"
+description: "纵深防御 —— 网络边界、TLS、执行审批门、沙箱、签名账本"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## 安全架构
 
-Aleph 的安全模型建立在四个防御层之上。每一层独立运行——一层的失败不会导致其他层崩溃。
+Aleph 的安全模型建立在几层独立运行的防御之上。一层失败不会让其他层崩溃。
 
 ```
-Layer 1: 认证
-├─ 设备配对（8 字符代码，Ed25519 密钥）
-├─ Bearer 令牌验证
-└─ 会话建立
+Layer 1 — 网络边界 + Gateway 凭证
+├─ 默认绑定 loopback，操作员零配置
+├─ 远程连接必须出示凭证之一：
+│   • 设备 token（aleph-dt-*，长生命周期）
+│   • 启动票（aleph-bt-*，5 分钟单次）
+│   • 共享 Gateway token（aleph-<uuid>，HMAC-hashed）
+├─ 失败关闭（per-connect gate）
+└─ 原生 TLS + TOFU 客户端信任
 
-Layer 2: 授权
-├─ IdentityContext（不可变的身份快照）
-├─ PolicyEngine（无状态权限检查器）
-├─ 基于角色的访问（Owner / Guest / Anonymous）
-└─ GuestScope（工具级限制）
+Layer 2 — 工具权限
+├─ ScopedToolService 合并（global → agent → channel）
+├─ Exec tier（Ask / Auto / Full）—— 按 ToolFacts 元数据
+├─ [policies.tool_permissions] 显式条目胜出
+└─ [sandbox.command_policy] 硬线底线
 
-Layer 3: 沙箱
-├─ WorkspaceSandbox（文件系统隔离）
-├─ OsSandboxDriver（平台原生强制执行）
-├─ 基于能力的配置文件
-└─ 信任阶段（Draft → Trial → Verified）
+Layer 3 — 执行审批
+├─ action-aware 审批门（ApprovalAction）
+├─ 授权指纹键绑定在规范化参数上
+├─ 120 秒超时 ⇒ 拒绝（不写入 denial ledger）
+└─ /deny <reason> 把原因回传到模型
 
-Layer 4: 审计
-├─ capability_ledger（结构化审计日志）
-├─ SandboxAuditLog（执行跟踪）
-└─ ExecAuditEntry（审批决策）
+Layer 4 — 沙箱
+├─ WorkspaceSandbox（六步管道）
+├─ 平台原生强制：
+│   • macOS — sandbox-exec + Seatbelt
+│   • Linux — bwrap + Landlock + seccomp-bpf + cgroup v2
+│   • Windows — AppContainer + RestrictedToken + JobObject
+├─ [sandbox.command_policy] 硬线命令过滤
+└─ SSRF 引擎 + 解析规范化
+
+Layer 5 — 审计
+├─ session event log（ToolCallApproved / ToolCallDenied）
+└─ 每 agent 签名账本（Ed25519 hash chain）
 ```
 
-## 身份和访问控制
+## 网络边界 + Gateway token
 
-到达 Aleph 的每个请求都携带一个 [IdentityContext](/docs/zh/concepts/identity-context) —— 一个不可变的快照，说明调用者是谁以及他们被允许做什么。
+信任边界就是网络边界，由单一共享 **Gateway token** 守卫。
 
-身份系统支持三种角色：
+| 配置 | 含义 |
+|------|------|
+| `host = "127.0.0.1"`（默认） | 只允许本机进程；零配置操作员 |
+| `host = "0.0.0.0"` | 远端设备可以到达 socket，但**必须**出示有效凭证 |
 
-| 角色 | 行为 |
-|------|----------|
-| **Owner** | 完全访问；绕过所有权限检查 |
-| **Guest** | 范围受限；限制为允许的工具，可选过期时间 |
-| **Anonymous** | 除非禁用认证，否则被拒绝 |
+Loopback 始终免密（`is_loopback` ⇒ operator），远端连接必须出示凭证
+之一，按优先级：
 
-访客访问通过带有细粒度 `GuestScope` 的 [邀请](/docs/zh/concepts/identity-context) 授予：
+1. **设备 token**（`aleph-dt-*`）—— 长生命周期，绑定到一台已配对设备，
+   SHA-256-hashed 存储。
+2. **启动票**（`aleph-bt-*`）—— 5 分钟单次，配对过程中换取设备 token。
+3. **共享 Gateway token**（`aleph-<uuid>`）—— 启动时由
+   `SharedTokenManager` 生成，HMAC-hashed，常数时间验证。
 
-```rust
-pub struct GuestScope {
-    pub allowed_tools: Vec<String>,
-    pub expires_at: Option<i64>,
-    pub display_name: Option<String>,
-}
-```
+有效凭证 = 完整操作员权限（与本机相同）；缺失或无效 ⇒ 被登录墙挡住
+（WS 分发拒绝除 `connect` 之外的所有方法）。
 
-## PolicyEngine
+### 远程连接的传输加密（TLS）
 
-PolicyEngine 是一个**无状态**的权限检查器，没有可变状态。它根据调用者的 IdentityContext 评估每个工具调用：
+loopback 永远是明文 `ws://`（零配置桌面 / CLI / 同机代理），不变。
+对**非 loopback** 绑定 Aleph 现在是失败关闭：
 
-- **Owner** — 始终允许
-- **Guest** — 检查范围存在、过期时间和工具成员资格
-- **Anonymous** — 始终拒绝（在生产环境中）
+- **启动门**（`check_network_exposure`）：非 loopback 绑定且没有原生
+  TLS / 没有受信代理 / `allow_insecure_remote = false` 的配置 **拒绝启动**。
+- **每连接门**（`refuse_insecure_remote`）：远端客户端的 leg 未加密时，
+  WS upgrade 处用 `426 Upgrade Required` 拒绝。
 
-因为它是有状态的，PolicyEngine 可以在执行链中的任何地方实例化，而无需考虑生命周期或同步问题。
+三种满足方式：
+
+| 层级 | 方式 |
+|------|------|
+| ① | 同机 Caddy / nginx 反向代理（推荐；需要域名） |
+| ② | 原生自签名 TLS（无域名；客户端走 TOFU） |
+| ③ | 原生 TLS + 操作员提供的 PEM（域名，无代理） |
+
+`allow_insecure_remote = true` 是逃生口 —— 启动门和每连接门同时撤销，
+恢复 pre-hardening 行为。仅用于受信任、隔离的 LAN。
+
+## 远程连接 TLS（客户端信任）
+
+Tier ② 自签名 TLS 的客户端信任走 **Trust-on-First-Use（TOFU）**
+（`src/gateway/cert_trust.rs`）：
+
+- 共享决策核心 + 已固定的 TOFU 信任存储（`~/.aleph/data/security.db`）
+- SHA-256 指纹 + SAN / Subject 解析
+- 审批 splash 页面（指纹 + SAN + TOFU / change 警告）
+- pending-cert 状态 + approve / reject Tauri 命令
+- macOS WKWebView `respondsToSelector` 缓存失效；绝对 URL 跳转信任审批页
+- iOS Keychain trust store + 决策镜像（与 macOS 共享决策状态）
+
+新出现的接口 IP 触发证书 regen（new fingerprint ⇒ re-trust once）；
+`sans.txt` sidecar 跟踪 SAN 覆盖，使 churn 最小。
+
+## 配对
+
+Aleph 现在区分两类配对请求：
+
+### 设备配对（远程桌面 / 手机 / CLI）
+
+1. 远端 Panel 在 Settings → Security → "Pair new device" 上
+   `gateway.ticket.create` 请求一个启动票（`aleph-bt-*`）。
+2. URL 由服务端解析（`gateway.ticket.create` 返回 `urls`，从
+   `tls::discover_interface_ips`）—— 不要让 Panel 用
+   `window.location` 自己拼，localhost 生成时永远是
+   `http://127.0.0.1:<port>/…`。
+3. Panel 把启动票以 `connect.bootstrap_ticket` 提交，握手换出一个新
+   `device_token`（`aleph-dt-*`），持久化供后续重连使用。
+4. 撤销：`gateway.token.rotate`（重新生成共享 token，撤销所有配对设备并
+   关闭远端 socket）或 `gateway.devices.revoke {device_id}`（仅撤销
+   一台设备，立即把它的 socket 关闭并退回登录墙，WS 4001
+   `device_revoked`）。
+
+无头核心用 `aleph-server pair` 直接 mint 一个票（打开 0600
+`security.db`，WAL —— 不需要 daemon 运行）。`aleph-server
+bootstrap-token` 打印共享 Gateway token 用于恢复。
+
+### 频道发送者配对（Telegram / Discord / iMessage 未知发送者）
+
+走更轻量的流程 —— 在 inbound router 的**单一**配对存储
+（`src/gateway/pairing_store.rs`）里生成一个 **6 字符字母数字代码**，操作
+员通过 RPC `pairing.list` / `pairing.approve` 批准（**不是** `aleph
+pairing approve` CLI）。
+
+`[routing] pairing_code_expiry_secs` 控制过期（默认 24 h，`0` = 不过期）。
+
+### 设备与频道配对的差异
+
+- **设备**：长生命周期凭证（device_token），可单独撤销，永远不放在 URL /
+  QR 里（只有单次启动票走这些通道）。
+- **频道发送者**：单次或短期授权（inbound router 配对存储），通过 RPC
+  管理。
+
+## 工具权限
+
+限制 *agent 能做什么*（不是 *谁能连接*）由
+**`ScopedToolService`**（`src/tools/scoped/`）处理 —— 它不读
+`IdentityContext`，按三层合并 `ToolPermissionsConfig`（**global → agent →
+channel**，最严格胜出）。这与连接信任正交。
+
+按同一强制点，按此顺序组合三层：
+
+1. **`[policies.tool_permissions]`** —— 按工具的 `allow` / `ask` / `deny`，
+   精确名或 glob。显式条目胜出 tier。
+2. **Exec tier**（`Ask` / `Auto` / `Full`）—— 读取 `ToolFacts` 的
+   `idempotent` / `requires_approval`，**不**读工具名。默认 fail-closed：
+   一个 Aleph 没听过的工具是非幂等的 ⇒ `Ask` tier 下必拦。
+3. **`[sandbox.command_policy]`** —— 硬线命令底线，任何 tier 任何权限
+   条目都不能降低它。
+
+`Deny` 把工具从模型视角隐藏**且**拒绝调用；`Ask` 路由到审批门。
+
+## 执行审批门
+
+action-aware 审批门（`src/sandbox/exec_approval/`）：
+
+- 看到的是 *这次调用*（`ApprovalAction`），不是工具名。
+- 授权指纹 = `grant_fingerprint(tool, 规范化参数)` —— 用**原始**规范化
+  参数，**不**用脱敏摘要（脱敏会把不同密钥塌成同一占位符，让一个授权
+  覆盖另一个密钥）。
+- 决策：`AllowOnce` / `AllowSession` / `AllowAlways`（`AllowAlways` 由
+  `ExecApprovalManager::clamp_decision` 收紧到 `AllowSession` —— 没有
+  持久的允许列表）。
+- 120 秒超时 ⇒ **拒绝**（`ApprovalOutcome::is_approved` 排除 `Timeout`），
+  不写入 denial ledger。
+- `/deny <reason>`（频道）或 `exec.approval.resolve {reason}`（RPC）让
+  原因随 `ExecApprovalRecord.deny_reason` 流回模型 —— 渲染为
+  `The user said: "…"`（**显示层**，denial ledger 仍按指纹键控）。
 
 ## 沙箱
 
-Aleph 在操作系统级别强制执行基于能力的沙箱。每个工具声明它需要的权限（文件系统路径、网络访问、内存限制），系统生成一个平台原生的沙箱配置文件，强制执行这些边界。
+`WorkspaceSandbox`（`src/sandbox/workspace.rs`）是 exec-class 工具
+与 OS 之间的唯一 seam，**六步**管道：
 
-关键特性：
-- **能力预设** — `file_processor`、`web_scraper`、`code_analyzer`、`data_transformer`
-- **信任阶段** — Draft → Trial → Verified，逐步审批
-- **升级检测** — 敏感目录访问触发重新审批
-- **平台强制执行** — macOS `sandbox-exec` 带 Seatbelt 配置文件
+1. **Session resolve** —— 懒创建 `~/.aleph/workspaces/<session_hash>/`。
+2. **cwd validate** —— 规范化 + `starts_with(&ws.cwd)`；symlink 不能
+   逃出（BUB-3 hardening）。
+3. **Capability check** —— `SandboxCapabilities::is_within`；越界走
+   `ApprovalGate`，会话内缓存已批准的升级。
+4. **Profile generate** —— 平台原生（SBPL / bwrap args / AppContainer
+   profile）。
+5. **Run** —— 通过 `OsSandboxDriver`；默认 60 s 超时 + 1 MiB 输出预算。
+6. **Audit** —— `tracing::info!` 到 `capability_ledger`。
 
-参见 [沙箱](/docs/zh/security/sandboxing) 获取完整参考。
+命令策略层（`src/sandbox/command_policy/`）**先于** OS 沙箱运行：
+确定性 hard-filter，覆盖 fork bomb、`rm -rf /` / `rm -rf //` / `/.`、
+`dd of=/dev/...`、`mkfs`、shadow-copy 破坏、`powershell -EncodedCommand`
+解码、Windows raw disk 写入等。
 
-## 执行审批
+平台支持：
 
-在任何 shell 命令运行之前，它会通过人机回环审批流程：
+| OS | 强制机制 |
+|----|---------|
+| macOS | `sandbox-exec` + Seatbelt profile + AllowHosts 走 managed proxy |
+| Linux | bwrap + Landlock（≥ 5.13）+ seccomp-bpf + cgroup v2 资源限制 |
+| Windows | AppContainer（首选）→ RestrictedToken + Low IL → 基础 JobObject 三级软降级 |
 
-1. **风险分析** — 命令被评为 Low / Medium / High / Critical
-2. **白名单检查** — 已知安全的命令自动批准
-3. **人工提示** — 未知命令通过 CLI、macOS 应用或聊天路由给所有者
-4. **决策持久化** — "始终允许" 将命令添加到永久白名单
+Linux/Windows 上的 `NetworkPolicy::AllowHosts` 通过 netns→UDS→loopback
+bridge（Linux，Phase B）或 AppContainer capability SID（Windows）实现
+—— 这两种 OS 的 raw-`AllowHosts` 仍然以可读性好的拒绝消息硬失败。
 
-参见 [执行审批](/docs/zh/security/exec-approval) 获取完整参考。
+## 审计
 
-## 设备配对
+**Session event log** 是审批决策的活档
+（`tools/scoped/dispatch.rs::record_approval_decision` 写
+`ToolCallApproved` / `ToolCallDenied`）。通过 session service 查，与产生
+该决策的 run 的其它事件一起。
 
-新设备和聊天发送者必须完成配对流程才能与 Aleph 交互：
+**签名 agent 账本**（`src/identity/`，2026-07-25 落地，2026-07-26
+加固）回答 *谁，可证明*：
+- 每 agent Ed25519 密钥对（公钥 + 指纹在 `security.db`，私钥在加密 vault）；
+- 每个**变更**工具调用、每个拒绝、每个审批决策都追加到该 agent 自己的
+  hash-chained、**已签名**链；
+- `agent_identity`（工具，operator-gated）和 `aleph-server identity`
+  （CLI，只读，独立进程）可以读。
 
-1. 设备请求配对并收到 8 字符 Base32 代码
-2. 所有者收到带有代码的通知
-3. 所有者通过 `aleph pairing approve <code>` 批准
-4. 设备收到签名令牌用于未来认证
+委托子 agent 是自己签名链上的主角色（不是父链的一行）—— 它持有自己的
+Ed25519 密钥，在自己的链上签名。注入点在 `AllowlistToolService`，由
+spawner 从子 `AgentDef` 构建。
 
-配对使用 Ed25519 密钥交换、HMAC-SHA256 令牌签名和 5 分钟代码过期。
+## 跨流程安全保证（Spec C）
 
-参见 [设备配对](/docs/zh/security/pairing) 获取完整参考。
+原始的 `.shared_token` 损坏事件有结构性原因：两个 `aleph-server`
+进程写同一 `~/.aleph/data/` 文件没有防护。Spec C 通过四层保护关闭这个
+缺口：
 
-## IPC 安全
-
-Gateway 通过 Unix 域套接字与本地桌面客户端（例如 macOS 应用）通信，位于 `~/.aleph/exec-approvals.sock`。IPC 协议提供：
-
-- 每次连接上的 **HMAC-SHA256 挑战-响应** 认证
-- 套接字上的 **0600 文件权限**（仅所有者访问）
-- **独立连接处理** — 每个客户端在自己的任务中运行
-- Gateway 重启时的 **陈旧套接字清理**
-
-参见 [IPC 协议](/docs/zh/security/ipc) 获取完整参考。
-
-## 审计日志
-
-每个安全相关事件都记录在结构化审计日志中：
-
-### capability_ledger
-
-沙箱执行事件的跟踪目标：
-
-```rust
-pub struct SandboxAuditLog {
-    pub skill_id: String,
-    pub capabilities: Capabilities,
-    pub status: ExecutionStatus,
-    pub platform: String,
-    pub timestamp: DateTime<Utc>,
-}
-```
-
-### 执行审计条目
-
-记录 shell 命令的审批决策：
-
-```rust
-pub struct AuditEntry {
-    pub timestamp: DateTime<Utc>,
-    pub command: String,
-    pub risk_level: RiskLevel,
-    pub decision: ApprovalDecision,
-    pub executor: String,
-    pub session_key: String,
-    pub duration_ms: u64,
-    pub exit_code: Option<i32>,
-}
-```
-
-这些日志提供了谁执行了什么、何时执行以及具有什么权限的完整跟踪。
+- **单例锁**：`aleph-server start` 通过 `flock()` 在所有其它状态前获取
+  `~/.aleph/data/aleph.lock`。第二个 `start` 以 code 64 + 持有者 PID 干净
+  退出。
+- **Vault 写入**：`secrets.vault` 的每次写入通过 `vault_io::VaultIo`，
+  fcntl 排他锁 + `tempfile + persist` 原子重命名。
+- **JSON 状态写入**：`acp_sessions.json` 等走 `atomic_io::write_atomic`。
+- **SQLite 连接**：`open_sqlite_safe` 设 `journal_mode=WAL`、
+  `busy_timeout=5000`、`synchronous=NORMAL`。
+- **CLI dispatch**：每个 CLI 子命令声明一个 `CommandPolicy`（NoLock /
+  LockOnly / LockOrIpc），走 `with_policy` / `run_no_lock`。当 server 持有
+  单例锁时，写子命令前转到 `/v1/admin/*` IPC 端点（token rotation 自愈
+  通过一次 401 重试）。
 
 ## 另请参阅
 
-- [身份上下文](/docs/zh/concepts/identity-context) — 不可变的身份快照和权限流程
-- [沙箱](/docs/zh/security/sandboxing) — 基于能力的执行沙箱
-- [设备配对](/docs/zh/security/pairing) — 新设备的信任建立
-- [IPC 协议](/docs/zh/security/ipc) — 安全的本地通信协议
-- [执行审批](/docs/zh/security/exec-approval) — 人机回环命令审批
-
----
-
-## 26.7.x 补充
-
-### 失败关闭
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### 三级执行权限
-
-| 等级 | 行为 |
-|------|------|
-| `ask` | 每次审批；未知工具失败关闭（默认） |
-| `auto` | 幂等自动；破坏性仍审批 |
-| `full` | 全部自动（独立安全过滤除外） |
-
-### Action-aware Approval Gate
-
-26.7.15+ 审批门是动作感知的——人看到真实命令且授权指纹键绑定在命令上。单一强点 `src/tools/scoped/`。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
-
-### TOFU 证书信任
-
-26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use。共享决策核心 + 已固定信任存储 + SHA-256 指纹 + SAN/Subject 解析 + 审批面板 + macOS WKWebView / iOS Keychain 适配器。
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已回退，**单源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### TLS / TOFU 完整流程（26.7.17 → 26.7.18）
-
-**服务端**（`src/gateway/tls.rs`）：
-
-- 进程内终止 TLS（用户提供证书或自动生成自签名）
-- 自签名证书 SAN **自动发现**主机非环回接口 IP（`[gateway.tls] san` 字段手动覆盖）
-- SAN-drift sidecar：不变或子集复用；漂移则原子 regen
-- 原子 regen marker + shrink-reuse 测试
-- `allow_insecure_remote = false`：非环回绑定失败关闭
-- Panel 强制远程使用 `wss://`
-
-**客户端**（`src/gateway/cert_trust.rs` + 共享决策核心）：
-
-- TOFU 信任：自签名证书首次连接时被应用**内**审批
-- 共享决策核心 + 已固定 TOFU 信任存储（`~/.aleph/data/security.db`）
-- SHA-256 指纹 + SAN/Subject 解析
-- 审批面板页面（指纹 + SAN + TOFU/change 警告）
-- pending-cert 状态与 approve/reject Tauri 命令
-- **macOS WKWebView** `respondsToSelector` 缓存失效；**绝对 URL** 跳转信任审批页
-- **iOS Keychain trust store + 决策镜像**——与 macOS 共享决策状态
-
-### Gateway 远程认证与 kill switch（26.7.22+）
-
-- **审计轨道接入**：远端认证轮换 kick + 设备复活
-- **`interpreter` 设置项**：决定认证决策由哪个组件发出（CLI vs Panel vs 远端）
-- **WebView 麦克风授权按 origin 限制**（Linux / Windows 修复）
-- **Lite supervisor relocation 在信任提示挂起时被抑制**（避免审批流程被中断）
-
-### 网关死信取证（26.7.17+）
-
-无法下发的消息可被检查并安全地重投递：`~/.aleph/data/security.db` 持久化死信；`/health` 暴露计数器；`replay` RPC 触发重投递。
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### `signed_operation_ledger`
-
-26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
-
-### 桌面 `open` / `launch` 命令注入
-
-26.7.21+ 修复：通过 `ShellExecuteW` 而非 shell。
-
-### Bundled 解压符号链接
-
-26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接。
-
-### 进程隔离内核
-
-26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口。
-
-### 详见
-
-- [架构红线 R1 / R3 / R10](/docs/zh/philosophy/redlines) — 硬约束
-- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与审批
-- [安全：配对](/docs/zh/security/pairing) — 设备配对
-- [安全：沙箱](/docs/zh/security/sandboxing) — OS 级沙箱
+- [执行审批](/docs/zh/security/exec-approval) —— `exec_tier` + action-aware
+  审批门
+- [配对](/docs/zh/security/pairing) —— 设备与频道发送者信任建立
+- [沙箱](/docs/zh/security/sandboxing) —— OS 级隔离
+- [IPC](/docs/zh/security/ipc) —— WebSocket 控制平面 + JSON-RPC

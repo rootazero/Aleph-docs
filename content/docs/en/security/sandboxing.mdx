@@ -1,532 +1,404 @@
 ---
 title: "Sandboxing"
-description: "Capability-based execution sandboxing with per-tool permission declarations, filesystem controls, and platform-native enforcement"
+description: "WorkspaceSandbox six-step pipeline, platform-native enforcement (macOS / Linux / Windows), [sandbox.command_policy] hardline command filter"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-Aleph's sandboxing system enforces fine-grained security boundaries around tool execution. Rather than relying solely on approval prompts to prevent damage, sandboxing restricts *what a process can do* at the operating system level -- even if the command itself was approved.
+The `Sandbox` trait (`src/sandbox/mod.rs`) is the **single** seam between
+exec-class tools and the operating system:
 
-The sandbox model is **capability-based**: each tool declares the permissions it needs (filesystem paths, network access, memory limits), and the system generates a platform-native sandbox profile that enforces exactly those boundaries. A tool that declares "read-only access to `/tmp`" physically cannot write to `/tmp`, regardless of what command it runs.
+```rust
+#[async_trait]
+pub trait Sandbox: Send + Sync + 'static {
+    async fn execute(&self, command: SandboxCommand)
+        -> Result<SandboxOutput, SandboxError>;
+}
+```
+
+Production boots an `Arc<dyn Sandbox>` pointing at `WorkspaceSandbox`
+(`src/sandbox/workspace.rs`), which owns three concerns:
+
+1. **Workspace provisioning** — materialize
+   `~/.aleph/workspaces/{hash(session_id)}/` on first exec, keep it alive
+   for the session, reuse on subsequent calls.
+2. **Capability enforcement** — classify every `SandboxCommand` against
+   the session's baseline `SandboxCapabilities`, escalate out-of-baseline
+   requests through `ApprovalGate`, cache per-session grants.
+3. **OS isolation** — delegate actual subprocess launch to an
+   `OsSandboxDriverTrait` implementation (macOS: `sandbox-exec` + Seatbelt;
+   Linux: `bwrap` + Landlock + seccomp-bpf + cgroup v2; Windows:
+   `AppContainer` / `RestrictedToken` / `JobObject`).
+
+```
+exec-class tool (bash_exec, code_exec, …)
+        │   Arc<dyn Sandbox>
+        ▼
+WorkspaceSandbox   ──► ApprovalGate (capability elevation)
+        │
+        │   OsSandboxDriverTrait
+        ▼
+OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 3-tier soft-degrade
+```
 
 **Source locations:**
-- Capabilities: `src/sandbox/capabilities.rs`
-- Workspace: `src/sandbox/workspace.rs`
-- Driver: `src/sandbox/driver.rs`
+- Trait + re-exports + test helper: `src/sandbox/mod.rs`
+- Six-step pipeline: `src/sandbox/workspace.rs`
+- Command-policy layer: `src/sandbox/command_policy/` (`rules.rs`,
+  `normalize.rs`, `hooks.rs`)
+- Capabilities: `src/sandbox/capabilities.rs` (`SandboxCapabilities` +
+  `NetworkPolicy` + `is_within`)
+- OS driver: `src/sandbox/driver.rs` (trait) + platform implementations
 - Factory: `src/sandbox/factory.rs`
 - Config: `src/sandbox/config.rs`
-- macOS adapter: `src/exec/sandbox/executor.rs` (legacy path)
-- Approval gate: `src/sandbox/exec_approval/gate.rs`
-- Audit logging: `src/tools/middleware/audit.rs`
+- Task-local `SESSION_ID`: `src/sandbox/context.rs`
+- Managed proxy: `src/sandbox/proxy/` (HTTP CONNECT + SOCKS5)
+- Linux / macOS / Windows adapters: `src/sandbox/platforms/`
 
-## Architecture
+## Lifecycle — per-session workspace
+
+`WorkspaceSandbox` keeps a `HashMap<SessionId, Arc<SessionWorkspace>>`
+behind an `RwLock`. `for_session(&sid)` is the entry point:
+
+- **Fast path**: `read().await` → cache hit → return the existing
+  `Arc<SessionWorkspace>`.
+- **Slow path**: `write().await` → double-check (another task may have
+  created it) → `tokio::fs::create_dir_all(cwd)` → insert into the map.
+
+The on-disk path is deterministic:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Sandbox Execution Flow                     │
-│                                                               │
-│  Tool Declaration                                             │
-│  ┌────────────────────────────────────────────┐              │
-│  │ RequiredCapabilities {                      │              │
-│  │   base_preset: "file_processor",            │              │
-│  │   overrides: { network: AllowAll },         │              │
-│  │   parameter_bindings: { path → fs.rw }      │              │
-│  │ }                                           │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ Capability Resolver                         │              │
-│  │   Preset + Overrides + Bindings → Caps      │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ Trust Check (Draft → Trial → Verified)      │              │
-│  │   Escalation on scope violations            │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ Platform Adapter (macOS sandbox-exec)       │              │
-│  │   Generate .sb profile → Execute → Cleanup  │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ Audit Log                                   │              │
-│  └────────────────────────────────────────────┘              │
-└─────────────────────────────────────────────────────────────┘
+workspace_root / session_key_to_filename(session_id)
 ```
 
-## Capabilities Model
+`session_key_to_filename` (`src/sandbox/workspace.rs:114`) SHA-256s the
+JSON-serialized `SessionId` and truncates to 16 bytes (32 hex chars) —
+short and safe across every `SessionKey` variant regardless of the
+characters those variants may carry.
 
-The `Capabilities` struct defines the four dimensions of a sandbox:
+Each `SessionWorkspace` carries:
+
+- `cwd: PathBuf` — the materialized directory
+- `baseline: SandboxCapabilities` — policy ceiling (today: `::strict()`)
+- `granted_elevations: RwLock<HashSet<SandboxCapabilities>>` — per-session
+  cache of approvals the user has already granted
+
+## The six-step `execute` pipeline
+
+`WorkspaceSandbox::execute` (`src/sandbox/workspace.rs:124`) implements
+the spec §8 pipeline:
+
+1. **Session resolve** — `self.for_session(&cmd.session_id)` → lazy dir
+   creation on first call; cached `Arc<SessionWorkspace>` otherwise.
+2. **cwd validate** — `cmd.cwd` is either `None` (defaults to workspace
+   root) or must `canonicalize + starts_with(&ws.cwd)` (BUG-3 hardening:
+   a symlink cannot escape). Anything else returns
+   `SandboxError::CapabilityDenied { reason: "cwd outside workspace root" }`.
+3. **Capability check** — `cmd.capabilities.is_within(&ws.baseline)` is
+   the fast path (no approval). Otherwise consult `granted_elevations`;
+   if the request is within a prior grant, pass. Otherwise ask
+   `ApprovalGate::request_approval_for_tool`.
+   - `ApprovalOutcome::Approved` → insert `cmd.capabilities` into
+     `granted_elevations` (future same-or-narrower requests are cached).
+   - `ApprovalOutcome::Denied` | `Timeout` → `SandboxError::CapabilityDenied`.
+4. **Profile generate** — `os_driver.profile_for(&caps, &cwd)` returns
+   an opaque `OsSandboxProfile` (on macOS, SBPL profile text).
+5. **Run** — `os_driver.run(program, args, env, stdin, cwd, profile,
+   timeout, max_output_bytes)`. Default 60 s timeout and 1 MiB output
+   budget (split stdout + stderr). Both overrideable on `WorkspaceSandbox`
+   via `with_timeout` / `with_max_output_bytes`. Precedence:
+   `cmd.timeout` > `capabilities.timeout_secs` > configured default.
+6. **Audit** — `tracing::info!(target: "capability_ledger", …)` record
+   carrying `session_id`, `program`, `caps`, `exit_code`, `signal`,
+   `duration_ms`. Downstream tracing subscribers can sink it to any store.
+
+Inside the pipeline, `SandboxCapabilities::is_within`
+(`src/sandbox/capabilities.rs:36`) enforces four monotonic checks:
+`fs_read` ⊆ (prefix), `fs_write` ⊆ (prefix), `network` (`None ⊆ AllowHosts ⊆
+AllowAll`), `spawn_subprocess` (false ⊆ any).
+
+## `SandboxCapabilities`
 
 ```rust
-pub struct Capabilities {
-    pub filesystem: Vec<FileSystemCapability>,
-    pub network: NetworkCapability,
-    pub process: ProcessCapability,
-    pub environment: EnvironmentCapability,
+pub struct SandboxCapabilities {
+    pub fs_read: Vec<PathBuf>,
+    pub fs_write: Vec<PathBuf>,
+    pub network: NetworkPolicy,
+    pub spawn_subprocess: bool,
+}
+
+pub enum NetworkPolicy {
+    None,
+    AllowAll,
+    AllowHosts { hosts: Vec<String> },
 }
 ```
 
-### Filesystem Capabilities
+`::strict()` (equivalent to `::default()`) is the workspace baseline: no
+fs access outside the cwd (which the OS driver auto-grants via the
+seatbelt profile), no network, no subprocess spawn. Any command that
+needs more must escalate via `ApprovalGate`.
 
-Each filesystem capability grants access to a specific path with a specific mode:
+## Task-local `SESSION_ID`
+
+Exec-class tools don't know the current session id — their
+`AlephTool::execute` signature doesn't carry it. The sandbox subsystem
+uses a tokio `task_local!` to thread the id without touching every tool
+trait:
+
+- `crate::sandbox::context::SESSION_ID` — declared in
+  `src/sandbox/context.rs`
+- `current_session() -> Option<SessionId>` — the read helper
+- **Writer**: `crate::session::invoke_with_session_trace`
+  (`src/session/tool_trace.rs:17`) wraps `tool_svc.execute(...)` in a
+  `SESSION_ID.scope(session_id.clone(), async move { ... })`.
+
+This gives tools a single, narrow mechanism:
+`crate::sandbox::context::current_session()` returns `Some(sid)` inside
+the scope and `None` outside.
+
+## `SandboxConfig`
 
 ```rust
-pub enum FileSystemCapability {
-    ReadOnly { path: PathBuf },   // Read-only access to a path tree
-    ReadWrite { path: PathBuf },  // Full read/write access to a path tree
-    TempWorkspace,                // Auto-created temporary directory
+pub struct SandboxConfig {
+    pub workspace_root: PathBuf,       // default: ~/.aleph/workspaces
+    pub enabled: bool,                 // default: true
+    pub default_timeout_seconds: u64,  // default: 60
+    pub max_output_bytes: usize,       // default: 1 MiB
 }
 ```
 
-**TempWorkspace** creates a unique temporary directory under the system temp path (e.g., `/tmp/aleph-sandbox-Xk9mRa/`). The directory is automatically cleaned up after execution completes.
-
-### Network Capabilities
-
-```rust
-pub enum NetworkCapability {
-    Deny,                        // No network access
-    AllowDomains(Vec<String>),   // Allow specific domains only
-    AllowAll,                    // Unrestricted network access
-}
-```
-
-When `AllowDomains` is used, the sandbox profile denies all network by default and adds explicit allow rules for each domain:
-
-```
-(deny network*)
-(allow network-outbound (remote tcp "api.github.com:*"))
-(allow network-outbound (remote tcp "registry.npmjs.org:*"))
-```
-
-### Process Capabilities
-
-```rust
-pub struct ProcessCapability {
-    pub no_fork: bool,            // Prevent spawning child processes
-    pub max_execution_time: u64,  // Timeout in seconds
-    pub max_memory_mb: Option<u64>,  // Memory limit
-}
-```
-
-### Environment Capabilities
-
-```rust
-pub enum EnvironmentCapability {
-    None,        // No environment variables
-    Restricted,  // Only safe variables (PATH, HOME, USER)
-    Full,        // Full environment passthrough
-}
-```
-
-### Defaults
-
-The default capabilities are conservative:
-
-```rust
-impl Default for Capabilities {
-    fn default() -> Self {
-        Self {
-            filesystem: vec![FileSystemCapability::TempWorkspace],
-            network: NetworkCapability::Deny,
-            process: ProcessCapability {
-                no_fork: true,
-                max_execution_time: 300,  // 5 minutes
-                max_memory_mb: Some(512),
-            },
-            environment: EnvironmentCapability::Restricted,
-        }
-    }
-}
-```
-
-<Callout type="warn">
-Default capabilities grant no filesystem access beyond a temporary workspace and deny all network access. Tools must explicitly request any access they need.
-</Callout>
-
-## Capability Presets
-
-To simplify tool declarations, the system provides preset templates that define common capability profiles:
-
-### `file_processor`
-
-For tools that process local files without network access.
-
-| Dimension | Value |
-|-----------|-------|
-| Filesystem | TempWorkspace |
-| Network | Deny |
-| Process | no_fork, 300s timeout, 512MB memory |
-| Environment | Restricted |
-| Immutable | `network` (cannot be overridden to allow) |
-
-### `web_scraper`
-
-For tools that fetch data from the web.
-
-| Dimension | Value |
-|-----------|-------|
-| Filesystem | TempWorkspace |
-| Network | AllowAll |
-| Process | no_fork, 600s timeout, 1024MB memory |
-| Environment | Restricted |
-| Immutable | `filesystem` (cannot add arbitrary paths) |
-
-### `code_analyzer`
-
-For static analysis tools that read project source code.
-
-| Dimension | Value |
-|-----------|-------|
-| Filesystem | ReadOnly `${WORKSPACE}` |
-| Network | Deny |
-| Process | no_fork, 900s timeout, 2048MB memory |
-| Environment | Restricted |
-| Immutable | `network` |
-
-### `data_transformer`
-
-For data processing tools that need both read access to data and a writable workspace.
-
-| Dimension | Value |
-|-----------|-------|
-| Filesystem | TempWorkspace + ReadOnly `${PROJECT_ROOT}/data` |
-| Network | Deny |
-| Process | no_fork, 1800s timeout, 4096MB memory |
-| Environment | Restricted |
-| Immutable | None |
-
-### Immutable Fields
-
-Each preset can declare fields that cannot be overridden. For example, the `file_processor` preset marks `network` as immutable, meaning a tool using this preset cannot override it to `AllowAll`. This prevents privilege escalation through override abuse.
-
-## Parameter Bindings
-
-Tools can declare dynamic filesystem access based on their input parameters. For example, a file conversion tool might receive an input path and an output path -- the sandbox should grant read access to the input and write access to the output:
-
-```rust
-pub struct ParameterBinding {
-    pub capability: String,      // "filesystem.read_only" or "filesystem.read_write"
-    pub validation: ValidationRule,  // is_file, is_directory, is_path
-    pub mapping: MappingType,    // single or each_element (for arrays)
-}
-```
-
-### Example Declaration
-
-```rust
-RequiredCapabilities {
-    base_preset: "file_processor",
-    description: "Convert image formats",
-    overrides: CapabilityOverrides::default(),
-    parameter_bindings: {
-        "input_path" => ParameterBinding {
-            capability: "filesystem.read_only",
-            validation: ValidationRule::IsFile,
-            mapping: MappingType::Single,
-        },
-        "output_dir" => ParameterBinding {
-            capability: "filesystem.read_write",
-            validation: ValidationRule::IsDirectory,
-            mapping: MappingType::Single,
-        },
-    },
-}
-```
-
-At execution time, the capability resolver substitutes the actual parameter values into the filesystem capabilities, producing a concrete `Capabilities` instance with the real paths.
-
-## Trust Stages
-
-The sandbox system implements progressive trust through three stages:
-
-```rust
-pub enum TrustStage {
-    Draft,     // Newly generated tool, awaiting first approval
-    Trial,     // Approved, awaiting first execution confirmation
-    Verified,  // Executed multiple times, enters silent mode
-}
-```
-
-### Stage Progression
-
-```
-Draft ──[owner approves capabilities]──► Trial ──[N successful executions]──► Verified
-```
-
-- **Draft**: The tool's capability declaration is shown to the owner for review. No execution is allowed.
-- **Trial**: The tool can execute, but each execution triggers an approval prompt showing what the tool is about to do.
-- **Verified**: The tool executes silently without prompts, using the previously approved capabilities.
-
-### Escalation
-
-If a verified tool attempts to exceed its declared capabilities, the system triggers an escalation:
-
-```rust
-pub enum EscalationReason {
-    PathOutOfScope,       // Parameter path outside approved range
-    SensitiveDirectory,   // Accessing ~/.ssh, ~/.gnupg, ~/.aws, etc.
-    UndeclaredBinding,    // Using parameter not declared in bindings
-    FirstExecution,       // Initial run of a Trial-stage tool
-}
-```
-
-Escalations reset the tool to the Draft stage, requiring re-approval:
-
-```rust
-pub struct EscalationTrigger {
-    pub reason: EscalationReason,
-    pub requested_path: Option<PathBuf>,
-    pub approved_paths: Vec<String>,
-}
-```
-
-### Sensitive Directory Detection
-
-The escalation system includes a built-in list of sensitive directories that always trigger escalation:
-
-| Directory | Content |
-|-----------|---------|
-| `~/.ssh/` | SSH keys and configuration |
-| `~/.gnupg/` | GPG keys |
-| `~/.aws/` | AWS credentials |
-| `Keychain.app` | macOS keychain |
-| `~/.config/gcloud` | Google Cloud credentials |
-
-## Platform: macOS sandbox-exec
-
-On macOS, sandboxing is enforced using Apple's `sandbox-exec` tool with Seatbelt profile language (.sb files).
-
-### Profile Generation
-
-The macOS adapter generates a Seatbelt profile from the `Capabilities` struct:
-
-```scheme
-(version 1)
-(allow default)
-
-;; Filesystem restrictions
-(deny file-write* (subpath "/Users/alice/project"))
-
-;; Network restrictions
-(deny network*)
-```
-
-<Callout type="info">
-The profile starts with `(allow default)` and selectively denies operations, rather than starting with `(deny default)` and selectively allowing. This is because macOS `sandbox-exec` kills processes that attempt disallowed operations via signal, which breaks basic utilities like `echo` and `sh`.
-</Callout>
-
-### Execution
-
-Commands are wrapped with `sandbox-exec`:
-
-```bash
-sandbox-exec -f /tmp/aleph-profile-Xk9m.sb echo "hello"
-```
-
-The adapter handles:
-1. Writing the profile to a temporary `.sb` file
-2. Executing the command via `sandbox-exec -f <profile>`
-3. Capturing stdout, stderr, and exit code with timeout
-4. Cleaning up the profile file and temporary workspace
-
-### Cleanup
-
-After execution (whether successful or failed), the adapter removes:
-- The temporary sandbox profile file
-- The temporary workspace directory (if TempWorkspace was used)
-
-```rust
-fn cleanup(&self, profile: &SandboxProfile) -> Result<()> {
-    if profile.path.exists() {
-        std::fs::remove_file(&profile.path)?;
-    }
-    if let Some(ref workspace) = profile.temp_workspace {
-        if workspace.exists() {
-            std::fs::remove_dir_all(workspace)?;
-        }
-    }
-    Ok(())
-}
-```
-
-## Fallback Policy
-
-When sandbox enforcement is unavailable (e.g., on Linux where `sandbox-exec` does not exist), the `FallbackPolicy` determines behavior:
-
-```rust
-pub enum FallbackPolicy {
-    Deny,              // Refuse to execute (default)
-    RequestApproval,   // Ask user before unsandboxed execution
-    WarnAndExecute,    // Log warning and execute without sandbox
-}
-```
-
-<Callout type="warn">
-The default fallback policy is `Deny`. Changing it to `WarnAndExecute` removes sandbox protection entirely on unsupported platforms. This should only be used in trusted development environments.
-</Callout>
-
-## Shell Command Sandboxing
-
-In addition to the capability-based sandbox for tools, Aleph provides a separate layer of sandboxing for direct shell command execution via the `CodeExecutor`:
-
-### Command Blocking
-
-A regex-based `CommandChecker` blocks known-dangerous patterns before execution:
-
-```rust
-const DEFAULT_BLOCKED: &[&str] = &[
-    r"rm\s+-rf\s+/\s*$",             // rm -rf /
-    r"sudo\s+",                      // any sudo command
-    r"chmod\s+777\s+/",              // chmod 777 /
-    r":\(\)\s*\{\s*:\|:&\s*\}\s*;:", // fork bomb
-    r">\s*/dev/sd[a-z]",             // overwrite disk
-    r"mkfs\.",                       // format filesystem
-    r"dd\s+if=.*of=/dev/",           // dd to device
-];
-```
-
-### Path Permission Checking
-
-The `PathPermissionChecker` validates file paths against allowed and denied lists using glob patterns:
-
-```rust
-pub struct PathPermissionChecker {
-    allowed_patterns: Vec<Pattern>,   // Allowed path globs
-    denied_patterns: Vec<Pattern>,    // Denied path globs (checked first)
-    max_file_size: u64,              // Size limit for file operations
-}
-```
-
-Default denied paths include sensitive credential directories:
-
-| Pattern | Content Protected |
-|---------|-------------------|
-| `~/.ssh/**` | SSH keys |
-| `~/.gnupg/**` | GPG keys |
-| `~/.aws/**` | AWS credentials |
-| `~/.kube/**` | Kubernetes config |
-| `/etc/passwd` | System users |
-| `/etc/shadow` | Password hashes |
-| `/etc/sudoers` | Sudo configuration |
-
-<Callout type="info">
-Denied paths take precedence over allowed paths. Even if `~/**` is in the allowed list, `~/.ssh/**` will still be denied by the default deny rules.
-</Callout>
-
-### Path Traversal Detection
-
-The system detects and rejects path traversal attempts:
-
-```rust
-fn has_path_traversal(&self, path: &Path) -> bool {
-    let path_str = path.to_string_lossy();
-    path_str.contains("..") || path_str.contains("./")
-}
-```
-
-A request for `/tmp/../etc/passwd` is rejected before the path is even checked against the allow/deny lists.
-
-### Runtime Restrictions
-
-The `CodeExecutor` supports restricting which language runtimes are available:
-
-```rust
-pub struct CodeExecutor {
-    allowed_runtimes: Vec<String>,  // Empty = all allowed
-    timeout_seconds: u64,           // Execution timeout
-    // ...
-}
-```
-
-If `allowed_runtimes` is set to `["bash", "python3"]`, attempting to execute JavaScript via `node` will be rejected.
-
-## Audit Logging
-
-Every sandboxed execution is recorded in a structured audit log:
-
-```rust
-pub struct SandboxAuditLog {
-    pub skill_id: String,
-    pub capabilities: Capabilities,
-    pub status: ExecutionStatus,
-    pub platform: String,
-    pub timestamp: DateTime<Utc>,
-}
-
-pub enum ExecutionStatus {
-    Success { exit_code: i32, duration_ms: u64 },
-    Timeout { duration_ms: u64 },
-    Error { error: String },
-}
-```
-
-This provides a complete record of what capabilities were granted, what platform enforced them, and whether execution succeeded.
-
-## See Also
-
-- [Execution Approval](/docs/en/security/exec-approval) -- The approval system that decides whether to execute
-- [IPC Protocol](/docs/en/security/ipc) -- How approval requests are communicated for sandboxed tools
-- [Tool System](/docs/en/architecture/tools) -- How tools declare and use sandbox capabilities
-
----
-
-## 26.7.x Addendum
-
-### Fail-Closed
-
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
-
-### Three-Tier Execution Permissions
-
-| Tier | Behavior |
-|------|----------|
-| `ask` | Prompt for approval before every execution; unknown tools fail closed (default) |
-| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
-| `full` | All auto-allow (besides the hard security filter) |
-
-### Action-Aware Approval Gate
-
-26.7.15+ the approval gate is action-aware — the human sees the actual command and the grant fingerprint **keys on it**. Single choke point at `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
-
-### TOFU Certificate Trust
-
-26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use. Shared decision core + pinned trust store + SHA-256 fingerprint + SAN/Subject parsing + approval splash + macOS WKWebView / iOS Keychain adapters.
-
-### Pairing Single-Sourced on the Router
-
-26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
-
-### Real Client IP
-
-26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
-
-### Signed Operation Ledger
-
-26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
-
-### Desktop `open` / `launch` Command Injection
-
-26.7.21+ fix: dispatched through `ShellExecuteW` instead of a shell.
-
-### Bundled-Extraction Symlink Planting
-
-26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata`.
-
-### Process-Isolation Kernel
-
-26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. A legitimate carve-out from R1.
-
-### See Also
-
-- [Architectural Redlines R1 / R3 / R10](/docs/en/philosophy/redlines) — hard constraints
-- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and approval
-- [Security: Pairing](/docs/en/security/pairing) — device pairing
-- [Security: Sandbox](/docs/en/security/sandboxing) — OS-level sandbox
+Serde reads `[sandbox]` TOML with defaults. Tests / CI can set
+`enabled = false` to disable the subsystem; `build_sandbox` then hands
+back a `NoopSandbox` whose `execute` always errors with
+`SandboxError::Other("sandbox disabled: …")` — a deliberate fail-fast,
+not a silent bypass.
+
+## Platform implementations
+
+### macOS — sandbox-exec + Seatbelt
+
+`src/sandbox/platforms/macos/seatbelt.rs` ships the complete codex
+`restricted_read_only_platform_defaults.sbpl` (mach-lookups to logd /
+trustd / runningboard / analyticsd, IOSurface, system-mac-syscall,
+firmlink ancestors, terminal / PTY / dev handles, `/tmp` scratch space,
+opt-homebrew lib).
+
+**`NetworkPolicy::AllowHosts`** flows through the **managed proxy** (Cycle 6):
+- `WorkspaceSandbox::maybe_spawn_proxy` spawns an in-process HTTP CONNECT +
+  SOCKS5 proxy on `127.0.0.1:0`;
+- `cmd.capabilities.network` is collapsed to `AllowHosts(["127.0.0.1"])`;
+- standard `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` env vars are
+  injected;
+- the seatbelt profile collapses to "allow loopback only";
+- the proxy enforces hostname allowlists internally (exact names,
+  `*.suffix` wildcards, IP literals).
+
+### Linux — bwrap + Landlock + seccomp-bpf + cgroup v2
+
+`src/sandbox/platforms/linux/bwrap.rs` (`#[cfg(target_os = "linux")]`-gated).
+
+**Defense-in-depth (SP-2)**: bwrap's namespace isolation sits underneath
+two additional LSM mechanisms, applied by a hidden `aleph-server
+sandbox-init` subcommand that bwrap launches inside its mount namespace:
+
+- **Landlock** (kernel ≥ 5.13): in-process FS ACL inside the mounts
+  bwrap already gave the child. `READ_FILE | READ_DIR | EXECUTE` on
+  `SYSTEM_READ_PATHS` (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/etc`)
+  + `SandboxCapabilities.fs_read`; full RW + Exec on
+  `SandboxCapabilities.fs_write` + the session cwd.
+- **seccomp-bpf** (kernel ≥ 3.5, universal in practice): syscall
+  denylist returning `EPERM` for filesystem manipulation
+  (`mount` / `umount` / `pivot_root` / `chroot`), kernel reload
+  (`kexec_*`), module loading (`*_module`), eBPF, perf, `ptrace`,
+  cross-process memory (`process_vm_readv` / `process_vm_writev` — a
+  read/write primitive independent of `ptrace`, critical in the
+  `allow_fork=true` shared-PID-ns path), kernel keyring, `userfaultfd`,
+  io_uring, `mknodat`, swap, syslog, reboot, namespace switching,
+  `clone` / `unshare` with `CLONE_NEWUSER`, and the filesystem-handle
+  escape primitives `open_by_handle_at` / `name_to_handle_at`.
+- **seccomp socket gate** (`SeccompNetworkMode`):
+  - `Unrestricted` (`AllowAll` / raw `AllowHosts`) — no socket-family
+    filtering.
+  - `UnixOnly` (`None`) — allow only `AF_UNIX`, deny `connect`, and deny
+    the rest of the socket-operation surface.
+  - `ProxyRouted` (loopback-collapsed `AllowHosts` behind the
+    netns→UDS→loopback bridge) — allow only `AF_INET` / `AF_INET6` to
+    reach the local bridge, deny `AF_UNIX` socketpairs.
+
+**cgroup v2 resource limits (SP-5)**: when delegated to the user,
+`BubblewrapDriver::run` creates a per-execution sub-cgroup under the
+aleph-server process's own cgroup and applies:
+
+- **`memory.max`** from `SandboxCapabilities.max_memory_mb`. RSS-based
+  (so `mmap(PROT_NONE)` tricks that bypass `RLIMIT_AS` are caught).
+  `memory.swap.max = 0` always.
+- **`cpu.max`** from `LinuxSandboxConfig.cpu_quota_percent`. `None` →
+  unlimited; `Some(50)` → 50 % of one core.
+- **`pids.max`** from `LinuxSandboxConfig.max_pids` (default `Some(200)`).
+
+`SandboxCapabilities.max_memory_mb` caps the sandboxed process's
+virtual address space on all three OSes:
+
+- macOS / Linux: `setrlimit(RLIMIT_AS)` via `pre_exec` on the sandbox
+  helper.
+- Windows: `JOBOBJECT_EXTENDED_LIMIT_INFORMATION.ProcessMemoryLimit`.
+
+`SandboxCapabilities.timeout_secs` is the per-call override of
+`SandboxConfig.default_timeout_seconds`, enforced as the
+`WorkspaceSandbox::execute` wall-clock timeout. Precedence,
+most-specific first: `SandboxCommand.timeout` > `capabilities.timeout_secs`
+> configured default. `capabilities.timeout_secs` is the **only** timeout
+carrier.
+
+### Windows — AppContainer (preferred) → RestrictedToken → JobObject
+
+`src/sandbox/platforms/windows/`.
+
+The SP-6 three-tier soft-degrade chain (`sandbox-init-windows`):
+
+1. **AppContainer** (SP-6): per-execution unique profile via
+   `CreateAppContainerProfile`; capability SIDs derived from
+   `SandboxCapabilities.network` (`AllowAll` ⇒ `internetClient` /
+   `privateNetworkClientServer`; `None` ⇒ nothing);
+   `CreateProcessW` with `EXTENDED_STARTUPINFO_PRESENT` +
+   `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`. Target runs at a
+   trust level below Low IL with capability-gated resource access.
+   Profile is `DeleteAppContainerProfile`-d after `wait`. On any
+   AppContainer setup failure, soft-degrades to tier 2.
+2. **Restricted token + Low IL** (SP-3a):
+   `CreateRestrictedToken(self, DISABLE_MAX_PRIVILEGE)` →
+   `SetTokenInformation(TokenIntegrityLevel = S-1-16-4096)` →
+   `CreateProcessAsUserW(target)`. Target runs with no privileges at Low
+   IL. On `ERROR_PRIVILEGE_NOT_HELD`, soft-degrades to tier 3.
+3. **`CreateProcessW` baseline**: host token, Medium IL, inside JobObject
+   only. Last-resort tier — JobObject containment from cycle 1 always
+   applies regardless of which tier launches the target.
+
+JobObject (cycle 1): active-process limit (fork-bomb defense),
+kill-on-close, die-on-unhandled-exception, virtual-memory ceiling,
+UI restrictions.
+
+Cycles 3 / 5 tightened DACL on `{.git, .aleph, .codex, .agents}` —
+existing paths get `DENY_ACCESS` ACEs, missing paths get a stub directory
++ ACE (NTFS ACLs cannot deny "create a child named `.git`" by name).
+Cycle 5 tightened symlink escapes (`push_metadata_protection_args` runs
+`protected_paths::first_writable_symlink_component`).
+
+Windows `AllowHosts` **still hard-fails**, with a readable rejection
+message that includes the exact pre-resolved IPs that would be allowed.
+WFP (SP-3b) needs admin and is deferred indefinitely.
+
+### R1 carve-out — process-isolation FFI stays in-core
+
+The sandbox is the one place `src/` calls platform FFI directly
+(`windows-sys` under `src/sandbox/platforms/windows/*`,
+`src/sandbox/windows_init/*`), and this is a **deliberate R1 carve-out,
+not a violation**. Restricted-token / job-object / AppContainer /
+integrity-level / SID·ACL calls must be made by the parent **at spawn
+time** — you cannot sandbox a process from a separate helper, and routing
+a spawn-time restricted token through an IPC round-trip would weaken the
+security model. The local PID-liveness probe in
+`src/builtin_tools/desktop/session_lock.rs` (`OpenProcess` /
+`GetExitCodeProcess`) is in-core for the same reason.
+
+R1 targets the desktop UI / screen / Vision *limbs*, which still go
+through the Swift bridge — proven by `src/` carrying zero direct
+`cocoa` / `objc` / `core-graphics` use.
+
+## `[sandbox.command_policy]` — hardline command filter
+
+`src/sandbox/command_policy/` adds a command-*content* **hard-filter**
+in front of the OS sandbox, modelled on clawshell's DLP `[[patterns]]`
+engine but specialised for shell commands and evaluated in a single pass
+via `regex::RegexSet` (Aho-Corasick-backed). It is an R7-sanctioned
+hard-filter, **not** an intent classifier.
+
+- **Wiring**: implemented as a `SandboxBeforeHook` (sibling of
+  `RateLimitHook`) and installed by `build_sandbox` *first* in the hook
+  chain. **Zero changes to the `execute` pipeline** — it reuses the
+  existing `hooks.run_before()` → `Deny` path.
+- **Ruleset** (`rules.rs`): `Block` = fork bomb, `rm --no-preserve-root`,
+  bare-root `rm -rf /` / `rm -rf //` / `/.` (cycle 7 tightened the
+  multi-slash / dot bypass), `dd of=/dev/<disk>`, `mkfs /dev/…`,
+  redirect-to-block-device, `wipefs` / `blkdiscard` / `shred` of a device.
+  `Warn` (audit-only) = `rm -rf` of an absolute system path,
+  `curl|wget … | sh`, `chmod 777` of a system path, writes to
+  `/etc/{passwd,shadow,sudoers}`, `/dev/tcp/` reverse shells, host
+  shutdown / reboot, `sudo -S` / `--stdin` / `--askpass` / `-s`, writes
+  into `~/.ssh/authorized_keys`.
+- **Windows shapes** (added 2026-06-15, deepened 2026-07-27):
+  `Block` = `format <drive:>` / `Format-Volume`; drive / hive-root
+  recursive delete; shadow-copy destruction; backup-catalog destruction;
+  raw-disk destruction; `bcdedit /delete` / `bcdedit /set … recoveryenabled
+  No` / `bootstatuspolicy ignoreallfailures`; whole-hive `reg delete
+  HKLM /f`. `Warn` = Windows system-location recursive delete,
+  `powershell -EncodedCommand`, download-execute cradles, disabling
+  Defender, disabling the firewall, weakening the execution policy, AMSI
+  tampering, event-log clearing, local-account backdoors, autostart
+  persistence, ACL takeover.
+- **Normalisation** (`normalize.rs`) folds the evasions the shell would
+  execute verbatim: invisible characters, cmd `^` and PowerShell `` ` ``
+  escapes, empty quote pairs, three Windows-specific readings (two views
+  of `\`, path-prefix canonicalisation, `-EncodedCommand` expansion).
+  Because this happens in the normaliser, **ahead of** the tier split,
+  `enforcement = "off"` cannot restore the blind spot.
+- **Config** (`[sandbox.command_policy]`): `enabled`, `enforcement`
+  (`block` / `warn` / `off`), `use_default_rules`, `custom_rules[]`
+  (`{name, regex, action, description}`). A malformed custom regex fails
+  **safe** — boot logs the offending rule by name and falls back to the
+  curated defaults rather than running with no filter.
+- **Scan target**: `program` + space-joined `args` + any UTF-8 `stdin`
+  payload (the `bash -s` large-script path), bounded to 256 KiB.
+- **Audit**: matches log to the `command_policy` tracing target.
+- **Non-breaking**: defaults block only patterns with essentially no
+  legitimate workspace use; relative-path `rm -rf build/` and ordinary
+  commands are unaffected. The OS sandbox remains the real enforcer.
+
+## Testing pattern
+
+The sandbox stack is testable at every seam without real subprocesses or
+OS sandboxing:
+
+- **Fake OS driver** — implement `OsSandboxDriverTrait`, count `run`
+  calls, return canned `SandboxOutput`. Used by `src/sandbox/workspace.rs`
+  unit tests and integration tests.
+- **Fake approval requester** — implement `ApprovalRequester` and hand
+  the resulting box to `ApprovalGate::new(cfg, Some(Box::new(requester)))`.
+  Unit tests use this to drive every branch of step 3.
+- **`MockSandbox`** (`src/sandbox/mod.rs:50`, `#[cfg(test)]`) — records
+  every `SandboxCommand` and returns canned `SandboxOutput`. Used by
+  exec-class tools (`bash_exec`, `code_exec`) to assert they route through
+  the sandbox seam.
+- **Integration** — `tests/sandbox_capability_approval.rs` drives the
+  full pipeline via the public surface (`build_sandbox`,
+  `Arc<dyn Sandbox>`, `SandboxCommand`) with the fake driver + fake
+  requester wiring.
+
+Tests that don't touch exec at all can skip the subsystem by
+constructing `SandboxConfig { enabled: false, .. }` — `build_sandbox`
+returns `NoopSandbox`.
+
+## Desktop Bridge boundary
+
+The Swift `AlephBridge` helper process runs **outside** the Rust sandbox.
+Hard rules that must not be violated by any bridge handler:
+
+- The bridge process **must not** open any TCP or Unix domain socket.
+  Only the inherited stdio pipes are used for IPC.
+- The bridge **must not** read or write `~/.aleph/data/`, the
+  `.shared_token` file, or any other vault path. Vault access is
+  exclusive to the Rust core.
+- Permission status is owned by macOS TCC; the bridge merely reflects
+  it via `perm.check` and returns `PermissionGuide` in `-32001` errors.
+- Any new bridge handler added in the future **must** include a comment
+  justifying why it does not touch `~/.aleph/`. Bridge code review
+  checks this invariant.
+
+## See also
+
+- [Security Overview](/docs/en/security/overview) — trust boundary + tier
+- [Execution Approval](/docs/en/security/exec-approval) — action-aware gate
+- [Pairing](/docs/en/security/pairing) — device trust establishment

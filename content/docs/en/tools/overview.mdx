@@ -7,256 +7,195 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-Aleph's tool system is a type-safe, extensible framework that gives the AI agent the ability to act on the world — executing shell commands, reading files, searching the web, controlling a browser, and more. Every tool is defined as a Rust trait implementation with automatic JSON Schema generation, ensuring compile-time correctness and runtime flexibility.
+Aleph's tool system is a type-safe, extensible framework that gives the agent
+the ability to act on the world — executing shell commands, reading files,
+searching the web, controlling a browser, and more. Every tool is defined as a
+Rust trait implementation with automatic JSON Schema generation, giving
+compile-time correctness and runtime flexibility.
 
-The tool system is built around three key principles:
+Three principles:
 
-1. **Type safety first** — Tool arguments and outputs are strongly typed Rust structs. The JSON Schema sent to the LLM is auto-generated from these types via `schemars`, eliminating schema drift.
-2. **Static + dynamic dispatch** — Built-in tools use zero-cost static dispatch; MCP and plugin tools use dynamic dispatch. A blanket implementation bridges the two seamlessly.
-3. **Hot-reload capable** — The `AlephToolServer` supports adding, removing, and replacing tools at runtime without restarting the agent.
+1. **Type safety first** — Tool arguments and outputs are strongly-typed Rust
+   structs. The JSON Schema sent to the LLM is auto-generated from these types
+   via `schemars`, eliminating schema drift.
+2. **One chokepoint** — Every tool call funnels through `ScopedToolService`
+   (`src/tools/scoped/`), which merges the per-channel tool-permission layer
+   with the exec tier and the sandbox command-policy floor.
+3. **Capability-gated surfaces** — Capability-bearing builtin tools (MCP
+   resource / prompt readers, the OAuth login helper) are only present in the
+   registry while at least one connected server actually advertises that
+   capability.
 
 ## Architecture
 
-The tool system is organized into three layers:
-
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    AlephTool (static)                       │
-│   Compile-time known tools with typed Args/Output           │
-│   Auto JSON Schema generation via schemars                   │
-└─────────────────────────────────┬───────────────────────────┘
-                                  │ Blanket impl
-                                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   AlephToolDyn (dynamic)                    │
-│   Runtime dispatch with JSON Value args                      │
-│   Used by: MCP tools, plugin tools, hot-reloaded tools      │
-└─────────────────────────────────┬───────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   AlephToolServer                           │
-│   Hot-reload enabled tool registry                           │
-│   Thread-safe add/remove/list/call operations               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                          Harness                                  │
+│                                                                  │
+│           Arc<dyn ToolService>  (per-request override)           │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  ScopedToolService  (src/tools/scoped/)           │
+│                                                                  │
+│  • tool_permissions merge (global → agent → channel,               │
+│    most-restrictive wins)                                         │
+│  • exec tier (Ask / Auto / Full)                                 │
+│  • sandbox::command_policy floor                                 │
+│  • action-aware approval gate (HITL seam)                        │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      LoopToolRegistry                              │
+│                                                                  │
+│  Builtin handlers · MCP handlers (McpHandler per server) ·         │
+│  Capability-gated builtin tools (mcp_read_resource,               │
+│  mcp_list_resources, mcp_list_resource_templates, mcp_get_prompt, │
+│  mcp_list_prompts, mcp_login)                                     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 **Source locations:**
-- Traits: `src/tools/traits.rs`
-- Server: `src/tools/server.rs`
-- Built-in tools: `src/builtin_tools/`
-- MCP client: `src/mcp/`
-- Browser runtime: `src/browser/`
+- Production chokepoint: `src/tools/scoped/` (`dispatch.rs`, `builder.rs`,
+  `traits.rs`, `ledger.rs`)
+- Tool registry: `src/tools/registry/`, `src/tools/handlers/`
+- Builtin tools: `src/builtin_tools/`
+- MCP client / manager: `src/mcp/`
+- Browser runtime + per-action tools: `src/browser/`, `src/builtin_tools/browser_tools/`
 
-## The AlephTool Trait
+## The production chokepoint — `ToolService`
 
-The `AlephTool` trait is the primary interface for defining tools. It uses associated types for compile-time type safety and auto-generates JSON Schema from the `Args` type:
+Harness consumers depend on `Arc<dyn ToolService>` exclusively:
 
 ```rust
-#[async_trait]
-pub trait AlephTool: Clone + Send + Sync + 'static {
-    /// Tool name used in function calls (e.g., "search", "file_read")
-    const NAME: &'static str;
-
-    /// Human-readable description for LLM tool selection
-    const DESCRIPTION: &'static str;
-
-    /// Input argument type (must derive JsonSchema for auto-schema generation)
-    type Args: Serialize + DeserializeOwned + JsonSchema + Send;
-
-    /// Output type (serialized to JSON for LLM)
-    type Output: Serialize + Send;
-
-    /// Get tool category (default: Builtin)
-    fn category(&self) -> ToolCategory { ToolCategory::Builtin }
-
-    /// Whether this tool requires user confirmation before execution
-    fn requires_confirmation(&self) -> bool { false }
-
-    /// Usage examples for few-shot learning context
-    fn examples(&self) -> Option<Vec<String>> { None }
-
-    /// Get tool definition with auto-generated JSON Schema
-    fn definition(&self) -> ToolDefinition { /* auto-implemented */ }
-
-    /// Execute the tool with typed arguments
-    async fn call(&self, args: Self::Args) -> Result<Self::Output>;
-
-    /// Execute with JSON arguments (auto-implemented)
-    async fn call_json(&self, args: Value) -> Result<Value> { /* auto-implemented */ }
+pub trait ToolService: Send + Sync + 'static {
+    async fn execute(&self, name: &str, input: Value) -> Result<ToolOutput, ToolError>;
+    async fn list(&self) -> Vec<ToolDefinition>;
+    async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+    fn dispatcher_schema(&self) -> Arc<[crate::dispatcher::ToolDefinition]>;
 }
 ```
 
-### Schema Generation via schemars
+The production impl is **`ScopedToolService`** (`src/tools/scoped/`). The
+Gateway builds one per request via
+`gateway::execution_engine::tool_service_builder::build_request_tool_service`
+and supplies it as `FlowRequest::tool_service`, so each turn sees an
+allow-listed view over the shared `LoopToolRegistry`.
 
-Tool argument types derive `JsonSchema`, which automatically generates the JSON Schema sent to the LLM. Field-level documentation comments become parameter descriptions:
+`ScopedToolService` carries the HITL seams natively:
+
+- `with_confirmation(confirm_tools, requester)` — gates `requires_confirmation`
+  tools through `ApprovalRequester` (wired at boot to
+  `ChannelApprovalBridgeAdapter`).
+- `with_turn_context(TurnContext)` — scopes the `TURN_CONTEXT` task-local for
+  every tool call so HITL tools (`ask_user`, sandbox escalations, channel
+  approval) can route back to the originating channel.
+
+Tool authors implement `AlephTool` (typed) or `LoopTool` (untyped via
+`RegistryToolAdapter`). The harness fallback `AgentHarnessRunner.tool_service`
+is `NullToolService` (`src/tools/null.rs`) — production never reaches it
+because Gateway always supplies the per-request override; a `NotFound` from
+that service signals an upstream wiring regression.
+
+The pre-`ScopedToolService` Phase 2 decorator chain (`facade.rs` /
+`dispatch.rs` / `registry.rs` / `middleware/` / `handlers/`, ~2,700 lines)
+was deleted in 2026-05-20; it was unreachable because every Gateway request
+overrode it.
+
+## The `AlephTool` trait
+
+`AlephTool` is the primary interface for typed tools. Static-dispatch, with
+the JSON Schema auto-derived from `Args`:
+
+```rust
+pub trait AlephTool: Clone + Send + Sync + 'static {
+    const NAME: &'static str;
+    const DESCRIPTION: &'static str;
+    type Args: Serialize + DeserializeOwned + JsonSchema + Send;
+    type Output: Serialize + Send;
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output>;
+
+    async fn call_json(&self, args: Value) -> Result<Value> { /* blanket */ }
+    fn definition(&self) -> ToolDefinition { /* blanket, schemars */ }
+}
+```
+
+`LoopTool` is the untyped, JSON-`Value` shape used by `McpHandler` and the
+capability-gated builtin tools. `RegistryToolAdapter` bridges the two.
+
+### Schema generation via `schemars`
+
+Tool argument types derive `JsonSchema`, which generates the JSON Schema sent
+to the LLM. Field-level documentation comments become parameter
+descriptions:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchArgs {
     /// Search query (natural language)
     pub query: String,
-
     /// Maximum results to return (default: 10)
     #[serde(default)]
     pub max_results: Option<u32>,
 }
 ```
 
-This generates the following schema, which is sent to the LLM as part of the tool definition:
+The `required` array is auto-computed: only fields without `#[serde(default)]`
+are required.
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "query": {
-      "type": "string",
-      "description": "Search query (natural language)"
-    },
-    "max_results": {
-      "type": "integer",
-      "description": "Maximum results to return (default: 10)"
-    }
-  },
-  "required": ["query"]
-}
-```
+## Tool categories
 
-## Dynamic Dispatch
-
-For tools loaded at runtime (MCP servers, plugins), Aleph provides the `AlephToolDyn` trait:
-
-```rust
-pub trait AlephToolDyn: Send + Sync {
-    fn name(&self) -> &str;
-    fn definition(&self) -> ToolDefinition;
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>>;
-}
-```
-
-A blanket implementation ensures every `AlephTool` is automatically also an `AlephToolDyn`:
-
-```rust
-impl<T: AlephTool> AlephToolDyn for T {
-    fn name(&self) -> &str { T::NAME }
-    fn definition(&self) -> ToolDefinition { AlephTool::definition(self) }
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>> {
-        Box::pin(async move { self.call_json(args).await })
-    }
-}
-```
-
-This means you can mix static and dynamic tools in the same collection:
-
-```rust
-let tools: Vec<Box<dyn AlephToolDyn>> = vec![
-    Box::new(SearchTool::new()),     // Static (AlephTool)
-    Box::new(mcp_tool_wrapper),      // Dynamic (AlephToolDyn only)
-];
-```
-
-## Tool Categories
-
-Tools in Aleph fall into four categories:
-
-| Category | Source | Dispatch | Examples |
-|----------|--------|----------|----------|
-| **Built-in** | `src/builtin_tools/` | Static | `bash`, `file_ops`, `web_fetch`, `browser` |
-| **MCP** | External processes | Dynamic | Filesystem server, GitHub server |
-| **Extension** | WASM/Node.js plugins | Dynamic | Custom plugins |
-| **Markdown Skills** | `SKILL.md` files | Dynamic | User-defined prompt workflows |
-
-## AlephToolServer
-
-The `AlephToolServer` is a thread-safe, hot-reload-capable registry that manages all tools:
-
-```rust
-pub struct AlephToolServer {
-    tools: Arc<RwLock<HashMap<String, Arc<dyn AlephToolDyn>>>>,
-}
-```
-
-### Registration
-
-Tools can be registered using the builder pattern or at runtime:
-
-```rust
-// Builder pattern during construction
-let server = AlephToolServer::new()
-    .with_bash()
-    .with_file_ops()
-    .with_search()
-    .with_web_fetch()
-    .with_browser();
-
-// Runtime registration
-server.add_tool(MyCustomTool::new()).await;
-
-// Hot-reload with update tracking
-let info = server.replace_tool(UpdatedTool::new()).await;
-if info.was_replaced {
-    println!("Updated: {}", info.tool_name);
-}
-```
-
-### Execution with Auto-Repair
-
-The server includes automatic tool name repair, inspired by OpenCode's `experimental_repairToolCall` pattern. When the LLM sends an incorrect tool name, the server tries:
-
-1. **Exact match** — `search` matches `search`
-2. **Case-insensitive** — `Search` repairs to `search`
-3. **Snake-case conversion** — `WebSearch` repairs to `web_search`
-4. **Invalid fallback** — Routes to the `invalid` tool handler with an error message
-
-```rust
-let (result, repair_info) = server.call_with_repair("WebSearch", args).await;
-if let Some(repair) = repair_info {
-    tracing::info!("Repaired {} -> {}", repair.original_name, repair.repaired_name);
-}
-```
-
-### Handles for Concurrency
-
-The server provides lightweight, cloneable handles for sharing across async tasks:
-
-```rust
-let handle = server.handle();
-tokio::spawn(async move {
-    handle.call("search", args).await
-});
-```
-
-## Tool Filtering
-
-Aleph supports fine-grained control over which tools are available to the agent:
-
-```rust
-pub struct ToolFilter {
-    pub allowed: Option<HashSet<String>>,      // Whitelist
-    pub blocked: HashSet<String>,              // Blacklist
-    pub require_confirmation: HashSet<String>, // Require user approval
-}
-```
-
-Configure via JSON:
-
-```json
-{
-  "tools": {
-    "allowed": ["file_read", "web_fetch", "memory_*"],
-    "blocked": ["bash"],
-    "requireConfirmation": ["file_write", "file_delete"]
-  }
-}
-```
+| Source | Dispatch | Examples |
+|--------|----------|----------|
+| **Built-in** (`src/builtin_tools/`) | Static (`AlephTool`) | `bash_exec`, `code_exec`, `file_ops`, `web_fetch`, `search`, `memory_*`, `browser_*` |
+| **MCP** (external process) | Dynamic (`LoopTool` via `McpHandler`) | `<server>__<tool>`, capability-gated `mcp_read_resource` / `mcp_list_resources` / `mcp_list_resource_templates` / `mcp_get_prompt` / `mcp_list_prompts` / `mcp_login` |
+| **Browser per-action** (`src/builtin_tools/browser_tools/`) | Static | `browser_open`, `browser_click`, `browser_navigate`, `browser_snapshot`, `browser_screenshot`, `browser_evaluate`, `browser_fill_form`, … |
 
 <Callout type="info">
-Wildcard patterns like `memory_*` are supported in the allowed list, matching any tool whose name starts with the prefix.
+A capability-gated builtin appears in the registry only while at least one
+connected MCP server advertises that capability — the model is never offered
+a tool that every call would reject. The bridge reconciles every server's
+capability set on every manager event (`src/mcp/tool_bridge.rs`).
 </Callout>
 
-## Tool Result
+## Built-in tool registration
 
-Every tool execution returns a standardized `ToolResult`:
+Builtin tools are registered by the executor's builtin registry
+(`src/executor/builtin_registry/`), not by a hand-written builder. Each tool
+holds the shared dependencies it needs (`Arc<Sandbox>`, `Arc<ProfileManager>`,
+`Arc<McpManagerHandle>`, …) and the registry owns wiring them up at boot.
+
+A tool constructed without a required dependency returns a structured
+"sandbox not configured" / "manager not configured" error rather than
+falling back to unscoped execution — the default is safe, not permissive.
+
+## Per-channel tool permissions
+
+Limiting *what an agent may do* (as opposed to *who may connect*) is the job
+of the per-channel tool-permission layer, `ScopedToolService`. It merges a
+`ToolPermissionsConfig` across three tiers — **global → agent → channel**,
+most-restrictive wins — and does not read `IdentityContext`. This is
+orthogonal to connection trust.
+
+Three compositions happen at the same chokepoint, in this order:
+
+1. **`[policies.tool_permissions]`** — per-tool `allow` / `ask` / `deny`,
+   exact name or glob, most-restrictive-wins across the three tiers. An
+   explicit entry beats the tier.
+2. **The exec tier** (`Ask` / `Auto` / `Full`) — consults `ToolFacts`
+   `{idempotent, requires_approval}`, never the tool's name. Default is
+   fail-closed: a tool Aleph has not heard of is non-idempotent, hence
+   `Ask` under any tier.
+3. **`[sandbox.command_policy]`** — the hardline command floor, which no
+   tier and no permission entry can lower.
+
+`Deny` hides the tool from the model *and* refuses the call; `Ask` routes to
+the approval gate.
+
+## Tool result
 
 ```rust
 #[derive(Debug, Serialize, Deserialize)]
@@ -268,71 +207,21 @@ pub struct ToolResult {
 }
 ```
 
-## Tool Progress Callbacks
+## Integration with the agent loop
 
-Aleph provides a global callback system for monitoring tool execution, enabling streaming progress updates to the UI:
+When the LLM responds with a tool call:
 
-```rust
-pub trait ToolProgressCallback: Send + Sync {
-    fn on_tool_start(&self, tool_name: &str, args_summary: &str);
-    fn on_tool_result(&self, tool_name: &str, result_summary: &str, success: bool);
-}
+1. **Resolve** the call against the per-request `ScopedToolService`.
+2. **Filter** through the merged `tool_permissions` (allow / ask / deny).
+3. **Consult** the exec tier for tools nobody named (Ask / Auto / Full).
+4. **Gate** confirm-gated tools through the approval requester (HITL).
+5. **Execute** — exec-class tools route through `WorkspaceSandbox`.
+6. **Record** the decision to the session event log; signed tools also
+   append to the per-agent signed ledger.
 
-// Set handler before agent execution
-set_tool_progress_handler(Some(Arc::new(MyProgressHandler)));
-```
+## Next steps
 
-## Integration with the Agent Loop
-
-When the LLM responds with a `tool_use` block, the agent loop:
-
-1. **Resolves** the tool name via the `AlephToolServer` (with auto-repair)
-2. **Filters** the call through the `ToolFilter` (whitelist/blacklist check)
-3. **Checks confirmation** for tools marked as requiring user approval
-4. **Executes** the tool with the provided JSON arguments
-5. **Returns** the `ToolResult` to the LLM as a `tool_result` message
-
-This cycle repeats until the LLM produces a final text response without tool calls.
-
-## Next Steps
-
-- [Built-in Tools](/docs/en/tools/builtin) — Complete catalog of tools shipped with Aleph
-- [MCP Integration](/docs/en/tools/mcp) — Connecting external MCP servers
-- [Creating Tools](/docs/en/tools/creating) — Step-by-step guide to building custom tools
-- [Browser Automation](/docs/en/tools/browser) — Deep-dive into browser control
-
----
-
-## 26.7.x Addendum
-
-### Toolset Reorganized
-
-26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`.
-
-### Parallel Execution
-
-`src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
-
-### `tools.defer_mcp_tools` / `enable_tool_search`
-
-26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
-
-### MCP On-Demand Discovery
-
-26.7.17+: `McpResourceIndexLayer` is retracted. `mcp_list_*` tools discover on demand; a `cat`-guard read-steer routes to native MCP / skill / plugin reads.
-
-### `file_read` Supports Images
-
-26.6.29+: `file_read` now supports images (`image_read`); unchanged file reads are de-duplicated across turns via a read cache.
-
-### Fail-Closed
-
-Unknown tools **fail closed** under the `ask` tier.
-
-### `plugin.install` Unified Entry
-
-26.7.21+: classifies by source (marketplace / zip / path) and routes uniformly.
-
-### Full `tools.*` / `mcp.*` / `extensions.*` RPC
-
-See [Gateway Methods Reference](/docs/en/gateway/methods).
+- [Built-in Tools](/docs/en/tools/builtin) — the catalog of shipped tools
+- [MCP Integration](/docs/en/tools/mcp) — connecting external MCP servers
+- [Creating Tools](/docs/en/tools/creating) — how to add a new tool
+- [Browser Automation](/docs/en/tools/browser) — per-action browser tools

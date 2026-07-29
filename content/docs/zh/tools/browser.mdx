@@ -1,179 +1,176 @@
 ---
 title: "浏览器自动化"
-description: "通过 CDP 控制 Chromium 浏览器进行网页导航、交互和数据提取"
+description: "通过 Playwright CLI / Chrome DevTools MCP 控制 Chromium 进行导航、交互与数据提取"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## 概述
 
-Aleph 包含一个完整的浏览器自动化系统，使 AI agent 能够导航网页、与页面元素交互、提取内容和捕获屏幕截图。该系统使用 Chrome DevTools Protocol (CDP) 控制 Chromium 实例，并使用 ARIA 无障碍树进行结构化页面理解。
+Aleph 的浏览器自动化以一组 **单职责工具** 的形式暴露给 agent —— 不是
+一个带 `action` 参数的单一 `browser` 工具。每个工具聚焦一个动作
+（点击、导航、截图、快照、填充、按下按键、上传、悬停、滚动、评估 JS …），
+通过 `Arc<ProfileManager>` 共享浏览器实例。
+
+底层支持两个后端：
+
+- **Playwright CLI**（`src/browser/playwright_cli_backend.rs`）
+- **Chrome DevTools MCP**（`src/browser/chrome_mcp_backend.rs`）
+
+二者通过统一的 `BrowserBackend` trait 暴露 —— `browser_*` 工具不区分
+后端，profile 决定哪一个会启动。
 
 **源位置：**
-- 运行时：`src/browser/runtime.rs`
-- 操作：`src/browser/actions.rs`
-- 快照：`src/browser/snapshot.rs`
-- 类型：`src/browser/types.rs`
-- 工具包装器：`src/builtin_tools/browser.rs`
-- 发现：`src/browser/discovery.rs`
+- 后端：`src/browser/backend.rs`
+- Per-action 工具：`src/builtin_tools/browser_tools/`（每个动作一个文件）
+- Profile 管理：`src/browser/profile.rs`、`src/browser/manager.rs`
+- 网络策略：`src/browser/network_policy.rs`（SSRF 防护）
+- 标签页注册：`src/browser/tab_registry.rs`
+- Chromium 发现：`src/browser/discovery.rs`
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────┐
-│               BrowserTool                    │
-│          (AlephTool interface)               │
-│                                             │
-│  Arc<Mutex<Option<BrowserRuntime>>>          │
-│  Optional ApprovalPolicy                    │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│             BrowserRuntime                   │
-│        (CDP transport layer)                │
-│                                             │
-│  Browser (chromiumoxide)                    │
-│  HashMap<TabId, Page>                       │
-│  CDP event loop (tokio task)               │
-└──────────────────┬──────────────────────────┘
-                   │ Chrome DevTools Protocol
-                   ▼
-┌─────────────────────────────────────────────┐
-│             Chromium Instance                │
-│      (headless or headed mode)              │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                  builtin_tools/browser_tools/*                      │
+│                                                                     │
+│   browser_open → browser_navigate → browser_snapshot                │
+│          ↓              ↓                  ↓                         │
+│   browser_click / browser_type / browser_fill_form / browser_hover  │
+│   browser_scroll / browser_drag / browser_upload / browser_press_key│
+│   browser_screenshot / browser_evaluate / browser_console            │
+│   browser_dialog / browser_emulate / browser_resize / browser_wait_for│
+│   browser_pdf / browser_network / browser_cookies / browser_tabs    │
+└──────────────────────────────┬─────────────────────────────────────┘
+                               │ Arc<ProfileManager>
+                               ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                       ProfileManager                                │
+│                                                                     │
+│   Profile { id, backend: PlaywrightCliBackend | ChromeMcpBackend,  │
+│             headless, user_data_dir, … }                             │
+└──────────────────────────────┬─────────────────────────────────────┘
+                               │ BrowserBackend trait
+              ┌────────────────┴───────────────────┐
+              ▼                                    ▼
+┌──────────────────────────┐         ┌──────────────────────────────┐
+│  PlaywrightCliBackend    │         │  ChromeMcpBackend             │
+│  (CLI subprocess)        │         │  (Chrome DevTools MCP server) │
+└──────────────────────────┘         └──────────────────────────────┘
 ```
 
-`BrowserTool` 是 agent 与之交互的 `AlephTool` 实现。它将 `BrowserRuntime` 包装在 `Arc<Mutex<Option<...>>>` 中，以便工具可以被克隆（`AlephTool` trait 所需），同时共享单个浏览器实例。`BrowserRuntime` 通过 `chromiumoxide` crate 管理实际的 Chromium 进程。
+## 浏览器后端
 
-## 启动模式
+每个 profile 在创建时绑定一个 backend：
 
-Aleph 支持三种获取浏览器实例的方式：
+| 后端 | 何时使用 |
+|------|---------|
+| `PlaywrightCliBackend` | 默认；最广泛支持，无外部服务。 |
+| `ChromeMcpBackend` | 已经运行了 Chrome DevTools MCP 服务器，或需要 CDP 精细控制。 |
 
-| 模式 | 描述 | 配置 |
-|------|------|------|
-| **Auto** | 自动在系统上发现 Chromium 二进制文件 | `LaunchMode::Auto` |
-| **Binary** | 使用特定的浏览器可执行文件路径 | `LaunchMode::Binary { path }` |
-| **Connect** | 通过 WebSocket 连接到现有浏览器 | `LaunchMode::Connect { endpoint }` |
-
-### 浏览器配置
-
-```rust
-pub struct BrowserConfig {
-    pub mode: LaunchMode,           // Auto, Binary, 或 Connect
-    pub headless: bool,             // 无头模式（默认：false）
-    pub cdp_port: u16,              // CDP 端口（默认：9222）
-    pub user_data_dir: Option<String>, // 自定义配置文件目录
-    pub extra_args: Vec<String>,    // 额外的 Chromium 命令行参数
-}
-```
-
-### Chromium 发现
-
-在 `Auto` 模式下，Aleph 会在已知位置搜索 Chromium。`find_chromium()` 函数检查平台特定的路径以定位合适的浏览器二进制文件。
-
-## 浏览器工具
-
-`browser` 工具通过单个 `action` 参数暴露所有浏览器操作。这种设计为 agent 提供了统一的界面，无需记住几十个单独的工具名称。
-
-### 典型工作流
-
-agent 遵循此工作流与网页交互：
-
-```
-start -> open_tab -> snapshot -> click/type/fill -> screenshot -> stop
-```
-
-1. **启动**浏览器（headed 或 headless）
-2. **打开标签页**到 URL
-3. **拍摄快照**以获取带有 `ref_id` 的 ARIA 无障碍树
-4. 使用快照中的 `ref_id` **交互**元素
-5. **截图**以直观验证结果
-6. 完成后 **停止**浏览器
-
-### 操作参考
-
-#### 生命周期
-
-| 操作 | 描述 | 参数 |
-|------|------|------|
-| `start` | 启动浏览器实例 | 可选：`headless` (bool) |
-| `stop` | 关闭浏览器 | 无 |
-
-```json
-{ "action": "start" }
-{ "action": "start", "headless": true }
-{ "action": "stop" }
-```
-
-#### 标签页管理
-
-| 操作 | 描述 | 参数 |
-|------|------|------|
-| `open_tab` | 打开新标签页 | `url` (必需) |
-| `close_tab` | 关闭现有标签页 | `tab_id` (必需) |
-| `list_tabs` | 列出所有打开的标签页 | 无 |
-| `navigate` | 将标签页导航到 URL | `tab_id`, `url` (均必需) |
-
-```json
-{ "action": "open_tab", "url": "https://example.com" }
-{ "action": "list_tabs" }
-{ "action": "navigate", "tab_id": "ABC123", "url": "https://other.com" }
-{ "action": "close_tab", "tab_id": "ABC123" }
-```
-
-#### 元素交互
-
-| 操作 | 描述 | 参数 |
-|------|------|------|
-| `click` | 点击元素 | `tab_id`, `ref_id` 或 `selector` |
-| `type` | 向元素追加文本 | `tab_id`, `ref_id` 或 `selector`, `text` |
-| `fill` | 替换元素值 | `tab_id`, `ref_id` 或 `selector`, `text` |
-| `scroll` | 滚动页面或元素 | `tab_id`, `direction` (up/down/left/right) |
-| `hover` | 悬停在元素上 | `tab_id`, `ref_id` 或 `selector` |
-
-```json
-{ "action": "click", "tab_id": "ABC123", "ref_id": "e42" }
-{ "action": "type", "tab_id": "ABC123", "ref_id": "e7", "text": "search query" }
-{ "action": "fill", "tab_id": "ABC123", "selector": "input#email", "text": "user@example.com" }
-{ "action": "scroll", "tab_id": "ABC123", "direction": "down" }
-{ "action": "hover", "tab_id": "ABC123", "ref_id": "e15" }
-```
-
-#### 观察
-
-| 操作 | 描述 | 参数 |
-|------|------|------|
-| `screenshot` | 将标签页捕获为 PNG | `tab_id`, 可选 `full_page` |
-| `snapshot` | 获取 ARIA 无障碍树 | `tab_id` |
-| `evaluate` | 在标签页中运行 JavaScript | `tab_id`, `js` |
-
-```json
-{ "action": "screenshot", "tab_id": "ABC123", "full_page": true }
-{ "action": "snapshot", "tab_id": "ABC123" }
-{ "action": "evaluate", "tab_id": "ABC123", "js": "document.title" }
-```
+`browser_profile` 工具创建 / 列出 / 删除 profile；`browser_session` 工具
+查询当前活跃会话。
 
 ## 元素定位
 
-元素可以使用三种方法定位，按优先级排序：
+元素定位有三种方式，按优先级：
 
-### 1. ARIA Ref ID（首选）
+### 1. ARIA `ref_id`（首选）
 
-ARIA 快照中的每个元素都有一个唯一的 `ref_id`。这是最可靠的定位方法，因为它通过无障碍树位置引用元素：
+ARIA 快照里的每个元素都有一个唯一的 `ref_id`。这是最可靠的定位方法，
+因为它通过可访问性树的位置引用元素：
 
 ```json
 { "action": "click", "tab_id": "...", "ref_id": "e42" }
 ```
 
-agent 通过首先拍摄 `snapshot` 来获取 `ref_id`：
+先调用 `browser_snapshot` 获取 `ref_id`，再定位。
+
+### 2. 坐标 `(x, y)`
+
+后备：当 `ref_id` 不可用时，直接传视口坐标。
 
 ```json
-{ "action": "snapshot", "tab_id": "..." }
+{ "action": "click", "tab_id": "...", "x": 312, "y": 540 }
 ```
 
-返回：
+### 3. CSS 选择器 —— **已撤除**
+
+`browser_click`（以及其它定位工具）不再接受 `selector` 字段。传
+`selector` 现在返回错误：
+
+```
+CSS selector targeting is no longer supported. Use 'ref_id' from browser_snapshot.
+```
+
+ARIA `ref_id` 与坐标同时是稳定且通用的方式。
+
+## 工具清单
+
+### 生命周期
+
+| 工具 | 描述 |
+|------|------|
+| `browser_profile` | 创建 / 列出 / 删除 profile。 |
+| `browser_session` | 查询当前活跃会话。 |
+| `browser_open` | 启动 profile 的浏览器实例并打开一个新标签页。 |
+| `browser_tabs` | 列出 / 打开 / 关闭标签页。 |
+
+### 导航与观察
+
+| 工具 | 描述 |
+|------|------|
+| `browser_navigate` | 导航现有标签页到 URL。 |
+| `browser_snapshot` | 获取 ARIA 可访问性树。 |
+| `browser_screenshot` | 截图（PNG / JPEG / WebP），可选 `full_page`。 |
+| `browser_evaluate` | 在标签页中执行 JavaScript。 |
+
+### 元素交互
+
+| 工具 | 描述 |
+|------|------|
+| `browser_click` | 点击元素（`ref_id` 或坐标；`double=true` 双击）。 |
+| `browser_type` | 追加文本（**追加**到 value，触发 `input` 事件）。 |
+| `browser_fill_form` | 一次性填充多个字段（结构化 JSON）。 |
+| `browser_press_key` | 按下单个键（`Enter` / `Tab` / 箭头键 / 等）。 |
+| `browser_hover` | 触发 `mouseenter` / `mouseover`。 |
+| `browser_scroll` | 滚动（方向 + 增量）。 |
+| `browser_select` | 选择 `<select>` 选项。 |
+| `browser_drag` | 拖拽（`from` + `to`）。 |
+| `browser_upload` | 上传文件到 input。 |
+
+### 观察与调试
+
+| 工具 | 描述 |
+|------|------|
+| `browser_console` | 读控制台日志。 |
+| `browser_network` | 读网络请求 / 响应。 |
+| `browser_cookies` | 列出 / 设置 / 清除 cookies。 |
+| `browser_dialog` | 接受 / 关闭浏览器对话框（alert / confirm / prompt）。 |
+
+### 会话状态
+
+| 工具 | 描述 |
+|------|------|
+| `browser_emulate` | 模拟设备 / 网络条件。 |
+| `browser_resize` | 视口尺寸。 |
+| `browser_wait_for` | 等待选择器 / 文本 / 函数返回值。 |
+| `browser_pdf` | 标签页另存为 PDF。 |
+
+## 典型工作流
+
+```
+browser_open → browser_snapshot → browser_click / browser_fill_form
+                                  → browser_screenshot (可选验证)
+                                  → browser_evaluate (可选数据提取)
+                                  → browser_close_tab (或 browser_session 结束)
+```
+
+每个工具都接受 `profile` 字段（默认 `"default"`）以及后端特定的额外字段。
+
+## ARIA 无障碍快照
+
+无障碍快照给页面提供结构化表示。`browser_snapshot` 返回：
 
 ```json
 {
@@ -198,243 +195,78 @@ agent 通过首先拍摄 `snapshot` 来获取 `ref_id`：
 }
 ```
 
-### 2. CSS 选择器
-
-当 `ref_id` 不可用时，使用 CSS 选择器：
-
-```json
-{ "action": "click", "tab_id": "...", "selector": "button.submit" }
-{ "action": "fill", "tab_id": "...", "selector": "#login-form input[type='email']", "text": "user@example.com" }
-```
-
-选择器使用 `document.querySelector()` 和 `getBoundingClientRect()` 解析。
-
-### 3. 坐标（内部）
-
-操作最终内部解析为视口坐标 `(x, y)`。`Coordinates` 变体存在用于编程用途，但通常不直接由 agent 使用。
-
-## 操作实现
-
-所有浏览器操作都通过将目标解析为视口坐标，然后在页面上下文中执行 JavaScript 来工作：
-
-### Click
-
-将目标解析为 `(x, y)`，然后使用 `document.elementFromPoint(x, y).click()`。
-
-### Type
-
-聚焦目标元素，然后向其 `value` 属性追加文本并调度 `input` 事件，设置 `bubbles: true`。
-
-### Fill
-
-与 type 类似，但替换整个值而不是追加。调度 `input` 和 `change` 事件以确保框架（React, Vue 等）检测到更改。
-
-### Scroll
-
-使用 `scrollBy()` 设置 `behavior: 'smooth'` 和在指定方向上固定增量 300px。
-
-### Hover
-
-在目标坐标调度 `mouseenter` 和 `mouseover` 事件以触发 CSS `:hover` 样式和 JavaScript 事件监听器。
-
-## 屏幕截图
-
-屏幕截图以 PNG（默认）或 JPEG 捕获，并作为 Base64 编码数据返回：
-
-```rust
-pub struct ScreenshotResult {
-    pub data_base64: String,  // Base64 编码图像
-    pub width: u32,           // 图像宽度（像素）
-    pub height: u32,          // 图像高度（像素）
-    pub format: String,       // "png" 或 "jpeg"
-}
-```
-
-### 选项
-
-| 选项 | 类型 | 默认 | 描述 |
-|------|------|------|------|
-| `full_page` | boolean | false | 捕获整个可滚动页面 |
-| `format` | string | "png" | 图像格式：`png`, `jpeg`, `webp` |
-| `quality` | integer | 80 | JPEG 质量（1-100） |
-
-## ARIA 无障碍快照
-
-无障碍快照提供页面的结构化表示：
-
-```rust
-pub struct AriaSnapshot {
-    pub elements: Vec<AriaElement>,   // 元素扁平列表
-    pub page_title: Option<String>,   // 文档标题
-    pub page_url: Option<String>,     // 当前 URL
-    pub focused_ref: Option<String>,  // 当前聚焦元素
-}
-
-pub struct AriaElement {
-    pub ref_id: String,               // 唯一引用 ID
-    pub role: String,                 // ARIA 角色（button, textbox, link 等）
-    pub name: Option<String>,         // 无障碍名称
-    pub value: Option<String>,        // 当前值（用于输入）
-    pub state: Vec<String>,           // 状态（focused, checked, disabled 等）
-    pub bounds: Option<ElementRect>,  // 视口位置和大小
-    pub children: Vec<AriaElement>,   // 嵌套元素
-}
-```
-
-快照是 agent 理解页面结构的主要方式。通过读取 ARIA 树，agent 可以识别交互元素、理解其用途，并通过 `ref_id` 定位它们。
+`ref_id` 是一次快照有效的；后续的 `browser_snapshot` 会重新分配。
 
 ## 审批策略
 
-浏览器工具支持用于控制敏感操作的审批策略。当配置时，变更操作需要审批才能执行：
+所有 `browser_*` 工具接受一个用户定义的 `ApprovalPolicy`
+（`src/approval/`），对敏感动作进行门控：
 
-| 操作类别 | 需要审批 |
-|----------|----------|
-| `start`, `stop` | 否 |
-| `list_tabs`, `screenshot`, `snapshot`, `scroll`, `hover` | 否（只读） |
-| `open_tab`, `navigate` | 是（导航） |
-| `click` | 是（变更） |
-| `type`, `fill` | 是（输入） |
-| `evaluate` | 是（JavaScript 执行） |
+| 动作类别 | 审批门 |
+|---------|--------|
+| `browser_open`, `browser_profile`, `browser_session`, `browser_close_tab` | 否（生命周期） |
+| `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_cookies` | 否（只读） |
+| `browser_navigate`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_scroll`, `browser_select`, `browser_drag`, `browser_upload`, `browser_evaluate`, `browser_dialog`, `browser_emulate`, `browser_resize`, `browser_pdf` | 是（导航 / 变更 / 输入） |
 
-```rust
-let policy = Arc::new(MyApprovalPolicy::new());
-let tool = BrowserTool::new().with_approval_policy(policy);
-```
+策略拒绝时调用返回 `success: false` 加拒绝原因；策略要求确认时返回
+`success: false` 加 `Approval required: …` 提示；agent 据此转交用户。
 
-当策略拒绝操作时：
+## 网络策略
 
-```json
-{
-  "success": false,
-  "message": "Action denied by approval policy: navigation to untrusted domain"
-}
-```
-
-当策略需要用户确认时：
-
-```json
-{
-  "success": false,
-  "message": "Approval required: Confirm navigation to https://example.com",
-  "data": {
-    "approval_required": true,
-    "prompt": "Confirm navigation to https://example.com"
-  }
-}
-```
-
-## 配置
-
-在 Aleph 的配置中配置浏览器工具：
-
-```json
-{
-  "browser": {
-    "headless": false,
-    "cdp_port": 9222,
-    "user_data_dir": "~/.aleph/browser-profile",
-    "extra_args": [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-infobars",
-      "--no-first-run"
-    ]
-  }
-}
-```
-
-<Callout type="info">
-标志 `--disable-blink-features=AutomationControlled` 和 `--disable-infobars` 会自动添加以减少反机器人系统的检测。
-</Callout>
+所有浏览器导航都通过 `BrowserSsrfGuard`
+（`src/browser/network_policy.rs`）—— 与工具 SSRF 引擎共享
+`SsrfPolicy`。私网、链接本地、loopback 与云元数据端点默认被拒。
 
 ## 优雅降级
 
-当没有浏览器运行时，操作调用返回友好的消息而不是抛出错误：
+未配置 profile 的 `browser_*` 调用返回友好消息而不是错误：
 
 ```json
 {
   "success": false,
-  "message": "Browser is not running. Use action 'start' to launch a browser first."
+  "message": "No browser profile configured. Use browser_profile to create one first."
 }
 ```
 
-这允许 agent 检测到需要浏览器并启动一个，而无需错误处理样板代码。
+agent 据此自动创建 profile 并启动浏览器，无需错误样板。
 
 ## 安全注意事项
 
-- **进程隔离**：浏览器作为具有自己沙箱的单独 Chromium 进程运行
-- **无头模式**：在生产环境中使用 `headless: true` 以防止视觉干扰
-- **审批策略**：通过审批系统控制敏感操作（导航、JavaScript 执行）
-- **用户数据目录**：使用专用的浏览器配置文件以将 cookie 和存储与用户的个人浏览器隔离
-- **JavaScript 评估**：`evaluate` 操作可以在页面上下文中执行任意 JS —— 这很强大，但应在安全敏感部署中通过审批策略控制
-- **反自动化标志**：默认 Chromium 标志减少机器人检测，但某些网站仍可能阻止自动化访问
+- **进程隔离**：浏览器作为独立 Chromium 进程运行在自己的沙箱里。
+- **无头模式**：在生产环境用 `headless: true` 避免视觉干扰。
+- **审批策略**：通过审批系统控制敏感动作（导航、JS 评估、上传）。
+- **用户数据目录**：用专用浏览器 profile 把 cookie 和存储与用户个人
+  浏览器隔离。
+- **JS 评估**：`browser_evaluate` 可在页面上下文执行任意 JS —— 强大但在
+  安全敏感部署中应被审批策略控制。
+- **反自动化标志**：默认 Chromium 标志减少机器人检测，但部分网站可能
+  仍会阻止自动化访问。
 
-## 示例：搜索和提取
-
-使用浏览器工具的典型 agent 工作流：
+## 示例：搜索并提取
 
 ```
-Agent: I'll search for the latest Rust release notes.
+1. browser_profile(action="create", id="default", headless=true)
+   -> profile created
 
-1. browser(action="start", headless=true)
-   -> "Browser started successfully."
+2. browser_open(profile="default", url="https://blog.rust-lang.org/")
+   -> tab_id="TAB_001"
 
-2. browser(action="open_tab", url="https://blog.rust-lang.org/")
-   -> { "tab_id": "TAB_001" }
-
-3. browser(action="snapshot", tab_id="TAB_001")
+3. browser_snapshot(profile="default", tab_id="TAB_001")
    -> { elements: [
-        { ref_id: "e1", role: "heading", name: "Rust Blog" },
-        { ref_id: "e5", role: "link", name: "Rust 1.84.0" },
-        ...
-      ]}
+         { ref_id: "e1", role: "heading", name: "Rust Blog" },
+         { ref_id: "e5", role: "link", name: "Rust 1.84.0" },
+         …
+       ]}
 
-4. browser(action="click", tab_id="TAB_001", ref_id="e5")
-   -> "Clicked."
+4. browser_click(profile="default", tab_id="TAB_001", ref_id="e5")
+   -> success
 
-5. browser(action="snapshot", tab_id="TAB_001")
-   -> { elements: [{ ref_id: "e1", role: "heading", name: "Announcing Rust 1.84.0" }, ...] }
+5. browser_snapshot(profile="default", tab_id="TAB_001")
+   -> new ref ids for the announcement page
 
-6. browser(action="evaluate", tab_id="TAB_001", js="document.body.innerText")
-   -> "Announcing Rust 1.84.0 ..."
+6. browser_evaluate(profile="default", tab_id="TAB_001",
+                    js="document.body.innerText")
+   -> extracted text
 
-7. browser(action="stop")
-   -> "Browser stopped."
+7. browser_tabs(action="close", tab_id="TAB_001")
 ```
-
-agent 使用快照来理解页面结构，通过 `ref_id` 点击链接，并通过 JavaScript 评估提取内容。
-
----
-
-## 26.7.x 补充
-
-### 工具集重组
-
-26.7.x 内置工具集重组（约 19+ 工具），`src/builtin_tools/` 重新分目录。
-
-### 并行执行
-
-`src/tools/concurrency.rs` 资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）—— Act 阶段按声明分桶并行。
-
-### `tools.defer_mcp_tools` / `enable_tool_search`
-
-26.7.7+ 渐进式工具披露——非核心工具 schema 折叠为 name + description；`tool_search` 元工具按需加载。
-
-### MCP 按需发现
-
-26.7.17+：`McpResourceIndexLayer` 已回退。`mcp_list_*` 工具按需发现；`cat`-guard read-steer 路由到原生 MCP / 技能 / 插件读取。
-
-### `file_read` 支持图片
-
-26.6.29+：`file_read` 现在支持图片（`image_read`）；未变更的文件读取通过读缓存在轮次间去重。
-
-### 失败关闭
-
-未知工具在 `ask` tier 下**失败关闭**。
-
-### `plugin.install` 统一入口
-
-26.7.21+：按源（市场 / 压缩包 / 路径）分类统一处理。
-
-### 完整 `tools.*` / `mcp.*` / `extensions.*` RPC
-
-详见 [网关方法参考](/docs/zh/gateway/methods)。

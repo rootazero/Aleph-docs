@@ -1,371 +1,364 @@
 ---
 title: "Execution Approval"
-description: "Human-in-the-loop approval system for shell command execution with allowlists, risk analysis, and multi-channel decision routing"
+description: "Action-aware human-in-the-loop approval gate — ToolFacts metadata, grant fingerprint, 120 s timeout"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-Aleph's execution approval system is a three-tier security model that governs how shell commands are executed by the AI agent. Every command passes through a pipeline of parsing, risk analysis, and approval before it reaches the operating system. This human-in-the-loop design ensures that the AI cannot silently execute destructive operations on your machine.
+Aleph's execution approval system is an **action-aware** human-in-the-loop
+gate: every shell command, every mutating operation, every confirm-gated
+tool call passes through the same enforcement point
+`src/sandbox/exec_approval/`. The human sees the **actual call**, not the
+tool name; the grant fingerprint keys on **raw canonical arguments**.
 
-The system is built around three core principles:
+Core design points:
 
-1. **Default deny** -- Commands are blocked unless explicitly approved or matched by an allowlist entry.
-2. **Progressive trust** -- Users can approve commands once, for the session, or permanently (adding to the allowlist). Trust accumulates over time.
-3. **Multi-channel routing** -- Approval requests can be delivered to the CLI, macOS app, Telegram, Discord, or any connected interface.
+1. **Default deny** — any tool `ScopedToolService` judges non-idempotent
+   or approval-required must go through the gate.
+2. **Metadata-driven** — the gate reads `ToolFacts.name` /
+   `idempotent` / `requires_approval`, **never the tool name** — MCP tools
+   register as `{server}__{tool}`, and a name-glob table silently lets
+   whole families through the gate it claims to hold.
+3. **Action-aware** — sees the **actual call** (`ApprovalAction` carrying
+   the real command / `operation=delete path=…`), not just the word `bash`.
+4. **Grant fingerprint keys on canonical args** — uses the raw canonical
+   args, **not** the redacted summary (redaction would collapse distinct
+   secrets to one placeholder, letting one grant cover another).
 
 **Source locations:**
-- Exec kernel: `src/exec/kernel.rs`
-- Approval manager: `src/exec/manager.rs`
-- Risk analyzer: `src/exec/risk.rs`
-- Command parser: `src/exec/parser.rs`
-- Allowlist: `src/exec/allowlist.rs`
-- Configuration: `src/exec/config.rs`
+- Enforcement chokepoint: `src/tools/scoped/` (`dispatch.rs`, `builder.rs`,
+  `traits.rs`)
+- Action-aware gate: `src/sandbox/exec_approval/` (`gate.rs`, `action.rs`,
+  `session_memory.rs`, `denial_ledger.rs`)
+- Exec tier: `src/config/types/policies/exec_tier.rs`
+- Pending / resolve pairing: `src/exec/manager.rs` (`ExecApprovalManager`)
+- Rendering helper: `src/exec/parser.rs::analyze_shell_command` (render only)
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      Exec Kernel Pipeline                     │
-│                                                               │
-│  Command ──→ Parser ──→ Risk Analyzer ──→ Approval Manager   │
-│                                               │               │
-│                              ┌────────────────┼──────┐       │
-│                              │                │      │       │
-│                              ▼                ▼      ▼       │
-│                          Allowlist        Human    Auto      │
-│                           Check          Approval  Approve   │
-│                              │                │      │       │
-│                              └────────────────┼──────┘       │
-│                                               │               │
-│                                               ▼               │
-│                              Execute ──→ Output Masker        │
-│                                               │               │
-│                                               ▼               │
-│                                          Audit Log            │
-└──────────────────────────────────────────────────────────────┘
+Tool call
+   │
+   ▼
+ScopedToolService::execute_inner
+   │
+   ├── [policies.tool_permissions]   ── explicit entries win
+   │
+   ├── exec tier  ──────────────────►  Ask / Auto / Full
+   │                                    │
+   │                                    ▼
+   │                              ToolFacts read
+   │                              (idempotent, requires_approval)
+   │
+   ├── [sandbox.command_policy] ───  hardline command floor
+   │                                  (no tier can lower)
+   │
+   ▼
+ApprovalGate (action-aware)
+   │
+   ├── grant_fingerprint(tool, canonical args)
+   │       │
+   │       ├── hit in session_memory? ─► Allow (cached)
+   │       │
+   │       └── otherwise:
+   │           Render ApprovalAction (command / op=delete path=…)
+   │           Route through ApprovalRequester to a human
+   │           │
+   │           ├── AllowOnce  ─► this call only
+   │           ├── AllowSession ─► this + same fingerprint later
+   │           │                  (cached by fingerprint)
+   │           ├── AllowAlways ─► clamped to AllowSession by clamp_decision
+   │           │                  (no persistent allowlist — button
+   │           │                   is never rendered)
+   │           ├── Deny <reason> ─► refuse; reason rendered back to model
+   │           └── Timeout ─► refuse (not ledgered)
 ```
 
-When a command enters the pipeline:
-1. The **Command Parser** breaks it into structured segments (program, arguments, pipes, redirects).
-2. The **Risk Analyzer** scores each segment against pattern-based rules.
-3. The **Approval Manager** checks the allowlist, blocklist, and -- if needed -- routes the request to a human for approval.
-4. On approval, the command is executed and output passes through the **Output Masker** to redact secrets.
-5. Every decision is written to the **Audit Log**.
+## Exec tier (Ask / Auto / Full)
 
-## Security Levels
+`[policies] exec_tier` is the **one user-facing dial** over tool
+permissions. It is not a second policy engine and not a second
+enforcement mechanism: it is a rule consulted at the chokepoint every
+tool call already funnels through, whenever no explicit
+`[policies.tool_permissions]` entry names the tool.
 
-The `security` field in the exec approvals configuration determines the base behavior:
+| Tier | What it asks about | Notes |
+|------|--------------------|-------|
+| `Ask` | Every mutating / side-effecting tool | Read-only tools stay allowed, so the model can still investigate |
+| `Auto` (default) | The irreversible tail only | `*_delete`, `vault_*`, `team_disband`, an MCP server's `destructiveHint`, and `file_ops` argument-level `delete` / `move` |
+| `Full` | Nothing | `[sandbox.command_policy]` floor still applies |
 
-| Level | Behavior | Use Case |
-|-------|----------|----------|
-| `deny` | Block all command execution | Maximum lockdown, no shell access |
-| `allowlist` | Only allow commands matching allowlist patterns | Default -- balanced safety |
-| `full` | Allow all commands without approval | Full trust (development environments) |
+### The lattice (who wins)
 
-The `ask` policy controls what happens when a command is not in the allowlist:
+```
+explicit [policies.tool_permissions] entry   (exact name > glob)
+        ↓  (nothing named this tool)
+configured `default`   TIGHTENED BY   the tier's verdict
+        ↓  (restrictive_min — tier can only raise, never widen)
+[sandbox.command_policy] hardline floor      (no tier can lower it — Full included)
+```
 
-| Policy | Behavior |
-|--------|----------|
-| `off` | Never prompt the user; use `ask_fallback` |
-| `on-miss` | Prompt when command is not in allowlist (default) |
-| `always` | Prompt for every command, even allowlisted ones |
+`effective_permission(permissions, tier, facts)` is the **only** place this
+precedence exists. Both consumers (`ScopedToolService::permission_for` and
+the gateway slash-command fast path) call it, so the two surfaces cannot
+drift.
 
-## Risk Analysis
+### Where the tier comes from, per turn
 
-Before reaching the approval manager, every command is scored by the risk analyzer. Risk levels determine how prominently the approval prompt is displayed:
+`resolve_turn_permissions` resolves it once per run: **request > session >
+global**.
+
+- **request** — the Panel composer pill sends the tier *with* the first
+  message (`chat.send`), so it governs the very turn it was armed for.
+- **session** — persisted to `identity_meta.custom["exec_tier"]` via
+  `sessions.patch` (the same carrier as `project_root`). `null` = follow
+  global. `sessions.patch` validates the value against `ExecTier::from_id`,
+  exactly as `chat.send` does.
+- **global** — `[policies] exec_tier`, read live per turn (no restart).
+- A **non-operator** caller (a chat-tier channel) is clamped after
+  resolution: it can tighten the tier but never raise it.
+
+### Unknown-tool default: fail closed
+
+`ToolFacts { name, idempotent, requires_approval }` is filled from the
+tool's own `ToolDefinition`:
+
+- `idempotent` ← `LoopTool::is_idempotent()` — the builtin pure-read
+  allowlist (`tools/retry.rs::is_idempotent_builtin_name`, which
+  delegates to the single `READ_ONLY_TOOLS` list in
+  `tools/adapters/registry_adapter.rs` — read-only ⇒ idempotent, one
+  source for the concurrency claim, auto-retry, and this tier rule) or
+  an MCP server's `readOnlyHint` / `idempotentHint`. Anything that
+  declares nothing is `false`.
+- `requires_approval` ← `ToolDefinitionMetadata` (an MCP server's
+  `destructiveHint`).
+
+Hence: **not idempotent = mutating**, **an unknown tool is
+non-idempotent**, so `Ask` tier is fail-closed for every tool Aleph has
+never heard of. A table of name globs cannot do this — MCP tools register
+as `{server}__{tool}` (`github__delete_repo`), and any glob table
+silently lets whole families through the gate it claims to hold.
+
+The one argument-level exception: `file_ops` multiplexes `list` and
+`delete` behind a single name, so `ExecTier::asks_for_arguments` reads
+the `operation` field. That is a deterministic safety hard-filter
+(explicitly permitted by R7), not a judgement about intent.
+
+## Action-aware approval gate
+
+### `ApprovalAction`
+
+The gate is asked to approve *this call*, not *this tool*:
 
 ```rust
-pub enum RiskLevel {
-    Low,       // Read-only operations (ls, cat, git log)
-    Medium,    // File modifications (cp, mv, mkdir)
-    High,      // System changes (chmod, chown, sudo)
-    Critical,  // Destructive operations (rm -rf, mkfs, dd)
+// src/sandbox/exec_approval/action.rs
+pub struct ApprovalAction {
+    pub tool_name: String,
+    pub summary: String,             // the ACTUAL call, redacted + capped
+    pub cwd: Option<String>,
+    pub analysis: Option<CommandAnalysis>,
+    pub reason: String,
+}
+
+// src/sandbox/exec_approval/gate.rs
+trait ApprovalRequester {
+    async fn request_approval(&self, action: &ApprovalAction) -> ApprovalResponse;
+}
+pub struct ApprovalResponse {
+    pub outcome: ApprovalOutcome,
+    pub deny_reason: Option<String>, // the human's own words on a /deny <reason>
 }
 ```
 
-### Built-in Risk Rules
+`summary` renders what will actually happen — the command for `bash` /
+`code_exec` (fed through the real `exec::parser::analyze_shell_command`),
+`operation=delete path=…` for `file_ops`, `k=v` otherwise — then passes
+through `SecretMasker`, is newline-flattened, and is capped at 200 chars
+on a `char_indices()` boundary. **A confirmation gate that hides what it
+is gating trains the user to click Approve**, which converts the whole
+tier system into theater; every surface (Panel card, plain-text channel
+prompt, cluster node over reverse RPC) now shows the action.
 
-| Pattern | Risk | Description |
-|---------|------|-------------|
-| `rm -rf /` | Critical | Recursive root delete |
-| `rm -rf ~` | Critical | Home directory wipe |
-| `curl * \| sh` | Critical | Remote code execution |
-| `> /dev/sd*` | Critical | Disk overwrite |
-| `dd if=* of=/dev/` | Critical | Raw device write |
-| `mkfs.*` | Critical | Filesystem format |
-| `:(){ :\|:& };:` | Critical | Fork bomb |
-| `sudo *` | High | Elevated privileges |
-| `chmod 777 /` | High | Permissive permissions |
-| `git *` | Low | Version control |
-| `ls *` | Low | Directory listing |
-| `cat *` | Low | File read |
+### Grant fingerprint keys on the action, not the tool
 
-You can add custom blocked patterns via the configuration:
+`confirm_with_memory` computes `grant_fingerprint(tool, &args)` once —
+over the **raw canonical arguments**, not the redacted summary (redaction
+collapses distinct secrets to one placeholder, so a grant on one
+credential would cover another) — and uses it for **both** the session
+memory and the denial ledger.
 
-```json
-{
-  "agents": {
-    "main": {
-      "blocklist": [
-        "curl.*evil\\.com",
-        "npm publish"
-      ]
-    }
-  }
-}
-```
+Consequence: "Allow for this session" authorizes **that exact call**.
+Under `Ask`, `bash` re-prompts per distinct command instead of
+whitelisting arbitrary argv after one approval (codex's
+`ApprovalStore` semantics). Noisier, deliberately.
 
-## Allowlist System
-
-The allowlist is the core of the progressive trust model. Each entry is a glob pattern matched against the resolved executable path:
+### Decisions
 
 ```rust
-pub struct AllowlistEntry {
-    pub id: Option<String>,          // Unique identifier
-    pub pattern: String,             // Glob pattern (e.g., "/usr/bin/git")
-    pub last_used_at: Option<i64>,   // Unix timestamp
-    pub last_used_command: Option<String>,
-    pub last_resolved_path: Option<String>,
-}
-```
-
-### Pattern Matching
-
-Patterns are matched against the fully resolved path of the command executable:
-
-| Pattern | Matches |
-|---------|---------|
-| `/usr/bin/git` | Exact path match |
-| `/usr/bin/*` | Any executable in `/usr/bin/` |
-| `git` | Name-based match (resolved via PATH) |
-| `~/bin/*` | User bin directory |
-
-### Automatic Allowlist Growth
-
-When a user approves a command with **Allow Always**, the resolved executable path is automatically added to the agent's allowlist. This means the allowlist grows organically as the user works:
-
-```
-1. Agent wants to run: git status
-2. Resolved path: /usr/bin/git
-3. User clicks "Allow Always"
-4. /usr/bin/git is added to allowlist
-5. All future git commands are auto-approved
-```
-
-## Approval Decisions
-
-When a command requires human approval, the user is presented with three options:
-
-```rust
+// src/exec/socket.rs
 pub enum ApprovalDecisionType {
-    AllowOnce,    // Execute this command only
-    AllowAlways,  // Execute and add to allowlist
-    Deny,         // Block execution
+    AllowOnce,    // this call
+    AllowSession, // this call, for the rest of the session (by fingerprint)
+    AllowAlways,  // clamped to AllowSession by clamp_decision
+                  // (no persistent allowlist — never rendered)
+    Deny,
 }
 ```
 
-Each decision is scoped:
+- **Timeout ⇒ refusal.** `DEFAULT_APPROVAL_TIMEOUT_MS = 120s`;
+  `ApprovalOutcome::is_approved` excludes `Timeout`. A timeout is
+  deliberately **not** written to the denial ledger — an expired card
+  is not a decision. There is no fail-open path.
+- **Orphans cannot hijack a card.** `PendingEntry::is_live()`
+  (not expired ∧ receiver not closed) filters both `resolve_for_session`
+  and `list_pending`, so a cancelled run's zombie can no longer win the
+  `/approve` FIFO or render.
+- **Denial is terminal** for that call, returned to the model as an
+  in-context instruction not to retry it, rewrite it, or achieve the
+  same result by other means. Three denials trip the sticky pause in
+  `denial_ledger.rs`.
+- **A denial can carry the human's reason.** `/deny wrong directory,
+  use /tmp` (channels) or `exec.approval.resolve {reason}` (RPC) stamps
+  `ExecApprovalRecord.deny_reason`; the gate renders it verbatim in the
+  model-facing error (`The user said: "…"`) so the model re-plans on the
+  actual objection. Display-layer only — the ledger still keys on the
+  fingerprint.
 
-| Decision | Scope | Persistence |
-|----------|-------|-------------|
-| Allow Once | This execution only | None |
-| Allow Always | All future matching commands | Written to `exec-approvals.json` |
-| Deny | This execution only | None |
+### Decision transport
 
-### Approval Timeout
+All approvals flow over WebSocket JSON-RPC:
 
-Approval requests have a default timeout of **120 seconds** (2 minutes). If no decision is received within the timeout, the command is denied. This prevents the agent from hanging indefinitely.
+- Panel → `exec.approval.list` / `exec.approval.resolve {outcome, reason}`
+  RPC.
+- Channels (Telegram / Discord / iMessage) → the same RPC, rendered as
+  inline buttons.
+- Cluster nodes → reverse RPC (the `exec.approval.resolve` payload also
+  accepts an optional `reason`; older nodes ignore it).
 
-```rust
-pub const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 120_000;
-```
+There used to be a Unix-socket IPC transport for approvals — it was
+never wired into the server and has been removed (see `src/exec/socket.rs`
+docs). The only wire vocabulary is WebSocket + JSON-RPC.
 
-## Multi-Channel Approval Routing
+## Command analysis (approval-summary rendering only)
 
-Approval requests are broadcast to all connected interfaces simultaneously. The first response wins:
+`src/exec/parser.rs::analyze_shell_command` splits a shell string into
+its executables and segments. Its output feeds the **approval card
+summary** (so a human approving a `bash` call sees the real command, not
+just the word `bash`) — it is a rendering aid, **not** an enforcement
+gate. The catastrophic floor that actually refuses commands is
+`sandbox::command_policy`, whose real hardline rules
+(`command_policy/rules.rs::hardline_rules`) cover:
 
-```
-┌─────────────┐
-│ Approval     │───→ CLI Terminal (inline prompt)
-│ Manager      │───→ macOS App (via IPC socket)
-│              │───→ Telegram (inline keyboard)
-│              │───→ Discord (button components)
-└─────────────┘
-```
+- fork bomb;
+- bare-root `rm -rf /` / `rm -rf //` / `/.` (cycle 7 tightened the
+  multi-slash / dot bypass);
+- `dd` / `mkfs` / redirect to raw block device;
+- Windows: drive / hive-root recursive delete, `format`, the shadow-copy
+  destruction chain;
+- `powershell -EncodedCommand` payloads decoded before matching, so
+  encoding a script does not remove it from the floor's view.
 
-### Chat Channel Approval UI
+## Output masking
 
-In chat interfaces (Telegram, Discord), approval requests are rendered as interactive messages with inline buttons:
+Two distinct paths, by consumer:
 
-```
-🔒 Command Approval Required
+- **`SecretMasker`** (`src/exec/masker.rs`) — redacts secrets in strings
+  shown to a human or written to logs (e.g., the approval-card summary
+  — `ApprovalAction` runs its command summary through it).
+- **`sandbox::scrub::scrub_and_gate_output`** (`src/sandbox/scrub.rs`) —
+  the **single** source of truth for a finished command's stdout /
+  stderr: redacts secrets at the byte level, strips invisible / bidi
+  control characters, and returns a **block-class** verdict. A
+  block-class hit (a PEM private key — `leak_detector::BLOCK_CLASS_SECRETS`)
+  makes the sandbox **fail closed** rather than return the surrounding
+  context. Both `WorkspaceSandbox` and `WorktreeSandbox` route their
+  output through it, so the floor cannot diverge between execution
+  paths.
 
-Command: npm install express
-Working Directory: /project
-Agent: main
+The two secret-pattern catalogs (`src/secrets/leak_detector.rs` and
+`src/exec/secret_patterns.rs`) are kept in sync — the private-key regex
+is `-----BEGIN[A-Z ]*PRIVATE KEY-----` in both, so a bare PKCS#8 header
+cannot slip one catalog but not the other.
 
-┌─────────────┬────────────────┐
-│ ✅ Allow Once │ ✅ Allow Always │
-├─────────────┴────────────────┤
-│          ❌ Deny              │
-└──────────────────────────────┘
-```
+## Three closed bypasses (do not re-open them)
 
-The callback data format for button presses is:
-```
-approve:{approval_id}:{decision}
-```
-Where `decision` is `once`, `always`, or `deny`.
+Each of these was a surface that could execute a tool **without** passing
+through `ScopedToolService`. When you add a new such surface, this is the
+question to ask first.
 
-### Local IPC Approval
+1. **Slash-command fast path** (`execution_engine/slash_command.rs`).
+   `/bash`, `/file_ops`, etc. dispatched straight into
+   `BuiltinToolRegistry` — no tier, no `tool_permissions`, no
+   `requires_confirmation`, no operator gate — and the path is reachable
+   **from channels**. Now `slash_gate_reason()` returns the existing
+   `ExecutionError::Fallthrough` for any gated call, routing it into the
+   fully-gated agent loop; ungated slash commands keep their
+   deterministic fast path.
+2. **`tools.invoke` RPC** (`gateway/handlers/tools_invoke.rs`). Its
+   denylist (`security/dangerous_tools.rs`) once named 7 tools that
+   **did not exist in this repo** — it had been inert its entire life.
+   It now names the real ones and also refuses confirmation-gated
+   tools (`is_confirmation_gated`, reading
+   `CONFIRMATION_REQUIRED_TOOLS`). *Known limitation*: argument-level
+   asks (an `Auto`-tier `file_ops delete`) are still ungated on this
+   direct-invoke surface — closing that needs an approval transport on
+   the RPC.
+3. **Background runs** (goal / loop continuations, cron, heartbeat,
+   a2a). A continuation used to drop both `caller_role` and the
+   channel's `tool_permissions` layer — a chat-tier Telegram session
+   escalated itself to local-operator authority by continuing.
+   `carry_policy_metadata` now forwards exactly those two keys (and
+   deliberately *not* `channel_id` / `conversation_id`, which would
+   make an unattended run's approvals look deliverable).
 
-For the macOS desktop application, approval requests are routed through the Unix domain socket IPC protocol. See [IPC Protocol](/docs/en/security/ipc) for details.
+## Unattended = fail closed
 
-## Per-Agent Configuration
+A run with no human attached is stamped `UNATTENDED_KEY`
+(`execution_engine/mod.rs`) at every headless producer: cron **when its
+approval is not routable** (a job carrying both a source channel and a
+conversation has a real `/approve` path — stamping it would auto-deny a
+working HITL flow), heartbeat and a2a always. `continuation_metadata`
+inserts the marker **last**, so an inherited key can never demote a
+continuation to attended. The flag also rides
+`TurnContext.unattended`, so `session_send` stamps **wait-mode** children
+of a headless parent too (`fire_and_forget || parent.unattended`) —
+previously only fire-and-forget children were stamped and a headless
+parent's wait-mode child hung the full 120 s per gated tool before
+refusing.
 
-Each agent can have its own security policy. Agent-specific settings override global defaults:
+`ScopedToolService` then **immediately** denies confirm-gated tools
+instead of publishing an approval card into the void and blocking for
+the 120 s timeout. The model is told the run is unattended.
 
-```json
-{
-  "version": 1,
-  "defaults": {
-    "security": "allowlist",
-    "ask": "on-miss",
-    "ask_fallback": "deny"
-  },
-  "agents": {
-    "main": {
-      "security": "allowlist",
-      "auto_allow_skills": true,
-      "allowlist": [
-        { "pattern": "/usr/bin/git" },
-        { "pattern": "/usr/local/bin/node" }
-      ],
-      "skill_allowlist": ["github", "ffmpeg"]
-    },
-    "sandbox": {
-      "security": "deny"
-    }
-  }
-}
-```
+Teams (dispatcher / broadcast) are deliberately **not** stamped: a
+member run's approvals resolve to a Panel card, and the user who
+dispatched the team is the operator watching it.
 
-<Callout type="info">
-Configuration is stored at `~/.aleph/exec-approvals.json` and supports optimistic locking via content hashing to prevent concurrent write conflicts.
-</Callout>
+## Audit
 
-### Configuration Resolution
+The **session event log** is the live trail.
+`tools/scoped/dispatch.rs::record_approval_decision` writes
+`ToolCallApproved` / `ToolCallDenied` session events. Query it through
+the session service, alongside every other event of the run that
+produced it.
 
-When resolving configuration for a specific agent, the system applies a layered merge:
+**Do not look for** `src/exec/approval/storage.rs` or `audit.rs` — they
+were deleted together with the `aleph-server audit` CLI on 2026-07-14.
+Their three SQLite tables (`~/.aleph/approval_audit.db`) had **only test
+helpers as writers**, so an operator running `audit` got zeros and
+concluded nothing had happened — while the real trail sat in the session
+event log. That is worse than dead code. Also removed in the same sweep,
+all zero-consumer: `src/exec/approval/{escalation,binding,path_canonicalize}.rs`,
+`benches/approval_performance.rs`,
+`exec/allowed_decisions.rs::{decisions_for_risk, assess_command_decisions,
+risk_segments}`.
 
-1. Start with built-in defaults (`security: deny`, `ask: on-miss`)
-2. Apply global `defaults` section
-3. Apply agent-specific overrides
+## See also
 
-```rust
-// Resolution priority: agent > global > built-in
-let security = agent.security
-    .or(global.security)
-    .unwrap_or(ExecSecurity::Deny);
-```
-
-## Output Masking
-
-After execution, command output passes through the output masker to redact sensitive data before it is returned to the AI or displayed to the user:
-
-| Pattern | Replacement |
-|---------|-------------|
-| API keys | `[API_KEY_REDACTED]` |
-| Passwords | `[PASSWORD_REDACTED]` |
-| AWS credentials | `[AWS_CRED_REDACTED]` |
-| Private keys | `[PRIVATE_KEY_REDACTED]` |
-| OAuth tokens | `[TOKEN_REDACTED]` |
-
-## Audit Logging
-
-Every execution decision is recorded for later review:
-
-```rust
-pub struct AuditEntry {
-    pub timestamp: DateTime<Utc>,
-    pub command: String,
-    pub risk_level: RiskLevel,
-    pub decision: ApprovalDecision,
-    pub executor: String,
-    pub session_key: String,
-    pub duration_ms: u64,
-    pub exit_code: Option<i32>,
-}
-```
-
-Query recent high-risk executions:
-
-```sql
-SELECT * FROM audit_log
-WHERE risk_level >= 'High'
-AND timestamp > datetime('now', '-7 days')
-ORDER BY timestamp DESC;
-```
-
-## See Also
-
-- [IPC Protocol](/docs/en/security/ipc) -- How approval requests are communicated between processes
-- [Sandboxing](/docs/en/security/sandboxing) -- Capability-based execution sandboxing
-- [Device Pairing](/docs/en/security/pairing) -- Trust establishment for remote devices
-
----
-
-## 26.7.x Addendum
-
-### Fail-Closed
-
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
-
-### Three-Tier Execution Permissions
-
-| Tier | Behavior |
-|------|----------|
-| `ask` | Prompt for approval before every execution; unknown tools fail closed (default) |
-| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
-| `full` | All auto-allow (besides the hard security filter) |
-
-### Action-Aware Approval Gate
-
-26.7.15+ the approval gate is action-aware — the human sees the actual command and the grant fingerprint **keys on it**. Single choke point at `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
-
-### TOFU Certificate Trust
-
-26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use. Shared decision core + pinned trust store + SHA-256 fingerprint + SAN/Subject parsing + approval splash + macOS WKWebView / iOS Keychain adapters.
-
-### Pairing Single-Sourced on the Router
-
-26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
-
-### Real Client IP
-
-26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
-
-### Signed Operation Ledger
-
-26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
-
-### Desktop `open` / `launch` Command Injection
-
-26.7.21+ fix: dispatched through `ShellExecuteW` instead of a shell.
-
-### Bundled-Extraction Symlink Planting
-
-26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata`.
-
-### Process-Isolation Kernel
-
-26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. A legitimate carve-out from R1.
-
-### See Also
-
-- [Architectural Redlines R1 / R3 / R10](/docs/en/philosophy/redlines) — hard constraints
-- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and approval
-- [Security: Pairing](/docs/en/security/pairing) — device pairing
-- [Security: Sandbox](/docs/en/security/sandboxing) — OS-level sandbox
+- [Security Overview](/docs/en/security/overview) — tier and floor design
+- [Sandboxing](/docs/en/security/sandboxing) — OS isolation + the
+  command floor
+- [Pairing](/docs/en/security/pairing) — permission system the paired
+  device interacts with

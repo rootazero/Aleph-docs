@@ -7,23 +7,34 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-You can extend Aleph's capabilities by creating custom tools. There are three approaches, ordered by integration depth:
+You can extend Aleph by creating custom tools. Three primary paths, ordered
+by integration depth:
 
-| Approach | Language | Registration | Best For |
-|----------|----------|-------------|----------|
-| **Rust built-in** | Rust | Compile-time | Core capabilities, maximum performance |
-| **MCP server** | Any (Node.js, Python, etc.) | Runtime | External integrations, polyglot teams |
-| **Markdown skill** | Markdown + prompts | Runtime | Prompt-based workflows, no code needed |
+| Method | Language | Registration | Best for |
+|--------|----------|--------------|----------|
+| **Rust built-in** | Rust | Compile-time | Core capabilities, max performance |
+| **MCP server** | Any (Node.js, Python, …) | Runtime | External integrations, polyglot teams |
+| **Markdown skill** | Markdown + prompts | Runtime | Prompt-driven workflows, no code |
+
+Every tool call funnels through **the same chokepoint**:
+`ScopedToolService` (`src/tools/scoped/`). It merges per-channel
+`tool_permissions`, the exec tier (Ask / Auto / Full), and the sandbox
+command-policy floor on one path — when you write a new tool, the chokepoint
+is what decides whether your tool needs to carry `requires_confirmation`
+metadata or a sandbox dependency at registration.
 
 ---
 
-## Creating a Rust Built-in Tool
+## Creating a Rust built-in tool
 
-This is the most integrated approach. Your tool is compiled into Aleph's binary and uses static dispatch for zero-cost abstraction.
+This is the deepest integration. Your tool is compiled into the Aleph binary
+with static dispatch and zero-cost abstractions.
 
-### Step 1: Define the Argument Type
+### Step 1 — Define the argument type
 
-Create a struct for your tool's input arguments. Derive `JsonSchema` for automatic schema generation — the doc comments on each field become the parameter descriptions that the LLM sees:
+Create a struct for your tool's input parameters. Derive `JsonSchema` for
+automatic schema generation — the field-level doc comments become the
+parameter descriptions the LLM sees:
 
 ```rust
 // src/builtin_tools/weather.rs
@@ -31,7 +42,7 @@ Create a struct for your tool's input arguments. Derive `JsonSchema` for automat
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Arguments for the weather tool
+/// Arguments for the weather tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WeatherArgs {
     /// City name or coordinates (e.g., "Tokyo" or "35.6762,139.6503")
@@ -41,7 +52,7 @@ pub struct WeatherArgs {
     #[serde(default = "default_unit")]
     pub unit: String,
 
-    /// Number of forecast days (1-7, default: 1)
+    /// Forecast days (1–7, default: 1)
     #[serde(default = "default_days")]
     pub days: u8,
 }
@@ -50,85 +61,49 @@ fn default_unit() -> String { "celsius".to_string() }
 fn default_days() -> u8 { 1 }
 ```
 
-### Step 2: Define the Output Type
+The `required` array is auto-computed: only fields without
+`#[serde(default)]` are required.
+
+### Step 2 — Define the output type
 
 The output struct is serialized to JSON and returned to the LLM:
 
 ```rust
-/// Output from the weather tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeatherOutput {
-    /// City name
     pub city: String,
-    /// Current temperature
     pub temperature: f64,
-    /// Temperature unit
     pub unit: String,
-    /// Weather condition (e.g., "sunny", "cloudy", "rain")
     pub condition: String,
-    /// Forecast for upcoming days
     pub forecast: Vec<ForecastDay>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForecastDay {
-    pub date: String,
-    pub high: f64,
-    pub low: f64,
-    pub condition: String,
 }
 ```
 
-### Step 3: Implement the AlephTool Trait
+### Step 3 — Implement the `AlephTool` trait
 
 ```rust
 use async_trait::async_trait;
 use crate::error::Result;
 use crate::tools::AlephTool;
 
-/// Weather information tool
 #[derive(Clone)]
 pub struct WeatherTool {
     api_key: String,
     client: reqwest::Client,
 }
 
-impl WeatherTool {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            api_key,
-            client: reqwest::Client::new(),
-        }
-    }
-}
-
 #[async_trait]
 impl AlephTool for WeatherTool {
     const NAME: &'static str = "weather";
 
-    const DESCRIPTION: &'static str = "\
-        Get current weather and forecast for a location. \
-        Returns temperature, conditions, and multi-day forecast.";
+    const DESCRIPTION: &'static str =
+        "Get current weather and forecast for a location. \
+         Returns temperature, conditions, and multi-day forecast.";
 
     type Args = WeatherArgs;
     type Output = WeatherOutput;
 
-    /// Optional: mark as requiring confirmation for sensitive operations
-    fn requires_confirmation(&self) -> bool {
-        false
-    }
-
-    /// Optional: provide usage examples for few-shot learning
-    fn examples(&self) -> Option<Vec<String>> {
-        Some(vec![
-            "weather(location='Tokyo', unit='celsius', days=3)".to_string(),
-            "weather(location='New York')".to_string(),
-            "weather(location='51.5074,-0.1278', unit='fahrenheit')".to_string(),
-        ])
-    }
-
     async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        // Your implementation here
         let response = self.client
             .get("https://api.weather.example.com/v1/forecast")
             .query(&[
@@ -141,46 +116,53 @@ impl AlephTool for WeatherTool {
             .await?
             .json::<WeatherOutput>()
             .await?;
-
         Ok(response)
     }
 }
 ```
 
-### Step 4: Register the Tool
+### Step 4 — Register in the builtin registry
 
-Add a builder method to `AlephToolServer` in `src/tools/builtin.rs`:
-
-```rust
-impl AlephToolServer {
-    /// Register the weather tool
-    pub fn with_weather(self, api_key: String) -> Self {
-        self.tool(WeatherTool::new(api_key))
-    }
-}
-```
-
-Then register it during server construction:
-
-```rust
-let server = AlephToolServer::new()
-    .with_bash()
-    .with_file_ops()
-    .with_weather(weather_api_key);
-```
-
-### Step 5: Export from the Module
-
-Add your tool to `src/builtin_tools/mod.rs`:
+Built-in tools are not registered through a hand-written builder — they are
+assembled by the executor's builtin registry
+(`src/executor/builtin_registry/`). Add your tool to
+`src/builtin_tools/mod.rs`:
 
 ```rust
 pub mod weather;
-pub use weather::{WeatherArgs, WeatherOutput, WeatherTool};
+pub use weather::{WeatherTool, WeatherArgs, WeatherOutput};
 ```
+
+The registry creates instances and injects shared dependencies
+(`Arc<Sandbox>`, `Arc<ProfileManager>`, `Arc<McpManagerHandle>`, …) into
+the tools that need them. A tool constructed without a required dependency
+returns a structured "sandbox not configured" / "manager not configured"
+error and **does not** fall back to unscoped execution — the default is
+safe, not permissive.
+
+If your tool spawns subprocesses, it **must** hold an `Arc<dyn Sandbox>` and
+dispatch through it (`src/sandbox/mod.rs::Sandbox` trait). Naked
+`Command::new` is **not** allowed in `src/builtin_tools/` for exec-class
+tools.
+
+### Step 5 — Declare approval semantics
+
+`ScopedToolService` reads `ToolDefinitionMetadata`, **not** tool names:
+
+- `idempotent` ← `LoopTool::is_idempotent()` or an MCP server's
+  `idempotentHint`. Undeclared = `false` ⇒ requires approval under the
+  `Ask` tier.
+- `requires_approval` ← an MCP server's `destructiveHint`, or membership
+  in `CONFIRMATION_REQUIRED_TOOLS` (e.g., `vault_store`, `agent_delete`,
+  `team_disband`).
+
+The way to change these semantics is to declare them. A name-glob whitelist
+adds no extra coverage on top of this.
 
 ### Generated JSON Schema
 
-When your tool is registered, Aleph auto-generates this tool definition for the LLM:
+When your tool is registered, Aleph auto-generates this tool definition for
+the LLM:
 
 ```json
 {
@@ -202,7 +184,7 @@ When your tool is registered, Aleph auto-generates this tool definition for the 
         },
         "days": {
           "type": "integer",
-          "description": "Number of forecast days (1-7, default: 1)",
+          "description": "Forecast days (1–7, default: 1)",
           "default": 1
         }
       },
@@ -212,17 +194,17 @@ When your tool is registered, Aleph auto-generates this tool definition for the 
 }
 ```
 
-The `required` array is automatically computed — only fields without `#[serde(default)]` are required.
-
 ---
 
-## Creating an MCP Server Tool
+## Creating an MCP server tool
 
-For tools in languages other than Rust, or when you want to iterate without recompiling Aleph, create an MCP server. The server runs as a separate process and communicates with Aleph via the Model Context Protocol.
+For languages other than Rust, or when you want to iterate without
+recompiling Aleph, MCP is the right path. The server runs as a separate
+process and communicates with Aleph over the Model Context Protocol.
 
-### Node.js Example
+### Node.js example
 
-Using the official `@modelcontextprotocol/sdk`:
+Use the official `@modelcontextprotocol/sdk`:
 
 ```typescript
 // weather-server/index.ts
@@ -234,7 +216,6 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// Define the tool
 server.setRequestHandler("tools/list", async () => ({
   tools: [
     {
@@ -243,10 +224,7 @@ server.setRequestHandler("tools/list", async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          location: {
-            type: "string",
-            description: "City name or coordinates",
-          },
+          location: { type: "string", description: "City name or coordinates" },
           unit: {
             type: "string",
             enum: ["celsius", "fahrenheit"],
@@ -255,41 +233,35 @@ server.setRequestHandler("tools/list", async () => ({
         },
         required: ["location"],
       },
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+      },
     },
   ],
 }));
 
-// Handle tool calls
 server.setRequestHandler("tools/call", async (request) => {
   if (request.params.name === "get_weather") {
     const { location, unit } = request.params.arguments;
-
     const response = await fetch(
       `https://api.weather.example.com/v1?q=${location}&units=${unit}`
     );
     const data = await response.json();
-
     return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
   }
-
   throw new Error(`Unknown tool: ${request.params.name}`);
 });
 
-// Start the server
 const transport = new StdioServerTransport();
 await server.connect(transport);
 ```
 
-### Python Example
+### Python example
 
-Using the official `mcp` package:
+Use the official `mcp` package:
 
 ```python
 # weather_server.py
@@ -310,15 +282,8 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "City name or coordinates",
-                    },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                        "default": "celsius",
-                    },
+                    "location": {"type": "string"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
                 },
                 "required": ["location"],
             },
@@ -330,16 +295,13 @@ async def call_tool(name: str, arguments: dict):
     if name == "get_weather":
         location = arguments["location"]
         unit = arguments.get("unit", "celsius")
-
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 "https://api.weather.example.com/v1",
                 params={"q": location, "units": unit},
             )
             data = resp.json()
-
         return [TextContent(type="text", text=json.dumps(data, indent=2))]
-
     raise ValueError(f"Unknown tool: {name}")
 
 async def main():
@@ -351,7 +313,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### Registering with Aleph
+### Register with Aleph
 
 Add the server to `~/.aleph/mcp_config.json`:
 
@@ -373,46 +335,45 @@ Add the server to `~/.aleph/mcp_config.json`:
 }
 ```
 
-For the Python example:
+You must restart `aleph-server` for changes to take effect — the file is
+not auto-reloaded and there is no MCP-management RPC surface.
 
-```json
-{
-  "weather-py": {
-    "id": "weather-py",
-    "name": "Weather Server (Python)",
-    "transport": "stdio",
-    "command": "python",
-    "args": ["/path/to/weather_server.py"],
-    "requires_runtime": "python",
-    "auto_start": true
-  }
-}
-```
+### MCP tool naming convention
 
-Or use the McpManager API programmatically:
+Your server-declared tool name (`get_weather`) appears in Aleph's registry
+as `<server>__<tool>` (`weather__get_weather`). `McpHandler::qualified_name`
+is the single source of naming truth — it strips the manager's redundant
+`{server}:` prefix, maps any character outside `[A-Za-z0-9_-]` to `_`, and
+truncates to 64 characters (the alphabet OpenAI function calling /
+Anthropic / Gemini all accept). Don't put colons or dots in your tool
+names.
 
-```rust
-let config = McpManagerConfig::stdio(
-    "weather",
-    "Weather Server",
-    "npx",
-)
-.with_args(vec!["tsx".to_string(), "/path/to/index.ts".to_string()])
-.with_runtime("node")
-.with_timeout(30);
+### Annotations = metadata-driven gating
 
-handle.add_server(config).await?;
-```
+`ToolAnnotations` are the signal `ScopedToolService` actually reads to
+decide `idempotent` / `requires_approval`:
+
+| Annotation | Field |
+|------------|-------|
+| `readOnlyHint: true` | `concurrent_safe` (auto-retry) |
+| `idempotentHint: true` | `idempotent` (tier treats as safe) |
+| `destructiveHint: true` | `requires_approval` (Ask tier still prompts) |
+
+Not declaring them in your server response means the field is `false` —
+which means "unknown ⇒ non-idempotent ⇒ mutating ⇒ Ask tier holds
+fail-closed". That's by design; no name-glob override is allowed on top
+of it.
 
 ---
 
-## Creating a Markdown Skill
+## Creating a Markdown skill
 
-Markdown skills are the simplest way to extend Aleph — no code required. They define prompt-based workflows in `SKILL.md` files.
+Markdown skills are the simplest way to extend Aleph — no code. Skills
+define prompt-driven workflows in `SKILL.md` files.
 
-### Skill File Structure
+### Skill file structure
 
-Create a `SKILL.md` file in one of the skill directories:
+Create a `SKILL.md` file in one of the configured skill directories:
 
 ```markdown
 ---
@@ -433,98 +394,56 @@ Please:
 Output the summary in markdown format.
 ```
 
-### Skill Directories
-
-Aleph loads skills from configured directories:
-
-```rust
-let server = AlephToolServer::new_with_skills(vec![
-    PathBuf::from("skills"),
-    PathBuf::from("~/.aleph/skills"),
-]).await;
-```
-
-Skills are auto-loaded at startup and registered as dynamic tools in the `AlephToolServer`.
-
-<Callout type="info">
-Markdown skills support hot-reload via a file watcher. Changes to `SKILL.md` files are detected and the skill is automatically re-registered without restarting Aleph.
-</Callout>
+Skills are loaded at startup from configured directories and hot-reloaded
+on file change — no restart needed.
 
 ---
 
-## Tool Design Best Practices
+## Tool design best practices
 
-### Naming Conventions
+### Naming conventions
 
-- Use `snake_case` for tool names: `web_fetch`, `file_read`
-- Be descriptive but concise: `memory_search` not `search_memory_database`
-- Group related tools with a common prefix: `sessions_spawn`, `sessions_send`, `sessions_list`
+- **snake_case**: `web_fetch`, `file_read`, `bash_exec`.
+- **Descriptive but concise**: `memory_search` over `search_memory_database`.
+- **MCP tools**: write clean inner names (`get_weather`); the `server__`
+  prefix is added by `McpHandler`.
+- **Do not** put colons or dots in tool names — they map to `_` and the
+  name is truncated to 64 chars.
 
-### Description Quality
+### Description quality
 
-The tool description is critical — it is what the LLM uses to decide whether to call your tool. Write clear, specific descriptions:
+The description is what the LLM uses to decide whether to call your tool.
+Be specific. State inputs and outputs.
 
-```rust
-// Good: specific, explains what it does and returns
-const DESCRIPTION: &'static str = "\
-    Get current weather and forecast for a location. \
-    Returns temperature, conditions, and multi-day forecast.";
+### Metadata, not name whitelists
 
-// Bad: vague, doesn't explain the output
-const DESCRIPTION: &'static str = "Weather tool";
-```
+If your tool is destructive, do not rely on a name match to force approval.
+`ScopedToolService` reads `ToolDefinitionMetadata`:
 
-### Few-Shot Examples
+- Built-in tools: register once in `CONFIRMATION_REQUIRED_TOOLS` (in
+  `src/tools/scoped/`).
+- MCP servers: return `destructiveHint` / `requires_approval` in
+  `tools/list` `annotations`.
 
-Providing examples significantly improves the LLM's ability to use your tool correctly:
+### Error handling
 
-```rust
-fn examples(&self) -> Option<Vec<String>> {
-    Some(vec![
-        "weather(location='Tokyo', unit='celsius', days=3)".to_string(),
-        "weather(location='New York')".to_string(),
-    ])
-}
-```
+Return `Result<Self::Output>` with Aleph's error types. Map HTTP / network
+failures to `ToolError::Transport` or `Timeout`; map everything else to
+`ToolError::Execution` so the model sees and recovers.
 
-Examples are injected into the tool definition's `llm_context` field and shown to the LLM alongside the schema.
+### Sandbox contract
 
-### Error Handling
-
-Tools should return `Result<Self::Output>` and use Aleph's error types:
-
-```rust
-async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-    if args.days > 7 {
-        return Err(AlephError::InvalidArgument(
-            "days must be between 1 and 7".to_string()
-        ));
-    }
-
-    let response = self.client.get(&url).send().await
-        .map_err(|e| AlephError::ToolExecution(format!("HTTP request failed: {e}")))?;
-
-    Ok(output)
-}
-```
-
-### Confirmation for Destructive Operations
-
-Mark tools that perform destructive or sensitive operations:
-
-```rust
-fn requires_confirmation(&self) -> bool {
-    true  // User must approve before execution
-}
-```
-
-This integrates with the approval policy system — when configured, the agent loop will pause and request user confirmation before executing the tool.
+If your tool spawns subprocesses, **accept** an `Arc<dyn Sandbox>` and
+dispatch through it (`WorkspaceSandbox::execute`). Naked `Command::new` is
+not allowed in `src/builtin_tools/`. The sandbox + command-policy layer
+(`src/sandbox/command_policy/`) handles working directory, capability
+escalation, and the hardline command filter for you.
 
 ---
 
-## Testing Custom Tools
+## Testing custom tools
 
-### Unit Testing
+### Unit tests
 
 Test the `AlephTool` implementation directly:
 
@@ -537,10 +456,8 @@ mod tests {
     fn test_tool_definition() {
         let tool = WeatherTool::new("test_key".to_string());
         let def = AlephTool::definition(&tool);
-
         assert_eq!(def.name, "weather");
         assert!(def.description.contains("weather"));
-        assert!(!def.requires_confirmation);
     }
 
     #[tokio::test]
@@ -551,123 +468,27 @@ mod tests {
             unit: "celsius".to_string(),
             days: 1,
         }).await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_tool_call_json() {
-        let tool = WeatherTool::new("test_key".to_string());
-        let args = serde_json::json!({
-            "location": "London",
-            "unit": "celsius"
-        });
-
-        let result = AlephTool::call_json(&tool, args).await;
         assert!(result.is_ok());
     }
 }
 ```
 
-### Integration Testing with AlephToolServer
+### Integration tests
 
-Test the full tool server integration:
-
-```rust
-#[tokio::test]
-async fn test_tool_server_integration() {
-    let server = AlephToolServer::new()
-        .with_weather("test_key".to_string());
-
-    assert!(server.has_tool("weather").await);
-    assert_eq!(server.len().await, 1);
-
-    let result = server.call(
-        "weather",
-        serde_json::json!({ "location": "Paris" })
-    ).await;
-
-    assert!(result.is_ok());
-}
-```
-
-### Testing Dynamic Dispatch
-
-Verify the blanket `AlephToolDyn` implementation:
-
-```rust
-#[tokio::test]
-async fn test_dynamic_dispatch() {
-    let tool: Box<dyn AlephToolDyn> = Box::new(WeatherTool::new("key".to_string()));
-
-    assert_eq!(tool.name(), "weather");
-
-    let args = serde_json::json!({ "location": "Berlin" });
-    let result = tool.call(args).await;
-    assert!(result.is_ok());
-}
-```
-
-### Testing Name Repair
-
-Verify that the auto-repair system handles your tool name correctly:
-
-```rust
-#[tokio::test]
-async fn test_name_repair() {
-    let server = AlephToolServer::new()
-        .with_weather("key".to_string());
-
-    // Snake case repair
-    let repaired = server.try_repair_tool_name("Weather").await;
-    assert_eq!(repaired, Some("weather".to_string()));
-}
-```
+Integration tests exercise the full `ScopedToolService` pipeline: register
+the tool against the shared `LoopToolRegistry`, construct a
+`ScopedToolService` bound to that registry (with permissions and tier),
+then `execute(name, args)`. `tests/sandbox_capability_approval.rs` is the
+reference example.
 
 ---
 
 ## Summary
 
-| What to build | Use this approach |
-|--------------|-------------------|
+| What to build | Use this |
+|---------------|----------|
 | High-performance core tool | Rust `AlephTool` trait |
-| Integration with external API | MCP server (Node.js/Python) |
-| Prompt-based workflow | Markdown skill |
-| Tools needing hot-reload | MCP server or Markdown skill |
-| Tools needing type safety | Rust `AlephTool` trait |
-
----
-
-## 26.7.x Addendum
-
-### Toolset Reorganized
-
-26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`.
-
-### Parallel Execution
-
-`src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
-
-### `tools.defer_mcp_tools` / `enable_tool_search`
-
-26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
-
-### MCP On-Demand Discovery
-
-26.7.17+: `McpResourceIndexLayer` is retracted. `mcp_list_*` tools discover on demand; a `cat`-guard read-steer routes to native MCP / skill / plugin reads.
-
-### `file_read` Supports Images
-
-26.6.29+: `file_read` now supports images (`image_read`); unchanged file reads are de-duplicated across turns via a read cache.
-
-### Fail-Closed
-
-Unknown tools **fail closed** under the `ask` tier.
-
-### `plugin.install` Unified Entry
-
-26.7.21+: classifies by source (marketplace / zip / path) and routes uniformly.
-
-### Full `tools.*` / `mcp.*` / `extensions.*` RPC
-
-See [Gateway Methods Reference](/docs/en/gateway/methods).
+| External API integration | MCP server (Node.js / Python) |
+| Prompt-driven workflow | Markdown skill |
+| Tool that needs hot-reload | MCP server or Markdown skill |
+| Tool that needs type safety | Rust `AlephTool` trait |

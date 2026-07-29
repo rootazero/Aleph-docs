@@ -1,361 +1,236 @@
 ---
 title: "设备配对"
-description: "基于 8 字符代码的配对协议，用于在 Aleph 与新设备或频道发送者之间建立信任"
+description: "通过启动票 / 设备 token 与频道发送者代码在 Aleph 与新设备或频道发送者之间建立信任"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## 概览
 
-设备配对是 Aleph 的信任建立协议。新设备（macOS 应用、iOS 客户端、Web 浏览器）或新聊天发送者（Telegram 用户、Discord 成员）在与 Aleph 交互之前，必须完成验证连接是否由服务器所有者授权的配对流程。
+设备配对是 Aleph 的信任建立协议。新设备（macOS 应用、iOS 客户端、Web
+浏览器）或新聊天发送者（Telegram 用户、Discord 成员）在与 Aleph 交互
+之前，必须完成验证"连接是否由服务器所有者授权"的配对流程。
 
-该协议使用短命的 **8 字符 Base32 代码** 显示给所有者，所有者确认或拒绝配对请求。这在概念上类似于蓝牙配对或 TV 应用激活——对非技术用户足够简单，同时在密码学上健全。
+两类信任建立：
 
-**源代码位置：**
-- 配对管理器：`src/gateway/security/pairing.rs`
-- 设备存储：`src/gateway/device_store.rs`
+| 类型 | 用途 | 凭证 |
+|------|------|------|
+| **设备配对** | 远程桌面 / 手机 / CLI 客户端 | `aleph-bt-*` 启动票换取 `aleph-dt-*` 设备 token |
+| **频道发送者配对** | Telegram / Discord / iMessage 未知发送者 | 6 字符字母数字代码（inbound router 单源存储） |
+
+两者都通过 **RPC** 管理（`pairing.list` / `pairing.approve` /
+`pairing.reject` / `gateway.ticket.create`），不是 CLI 命令。
+
+**源位置：**
+- 设备票 + token 管理：`src/gateway/security/device_token_manager.rs`
+- 频道配对存储：`src/gateway/pairing_store.rs`
+- 设备注册表（共享 + 集群节点）：`src/gateway/security/store/devices.rs`
 - 加密工具：`src/gateway/security/crypto.rs`
-- 安全存储：`src/gateway/security/store.rs`
-- CLI 命令：`src/bin/aleph_server/commands/pairing.rs`
-- 设备命令：`src/bin/aleph_server/commands/devices.rs`
+- 安全存储：`src/gateway/security/store/`
+- CLI：`src/bin/aleph-server/commands/pair.rs`、`bootstrap_token.rs`
+- 票 + 设备 RPC：`src/gateway/handlers/gateway_ticket.rs`、
+  `src/gateway/handlers/gateway_devices.rs`
 
 ## 为什么配对？
 
-Aleph 是一个自托管的 AI 助手，可以访问你的文件、shell 和在线账户。允许不受限制的连接将是一个重大的安全风险。配对协议解决了三个问题：
+Aleph 是一个自托管的 AI 助手，可以访问你的文件、shell 和在线账户。
+允许不受限制的连接将是一个重大安全风险。配对协议解决三个问题：
 
-1. **身份验证** — 确保连接的设备或用户由服务器所有者授权。
-2. **密钥交换** — 设备在配对期间提交其公钥，启用未来连接的加密认证。
-3. **范围限制** — 频道发送者可以在配对时获得有限的权限。
+1. **身份验证** —— 确保连接的设备或用户由服务器所有者授权。
+2. **密钥交换** —— 设备在配对期间提交（或获得）其密钥材料，用于未来
+   连接的加密认证。
+3. **范围限制** —— 频道发送者在配对时获得有限的权限。
 
-## 配对类型
+## 设备配对（远程 Panel / CLI）
 
-系统通过统一的 `PairingRequest` 枚举支持两种类型的配对：
+### 流程
 
-### 设备配对
+```
+设备                            Gateway                         操作员
+ │                                │                              │
+ │── gateway.ticket.create ──────►│                              │
+ │                                │                              │
+ │◄── { ticket: "aleph-bt-x",   ──│                              │
+ │     urls: [...] } ────────────│                              │
+ │                                │                              │
+ │   [设备 / QR 扫描 / 键入]      │                              │
+ │   [URL 来自服务端,             │                              │
+ │    含 ?bt=aleph-bt-x]          │                              │
+ │                                │                              │
+ │── WS /ws connect {             │                              │
+ │     bootstrap_ticket:          │                              │
+ │     "aleph-bt-x" } ──────────►│                              │
+ │                                │                              │
+ │   [exchange_bootstrap_ticket]  │                              │
+ │   [mint device_token]          │                              │
+ │                                │                              │
+ │◄── { device_token:            ─│                              │
+ │     "aleph-dt-…",              │                              │
+ │     role: "operator" } ────────│                              │
+ │                                │                              │
+ │   [设备存储 token 供后续重连]   │                              │
+```
 
-用于桌面应用、移动应用和 CLI 客户端：
+### 启动票 —— `aleph-bt-*`
 
-```rust
-PairingRequest::Device {
-    request_id: String,
-    code: String,              // 8 字符 Base32 代码
-    device_name: String,       // "Alice's MacBook Pro"
-    device_type: Option<DeviceType>,  // iOS、macOS、Android、CLI、Web
-    public_key: Vec<u8>,       // Ed25519 公钥（32 字节）
-    fingerprint: DeviceFingerprint,   // SHA256(public_key)[..16]
-    remote_addr: Option<String>,
-    created_at: i64,
-    expires_at: i64,
+`aleph-bt-*` 票是 5 分钟 TTL、单次使用的凭证。它的存在意义是让长生命周期
+凭证（device_token / shared Gateway token）**永远不进 URL 或 QR**。
+
+`gateway.ticket.create` 返回：
+
+```json
+{
+  "ticket": "aleph-bt-...",
+  "urls": [
+    "http://192.168.1.20:18790/?bt=aleph-bt-...",
+    "http://[fd00::1]:18790/?bt=aleph-bt-..."
+  ],
+  "expires_at": "..."
 }
 ```
 
-### 频道配对
+`urls` 字段由服务端组装（`tls::discover_interface_ips`）—— 不要让 Panel
+用 `window.location` 自己拼，localhost 生成时永远是
+`http://127.0.0.1:<port>/…`，远程操作员永远看不到。
 
-用于验证聊天平台上的发送者：
+### 设备 token —— `aleph-dt-*`
 
-```rust
-PairingRequest::Channel {
-    request_id: String,
-    code: String,              // 8 字符 Base32 代码
-    channel: String,           // "telegram"、"discord"、"imessage"
-    sender_id: String,         // 平台特定的用户 ID
-    metadata: Option<Value>,   // 额外上下文
-    created_at: i64,
-    expires_at: i64,
-}
+成功交换启动票后，握手返回一个 `aleph-dt-*` 设备 token。Panel 把它
+持久化并在每次重连时作为 `connect.device_token` 提交。
+
+设备 token：
+
+- 长生命周期，绑定到一台设备；
+- SHA-256-hashed 存储在 `security.db`；
+- 通过 `connect::resolve_connect_auth` 在 `connect` 握手中验证。
+
+### 无头核心：CLI 路径
+
+不需要 daemon 运行即可 mint 一个票或打印恢复 token：
+
+```bash
+# Mint a 5-minute bootstrap ticket
+aleph-server pair                    # default TTL = 300s
+aleph-server pair --ttl 3600         # 1 hour (clamped to 60..=86400)
+
+# Print the shared Gateway token (recovery / manual entry)
+aleph-server bootstrap-token
 ```
 
-## 配对流程
+`aleph-server pair` 直接打开 0600 `security.db`（WAL），不需要 daemon
+在运行。`aleph-server bootstrap-token` 打印共享 Gateway token，用于
+手动恢复（粘贴进 Panel / iOS App 的"Authorize"对话框）。
 
-### 设备配对序列
+### 撤销
 
-```
-设备                          Gateway                         所有者
-  │                                │                              │
-  │── POST /pair/request ─────────►│                              │
-  │   { name, type, public_key }   │                              │
-  │                                │                              │
-  │◄── { code: "XKRF4B7N" } ──────│                              │
-  │                                │                              │
-  │   [设备显示代码]                │── 通知 ─────────────────────►│
-  │                                │   "新设备: Alice's MB"        │
-  │                                │   "代码: XKRF4B7N"           │
-  │                                │                              │
-  │                                │◄── aleph pairing approve ────│
-  │                                │    XKRF4B7N                  │
-  │                                │                              │
-  │                                │── [生成 device_id] ──►       │
-  │                                │── [存储到 device_store] ►    │
-  │                                │── [签发签名令牌] ──►         │
-  │                                │                              │
-  │◄── { device_id, token } ───────│                              │
-  │                                │                              │
-  │   [设备存储令牌用于             │                              │
-  │    未来认证]                    │                              │
-```
+两种粒度，都**立即**生效：
 
-### 频道发送者配对序列
+- `gateway.token.rotate` —— 重新生成共享 token，**撤销所有配对设备**，
+  关闭所有远端 socket。
+- `gateway.devices.revoke {device_id}` —— 仅撤销**一台**设备：把它
+  活跃的会话同步打回登录墙，然后关闭 socket（WS 4001 `device_revoked`）。
+  `gateway.devices.list` 是清单，带 `connected` 实时标志。
 
-当新用户通过 Telegram 或 Discord 发送消息时：
+两者都限定 `device_type = 'panel'`，从不影响集群节点。`device_id`
+是客户端断言的，`devices` 表与集群节点共享一个命名空间 —— 交换过程会
+拒绝一个已经命名了非 Panel 设备的 `device_id`（`cluster::admit_node` 拒
+镜像情况）。没有这道保护，一张票就能换一个 Panel 看不到、无法撤销的
+操作员 token。
+
+## 频道发送者配对
+
+新聊天发送者（Telegram 用户、Discord 成员、iMessage 未知发送者）走
+更轻量的流程：6 字符字母数字代码通过**单一**入站配对存储
+（`src/gateway/pairing_store.rs`）路由 —— 通道不再有本地配对存储。
 
 ```
-发送者                        Gateway                         所有者
+发送者                        Gateway                         操作员
   │                                │                              │
   │── "你好, Aleph" ──────────────►│                              │
   │   (来自未知发送者)              │                              │
-  │                                │── 生成配对代码 ──►           │
+  │                                │── 生成 6 字符代码 ──►        │
   │◄── "请使用代码验证:             │                              │
-  │     MRKV52HJ" ────────────────│                              │
+  │     MRKV52" ──────────────────│                              │
   │                                │── 通知 ─────────────────────►│
   │                                │   "Telegram 上的新发送者"     │
-  │                                │   "代码: MRKV52HJ"           │
+  │                                │   "代码: MRKV52"             │
   │                                │                              │
-  │                                │◄── aleph pairing approve ────│
-  │                                │    MRKV52HJ                  │
-  │                                │                              │
-  │                                │── [存储已批准的发送者] ►      │
+  │                                │◄── pairing.approve ──────────│
+  │                                │    { channel, code }          │
   │                                │                              │
   │◄── "你已验证!" ────────────────│                              │
 ```
 
-## 配对代码
+### 6 字符代码
 
-### 生成
-
-配对代码是 8 字符字符串，从受限的 Base32 字母表中抽取，排除视觉上容易混淆的字符：
+频道配对代码是 **6 字符字母数字**（不是 8 字符 Base32；后者已经移除）：
 
 ```rust
-pub const PAIRING_CODE_LENGTH: usize = 8;
-pub const PAIRING_CODE_CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+fn generate_code() -> String {
+    // 6 alphanumeric characters, ambiguous chars (0/O, 1/I/l) excluded
+    ...
+}
 ```
 
-排除的字符：`0`（零）、`1`（一）、`I`（大写 I）、`O`（大写 O）。这避免了在代码被大声朗读或在模糊字体中显示时产生混淆。
+### 过期与容量
 
-代码空间是 `28^8 = ~3770 亿` 个可能的代码，在 10 请求容量窗口内碰撞实际上是不可能的。
+`[routing] pairing_code_expiry_secs` 控制过期（默认 **24 h**，`0` = 永不
+过期）。代码在过期后自动被拒；清理周期定期从数据库中删除过期请求。
 
-### 过期
+待处理配对请求数受 `MAX_PENDING_REQUESTS = 10` 限制 —— 超过则新请求被拒
+并返回 `TooManyPending`。
 
-代码在 **5 分钟**后默认过期：
+### RPC 管理
 
-```rust
-const DEFAULT_PAIRING_EXPIRY_MS: i64 = 5 * 60 * 1000;
+```bash
+# 通过 aleph-server gateway call 调用 RPC
+aleph-server gateway call -p '{"channel":"telegram"}' pairing.list
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.approve
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.reject
 ```
 
-过期代码自动被拒绝。清理例程定期从数据库中清除过期的请求。
+或通过 Panel Settings → Pairing UI。**没有** `aleph pairing approve`
+CLI 命令 —— 这一切都通过 RPC。
 
-### 容量限制
+## 设备与频道配对的对比
 
-为防止滥用，系统限制待处理配对请求：
-
-```rust
-const MAX_PENDING_REQUESTS: usize = 10;
-```
-
-如果达到限制，新的配对请求将被拒绝并显示 `TooManyPending` 错误，直到现有请求过期或被解决。
+| | 设备 | 频道发送者 |
+|---|------|-----------|
+| 凭证 | `aleph-dt-*` 设备 token（长生命周期） | 频道发送者 ID（inbound router 存储） |
+| 引入凭证 | `aleph-bt-*` 启动票（5 min TTL，单次） | 6 字符字母数字代码 |
+| 持久化位置 | `devices` 表（Panel 类型） | `pairing_requests` 表 |
+| 撤销粒度 | 单台设备（`gateway.devices.revoke`） | 频道发送者（`pairing.reject` 或 `pairing.revoke`） |
+| 携带者 | WS `/ws` connect 握手（`device_token` 参数） | 入站消息 |
+| 共享 secret | 共享 Gateway token 仅作恢复（不进 URL/QR） | —— |
 
 ## 加密基础
 
-### Ed25519 密钥对
+### 设备票 / token
 
-设备在安装时生成 Ed25519 密钥对。公钥在配对期间提交：
+`device_token_manager` 生成：
 
-```rust
-pub fn generate_keypair() -> ([u8; 32], [u8; 32]) {
-    let signing_key = SigningKey::generate(&mut OsRng);
-    let verifying_key = signing_key.verifying_key();
-    (signing_key.to_bytes(), verifying_key.to_bytes())
-}
-```
+- 启动票：`uuid` + TTL 戳；
+- 设备 token：`uuid` + SHA-256（明文存 `devices.public_key` 旁的 hash，
+  SHA-256-at-rest）。
 
-### 设备指纹
+### 共享 Gateway token
 
-每个设备由其公钥派生的指纹标识 —— `SHA256(public_key)` 的前 16 个十六进制字符：
+启动时由 `SharedTokenManager` 生成，HMAC-SHA256-hashed，常数时间验证。
+`aleph-server bootstrap-token` 是**唯一**打印它的途径；它永远不应进
+URL、QR 或 Referer header。
 
-```rust
-pub struct DeviceFingerprint(pub String);
+### 安全保证
 
-impl DeviceFingerprint {
-    pub fn from_public_key(public_key: &[u8]) -> Self {
-        let hash = Sha256::digest(public_key);
-        let hex = hex::encode(hash);
-        Self(hex[..16].to_string())
-    }
-}
-```
-
-示例指纹：`a1b2c3d4e5f6a7b8`
-
-### 令牌签名
-
-配对确认后，Gateway 使用 HMAC-SHA256 签发签名令牌：
-
-```rust
-pub fn hmac_sign(secret: &[u8], token: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .expect("HMAC accepts any key length");
-    mac.update(token.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-```
-
-签发的令牌格式为 `{token}:{signature}`。验证使用恒定时间比较来防止定时攻击：
-
-```rust
-pub fn hmac_verify(secret: &[u8], token: &str, signature: &str) -> Result<(), CryptoError> {
-    let expected = hmac_sign(secret, token);
-    if subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into() {
-        Ok(())
-    } else {
-        Err(CryptoError::HmacVerificationFailed)
-    }
-}
-```
-
-## 设备管理
-
-### 已批准设备存储
-
-已批准设备存储在 `~/.aleph/devices.db` 的 SQLite 数据库中：
-
-```rust
-pub struct ApprovedDevice {
-    pub device_id: String,
-    pub device_name: String,
-    pub device_type: Option<String>,  // macos、ios、android、cli、web
-    pub approved_at: String,          // ISO 8601
-    pub last_seen_at: Option<String>,
-    pub permissions: Vec<String>,     // ["*"] = 完全访问
-}
-```
-
-### CLI 命令
-
-通过 CLI 管理设备和配对请求：
-
-```bash
-# 列出待处理配对请求
-aleph pairing list
-
-# 批准配对请求
-aleph pairing approve XKRF4B7N
-
-# 拒绝配对请求
-aleph pairing reject XKRF4B7N
-
-# 列出已批准设备
-aleph devices list
-
-# 撤销设备
-aleph devices revoke <device-id>
-```
-
-`aleph devices list` 的示例输出：
-
-```
-Approved devices:
-DEVICE ID                            NAME                 TYPE       APPROVED AT
-------------------------------------------------------------------------------------------
-a1b2c3d4-e5f6-...                    Alice's MacBook      macos      2026-01-28T12:00:00
-b2c3d4e5-f6a7-...                    Alice's iPhone       ios        2026-02-01T09:30:00
-```
-
-### 撤销访问
-
-当设备被撤销时，它将从已批准设备数据库中删除。该设备的任何现有令牌都将失效：
-
-```rust
-pub fn revoke_device(&self, device_id: &str) -> SqliteResult<bool> {
-    let rows = conn.execute(
-        "DELETE FROM approved_devices WHERE device_id = ?1",
-        params![device_id],
-    )?;
-    Ok(rows > 0)
-}
-```
-
-### 更新权限
-
-设备权限可以在初始配对后缩小：
-
-```rust
-pub fn update_permissions(
-    &self,
-    device_id: &str,
-    permissions: &[String],
-) -> SqliteResult<bool>;
-```
-
-<Callout type="info">
-默认情况下，新批准的设备获得完全访问权限（`["*"]`）。你可以在配对后将设备限制为特定工具类别（例如 `["translate", "search"]`）。
-</Callout>
-
-## 安全保证
-
-1. **短命代码** — 配对代码在 5 分钟后过期，限制攻击窗口。
-2. **容量限制** — 最多 10 个待处理请求防止资源耗尽。
-3. **唯一代码** — 系统最多重试 10 次以生成不与现有待处理请求冲突的代码。
-4. **仅所有者批准** — 只有服务器所有者（通过 CLI 或认证接口）可以批准配对请求。
-5. **一次性使用** — 确认的配对代码会立即从数据库中删除。
-6. **恒定时间验证** — 令牌验证使用恒定时间比较来防止定时侧信道。
-7. **加密身份** — 设备由 Ed25519 公钥标识，启用未来的挑战-响应认证。
+1. **5 分钟启动票** —— 单次使用，限制凭证泄漏窗口。
+2. **可单独撤销的设备 token** —— 不需要轮换全局共享 token。
+3. **失败关闭** —— `exchange_bootstrap_ticket` 失败时连接不升级。
+4. **`device_id` 命名空间隔离** —— Panel 设备和集群节点 ID 不共享。
+5. **立即撤销生效** —— 不是在下一次握手。
 
 ## 另请参阅
 
-- [执行审批](/docs/zh/security/exec-approval) — 配对设备与之交互的权限系统
-- [IPC 协议](/docs/zh/security/ipc) — 配对桌面客户端使用的本地通信协议
-- [Gateway 认证](/docs/zh/gateway/auth) — 配对后如何建立认证会话
-
----
-
-## 26.7.x 补充
-
-### 失败关闭
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### 三级执行权限
-
-| 等级 | 行为 |
-|------|------|
-| `ask` | 每次审批；未知工具失败关闭（默认） |
-| `auto` | 幂等自动；破坏性仍审批 |
-| `full` | 全部自动（独立安全过滤除外） |
-
-### Action-aware Approval Gate
-
-26.7.15+ 审批门是动作感知的——人看到真实命令且授权指纹键绑定在命令上。单一强点 `src/tools/scoped/`。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
-
-### TOFU 证书信任
-
-26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use。共享决策核心 + 已固定信任存储 + SHA-256 指纹 + SAN/Subject 解析 + 审批面板 + macOS WKWebView / iOS Keychain 适配器。
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已回退，**单源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### `signed_operation_ledger`
-
-26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
-
-### 桌面 `open` / `launch` 命令注入
-
-26.7.21+ 修复：通过 `ShellExecuteW` 而非 shell。
-
-### Bundled 解压符号链接
-
-26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接。
-
-### 进程隔离内核
-
-26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口。
-
-### 详见
-
-- [架构红线 R1 / R3 / R10](/docs/zh/philosophy/redlines) — 硬约束
-- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与审批
-- [安全：配对](/docs/zh/security/pairing) — 设备配对
-- [安全：沙箱](/docs/zh/security/sandboxing) — OS 级沙箱
+- [安全概览](/docs/zh/security/overview) —— 信任边界 + Gateway token
+- [执行审批](/docs/zh/security/exec-approval) —— 配对设备与之交互的权限
+  系统
+- [IPC](/docs/zh/security/ipc) —— 配对后的 WebSocket 控制平面
+- [沙箱](/docs/zh/security/sandboxing) —— OS 级强制

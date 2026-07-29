@@ -1,334 +1,447 @@
 ---
 title: "IPC Protocol"
-description: "HMAC-SHA256 authenticated Unix socket protocol for secure approval communication between Gateway and desktop clients"
+description: "Gateway WebSocket control plane + JSON-RPC 2.0 + device-ticket / device-token handshake"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-Aleph uses a Unix domain socket IPC (Inter-Process Communication) protocol to securely route execution approval requests between the Gateway (server) and local UI clients such as the macOS desktop application. The protocol provides HMAC-SHA256 challenge-response authentication, newline-delimited JSON messaging, and keepalive support.
+Aleph's client ↔ Gateway communication is a single **WebSocket control
+plane** carrying JSON-RPC 2.0. Approvals, file IO, tool calls, config
+updates, memory queries, model selection — everything goes over `/ws`.
 
-This protocol solves a specific problem: when the AI agent wants to execute a shell command, the Gateway needs to ask the user for approval. If the user is interacting through the macOS desktop app (rather than a chat interface), the approval request must travel securely between two local processes.
+There used to be a Unix-socket UI protocol for approvals
+(`src/exec/socket.rs` documents this) — it was never wired into the
+server and has been removed. The only wire vocabulary in use today is
+WebSocket + JSON-RPC.
 
 **Source locations:**
-- IPC protocol: `src/exec/ipc.rs`
-- Socket messages: `src/exec/socket.rs`
-- Approval bridge: `src/exec/bridge.rs`
-- Configuration: `src/exec/config.rs`
+- WS server + handler: `src/gateway/server/handler.rs` (`axum`'s
+  `WebSocketUpgrade`)
+- WS `/ws` route: `src/gateway/server/` (handler / per_client_buffer /
+  flood_guard / metrics_endpoint)
+- JSON-RPC protocol: `src/gateway/protocol.rs`
+- Credential resolution: `src/gateway/handlers/connect.rs::resolve_connect_auth`
+- Device tickets / tokens: `src/gateway/security/device_token_manager.rs`
+- Cluster reverse RPC: `src/gateway/cluster/` (`exec.approval.resolve`
+  also accepts an optional `reason`)
+- Audit: `src/security/audit.rs`
 
 ## Architecture
 
 ```
-┌──────────────────────┐          Unix Socket          ┌──────────────────────┐
-│       Gateway        │ ◄────────────────────────────► │     macOS App        │
-│    (IPC Server)      │   ~/.aleph/exec-approvals.sock │    (IPC Client)      │
-│                      │                                │                      │
-│  ExecApprovalManager │   ◄── Challenge/Response ──►   │  IpcClient           │
-│  IpcServer           │   ◄── Approval Requests ──►    │  IpcConnection       │
-│                      │   ◄── Decisions ──────────►    │                      │
-└──────────────────────┘                                └──────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                         Gateway Server                           │
+│                  ws://127.0.0.1:18790/ws                        │
+│   (remote: wss://..., TLS self-signed or proxy-terminated)      │
+├────────────────────────────────────────────────────────────────┤
+│   Inbound Router  ─►  Handler Registry  ─►  Outbound Emitter    │
+│   • connect handshake     • agent.run     • stream.chunk        │
+│   • per-IP rate-limit     • chat.send     • agent.trace         │
+│   • flood guard           • exec.approval • tool_start / end    │
+│                          • tools.*       • session.*           │
+│                          • mcp.*         • events.subscribe     │
+│                          • gateway.*                             │
+│                          • runs.*                                │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-The IPC server listens on a Unix domain socket at `~/.aleph/exec-approvals.sock` with permissions set to `0600` (owner-only read/write). Each incoming connection must complete HMAC-SHA256 authentication before any messages are exchanged.
+## Trust boundary
 
-## Connection Lifecycle
+The trust boundary is the network boundary. Loopback is always
+credential-free; remote connections **must** present a valid credential,
+resolved by `src/gateway/handlers/connect.rs::resolve_connect_auth` in
+priority order:
 
-### Authentication Flow
+1. **loopback** ⇒ operator (no credential);
+2. **device token** (`aleph-dt-*`) — long-lived, bound to one paired
+   device;
+3. **bootstrap ticket** (`aleph-bt-*`) — 5-minute single-use, exchanged
+   during the handshake for a fresh device token;
+4. **legacy shared Gateway token** (`aleph-<uuid>`,
+   `SharedTokenManager`) — HMAC-hashed, constant-time verified.
 
-Every new connection must complete a three-step challenge-response handshake:
+A valid credential = full operator authority (identical to local); a
+missing / invalid one is walled (the WS dispatch refuses every method
+but `connect`).
 
-```
-Server                                          Client
-  │                                                │
-  │──── Challenge { nonce: "a1b2c3..." } ────────►│
-  │                                                │
-  │◄─── ChallengeResponse { response: "d4e5..." }─│
-  │                                                │
-  │     [Server verifies HMAC-SHA256]              │
-  │                                                │
-  │──── AuthResult { success: true } ─────────────►│
-  │                                                │
-  │     [Authenticated session established]        │
-  │                                                │
-  │◄──► Messages (approvals, decisions, pings) ◄──►│
-  │                                                │
-```
+The WS `Origin` check (`src/gateway/origin_policy.rs`) additionally
+blocks public web pages from cross-origin-driving the local daemon as a
+last guardrail.
 
-**Step 1: Challenge.** The server generates a 32-byte random nonce using a cryptographic RNG (`OsRng`) and sends it as a hex-encoded string.
+## Connect handshake
 
-**Step 2: Response.** The client computes `HMAC-SHA256(shared_secret, nonce_bytes)` and sends the result hex-encoded.
-
-**Step 3: Verification.** The server independently computes the same HMAC and compares. If the values match, authentication succeeds. The comparison is not done in constant time at this layer (the token itself is a shared local secret, not a user-facing credential).
-
-```rust
-fn compute_hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC key size issue");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-```
-
-### Shared Secret
-
-The shared secret (token) is configured in `exec-approvals.json`:
+The first frame on a `/ws` connection must be `connect`. Loopback omits
+the credential fields entirely; remote connections present one in
+`connect` params:
 
 ```json
 {
-  "socket": {
-    "path": "~/.aleph/exec-approvals.sock",
-    "token": "hex-encoded-32-byte-secret"
+  "method": "connect",
+  "params": {
+    "minProtocol": 1,
+    "maxProtocol": 1,
+    "client": {
+      "id": "macos-app",
+      "version": "1.0.0",
+      "platform": "macos"
+    },
+    "device_token": "aleph-dt-…",
+    "bootstrap_ticket": "aleph-bt-…"
   }
 }
 ```
 
-If no token is configured, the Gateway generates a random 32-byte secret on first startup and persists it.
+`resolve_connect_auth` stamps the resolved role (`operator` when
+authorized, else `guest`) onto the connection state, and the response
+echoes `role` / `authorized` / `needs_token`. A bootstrap-ticket exchange
+also returns a freshly minted `device_token` the client persists for
+subsequent reconnects. A rejected remote `connect` is recorded in the
+security audit log (`AuditEventType::AuthFailure`, bounded by the
+`Auth`-scope rate limiter).
 
-## Message Format
+> Loopback clients omit the credential fields entirely. A remote client
+> sends `bootstrap_ticket` on first pairing (receiving a `device_token`
+> back), then `device_token` on every reconnect. `token` (the legacy
+> shared Gateway token) is accepted as a fallback.
+>
+> `device_id` is **client-asserted** and the `devices` table shares one
+> namespace with cluster nodes, so the exchange refuses a `device_id`
+> that already names a non-Panel device (and `cluster::admit_node` refuses
+> the mirror case). Without that guard, one ticket buys an operator
+> token the Panel roster cannot see and no revoke path can reach.
 
-All messages are newline-delimited JSON. Each message is a single JSON object followed by `\n`. The `type` field (snake_case) determines the message variant:
+## JSON-RPC protocol
 
-### Message Types
-
-```rust
-pub enum IpcMessage {
-    // Authentication
-    Challenge { nonce: String },
-    ChallengeResponse { response: String },
-    AuthResult { success: bool, error: Option<String> },
-
-    // Approval workflow
-    ApprovalRequest { id: String, request: ApprovalRequestPayload, timeout_ms: u64 },
-    ApprovalDecision { id: String, decision: ApprovalDecisionType, resolved_by: Option<String> },
-
-    // Pending query
-    GetPending,
-    PendingList { pending: Vec<PendingInfo> },
-
-    // Keepalive
-    Ping,
-    Pong,
-
-    // Error
-    Error { message: String },
-}
-```
-
-### Approval Request Payload
-
-When the Gateway needs approval for a command, it sends:
+### Request format (Client → Gateway)
 
 ```json
 {
-  "type": "approval_request",
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "request": {
-    "command": "npm install express",
-    "cwd": "/Users/alice/project",
-    "agent_id": "main",
-    "session_key": "agent:main:main",
-    "executable": "npm",
-    "resolved_path": "/usr/local/bin/npm",
-    "segments": [
-      {
-        "raw": "npm install express",
-        "executable": "npm",
-        "resolved_path": "/usr/local/bin/npm",
-        "args": ["install", "express"]
-      }
-    ]
-  },
-  "timeout_ms": 120000
+  "jsonrpc": "2.0",
+  "id": "uuid-xxx",
+  "method": "agent.run",
+  "params": {
+    "message": "Hello",
+    "session_key": "agent:main:main"
+  }
 }
 ```
 
-The `segments` array supports piped commands -- each segment represents one command in a pipeline.
-
-### Approval Decision
-
-The client responds with:
+### Response format (Gateway → Client)
 
 ```json
 {
-  "type": "approval_decision",
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "decision": "allow-once",
-  "resolved_by": "Alice (macOS App)"
+  "jsonrpc": "2.0",
+  "id": "uuid-xxx",
+  "result": {
+    "run_id": "run-123",
+    "status": "running"
+  }
 }
 ```
 
-Decision values are kebab-case strings:
-
-| Value | Meaning |
-|-------|---------|
-| `allow-once` | Execute this command only |
-| `allow-always` | Execute and add to permanent allowlist |
-| `deny` | Block execution |
-
-### Pending Query
-
-Clients can request a list of all pending approvals:
+### Event format (Gateway → Client)
 
 ```json
-// Request
-{ "type": "get_pending" }
-
-// Response
 {
-  "type": "pending_list",
-  "pending": [
-    {
-      "id": "550e8400-...",
-      "command": "npm install",
-      "cwd": "/project",
-      "agent_id": "main",
-      "remaining_ms": 95000
+  "jsonrpc": "2.0",
+  "method": "event",
+  "params": {
+    "topic": "stream.chunk",
+    "data": {
+      "run_id": "run-123",
+      "content": "Hello! How can I help you?"
     }
-  ]
+  }
 }
 ```
 
-This is used when the macOS app opens and needs to display any approval requests that are already waiting.
+## RPC methods (selection)
 
-### Keepalive
+| Method | Description | Parameters |
+|--------|-------------|------------|
+| `connect` | LAN-trust handshake (remote requires credential) | `device_token` / `bootstrap_ticket` / `token` |
+| `agent.run` | Start agent execution | `message`, `session_key`, `thinking?`, `model?`, `exec_tier?` |
+| `agent.status` | Get run status | `run_id` |
+| `agent.cancel` / `agent.abort` | Cancel / force-abort run | `run_id` |
+| `session.get` / `session.list` / `session.history` | Session queries | `session_key`, `limit?` |
+| `session.compact` / `session.delete` | Session management | `session_key` |
+| `config.get` / `config.patch` / `config.apply` / `config.reload` | Config management | — |
+| `events.subscribe` / `events.unsubscribe` / `events.list` | Event subscription | `pattern` (glob) |
+| `exec.approval.list` / `exec.approval.resolve` | Approval decisions | `{outcome, reason?}` |
+| `memory.store` / `memory.search` / `memory.delete` / `memory.stats` | Long-term memory | — |
+| `browser.navigate` / `browser.click` / `browser.type` / `browser.screenshot` / `browser.evaluate` | Per-action browser entry points | — |
+| `mcp.*` | `start` / `stop` / `list` / `call` | — |
+| `gateway.ticket.create` / `gateway.devices.*` / `gateway.token.rotate` | Device / token management | — |
+| `runs.*` | `list` / `status` / `wait` / `queue` | — |
+| `models.*` / `generation.*` / `cron.*` / `plugins.*` / `skills.*` / `interfaces.*` | Per-domain RPC | — |
 
-Clients send periodic pings to keep the connection alive:
+## Event topics
 
-```json
-// Client
-{ "type": "ping" }
+Subscribe with glob patterns:
 
-// Server
-{ "type": "pong" }
+| Pattern | Events |
+|---------|--------|
+| `stream.*` | All streaming events |
+| `stream.chunk` | Text chunks |
+| `stream.agent_trace` | Structured, loop-originated execution trace |
+| `stream.tool_start` / `stream.tool_end` | Tool execution boundaries |
+| `agent.*` | Agent lifecycle |
+| `agent.started` / `agent.completed` / `agent.error` | Agent state |
+| `session.*` / `config.*` | Session + config events |
+
+## Remote transport encryption (TLS)
+
+Reachability controls *who can open the socket*; TLS controls *whether
+the bytes on the wire are readable*. The two are independent: the
+Gateway token authenticates, TLS encrypts. A `host = "0.0.0.0"` deployment
+without TLS ships the token and every message in cleartext, sniffable on
+any hop between client and server.
+
+**Enforcement (off-by-default; loopback always exempt)**. Loopback
+(`127.0.0.1` / `::1`) stays plaintext `ws://` — the zero-config desktop /
+CLI / same-host-proxy hop is unchanged. For a **non-loopback** bind Aleph
+is now fail-closed:
+
+- **Boot gate** (`check_network_exposure`): a config that binds a
+  non-loopback `host` with no native TLS, no trusted proxy, and
+  `allow_insecure_remote = false` **refuses to start** with an actionable
+  error. (This is the one intentional breaking change — a
+  previously-working `host = "0.0.0.0"` plaintext config now must pick
+  a remedy below.)
+- **Per-connect gate** (`refuse_insecure_remote`): a remote client whose
+  leg is unencrypted is rejected at the WS upgrade with `426 Upgrade
+  Required`, even if the boot gate passed on a permissive combo.
+  "Encrypted" means native TLS terminated in-process, or a trusted proxy
+  that set `X-Forwarded-Proto: https`.
+
+Three ways to satisfy it:
+
+### Tier ① — TLS reverse proxy (recommended; needs a domain)
+
+Aleph stays bound to **loopback**; a same-host Caddy / nginx terminates
+TLS and forwards to it. Keep the proxy config trivial — all the
+robustness lives in Aleph.
+
+```toml
+[gateway]
+host = "127.0.0.1"                       # aleph stays loopback; the proxy is same-host
+allowed_origins = ["https://your.domain.com"]
+
+[gateway.trusted_proxy]
+enabled = true                            # honor the proxy's X-Forwarded-For / -Proto
 ```
 
-## Socket Security
-
-### File Permissions
-
-The socket file is created with mode `0600` (Unix permissions), restricting access to the socket owner:
-
-```rust
-#[cfg(unix)]
-{
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(&self.socket_path, perms)?;
+```
+your.domain.com {
+    reverse_proxy 127.0.0.1:18790
 }
 ```
 
-This prevents other users on the system from connecting to the socket.
+> **Why `trusted_proxy` is security-critical here, not just cosmetic.**
+> The proxy connects to Aleph over loopback, so *without*
+> `trusted_proxy` every remote client would appear to Aleph as
+> `127.0.0.1` — i.e., **auto-authorized as loopback operator**, a full
+> auth bypass. With `trusted_proxy = true` Aleph reads the real client
+> IP from `X-Forwarded-For` (spoof-safe: only a peer in `trusted_ips` is
+> believed), so a remote client is correctly seen as remote and must
+> present a Gateway-token credential, and per-IP rate-limit / cap / audit
+> key on the real client. Enabling the proxy **without** setting
+> `trusted_proxy` is a mistake.
 
-### Stale Socket Cleanup
+### Tier ② — Native self-signed TLS (no domain; weaker)
 
-If a socket file exists from a previous Gateway run, the server removes it before binding:
+No domain, no proxy — Aleph generates and persists a self-signed cert
+to `~/.aleph/data/tls/` on first boot and logs its SHA-256 fingerprint.
+Its SAN **auto-covers loopback plus every non-loopback interface IP of
+the box** (e.g., a VPS public IP on `eth0`), so connecting by that IP
+passes TLS hostname validation; add hostnames or a NAT'd public IP via
+`[gateway.tls] san = [...]`. Clients still get a browser cert warning
+(accept-once, or pin the fingerprint) — encryption is real, the trust
+anchor is manual. A newly-appearing address regenerates the cert (new
+fingerprint ⇒ re-trust once); a `sans.txt` sidecar tracks coverage so
+churn stays minimal. The SAN enumerates *every* local interface IP —
+including private / LAN and Docker-bridge addresses — so anyone who
+inspects the cert learns the box's interface map; harmless for a
+personal server, but list only what you need via `san` + a loopback bind
+if that matters.
 
-```rust
-if self.socket_path.exists() {
-    std::fs::remove_file(&self.socket_path)?;
-}
+```toml
+[gateway]
+host = "0.0.0.0"
+
+[gateway.tls]
+enabled = true          # empty cert/key paths ⇒ auto self-signed
+# san = ["vps.example.com"]
 ```
 
-### Connection Isolation
+The Panel hard-codes `wss://` for any non-loopback host and refuses a
+plaintext socket to a remote gateway — remote Panels connect over TLS
+automatically.
 
-Each client connection is handled in an independent `tokio::spawn` task. A compromised or misbehaving client cannot affect other connections or the server's main loop.
+### Tier ③ — Native TLS with a real cert (domain, no proxy)
 
-## Client Implementation
+Point Aleph at operator-provided PEM files (e.g., certbot output). Aleph
+terminates TLS itself.
 
-The `IpcClient` struct provides a high-level API for connecting and interacting with the Gateway:
+```toml
+[gateway]
+host = "0.0.0.0"
 
-```rust
-// Connect and authenticate
-let client = IpcClient::new("~/.aleph/exec-approvals.sock", secret);
-let mut conn = client.connect().await?;
-
-// Send a decision
-conn.send_decision("req-123", ApprovalDecisionType::AllowOnce, Some("Alice".into())).await?;
-
-// Query pending approvals
-let pending = conn.get_pending().await?;
-
-// Keepalive
-conn.ping().await?;
+[gateway.tls]
+enabled = true
+cert_path = "/etc/letsencrypt/live/your.domain.com/fullchain.pem"
+key_path  = "/etc/letsencrypt/live/your.domain.com/privkey.pem"
 ```
 
-<Callout type="info">
-The IPC client is designed for the macOS desktop application but can be used by any local process that has access to the shared secret. The protocol is transport-agnostic -- while it currently uses Unix domain sockets, the message format could work over TCP or named pipes.
-</Callout>
+### Escape hatch — `allow_insecure_remote`
 
-## Error Handling
+```toml
+[gateway]
+host = "0.0.0.0"
+allow_insecure_remote = true    # DANGER: plaintext to remote clients
+```
 
-The protocol defines typed errors for common failure modes:
+Restores pre-hardening LAN-plaintext behavior (boot gate + per-connect
+gate both stand down). Only for a trusted, isolated LAN where you
+knowingly accept cleartext. Never on a public interface.
 
-| Error | Cause |
-|-------|-------|
-| `AuthFailed` | HMAC verification failed or unexpected message during handshake |
-| `InvalidMessage` | Received unexpected message type for current state |
-| `ConnectionClosed` | Remote end closed the socket (0 bytes read) |
-| `Timeout` | Operation did not complete within the expected timeframe |
-| `Io` | Underlying I/O error (socket not found, permission denied) |
-| `Json` | Message could not be serialized/deserialized |
+## Reverse RPC for cluster nodes
 
-When authentication fails, the server sends an `AuthResult` with `success: false` and the error reason before closing the connection.
+Cluster nodes (`aleph-server node --center ws://...`) communicate with
+the center over reverse WS RPC:
 
-## See Also
+- The node connects to the center's `/ws` and performs the Panel-device
+  handshake (device token / bootstrap ticket).
+- The center delegates `agent.run` to the node.
+- `exec.approval.resolve` on the node accepts an optional `reason`
+  parameter (the `ApprovalRequester` trait now returns
+  `outcome + reason`; transports that cannot carry one use
+  `From<ApprovalOutcome>`) — older nodes ignore it.
 
-- [Execution Approval](/docs/en/security/exec-approval) -- The approval system that generates IPC requests
-- [Device Pairing](/docs/en/security/pairing) -- How devices establish trust before connecting
-- [Gateway Protocol](/docs/en/gateway/protocol) -- The higher-level RPC protocol used by remote clients
+## Real client IP behind a trusted proxy
 
----
+The IP-keyed abuse protections (per-IP connection cap, rate limiter,
+`Auth`-scope lockout) key off the **raw socket peer address**
+(`peer_addr.ip()`, verbatim).
 
-## 26.7.x Addendum
+`X-Forwarded-For` / trusted-proxy resolution was removed with the
+LAN-trust revert and is **not** reinstated — a `trusted_proxies` key in
+config is a silently-ignored legacy field, and there is no
+`src/gateway/trusted_proxy.rs`. Keeping the loopback check on the raw
+peer is deliberate: it means `is_loopback` (the zero-config-operator
+grant) can never be forged by a spoofed `X-Forwarded-For` header.
 
-### Fail-Closed
+The trade-off: when the gateway is fronted by a reverse proxy, every
+client collapses to the proxy's socket address, so the per-IP
+protections bound the *proxy* rather than individual clients. Terminate
+client-identity trust upstream (the proxy) if you need per-client limits,
+and treat the Gateway token as the transport auth. (Restoring
+fail-closed, allowlist-gated trusted-proxy XFF resolution — never
+letting a forwarded header influence `is_loopback` — is tracked as a
+future enhancement.)
 
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+## WS Origin check (last guardrail)
 
-### Three-Tier Execution Permissions
+Browsers attach an unforgeable `Origin` header to every WebSocket
+upgrade and cross-origin `fetch`. A malicious public web page the user
+happens to visit can still *reach* `ws://127.0.0.1:18790/ws` (loopback
+is not firewalled from the browser), so without an origin check it
+could open a control channel to the local daemon — the
+cross-origin-WebSocket confused-deputy (and its DNS-rebinding variant).
+The origin gate (`src/gateway/origin_policy.rs`) is therefore retained
+as the **only** validation on the browser surface. It guards against
+the public internet, **not** against LAN neighbours.
 
-| Tier | Behavior |
-|------|----------|
-| `ask` | Prompt for approval before every execution; unknown tools fail closed (default) |
-| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
-| `full` | All auto-allow (besides the hard security filter) |
+`OriginPolicy::is_allowed` decides:
 
-### Action-Aware Approval Gate
+| Origin | Verdict | Why |
+|--------|---------|-----|
+| **absent / empty** | allow | Native clients (CLI, bots, bridges, `tokio-tungstenite`) send none; only browsers do. |
+| **loopback** (`127.0.0.0/8`, `::1`, `localhost`, `*.localhost`) | allow | Same-machine UI. |
+| **`tauri:` scheme** | allow | The desktop shell's own webview origin, unspoofable by a remote page. |
+| **exact allow-list match** (`[gateway] allowed_origins`) | allow | Operator-configured extra origins for split panel / API deployments. |
+| **same-origin** (Origin authority == request `Host`) | allow **only if the `Host` is an IP literal or loopback** | LAN deployments reached by IP (`http://10.10.10.6:18790`) work without config; an IP literal cannot be DNS-rebound. A **domain** `Host` is *not* auto-allowed — the deployment must add its origin to `allowed_origins` (see DNS-rebinding note below). |
+| anything else (public web domain) | **deny** | |
 
-26.7.15+ the approval gate is action-aware — the human sees the actual command and the grant fingerprint **keys on it**. Single choke point at `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
+> **DNS-rebinding — defended.** A classic DNS-rebinding attack rebinds a
+> domain (`evil.com`) to the gateway's own address so the victim's page
+> carries `Origin == Host == evil.com` and would slip past a naive
+> same-origin check. Aleph closes this by gating the same-origin branch
+> on the `Host`: same-origin is auto-allowed **only when the `Host` is an
+> IP literal or loopback** (`127.0.0.0/8`, `::1`, `localhost`,
+> `*.localhost`, or a bare IPv4 / IPv6 address). A rebinding attack must
+> use a domain name (the A record is what gets rebound), and a domain
+> `Host` no longer passes same-origin — it falls through to deny. The
+> trade-off: a zero-config **domain** deployment (serving the panel from
+> `aleph.example.com` with no `allowed_origins`) is now rejected and must
+> add its origin to `[gateway] allowed_origins`. LAN deployments reached
+> by IP and loopback access are unaffected.
 
-### TOFU Certificate Trust
+**Escape hatch — `allow_any_origin`.** Set `[gateway] allow_any_origin =
+true` to trust every Origin unconditionally
+(`OriginPolicy::allow_any`). Intended only for deployments that front
+the gateway with their own reverse proxy / auth layer; it leaves the
+agent drivable by any web page the user's browser visits, so keep it
+`false` unless you know why.
 
-26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use. Shared decision core + pinned trust store + SHA-256 fingerprint + SAN/Subject parsing + approval splash + macOS WKWebView / iOS Keychain adapters.
+## Rate limiting and abuse protection
 
-### Pairing Single-Sourced on the Router
+- **Global `max_connections`** cap.
+- **Per-IP concurrent-connection cap** (`gateway.max_connections_per_ip`,
+  default 64, `0` disables, loopback exempt) — bounds slot exhaustion by
+  a remote peer opening many idle sockets.
+- **Flood guard** (`src/gateway/server/flood_guard.rs`) — a remote
+  connection that keeps probing (repeated unauthorized `connect`) is
+  closed.
+- **Per-scope rate limiter** (`Auth`-scope and others).
 
-26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
+Connections closed for `AuthFailure` / `RateLimited` are recorded in the
+security audit log (`src/security/audit.rs`).
 
-### Real Client IP
+## Audit and trace correlation
 
-26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
+Each JSON-RPC request resolves a
+[W3C `traceparent`](https://www.w3.org/TR/trace-context/): an inbound
+`params.traceparent` is honoured (its trace id adopted), otherwise a
+fresh 128-bit root trace is minted. The dispatch chokepoint opens a
+`tracing` span carrying `trace_id` / `span_id`, and the response echoes a
+`traceparent` naming the server's span as the parent so a multi-hop call
+graph stitches together. This is a lightweight propagation layer
+(`src/gateway/trace_context.rs`), **not** an OpenTelemetry integration —
+the OTel SDK would violate core minimalism (R3) for what is, given
+Aleph's own trace persistence and `tracing` logging, a correlation
+feature.
 
-### Signed Operation Ledger
+> The JSON-RPC middleware chain is built once at server construction and
+> cloned per connection. Building it per connection previously
+> reinstalled the global request-state registry on every connect,
+> zeroing the `/metrics` request-lifecycle counters and undercounting
+> in-flight requests.
 
-26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
+## Metrics + health
 
-### Desktop `open` / `launch` Command Injection
+Gateway exposes:
 
-26.7.21+ fix: dispatched through `ShellExecuteW` instead of a shell.
+- `GET /health` — liveness probe.
+- `GET /ready` — readiness probe.
+- `GET /metrics` — Prometheus text exposition (v0.0.4) of
+  request-lifecycle counters, connection gauges, rate-limiter pressure,
+  and a request-duration histogram
+  (`aleph_gateway_request_duration_ms`, fed by the per-request
+  `elapsed_ms` the metrics middleware already measures); exports only
+  aggregate counts (no payloads / secrets), unauthenticated like the
+  probes. Implemented in
+  `src/gateway/server/metrics_endpoint.rs` +
+  `src/gateway/middleware/latency.rs`.
 
-### Bundled-Extraction Symlink Planting
+## See also
 
-26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata`.
-
-### Process-Isolation Kernel
-
-26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. A legitimate carve-out from R1.
-
-### See Also
-
-- [Architectural Redlines R1 / R3 / R10](/docs/en/philosophy/redlines) — hard constraints
-- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and approval
-- [Security: Pairing](/docs/en/security/pairing) — device pairing
-- [Security: Sandbox](/docs/en/security/sandboxing) — OS-level sandbox
+- [Security Overview](/docs/en/security/overview) — network boundary +
+  Gateway token
+- [Execution Approval](/docs/en/security/exec-approval) — routed via the
+  `exec.approval.*` RPC
+- [Pairing](/docs/en/security/pairing) — bootstrap tickets + device
+  tokens
+- [Sandboxing](/docs/en/security/sandboxing) — OS-level enforcement

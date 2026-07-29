@@ -1,371 +1,311 @@
 ---
 title: "执行审批"
-description: "用于 shell 命令执行的人机回环审批系统，具有白名单、风险分析和多通道决策路由"
+description: "action-aware 人机回环审批门 —— ToolFacts 元数据、授权指纹键、120 秒超时"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## 概览
 
-Aleph 的执行审批系统是一个三级安全模型，管理 AI Agent 如何执行 shell 命令。每个命令在到达操作系统之前都通过解析、风险分析和审批流程。这种人机回环设计确保 AI 不能在你的机器上静默执行破坏性操作。
+Aleph 的执行审批系统是一个 **action-aware** 的人机回环门：每个 shell
+命令、每个变更操作、每个审批门后的工具调用都通过同一个强制点
+`src/sandbox/exec_approval/`，人类看到的是 *这次调用* 而不是 *工具名*，
+授权指纹键绑定在**原始规范化参数**上。
 
-该系统围绕三个核心原则构建：
+核心设计要点：
 
-1. **默认拒绝** — 命令被阻止，除非被显式批准或匹配白名单条目。
-2. **渐进信任** — 用户可以一次性、会话内或永久地批准命令（添加到白名单）。信任会随着时间的推移而积累。
-3. **多通道路由** — 审批请求可以交付给 CLI、macOS 应用、Telegram、Discord 或任何已连接的接口。
+1. **默认拒绝** —— 任何工具若 `ScopedToolService` 判定为非幂等/要求审批，
+   都必须经过门。
+2. **元数据驱动** —— 门读 `ToolFacts { name, idempotent, requires_approval }`
+   的 `idempotent` / `requires_approval`，**不**读工具名 —— MCP 工具以
+   `{server}__{tool}` 注册，名字白名单会让一整个家族无声地通过门。
+3. **Action-aware** —— 看到的是 *真实调用*（`ApprovalAction` 携带实际命令
+   / `operation=delete path=…`），不是 `bash` 这种单词。
+4. **授权指纹键 = 规范化参数** —— 用原始参数，**不**用脱敏摘要（脱敏把
+   不同密钥塌成同一占位符，一个授权会覆盖另一个密钥）。
 
-**源代码位置：**
-- 执行内核：`src/exec/kernel.rs`
-- 审批管理器：`src/exec/manager.rs`
-- 风险分析器：`src/exec/risk.rs`
-- 命令解析器：`src/exec/parser.rs`
-- 白名单：`src/exec/allowlist.rs`
-- 配置：`src/exec/config.rs`
+**源位置：**
+- 强制点：`src/tools/scoped/`（`dispatch.rs`、`builder.rs`、`traits.rs`）
+- Action-aware 门：`src/sandbox/exec_approval/`（`gate.rs`、`action.rs`、
+  `session_memory.rs`、`denial_ledger.rs`）
+- Exec tier：`src/config/types/policies/exec_tier.rs`
+- Pending / resolve 配对：`src/exec/manager.rs`（`ExecApprovalManager`）
+- 渲染助手：`src/exec/parser.rs::analyze_shell_command`（仅渲染）
 
 ## 架构
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      执行内核流程                               │
-│                                                               │
-│  命令 ──→ 解析器 ──→ 风险分析器 ──→ 审批管理器                │
-│                                               │               │
-│                              ┌────────────────┼──────┐       │
-│                              │                │      │       │
-│                              ▼                ▼      ▼       │
-│                          白名单检查         人工    自动      │
-│                                           审批    批准       │
-│                              │                │      │       │
-│                              └────────────────┼──────┘       │
-│                                               │               │
-│                                               ▼               │
-│                              执行 ──→ 输出掩码器              │
-│                                               │               │
-│                                               ▼               │
-│                                          审计日志             │
-└──────────────────────────────────────────────────────────────┘
+工具调用
+   │
+   ▼
+ScopedToolService::execute_inner
+   │
+   ├── [policies.tool_permissions]   ──  显式条目胜出
+   │
+   ├── exec tier  ──────────────────►  Ask / Auto / Full
+   │                                    │
+   │                                    ▼
+   │                              ToolFacts 读取
+   │                              (idempotent, requires_approval)
+   │
+   ├── [sandbox.command_policy] ───  硬线命令底线（任何 tier 不能降级）
+   │
+   ▼
+ApprovalGate (action-aware)
+   │
+   ├── grant_fingerprint(tool, 规范化参数)
+   │       │
+   │       ├── 在 session_memory 命中？──► Allow（cached）
+   │       │
+       └── 否则：
+           渲染 ApprovalAction（命令 / op=delete path=…），
+           通过 ApprovalRequester 路由给人类
+           │
+           ├── AllowOnce  ─► 这次调用
+           ├── AllowSession ─► 这次 + 同指纹的未来调用（按 fingerprint 缓存）
+           ├── AllowAlways ─► 由 clamp_decision 收紧到 AllowSession
+           │                  （没有持久 allowlist —— 此按钮永远不渲染）
+           ├── Deny <reason> ─► 拒绝；reason 渲染回模型
+           └── Timeout ─► 拒绝（不写入 ledger）
 ```
 
-当命令进入流程时：
-1. **命令解析器** 将其分解为结构化段（程序、参数、管道、重定向）。
-2. **风险分析器** 根据基于模式的规则对每个段进行评分。
-3. **审批管理器** 检查白名单、黑名单，如果需要，将请求路由给人工审批。
-4. 批准后，命令被执行，输出通过**输出掩码器**传递以编辑密钥。
-5. 每个决策都写入**审计日志**。
+## Exec tier（Ask / Auto / Full）
 
-## 安全级别
+`[policies] exec_tier` 是工具权限之上唯一面向用户的旋钮。**不是**第二个
+策略引擎，也不是第二个强制机制：它是同一个 chokepoint 上的一组规则，在
+没有显式 `[policies.tool_permissions]` 条目命名工具时被咨询。
 
-执行审批配置中的 `security` 字段确定基本行为：
+| Tier | 行为 | 备注 |
+|------|------|------|
+| `Ask` | 每个变更 / 副作用工具都需要审批；只读工具保持允许 | 模型仍能调查 |
+| `Auto`（默认） | 仅不可逆尾部审批 | `*_delete`、`vault_*`、`team_disband`、MCP 服务器的 `destructiveHint`、`file_ops` 参数级 `delete` / `move` |
+| `Full` | 不审批 | `[sandbox.command_policy]` 底线仍然有效 |
 
-| 级别 | 行为 | 用例 |
-|-------|----------|----------|
-| `deny` | 阻止所有命令执行 | 最大锁定，无 shell 访问 |
-| `allowlist` | 仅允许匹配白名单模式的命令 | 默认——平衡安全 |
-| `full` | 无需批准允许所有命令 | 完全信任（开发环境） |
+### Lattice（谁胜出）
 
-`ask` 策略控制命令不在白名单中时会发生什么：
+```
+显式 [policies.tool_permissions] 条目   (精确名 > glob)
+        ↓  (没有条目命名这个工具)
+配置 default   被 tier 判决收紧
+        ↓  (restrictive_min —— tier 只能收紧不能放宽)
+[sandbox.command_policy] 硬线底线      (没有 tier 能降低 —— Full 也不能)
+```
 
-| 策略 | 行为 |
-|--------|----------|
-| `off` | 从不提示用户；使用 `ask_fallback` |
-| `on-miss` | 当命令不在白名单中时提示（默认） |
-| `always` | 对每个命令提示，即使是白名单中的 |
+`effective_permission(permissions, tier, facts)` 是这个优先级**唯一**的
+组合点。两个消费者（`ScopedToolService::permission_for` 与 gateway
+slash-command 快路径）都调用它，两个 surface 不可能漂移。
 
-## 风险分析
+### Tier 来自哪里（per-turn）
 
-在到达审批管理器之前，每个命令由风险分析器评分。风险级别决定审批提示的显示方式：
+`resolve_turn_permissions` 每 run 解析一次：**request > session > global**。
+
+- **request** —— Panel composer pill 把 tier 跟首条消息一起发
+  （`chat.send`），所以它治理的就是它被装备的那个 turn。
+- **session** —— 持久化到 `identity_meta.custom["exec_tier"]` 经
+  `sessions.patch`（与 `project_root` 同载体）。`null` = 跟随 global。
+  `sessions.patch` 校验值与 `ExecTier::from_id`，与 `chat.send` 完全相同。
+- **global** —— `[policies] exec_tier`，per-turn 实时读取（无需重启）。
+- **非操作员调用方**（chat-tier 通道）在解析后被收紧：能收紧 tier 但
+  永远不能放宽。
+
+### 未知工具默认 fail-closed
+
+`ToolFacts` 从工具的 `ToolDefinition` 填充：
+
+- `idempotent` ← `LoopTool::is_idempotent()` —— 内置纯读 allowlist
+  （`tools/retry.rs::is_idempotent_builtin_name`，委托给
+  `tools/adapters/registry_adapter.rs::READ_ONLY_TOOLS` 这一个列表 —— 是
+  并发安全声明、自动重试、本 tier 规则的**单一**来源），或 MCP 服务器
+  的 `readOnlyHint` / `idempotentHint`。任何不声明的 = `false`。
+- `requires_approval` ← `ToolDefinitionMetadata`（MCP 服务器的
+  `destructiveHint`）。
+
+于是 **非幂等 = mutating**，**未知工具 = 非幂等**，所以 `Ask` tier 对
+Aleph 从未听过的工具 fail-closed。名字 globs 表做不到这一点 —— MCP 工具
+以 `{server}__{tool}` 注册（`github__delete_repo`），任何 glob 表都会让
+整个家族无声通过它声称要守卫的门。
+
+唯一例外是参数级：`file_ops` 把 `list` 和 `delete` 多路复用到同一个名字
+下，所以 `ExecTier::asks_for_arguments` 读 `operation` 字段。这是
+R7 明确允许的确定性硬过滤，不是关于意图的判断。
+
+## Action-aware 审批门
+
+### `ApprovalAction`
+
+门被问到的是 *这次调用*，不是 *这个工具*：
 
 ```rust
-pub enum RiskLevel {
-    Low,       // 只读操作（ls、cat、git log）
-    Medium,    // 文件修改（cp、mv、mkdir）
-    High,      // 系统更改（chmod、chown、sudo）
-    Critical,  // 破坏性操作（rm -rf、mkfs、dd）
+// src/sandbox/exec_approval/action.rs
+pub struct ApprovalAction {
+    pub tool_name: String,
+    pub summary: String,             // 实际调用（脱敏 + 截断）
+    pub cwd: Option<String>,
+    pub analysis: Option<CommandAnalysis>,
+    pub reason: String,
+}
+
+// src/sandbox/exec_approval/gate.rs
+trait ApprovalRequester {
+    async fn request_approval(&self, action: &ApprovalAction) -> ApprovalResponse;
+}
+pub struct ApprovalResponse {
+    pub outcome: ApprovalOutcome,
+    pub deny_reason: Option<String>, // 人类在 /deny <reason> 时的原话
 }
 ```
 
-### 内置风险规则
+`summary` 渲染**实际**发生的事 —— `bash` / `code_exec` 的命令（过真正的
+`exec::parser::analyze_shell_command`）、`file_ops` 的 `operation=delete
+path=…`、否则 `k=v` —— 然后过 `SecretMasker`，换行被压平，在
+`char_indices()` 边界上截断到 200 字符。**一个对被它守卫的东西遮遮掩掩
+的确认门会训练用户去点 Approve**，这让整个 tier 系统变成演戏；现在
+每个 surface（Panel 卡片、纯文本通道提示、集群节点反向 RPC）都显示
+真实动作。
 
-| 模式 | 风险 | 描述 |
-|---------|------|-------------|
-| `rm -rf /` | Critical | 递归删除根目录 |
-| `rm -rf ~` | Critical | 删除主目录 |
-| `curl * \| sh` | Critical | 远程代码执行 |
-| `> /dev/sd*` | Critical | 磁盘覆盖 |
-| `dd if=* of=/dev/` | Critical | 原始设备写入 |
-| `mkfs.*` | Critical | 文件系统格式化 |
-| `:(){ :\|: & };:` | Critical | Fork bomb |
-| `sudo *` | High | 提升权限 |
-| `chmod 777 /` | High | 宽松权限 |
-| `git *` | Low | 版本控制 |
-| `ls *` | Low | 目录列表 |
-| `cat *` | Low | 文件读取 |
+### 授权键绑定在动作上，不绑定在工具上
 
-你可以通过配置添加自定义拦截模式：
+`confirm_with_memory` 一次计算 `grant_fingerprint(tool, &args)` —— 对
+**原始**规范化参数（**不**是脱敏摘要 —— 脱敏把不同密钥塌成同一占位符，
+一个授权会覆盖另一个密钥），并用于**会话内存**和**拒绝账本**。
 
-```json
-{
-  "agents": {
-    "main": {
-      "blocklist": [
-        "curl.*evil\\.com",
-        "npm publish"
-      ]
-    }
-  }
-}
-```
+后果："Allow for this session" 授权**那个精确调用**。`Ask` 下，`bash`
+对每个不同命令重新提示，而不是一次授权后任意 argv 都被白名单
+（codex 的 `ApprovalStore` 语义）。更吵，故意为之。
 
-## 白名单系统
-
-白名单是渐进信任模型的核心。每个条目都是一个与解析的可执行路径匹配的 glob 模式：
+### 决策
 
 ```rust
-pub struct AllowlistEntry {
-    pub id: Option<String>,          // 唯一标识符
-    pub pattern: String,             // Glob 模式（例如 "/usr/bin/git"）
-    pub last_used_at: Option<i64>,   // Unix 时间戳
-    pub last_used_command: Option<String>,
-    pub last_resolved_path: Option<String>,
-}
-```
-
-### 模式匹配
-
-模式与命令可执行文件的完全解析路径匹配：
-
-| 模式 | 匹配 |
-|---------|---------|
-| `/usr/bin/git` | 精确路径匹配 |
-| `/usr/bin/*` | `/usr/bin/` 中的任何可执行文件 |
-| `git` | 基于名称的匹配（通过 PATH 解析） |
-| `~/bin/*` | 用户 bin 目录 |
-
-### 自动白名单增长
-
-当用户用**始终允许**批准命令时，解析的可执行路径会自动添加到 Agent 的白名单中。这意味着白名单会随着用户工作而有机增长：
-
-```
-1. Agent 想要运行：git status
-2. 解析路径：/usr/bin/git
-3. 用户点击 "始终允许"
-4. /usr/bin/git 添加到白名单
-5. 所有未来的 git 命令自动批准
-```
-
-## 审批决策
-
-当命令需要人工审批时，用户会看到三个选项：
-
-```rust
+// src/exec/socket.rs
 pub enum ApprovalDecisionType {
-    AllowOnce,    // 仅执行此命令
-    AllowAlways,  // 执行并添加到白名单
-    Deny,         // 阻止执行
+    AllowOnce,    // 仅此次调用
+    AllowSession, // 此次调用 + 本会话内同指纹（按 fingerprint 缓存）
+    AllowAlways,  // 由 clamp_decision 收紧到 AllowSession
+                  // —— 没有持久 allowlist，所以这个按钮永远不渲染
+    Deny,
 }
 ```
 
-每个决策都有范围：
+- **超时 ⇒ 拒绝**。`DEFAULT_APPROVAL_TIMEOUT_MS = 120s`；
+  `ApprovalOutcome::is_approved` 排除 `Timeout`。超时被故意**不**写入
+  denial ledger —— 过期卡片不是决策。**没有** fail-open 路径。
+- **孤儿无法劫持卡片**。`PendingEntry::is_live()`（非过期 ∧ 接收者未
+  关闭）过滤 `resolve_for_session` 和 `list_pending`，所以被取消 run
+  的僵尸再也不能赢得 `/approve` FIFO 或渲染。
+- **拒绝是终结的**（对此调用），以一个 in-context 指令返回给模型：
+  不要重试、不要改写、不要用其他方式达到相同结果。三次拒绝触发
+  `denial_ledger.rs` 里的粘性暂停。
+- **拒绝可以携带人类的理由**：`/deny wrong directory, use /tmp`（频道）
+  或 `exec.approval.resolve {reason}`（RPC）把 `ExecApprovalRecord.deny_reason`
+  打上戳；门把它原样渲染到面向模型的错误（`The user said: "…"`），让
+  模型按实际异议重新规划。**显示层** —— ledger 仍按 fingerprint 键控。
 
-| 决策 | 范围 | 持久性 |
-|----------|-------|-------------|
-| 允许一次 | 仅此次执行 | 无 |
-| 始终允许 | 所有未来匹配的命令 | 写入 `exec-approvals.json` |
-| 拒绝 | 仅此次执行 | 无 |
+### 决策传输
 
-### 审批超时
+所有审批都通过 WebSocket JSON-RPC 路由：
 
-审批请求有默认 **120 秒**（2 分钟）的超时。如果在超时内未收到决策，命令将被拒绝。这防止 Agent 无限期挂起。
+- Panel → `exec.approval.list` / `exec.approval.resolve {outcome, reason}`
+  RPC；
+- 频道（Telegram / Discord / iMessage）→ 同一组 RPC，UI 渲染为按钮；
+- 集群节点 → 反向 RPC（`exec.approval.resolve` 也接受可选 `reason`
+  参数；老节点忽略它）。
 
-```rust
-pub const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 120_000;
-```
+历史上有过一个 Unix-socket IPC 传输（`src/exec/socket.rs` 文档说明）——
+它从未被接入 server，已经移除；唯一的线协议就是 WebSocket + JSON-RPC。
 
-## 多通道审批路由
+## 命令分析（仅用于审批卡渲染）
 
-审批请求同时广播到所有已连接的接口。第一个响应获胜：
+`src/exec/parser.rs::analyze_shell_command` 把 shell 字符串拆成程序 / 参数 /
+段。它的输出给**审批卡摘要**（让人类在批准 `bash` 调用时看到真实命令，
+不是单词 `bash`）—— 它是**渲染助手**，不是强制门。实际拒绝命令的
+硬线底线是 `sandbox::command_policy`，其真实的硬线规则
+（`command_policy/rules.rs::hardline_rules`）覆盖：
+- fork bomb；
+- 裸根 `rm -rf /` / `rm -rf //` / `/.`（cycle 7 收紧 multi-slash /
+  dot bypass）；
+- `dd` / `mkfs` / 重定向到裸块设备；
+- Windows 上驱动器 / 配置单元根的递归删除、`format`、shadow-copy 销毁链；
+- `powershell -EncodedCommand` 载荷解码后再匹配，所以给脚本加编码不会
+  让它从底线视野中消失。
 
-```
-┌─────────────┐
-│ 审批         │───→ CLI 终端（内联提示）
-│ 管理器       │───→ macOS 应用（通过 IPC 套接字）
-│              │───→ Telegram（内联键盘）
-│              │───→ Discord（按钮组件）
-└─────────────┘
-```
+## 输出屏蔽
 
-### 聊天频道审批 UI
+两个独立路径，按消费者：
 
-在聊天接口（Telegram、Discord）中，审批请求被渲染为带有内联按钮的交互式消息：
+- **`SecretMasker`**（`src/exec/masker.rs`）—— 面向人 / 日志字符串
+  脱敏（审批卡摘要用它）。
+- **`sandbox::scrub::scrub_and_gate_output`**（`src/sandbox/scrub.rs`）
+  —— 已完成命令的 stdout / stderr 的**单一**真实来源：字节级脱敏、
+  剥离隐形 / bidi 控制字符、返回 **block-class** 判定。block-class 命中
+  （PEM 私钥 —— `leak_detector::BLOCK_CLASS_SECRETS`）让沙箱**失败关闭**，
+  而非返回周围上下文。`WorkspaceSandbox` 与 `WorktreeSandbox` 都把输出
+  路由通过它 —— 底线不可能在执行路径间漂移。
 
-```
-🔒 需要命令审批
+两个密钥正则的目录在 `src/secrets/leak_detector.rs` 与
+`src/exec/secret_patterns.rs`，相互对齐（私钥正则两边都是
+`-----BEGIN[A-Z ]*PRIVATE KEY-----`，裸 PKCS#8 头无法只躲过一个）。
 
-命令: npm install express
-工作目录: /project
-Agent: main
+## 三个被关掉的旁路（不要重开）
 
-┌─────────────┬────────────────┐
-│ ✅ 允许一次  │ ✅ 始终允许     │
-├─────────────┴────────────────┤
-│          ❌ 拒绝              │
-└──────────────────────────────┘
-```
+每一个都是一个能执行工具而**不**通过 `ScopedToolService` 的 surface。
+加新 surface 时，这是第一个要问的问题。
 
-按钮按下的回调数据格式为：
-```
-approve:{approval_id}:{decision}
-```
-其中 `decision` 是 `once`、`always` 或 `deny`。
+1. **Slash-command 快路径**（`execution_engine/slash_command.rs`）。`/bash`
+   `/file_ops` 等直接进 `BuiltinToolRegistry` —— 没有 tier、没有
+   `tool_permissions`、没有 `requires_confirmation`、没有操作员门，并且
+   该路径可从**通道**触达。现在 `slash_gate_reason()` 对任何 gated 调用
+   返回已有的 `ExecutionError::Fallthrough`，把它路由进完全 gated 的
+   agent loop；ungated slash 保留它们确定性快路径。
+2. **`tools.invoke` RPC**（`gateway/handlers/tools_invoke.rs`）。它的
+   denylist（`security/dangerous_tools.rs`）曾经列 7 个**不存在的**工具
+   —— 它一辈子都不可用。现在它列真实存在的工具并拒绝 confirmation-gated
+   的工具（`is_confirmation_gated` 读 `CONFIRMATION_REQUIRED_TOOLS`）。
+   *已知限制*：参数级 ask（一个 `Auto` tier 的 `file_ops delete`）在这
+   个直接 invoke surface 上仍然 ungated —— 关这个需要 RPC 上的审批
+   transport。
+3. **后台 run**（goal / loop continuations、cron、heartbeat、a2a）。过去
+   一个延续会丢掉 `caller_role` 和通道的 `tool_permissions` 层 —— 一个
+   chat-tier Telegram 会话通过延续把自己升级成本地操作员权限。
+   `carry_policy_metadata` 现在精确转发那两个键（**故意不**带
+   `channel_id` / `conversation_id` —— 那会让一个 unattended run 的审批
+   看起来可下发）。
 
-### 本地 IPC 审批
+## 未出席 = 失败关闭
 
-对于 macOS 桌面应用，审批请求通过 Unix 域套接字 IPC 协议路由。参见 [IPC 协议](/docs/zh/security/ipc) 获取详情。
+无人类在场的 run 在每个 headless producer 处打上 `UNATTENDED_KEY`
+戳（`execution_engine/mod.rs`）：cron **当它的审批不可路由时**（携带源
+通道与会话的 job 有真正的 `/approve` 路径 —— 打戳会让工作的 HITL 流程
+auto-deny）、heartbeat 总是、a2a 总是。`continuation_metadata` **最后**
+插入这个标记，所以继承的 key 永远不能把延续降级为 attended。这个标记
+也搭 `TurnContext.unattended` —— 所以 `session_send` 给 headless 父的
+wait-mode 子也打戳（`fire_and_forget || parent.unattended`）——
+过去只有 fire-and-forget 子被打戳，headless 父的 wait-mode 子在每个
+gated 工具上挂满 120 秒才拒绝。
 
-## 每个 Agent 的配置
+`ScopedToolService` 然后**立即**拒绝 confirm-gated 工具，而不是把审批
+卡片发到虚空中再阻塞 120 秒。模型被告知该 run 是 unattended。
 
-每个 Agent 都可以有自己的安全策略。Agent 特定设置覆盖全局默认值：
+Team（dispatcher / broadcast）被故意**不**打戳：成员的审批解析成一张
+Panel 卡片，调度 team 的用户就是看着它的操作员。
 
-```json
-{
-  "version": 1,
-  "defaults": {
-    "security": "allowlist",
-    "ask": "on-miss",
-    "ask_fallback": "deny"
-  },
-  "agents": {
-    "main": {
-      "security": "allowlist",
-      "auto_allow_skills": true,
-      "allowlist": [
-        { "pattern": "/usr/bin/git" },
-        { "pattern": "/usr/local/bin/node" }
-      ],
-      "skill_allowlist": ["github", "ffmpeg"]
-    },
-    "sandbox": {
-      "security": "deny"
-    }
-  }
-}
-```
+## 审计
 
-<Callout type="info">
-配置存储在 `~/.aleph/exec-approvals.json` 中，并通过内容哈希支持乐观锁定以防止并发写入冲突。
-</Callout>
+**Session event log** 是活的 trail（`tools/scoped/dispatch.rs::record_approval_decision`
+写 `ToolCallApproved` / `ToolCallDenied` session 事件）。通过 session
+service 查，与产生该决策的 run 的其它事件一起。
 
-### 配置解析
-
-解析特定 Agent 的配置时，系统应用分层合并：
-
-1. 从内置默认值开始（`security: deny`、`ask: on-miss`）
-2. 应用全局 `defaults` 部分
-3. 应用 Agent 特定覆盖
-
-```rust
-// 解析优先级：agent > 全局 > 内置
-let security = agent.security
-    .or(global.security)
-    .unwrap_or(ExecSecurity::Deny);
-```
-
-## 输出掩码
-
-执行后，命令输出通过输出掩码器传递，在返回给 AI 或显示给用户之前编辑敏感数据：
-
-| 模式 | 替换 |
-|---------|-------------|
-| API 密钥 | `[API_KEY_REDACTED]` |
-| 密码 | `[PASSWORD_REDACTED]` |
-| AWS 凭据 | `[AWS_CRED_REDACTED]` |
-| 私钥 | `[PRIVATE_KEY_REDACTED]` |
-| OAuth 令牌 | `[TOKEN_REDACTED]` |
-
-## 审计日志
-
-每个执行决策都被记录以供日后审查：
-
-```rust
-pub struct AuditEntry {
-    pub timestamp: DateTime<Utc>,
-    pub command: String,
-    pub risk_level: RiskLevel,
-    pub decision: ApprovalDecision,
-    pub executor: String,
-    pub session_key: String,
-    pub duration_ms: u64,
-    pub exit_code: Option<i32>,
-}
-```
-
-查询最近的高风险执行：
-
-```sql
-SELECT * FROM audit_log
-WHERE risk_level >= 'High'
-AND timestamp > datetime('now', '-7 days')
-ORDER BY timestamp DESC;
-```
+**不要再去查** `src/exec/approval/storage.rs` 或 `audit.rs` —— 它们与
+`aleph-server audit` CLI 在 2026-07-14 一起删除了：三个 SQLite 表
+（`~/.aleph/approval_audit.db`）的**唯一**写入者是测试 helper，让
+操作员跑 `audit` 得到 0，得出"什么都没发生"的结论，而真正的 trail
+在 session event log 里。这比死代码更糟。同时删除的零消费者模块：
+`src/exec/approval/{escalation,binding,path_canonicalize}.rs`、
+`benches/approval_performance.rs`、
+`exec/allowed_decisions.rs::{decisions_for_risk, assess_command_decisions,
+risk_segments}`。
 
 ## 另请参阅
 
-- [IPC 协议](/docs/zh/security/ipc) — 进程间如何通信审批请求
-- [沙箱](/docs/zh/security/sandboxing) — 基于能力的执行沙箱
-- [设备配对](/docs/zh/security/pairing) — 远程设备的信任建立
-
----
-
-## 26.7.x 补充
-
-### 失败关闭
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### 三级执行权限
-
-| 等级 | 行为 |
-|------|------|
-| `ask` | 每次审批；未知工具失败关闭（默认） |
-| `auto` | 幂等自动；破坏性仍审批 |
-| `full` | 全部自动（独立安全过滤除外） |
-
-### Action-aware Approval Gate
-
-26.7.15+ 审批门是动作感知的——人看到真实命令且授权指纹键绑定在命令上。单一强点 `src/tools/scoped/`。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
-
-### TOFU 证书信任
-
-26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use。共享决策核心 + 已固定信任存储 + SHA-256 指纹 + SAN/Subject 解析 + 审批面板 + macOS WKWebView / iOS Keychain 适配器。
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已回退，**单源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### `signed_operation_ledger`
-
-26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
-
-### 桌面 `open` / `launch` 命令注入
-
-26.7.21+ 修复：通过 `ShellExecuteW` 而非 shell。
-
-### Bundled 解压符号链接
-
-26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接。
-
-### 进程隔离内核
-
-26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口。
-
-### 详见
-
-- [架构红线 R1 / R3 / R10](/docs/zh/philosophy/redlines) — 硬约束
-- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与审批
-- [安全：配对](/docs/zh/security/pairing) — 设备配对
-- [安全：沙箱](/docs/zh/security/sandboxing) — OS 级沙箱
+- [安全概览](/docs/zh/security/overview) —— tier 与底线的设计
+- [沙箱](/docs/zh/security/sandboxing) —— OS 隔离与命令底线
+- [配对](/docs/zh/security/pairing) —— 配对设备与之交互的权限系统

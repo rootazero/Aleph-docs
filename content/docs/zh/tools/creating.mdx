@@ -7,23 +7,31 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 ## 概述
 
-你可以通过创建自定义工具来扩展 Aleph 的功能。有三种方法，按集成深度排序：
+你可以通过创建自定义工具来扩展 Aleph 的功能。三种主要路径，按集成深度排序：
 
 | 方法 | 语言 | 注册 | 最适合 |
 |------|------|------|--------|
 | **Rust 内置** | Rust | 编译时 | 核心功能，最大性能 |
-| **MCP 服务器** | 任意（Node.js, Python 等） | 运行时 | 外部集成，多语言团队 |
+| **MCP 服务器** | 任意（Node.js、Python 等） | 运行时 | 外部集成，多语言团队 |
 | **Markdown 技能** | Markdown + 提示 | 运行时 | 基于提示的工作流，无需代码 |
+
+所有工具调用最终都通过 **同一个强制点**：`ScopedToolService`
+（`src/tools/scoped/`）。它把按频道合并的 `tool_permissions`、执行 tier
+（Ask / Auto / Full）与沙箱命令策略层统一在一个路径上 —— 写新工具时，
+这个强制点决定你的工具是否需要在注册时携带 `requires_confirmation` 元数据
+或沙箱依赖。
 
 ---
 
 ## 创建 Rust 内置工具
 
-这是最集成的方法。你的工具被编译到 Aleph 的二进制文件中，并使用静态分发实现零成本抽象。
+这是集成最深的方法。你的工具被编译到 Aleph 的二进制文件中，静态分发，
+零成本抽象。
 
 ### 步骤 1：定义参数类型
 
-为你的工具的输入参数创建一个结构体。派生 `JsonSchema` 以自动生成模式 —— 每个字段上的文档注释会成为 LLM 看到的参数描述：
+为你的工具的输入参数创建一个结构体。派生 `JsonSchema` 让 schema 自动
+生成 —— 字段上的文档注释会成为 LLM 看到的参数描述：
 
 ```rust
 // src/builtin_tools/weather.rs
@@ -50,6 +58,9 @@ fn default_unit() -> String { "celsius".to_string() }
 fn default_days() -> u8 { 1 }
 ```
 
+`required` 数组是自动计算的 —— 只有不带 `#[serde(default)]` 的字段才是
+必需的。
+
 ### 步骤 2：定义输出类型
 
 输出结构体被序列化为 JSON 并返回给 LLM：
@@ -58,77 +69,39 @@ fn default_days() -> u8 { 1 }
 /// 天气工具的输出
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeatherOutput {
-    /// 城市名称
     pub city: String,
-    /// 当前温度
     pub temperature: f64,
-    /// 温度单位
     pub unit: String,
-    /// 天气状况（例如 "sunny", "cloudy", "rain"）
     pub condition: String,
-    /// 未来几天预报
     pub forecast: Vec<ForecastDay>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForecastDay {
-    pub date: String,
-    pub high: f64,
-    pub low: f64,
-    pub condition: String,
 }
 ```
 
-### 步骤 3：实现 AlephTool Trait
+### 步骤 3：实现 `AlephTool` trait
 
 ```rust
 use async_trait::async_trait;
 use crate::error::Result;
 use crate::tools::AlephTool;
 
-/// 天气信息工具
 #[derive(Clone)]
 pub struct WeatherTool {
     api_key: String,
     client: reqwest::Client,
 }
 
-impl WeatherTool {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            api_key,
-            client: reqwest::Client::new(),
-        }
-    }
-}
-
 #[async_trait]
 impl AlephTool for WeatherTool {
     const NAME: &'static str = "weather";
 
-    const DESCRIPTION: &'static str = "\
-        Get current weather and forecast for a location. \
-        Returns temperature, conditions, and multi-day forecast.";
+    const DESCRIPTION: &'static str =
+        "Get current weather and forecast for a location. \
+         Returns temperature, conditions, and multi-day forecast.";
 
     type Args = WeatherArgs;
     type Output = WeatherOutput;
 
-    /// 可选：标记为需要确认以进行敏感操作
-    fn requires_confirmation(&self) -> bool {
-        false
-    }
-
-    /// 可选：提供使用示例以进行少样本学习
-    fn examples(&self) -> Option<Vec<String>> {
-        Some(vec![
-            "weather(location='Tokyo', unit='celsius', days=3)".to_string(),
-            "weather(location='New York')".to_string(),
-            "weather(location='51.5074,-0.1278', unit='fahrenheit')".to_string(),
-        ])
-    }
-
     async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-        // 你的实现在这里
         let response = self.client
             .get("https://api.weather.example.com/v1/forecast")
             .query(&[
@@ -141,46 +114,46 @@ impl AlephTool for WeatherTool {
             .await?
             .json::<WeatherOutput>()
             .await?;
-
         Ok(response)
     }
 }
 ```
 
-### 步骤 4：注册工具
+### 步骤 4：在注册表中注册
 
-在 `src/tools/builtin.rs` 中为 `AlephToolServer` 添加一个 builder 方法：
-
-```rust
-impl AlephToolServer {
-    /// 注册天气工具
-    pub fn with_weather(self, api_key: String) -> Self {
-        self.tool(WeatherTool::new(api_key))
-    }
-}
-```
-
-然后在服务器构建期间注册它：
-
-```rust
-let server = AlephToolServer::new()
-    .with_bash()
-    .with_file_ops()
-    .with_weather(weather_api_key);
-```
-
-### 步骤 5：从模块导出
-
-将你的工具添加到 `src/builtin_tools/mod.rs`：
+内置工具不通过手写 builder 注册；它们由 executor 的 builtin 注册表
+（`src/executor/builtin_registry/`）装配。把工具添加到
+`src/builtin_tools/mod.rs`：
 
 ```rust
 pub mod weather;
-pub use weather::{WeatherArgs, WeatherOutput, WeatherTool};
+pub use weather::{WeatherTool, WeatherArgs, WeatherOutput};
 ```
+
+注册表会创建实例并把共享依赖（`Arc<Sandbox>`、`Arc<ProfileManager>`、
+`Arc<McpManagerHandle>` …）注入到需要它们的工具里。一个没有携带必需
+依赖的工具返回结构化的"sandbox 未配置"或"manager 未配置"错误，**不会**
+回退到无沙箱执行 —— 默认是安全的，不是宽松的。
+
+如果你的工具执行子进程，必须持有 `Arc<dyn Sandbox>` 并把命令交给它
+（`src/sandbox/mod.rs::Sandbox` trait）。`src/builtin_tools/` 内 exec 类
+工具里 **不允许** `Command::new`。
+
+### 步骤 5：标记审批语义
+
+`ScopedToolService` 读取 `ToolDefinitionMetadata`，**不**读工具名：
+
+- `idempotent` ← `LoopTool::is_idempotent()` 或一个 MCP 服务器的
+  `idempotentHint`。未声明 = `false` ⇒ `Ask` tier 下要求审批。
+- `requires_approval` ← `destructiveHint`（MCP）或工具在
+  `CONFIRMATION_REQUIRED_TOOLS` 中（如 `vault_store` / `agent_delete` /
+  `team_disband`）。
+
+修改这两个语义的方式是声明它们 —— 用名字白名单不会带来附加的覆盖。
 
 ### 生成的 JSON Schema
 
-当你的工具被注册时，Aleph 会自动生成此工具定义供 LLM 使用：
+当你的工具被注册时，Aleph 自动生成这个工具定义发给 LLM：
 
 ```json
 {
@@ -193,16 +166,16 @@ pub use weather::{WeatherArgs, WeatherOutput, WeatherTool};
       "properties": {
         "location": {
           "type": "string",
-          "description": "City name or coordinates (e.g., \"Tokyo\" or \"35.6762,139.6503\")"
+          "description": "城市名称或坐标（例如 \"Tokyo\" 或 \"35.6762,139.6503\"）"
         },
         "unit": {
           "type": "string",
-          "description": "Temperature unit: \"celsius\" or \"fahrenheit\" (default: celsius)",
+          "description": "温度单位：\"celsius\" 或 \"fahrenheit\"（默认：celsius）",
           "default": "celsius"
         },
         "days": {
           "type": "integer",
-          "description": "Number of forecast days (1-7, default: 1)",
+          "description": "预报天数（1-7，默认：1）",
           "default": 1
         }
       },
@@ -212,13 +185,12 @@ pub use weather::{WeatherArgs, WeatherOutput, WeatherTool};
 }
 ```
 
-`required` 数组是自动计算的 —— 只有没有 `#[serde(default)]` 的字段才是必需的。
-
 ---
 
 ## 创建 MCP 服务器工具
 
-对于 Rust 以外的语言，或者当你想要在不重新编译 Aleph 的情况下进行迭代时，创建一个 MCP 服务器。服务器作为单独进程运行，并通过模型上下文协议与 Aleph 通信。
+Rust 之外的语言，或不想为每次迭代重新编译 Aleph 时，MCP 是合适的路径。
+服务器作为独立进程运行，通过模型上下文协议与 Aleph 通信。
 
 ### Node.js 示例
 
@@ -234,7 +206,6 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// 定义工具
 server.setRequestHandler("tools/list", async () => ({
   tools: [
     {
@@ -243,10 +214,7 @@ server.setRequestHandler("tools/list", async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          location: {
-            type: "string",
-            description: "City name or coordinates",
-          },
+          location: { type: "string", description: "城市名称或坐标" },
           unit: {
             type: "string",
             enum: ["celsius", "fahrenheit"],
@@ -255,34 +223,28 @@ server.setRequestHandler("tools/list", async () => ({
         },
         required: ["location"],
       },
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+      },
     },
   ],
 }));
 
-// 处理工具调用
 server.setRequestHandler("tools/call", async (request) => {
   if (request.params.name === "get_weather") {
     const { location, unit } = request.params.arguments;
-
     const response = await fetch(
       `https://api.weather.example.com/v1?q=${location}&units=${unit}`
     );
     const data = await response.json();
-
     return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     };
   }
-
   throw new Error(`Unknown tool: ${request.params.name}`);
 });
 
-// 启动服务器
 const transport = new StdioServerTransport();
 await server.connect(transport);
 ```
@@ -310,15 +272,8 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "City name or coordinates",
-                    },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                        "default": "celsius",
-                    },
+                    "location": {"type": "string"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
                 },
                 "required": ["location"],
             },
@@ -330,16 +285,13 @@ async def call_tool(name: str, arguments: dict):
     if name == "get_weather":
         location = arguments["location"]
         unit = arguments.get("unit", "celsius")
-
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 "https://api.weather.example.com/v1",
                 params={"q": location, "units": unit},
             )
             data = resp.json()
-
         return [TextContent(type="text", text=json.dumps(data, indent=2))]
-
     raise ValueError(f"Unknown tool: {name}")
 
 async def main():
@@ -348,12 +300,12 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    asyncio.run(asyncio.run(main()))
 ```
 
 ### 注册到 Aleph
 
-将服务器添加到 `~/.aleph/mcp_config.json`：
+把服务器加入 `~/.aleph/mcp_config.json`：
 
 ```json
 {
@@ -373,46 +325,41 @@ if __name__ == "__main__":
 }
 ```
 
-对于 Python 示例：
+修改后必须重启 `aleph-server`，配置才会生效。
 
-```json
-{
-  "weather-py": {
-    "id": "weather-py",
-    "name": "Weather Server (Python)",
-    "transport": "stdio",
-    "command": "python",
-    "args": ["/path/to/weather_server.py"],
-    "requires_runtime": "python",
-    "auto_start": true
-  }
-}
-```
+### MCP 工具命名约定
 
-或者以编程方式使用 McpManager API：
+你的服务器声明的工具名（`get_weather`）会以 `<server>__<tool>` 的形式
+出现在 Aleph 的注册表中（`weather__get_weather`）。`McpHandler::qualified_name`
+是命名唯一权威 —— 它去掉管理器加上的冗余 `{server}:` 前缀，然后把
+所有不在 `[A-Za-z0-9_-]` 集合中的字符映射为 `_`，并截断到 64 字符
+（OpenAI 函数调用 / Anthropic / Gemini 都接受的字符集）。不要再在工具名
+里写冒号或点。
 
-```rust
-let config = McpManagerConfig::stdio(
-    "weather",
-    "Weather Server",
-    "npx",
-)
-.with_args(vec!["tsx".to_string(), "/path/to/index.ts".to_string()])
-.with_runtime("node")
-.with_timeout(30);
+### 注解 = 元数据驱动的门
 
-handle.add_server(config).await?;
-```
+`ToolAnnotations` 是 `ScopedToolService` 用来决定 `idempotent` /
+`requires_approval` 的真正信号：
+
+| 注解 | 字段 |
+|------|------|
+| `readOnlyHint: true` | `concurrent_safe`（自动重试） |
+| `idempotentHint: true` | `idempotent`（tier 视为安全） |
+| `destructiveHint: true` | `requires_approval`（Ask 默认值下仍需审批） |
+
+不在服务器响应里写注解意味着字段为 `false` —— 含义是"未知 ⇒ 非幂等 ⇒
+mutating ⇒ Ask 必然 fail-closed"。这是按设计；用名字白名单覆盖不了它。
 
 ---
 
 ## 创建 Markdown 技能
 
-Markdown 技能是扩展 Aleph 的最简单方式 —— 无需代码。它们在 `SKILL.md` 文件中定义基于提示的工作流。
+Markdown 技能是扩展 Aleph 最简单的方式 —— 无需代码。技能在
+`SKILL.md` 文件中定义基于提示的工作流。
 
 ### 技能文件结构
 
-在技能目录之一中创建 `SKILL.md` 文件：
+在其中一个技能目录下创建 `SKILL.md` 文件：
 
 ```markdown
 ---
@@ -433,22 +380,8 @@ Please:
 Output the summary in markdown format.
 ```
 
-### 技能目录
-
-Aleph 从配置的目录加载技能：
-
-```rust
-let server = AlephToolServer::new_with_skills(vec![
-    PathBuf::from("skills"),
-    PathBuf::from("~/.aleph/skills"),
-]).await;
-```
-
-技能在启动时自动加载，并在 `AlephToolServer` 中注册为动态工具。
-
-<Callout type="info">
-Markdown 技能通过文件 watcher 支持热重载。对 `SKILL.md` 文件的更改会被检测到，并且技能会自动重新注册，无需重启 Aleph。
-</Callout>
+技能目录由配置给出，技能在启动时自动加载，并通过文件 watcher 支持热重载
+（修改 `SKILL.md` 后无需重启）。
 
 ---
 
@@ -456,69 +389,40 @@ Markdown 技能通过文件 watcher 支持热重载。对 `SKILL.md` 文件的�
 
 ### 命名约定
 
-- 对工具名称使用 `snake_case`：`web_fetch`, `file_read`
-- 描述性但简洁：`memory_search` 而不是 `search_memory_database`
-- 对相关工具使用通用前缀：`sessions_spawn`, `sessions_send`, `sessions_list`
+- **snake_case**：`web_fetch`，`file_read`，`bash_exec`。
+- **描述性但简洁**：`memory_search` 而不是 `search_memory_database`。
+- **MCP 工具**：写干净的内部名（`get_weather`）；`server__` 前缀由
+  `McpHandler` 添加。
+- **不要**在工具名里写冒号或点 —— 它们会被映射为 `_` 并截断到 64
+  字符。
 
 ### 描述质量
 
-工具描述至关重要 —— 它是 LLM 用来决定是否调用你的工具的依据。编写清晰、具体的描述：
+工具描述是 LLM 用来决定是否调用你的工具的依据。写清楚、具体、说明输入
+和返回内容。
 
-```rust
-// 好：具体，解释它做什么和返回什么
-const DESCRIPTION: &'static str = "\
-    Get current weather and forecast for a location. \
-    Returns temperature, conditions, and multi-day forecast.";
+### 元数据而不是名字白名单
 
-// 差：模糊，不解释输出
-const DESCRIPTION: &'static str = "Weather tool";
-```
+如果你的工具执行破坏性操作，**不要**寄希望于某个名字匹配来强制审批。
+`ScopedToolService` 读的是 `ToolDefinitionMetadata`：
 
-### 少样本示例
-
-提供示例可以显著提高 LLM 正确使用你的工具的能力：
-
-```rust
-fn examples(&self) -> Option<Vec<String>> {
-    Some(vec![
-        "weather(location='Tokyo', unit='celsius', days=3)".to_string(),
-        "weather(location='New York')".to_string(),
-    ])
-}
-```
-
-示例被注入到工具定义的 `llm_context` 字段中，并与模式一起展示给 LLM。
+- 内置工具：在 `CONFIRMATION_REQUIRED_TOOLS` 集合里登记一次（在
+  `src/tools/scoped/` 中）。
+- MCP 服务器：在 `tools/list` 的 `annotations` 里返回 `destructiveHint`
+  或 `requires_approval`。
 
 ### 错误处理
 
-工具应返回 `Result<Self::Output>` 并使用 Aleph 的错误类型：
+工具应返回 `Result<Self::Output>` 并使用 Aleph 的错误类型。HTTP / 网络
+失败映射到 `ToolError::Transport` 或 `Timeout`；其他失败映射到
+`ToolError::Execution`，让模型看到并修复。
 
-```rust
-async fn call(&self, args: Self::Args) -> Result<Self::Output> {
-    if args.days > 7 {
-        return Err(AlephError::InvalidArgument(
-            "days must be between 1 and 7".to_string()
-        ));
-    }
+### 沙箱契约
 
-    let response = self.client.get(&url).send().await
-        .map_err(|e| AlephError::ToolExecution(format!("HTTP request failed: {e}")))?;
-
-    Ok(output)
-}
-```
-
-### 破坏性操作的确认
-
-标记执行破坏性或敏感操作的工具：
-
-```rust
-fn requires_confirmation(&self) -> bool {
-    true  // 用户必须在执行前批准
-}
-```
-
-这与审批策略系统集成 —— 当配置时，agent 循环会暂停并在执行工具前请求用户确认。
+如果你的工具启动子进程，**必须**接受 `Arc<dyn Sandbox>` 并通过它
+执行命令（`WorkspaceSandbox::execute`）。`src/builtin_tools/` 中不允许
+裸的 `Command::new`。沙箱 + 命令策略层（`src/sandbox/command_policy/`）
+会替你处理工作目录、能力升级和硬线命令过滤。
 
 ---
 
@@ -537,10 +441,8 @@ mod tests {
     fn test_tool_definition() {
         let tool = WeatherTool::new("test_key".to_string());
         let def = AlephTool::definition(&tool);
-
         assert_eq!(def.name, "weather");
         assert!(def.description.contains("weather"));
-        assert!(!def.requires_confirmation);
     }
 
     #[tokio::test]
@@ -551,78 +453,17 @@ mod tests {
             unit: "celsius".to_string(),
             days: 1,
         }).await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_tool_call_json() {
-        let tool = WeatherTool::new("test_key".to_string());
-        let args = serde_json::json!({
-            "location": "London",
-            "unit": "celsius"
-        });
-
-        let result = AlephTool::call_json(&tool, args).await;
         assert!(result.is_ok());
     }
 }
 ```
 
-### 使用 AlephToolServer 进行集成测试
+### 集成测试
 
-测试完整的工具服务器集成：
-
-```rust
-#[tokio::test]
-async fn test_tool_server_integration() {
-    let server = AlephToolServer::new()
-        .with_weather("test_key".to_string());
-
-    assert!(server.has_tool("weather").await);
-    assert_eq!(server.len().await, 1);
-
-    let result = server.call(
-        "weather",
-        serde_json::json!({ "location": "Paris" })
-    ).await;
-
-    assert!(result.is_ok());
-}
-```
-
-### 测试动态分发
-
-验证 blanket `AlephToolDyn` 实现：
-
-```rust
-#[tokio::test]
-async fn test_dynamic_dispatch() {
-    let tool: Box<dyn AlephToolDyn> = Box::new(WeatherTool::new("key".to_string()));
-
-    assert_eq!(tool.name(), "weather");
-
-    let args = serde_json::json!({ "location": "Berlin" });
-    let result = tool.call(args).await;
-    assert!(result.is_ok());
-}
-```
-
-### 测试名称修复
-
-验证自动修复系统是否正确处理你的工具名称：
-
-```rust
-#[tokio::test]
-async fn test_name_repair() {
-    let server = AlephToolServer::new()
-        .with_weather("key".to_string());
-
-    // Snake case 修复
-    let repaired = server.try_repair_tool_name("Weather").await;
-    assert_eq!(repaired, Some("weather".to_string()));
-}
-```
+集成测试走完整的 `ScopedToolService` 管道：把工具注册到共享的
+`LoopToolRegistry`，构造一个绑定到该注册表的 `ScopedToolService`（含
+权限与 tier），然后发一个 `execute(name, args)`。`tests/` 下的
+`sandbox_capability_approval.rs` 是这种集成测试的范例。
 
 ---
 
@@ -631,43 +472,7 @@ async fn test_name_repair() {
 | 要构建什么 | 使用此方法 |
 |-----------|-----------|
 | 高性能核心工具 | Rust `AlephTool` trait |
-| 与外部 API 集成 | MCP 服务器（Node.js/Python） |
+| 与外部 API 集成 | MCP 服务器（Node.js / Python） |
 | 基于提示的工作流 | Markdown 技能 |
 | 需要热重载的工具 | MCP 服务器或 Markdown 技能 |
 | 需要类型安全的工具 | Rust `AlephTool` trait |
-
----
-
-## 26.7.x 补充
-
-### 工具集重组
-
-26.7.x 内置工具集重组（约 19+ 工具），`src/builtin_tools/` 重新分目录。
-
-### 并行执行
-
-`src/tools/concurrency.rs` 资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）—— Act 阶段按声明分桶并行。
-
-### `tools.defer_mcp_tools` / `enable_tool_search`
-
-26.7.7+ 渐进式工具披露——非核心工具 schema 折叠为 name + description；`tool_search` 元工具按需加载。
-
-### MCP 按需发现
-
-26.7.17+：`McpResourceIndexLayer` 已回退。`mcp_list_*` 工具按需发现；`cat`-guard read-steer 路由到原生 MCP / 技能 / 插件读取。
-
-### `file_read` 支持图片
-
-26.6.29+：`file_read` 现在支持图片（`image_read`）；未变更的文件读取通过读缓存在轮次间去重。
-
-### 失败关闭
-
-未知工具在 `ask` tier 下**失败关闭**。
-
-### `plugin.install` 统一入口
-
-26.7.21+：按源（市场 / 压缩包 / 路径）分类统一处理。
-
-### 完整 `tools.*` / `mcp.*` / `extensions.*` RPC
-
-详见 [网关方法参考](/docs/zh/gateway/methods)。

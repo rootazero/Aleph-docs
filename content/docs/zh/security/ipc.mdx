@@ -1,334 +1,400 @@
 ---
 title: "IPC 协议"
-description: "用于 Gateway 和桌面客户端之间安全审批通信的 HMAC-SHA256 认证 Unix 套接字协议"
+description: "Gateway WebSocket 控制平面 + JSON-RPC 2.0 + 设备票 / token 握手"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## 概览
 
-Aleph 使用 Unix 域套接字 IPC（进程间通信）协议在 Gateway（服务器）和本地 UI 客户端（如 macOS 桌面应用）之间安全地路由执行审批请求。该协议提供 HMAC-SHA256 挑战-响应认证、换行符分隔的 JSON 消息和 keepalive 支持。
+Aleph 的客户端 ↔ Gateway 通信是单一 **WebSocket 控制平面**，承载
+JSON-RPC 2.0 协议。审批、文件 IO、工具调用、配置更新、内存查询、模型
+选择 —— 一切走 `/ws`。
 
-该协议解决了一个特定问题：当 AI Agent 想要执行 shell 命令时，Gateway 需要请求用户批准。如果用户通过 macOS 桌面应用（而非聊天接口）交互，审批请求必须在两个本地进程之间安全传输。
+历史上曾有一个 Unix-socket UI 协议用于审批传输
+（`src/exec/socket.rs` 文档说明）—— 它从未被接入 server，已经移除。
+今天的现实只有一条线：WebSocket + JSON-RPC。
 
-**源代码位置：**
-- IPC 协议：`src/exec/ipc.rs`
-- 套接字消息：`src/exec/socket.rs`
-- 审批桥：`src/exec/bridge.rs`
-- 配置：`src/exec/config.rs`
+**源位置：**
+- WS 服务器 + handler：`src/gateway/server/handler.rs`（`axum` 的
+  `WebSocketUpgrade`）
+- WS /ws 路由：`src/gateway/server/`（handler / per_client_buffer /
+  flood_guard / metrics_endpoint）
+- JSON-RPC 协议：`src/gateway/protocol.rs`
+- 凭证解析：`src/gateway/handlers/connect.rs::resolve_connect_auth`
+- 设备票 / token：`src/gateway/security/device_token_manager.rs`
+- 集群反向 RPC：`src/gateway/cluster/`（`exec.approval.resolve` 也接受
+  可选 `reason`）
+- 审计：`src/security/audit.rs`
 
 ## 架构
 
 ```
-┌──────────────────────┐          Unix 套接字          ┌──────────────────────┐
-│       Gateway        │ ◄────────────────────────────► │     macOS App        │
-│    (IPC 服务器)       │   ~/.aleph/exec-approvals.sock │    (IPC 客户端)       │
-│                      │                                │                      │
-│  ExecApprovalManager │   ◄── 挑战/响应 ──►            │  IpcClient           │
-│  IpcServer           │   ◄── 审批请求 ──►             │  IpcConnection       │
-│                      │   ◄── 决策 ─────────►          │                      │
-└──────────────────────┘                                └──────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                         Gateway Server                           │
+│                  ws://127.0.0.1:18790/ws                        │
+│   （远端：wss://...，TLS 自签或代理终止）                          │
+├────────────────────────────────────────────────────────────────┤
+│   Inbound Router  ─►  Handler Registry  ─►  Outbound Emitter    │
+│   • connect handshake     • agent.run     • stream.chunk        │
+│   • per-IP rate-limit     • chat.send     • agent.trace         │
+│   • flood guard           • exec.approval • tool_start / end    │
+│                          • tools.*       • session.*           │
+│                          • mcp.*         • events.subscribe     │
+│                          • gateway.*                             │
+│                          • runs.*                                │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-IPC 服务器在 `~/.aleph/exec-approvals.sock` 的 Unix 域套接字上监听，权限设置为 `0600`（仅所有者读/写）。每个传入连接必须在交换任何消息之前完成 HMAC-SHA256 认证。
+## 信任边界
 
-## 连接生命周期
+信任边界是网络边界。loopback 永远免密；远端连接**必须**出示有效凭证，
+按优先级解析（`src/gateway/handlers/connect.rs::resolve_connect_auth`）：
 
-### 认证流程
+1. **loopback** ⇒ operator（无凭证）；
+2. **设备 token**（`aleph-dt-*`）—— 长生命周期，绑定到一台已配对设备；
+3. **启动票**（`aleph-bt-*`）—— 5 分钟单次，握手时换取新的设备 token；
+4. **共享 Gateway token**（`aleph-<uuid>`，`SharedTokenManager`）——
+   HMAC-hashed，常数时间验证。
 
-每个新连接必须完成三步挑战-响应握手：
+有效凭证 = 完整操作员权限（与本机相同）；缺失 / 无效 ⇒ WS 分发拒绝除
+`connect` 之外的所有方法。
 
-```
-服务器                                          客户端
-  │                                                │
-  │──── 挑战 { nonce: "a1b2c3..." } ─────────────►│
-  │                                                │
-  │◄─── 挑战响应 { response: "d4e5..." }──────────│
-  │                                                │
-  │     [服务器验证 HMAC-SHA256]                    │
-  │                                                │
-  │──── 认证结果 { success: true } ──────────────►│
-  │                                                │
-  │     [已建立认证会话]                            │
-  │                                                │
-  │◄──► 消息（审批、决策、ping）◄──►              │
-  │                                                │
-```
+WS `Origin` 检查（`src/gateway/origin_policy.rs`）作为最后一道额外阻挡
+公共 web 页面跨域驱动本地 daemon。
 
-**步骤 1：挑战。** 服务器使用加密 RNG（`OsRng`）生成 32 字节随机 nonce 并将其作为十六进制编码字符串发送。
+## Connect 握手
 
-**步骤 2：响应。** 客户端计算 `HMAC-SHA256(shared_secret, nonce_bytes)` 并以十六进制编码发送结果。
-
-**步骤 3：验证。** 服务器独立计算相同的 HMAC 并进行比较。如果值匹配，认证成功。该层不使用恒定时间比较（令牌本身是共享的本地密钥，不是面向用户的凭据）。
-
-```rust
-fn compute_hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC key size issue");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-```
-
-### 共享密钥
-
-共享密钥（令牌）在 `exec-approvals.json` 中配置：
+`/ws` 上的第一帧必须是 `connect`。Loopback 全部省略凭证字段；远端客户端
+在 `connect` params 里出示：
 
 ```json
 {
-  "socket": {
-    "path": "~/.aleph/exec-approvals.sock",
-    "token": "hex-encoded-32-byte-secret"
+  "method": "connect",
+  "params": {
+    "minProtocol": 1,
+    "maxProtocol": 1,
+    "client": {
+      "id": "macos-app",
+      "version": "1.0.0",
+      "platform": "macos"
+    },
+    "device_token": "aleph-dt-…",
+    "bootstrap_ticket": "aleph-bt-…"
   }
 }
 ```
 
-如果未配置令牌，Gateway 在首次启动时生成随机的 32 字节密钥并持久化它。
+`resolve_connect_auth` 解决授权。响应回显 `role` / `authorized` /
+`needs_token` —— Panel 据此渲染登录墙或解锁完整 app。一个启动票交换也
+返回一个客户端为后续重连持久化的新 `device_token`。
 
-## 消息格式
+一个被拒绝的远端 `connect` 记录在安全审计 log
+（`AuditEventType::AuthFailure`，由 `Auth`-scope rate limiter 约束）。
 
-所有消息都是换行符分隔的 JSON。每条消息都是一个 JSON 对象后跟 `\n`。`type` 字段（snake_case）确定消息变体：
+> Loopback 客户端完全省略凭证字段。远端客户端在首次配对时发
+> `bootstrap_ticket`（收到 `device_token` 作回报），然后每次重连发
+> `device_token`。`token`（遗留共享 Gateway token）作为后备接受。
+>
+> `device_id` 是**客户端断言**的，`devices` 表与集群节点共享一个命名
+> 空间 —— 交换过程会拒绝一个已经命名了非 Panel 设备的 `device_id`
+> （`cluster::admit_node` 拒镜像情况）。没有这道保护，一张票就能换一个
+> Panel 看不到、无法撤销的操作员 token。
 
-### 消息类型
+## JSON-RPC 协议
 
-```rust
-pub enum IpcMessage {
-    // 认证
-    Challenge { nonce: String },
-    ChallengeResponse { response: String },
-    AuthResult { success: bool, error: Option<String> },
-
-    // 审批工作流
-    ApprovalRequest { id: String, request: ApprovalRequestPayload, timeout_ms: u64 },
-    ApprovalDecision { id: String, decision: ApprovalDecisionType, resolved_by: Option<String> },
-
-    // 待处理查询
-    GetPending,
-    PendingList { pending: Vec<PendingInfo> },
-
-    // Keepalive
-    Ping,
-    Pong,
-
-    // 错误
-    Error { message: String },
-}
-```
-
-### 审批请求负载
-
-当 Gateway 需要命令审批时，它发送：
+### 请求格式（Client → Gateway）
 
 ```json
 {
-  "type": "approval_request",
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "request": {
-    "command": "npm install express",
-    "cwd": "/Users/alice/project",
-    "agent_id": "main",
-    "session_key": "agent:main:main",
-    "executable": "npm",
-    "resolved_path": "/usr/local/bin/npm",
-    "segments": [
-      {
-        "raw": "npm install express",
-        "executable": "npm",
-        "resolved_path": "/usr/local/bin/npm",
-        "args": ["install", "express"]
-      }
-    ]
-  },
-  "timeout_ms": 120000
+  "jsonrpc": "2.0",
+  "id": "uuid-xxx",
+  "method": "agent.run",
+  "params": {
+    "message": "Hello",
+    "session_key": "agent:main:main"
+  }
 }
 ```
 
-`segments` 数组支持管道命令 —— 每个段代表管道中的一个命令。
-
-### 审批决策
-
-客户端响应：
+### 响应格式（Gateway → Client）
 
 ```json
 {
-  "type": "approval_decision",
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "decision": "allow-once",
-  "resolved_by": "Alice (macOS App)"
+  "jsonrpc": "2.0",
+  "id": "uuid-xxx",
+  "result": {
+    "run_id": "run-123",
+    "status": "running"
+  }
 }
 ```
 
-决策值是 kebab-case 字符串：
-
-| 值 | 含义 |
-|-------|---------|
-| `allow-once` | 仅执行此命令 |
-| `allow-always` | 执行并添加到永久白名单 |
-| `deny` | 阻止执行 |
-
-### 待处理查询
-
-客户端可以请求所有待处理审批的列表：
+### 事件格式（Gateway → Client）
 
 ```json
-// 请求
-{ "type": "get_pending" }
-
-// 响应
 {
-  "type": "pending_list",
-  "pending": [
-    {
-      "id": "550e8400-...",
-      "command": "npm install",
-      "cwd": "/project",
-      "agent_id": "main",
-      "remaining_ms": 95000
+  "jsonrpc": "2.0",
+  "method": "event",
+  "params": {
+    "topic": "stream.chunk",
+    "data": {
+      "run_id": "run-123",
+      "content": "Hello! How can I help you?"
     }
-  ]
+  }
 }
 ```
 
-当 macOS 应用打开并需要显示已在等待的任何审批请求时使用此功能。
+## RPC 方法（节选）
 
-### Keepalive
+| 方法 | 描述 | 参数 |
+|------|------|------|
+| `connect` | LAN-trust 握手（远端要求凭证） | `device_token` / `bootstrap_ticket` / `token` |
+| `agent.run` | 启动 agent 执行 | `message`, `session_key`, `thinking?`, `model?`, `exec_tier?` |
+| `agent.status` | 获取 run 状态 | `run_id` |
+| `agent.cancel` / `agent.abort` | 取消 / 强制中止 run | `run_id` |
+| `session.get` / `session.list` / `session.history` | 会话查询 | `session_key`, `limit?` |
+| `session.compact` / `session.delete` | 会话管理 | `session_key` |
+| `config.get` / `config.patch` / `config.apply` / `config.reload` | 配置管理 | —— |
+| `events.subscribe` / `events.unsubscribe` / `events.list` | 事件订阅 | `pattern`（glob） |
+| `exec.approval.list` / `exec.approval.resolve` | 审批决策 | `{outcome, reason?}` |
+| `memory.store` / `memory.search` / `memory.delete` / `memory.stats` | 长期记忆 | —— |
+| `browser.navigate` / `browser.click` / `browser.type` / `browser.screenshot` / `browser.evaluate` | 浏览器 per-action 入口 | —— |
+| `mcp.*` | `start` / `stop` / `list` / `call` | —— |
+| `gateway.ticket.create` / `gateway.devices.*` / `gateway.token.rotate` | 设备 / token 管理 | —— |
+| `runs.*` | `list` / `status` / `wait` / `queue` | —— |
+| `models.*` / `generation.*` / `cron.*` / `plugins.*` / `skills.*` / `interfaces.*` | 各域 RPC | —— |
 
-客户端发送定期 ping 以保持连接：
+## 事件主题
 
-```json
-// 客户端
-{ "type": "ping" }
+事件用 glob 模式订阅：
 
-// 服务器
-{ "type": "pong" }
+| 模式 | 事件 |
+|------|------|
+| `stream.*` | 所有流式事件 |
+| `stream.chunk` | 文本块 |
+| `stream.agent_trace` | 结构化、loop-originated 执行 trace |
+| `stream.tool_start` / `stream.tool_end` | 工具执行边界 |
+| `agent.*` | agent 生命周期 |
+| `agent.started` / `agent.completed` / `agent.error` | agent 状态 |
+| `session.*` / `config.*` | 会话 + 配置事件 |
+
+## 远程连接的传输加密（TLS）
+
+reachability 控制*谁能打开 socket*；TLS 控制*线上字节是否可读*。
+两者独立：Gateway token 认证身份，TLS 加密信道。一个 `host = "0.0.0.0"`
+的部署若没 TLS，token 和每条消息都明文，嗅探 client 与 server 之间的任何
+一跳。
+
+**强制（默认关闭；loopback 永远豁免）**：loopback
+（`127.0.0.1` / `::1`）保持明文 `ws://` —— 零配置桌面 / CLI / 同机代理
+不变。对**非 loopback** 绑定 Aleph 现在是失败关闭：
+
+- **启动门**（`check_network_exposure`）：非 loopback 绑定且无原生 TLS、
+  无受信代理、`allow_insecure_remote = false` 的配置**拒绝启动**，
+  给出可操作错误。（这是有意的破坏性变更 —— 一个之前能用的
+  `host = "0.0.0.0"` 明文配置现在必须选下面的补救之一。）
+- **每连接门**（`refuse_insecure_remote`）：远端客户端 leg 未加密时，
+  在 WS upgrade 处用 `426 Upgrade Required` 拒绝，即使启动门通过了一个
+  宽松组合。"加密"指进程内终止的原生 TLS，或一个设了
+  `X-Forwarded-Proto: https` 的受信代理。
+
+三种满足方式：
+
+### Tier ① —— TLS 反向代理（推荐；需要域名）
+
+Aleph 保持绑定 **loopback**；同机 Caddy / nginx 终止 TLS 并转发给它。
+代理配置保持平凡 —— 所有健壮性都在 Aleph 里。
+
+```toml
+[gateway]
+host = "127.0.0.1"                       # aleph 保持 loopback；代理同机
+allowed_origins = ["https://your.domain.com"]
+
+[gateway.trusted_proxy]
+enabled = true                            # 信任代理的 X-Forwarded-For / -Proto
 ```
 
-## 套接字安全
+`Caddyfile`（整个文件 —— Caddy 自动准备 Let's Encrypt）：
 
-### 文件权限
-
-套接字文件以模式 `0600`（Unix 权限）创建，将套接字访问限制为所有者：
-
-```rust
-#[cfg(unix)]
-{
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(&self.socket_path, perms)?;
+```
+your.domain.com {
+    reverse_proxy 127.0.0.1:18790
 }
 ```
 
-这防止系统上的其他用户连接到套接字。
+> **`trusted_proxy` 在这里是安全关键，不只是形式**。代理通过 loopback
+> 连 Aleph，所以**没有** `trusted_proxy` 时每个远端客户端在 Aleph 看
+> 来都是 `127.0.0.1` —— 即**自动授权为 loopback 操作员**，完整绕过授权。
+> 设了 `trusted_proxy = true` 后 Aleph 从 `X-Forwarded-For` 读真实客户端
+> IP（spoof-safe：只有 `trusted_ips` 里的 peer 被相信），所以远端客户端
+> 被正确视为远端，必须出示 Gateway-token 凭证，并且 per-IP rate-limit /
+> cap / audit 按真实客户端键控。**启用代理而不设 `trusted_proxy` 是个
+> 错误**。
 
-### 陈旧套接字清理
+### Tier ② —— 原生自签名 TLS（无域名；更弱）
 
-如果存在来自先前 Gateway 运行的套接字文件，服务器在绑定前将其删除：
+无域名、无代理 —— Aleph 在 `~/.aleph/data/tls/` 上首次启动时生成并
+持久化一个自签名证书并 log 其 SHA-256 指纹。SAN **自动覆盖** loopback
+加上该 box 的每个非 loopback 接口 IP（例如 VPS `eth0` 上的公网 IP），
+所以通过那个 IP 连接能过 TLS hostname 验证；通过 `[gateway.tls] san =
+[...]` 添加 hostname 或 NAT 后的公网 IP。客户端仍然收到浏览器证书警告
+（一次性接受，或钉住指纹）—— 加密是真的，信任锚是手动的。新出现的地址
+regen 证书（新指纹 ⇒ 重新信任一次）；`sans.txt` sidecar 跟踪覆盖使
+churn 最小。注意 SAN 枚举了**每个**本地接口 IP —— 包括私网 / LAN 和
+Docker-bridge 地址 —— 所以任何检查证书的人都能学到 box 的接口图；对
+个人服务器无害，但如果这要紧，通过 `san` + loopback bind 只列出你
+需要的。
 
-```rust
-if self.socket_path.exists() {
-    std::fs::remove_file(&self.socket_path)?;
-}
+```toml
+[gateway]
+host = "0.0.0.0"
+
+[gateway.tls]
+enabled = true          # 空 cert/key 路径 ⇒ 自动自签名
+# san = ["vps.example.com"]
 ```
 
-### 连接隔离
+Panel 对任何非 loopback 主机硬编码 `wss://`，对远端 gateway 拒绝明文
+socket —— 远端 Panel 自动走 TLS。
 
-每个客户端连接在独立的 `tokio::spawn` 任务中处理。受损或行为异常的客户端不能影响其他连接或服务器的主循环。
+### Tier ③ —— 原生 TLS + 真实证书（域名，无代理）
 
-## 客户端实现
+指向操作员提供的 PEM 文件（例如 certbot 输出）。Aleph 自己终止 TLS。
 
-`IpcClient` 结构体提供用于连接和与 Gateway 交互的高级 API：
+```toml
+[gateway]
+host = "0.0.0.0"
 
-```rust
-// 连接并认证
-let client = IpcClient::new("~/.aleph/exec-approvals.sock", secret);
-let mut conn = client.connect().await?;
-
-// 发送决策
-conn.send_decision("req-123", ApprovalDecisionType::AllowOnce, Some("Alice".into())).await?;
-
-// 查询待处理审批
-let pending = conn.get_pending().await?;
-
-// Keepalive
-conn.ping().await?;
+[gateway.tls]
+enabled = true
+cert_path = "/etc/letsencrypt/live/your.domain.com/fullchain.pem"
+key_path  = "/etc/letsencrypt/live/your.domain.com/privkey.pem"
 ```
 
-<Callout type="info">
-IPC 客户端专为 macOS 桌面应用设计，但任何有权访问共享密钥的本地进程都可以使用它。该协议是传输无关的——虽然目前使用 Unix 域套接字，但消息格式可以适用于 TCP 或命名管道。
-</Callout>
+### 逃生口 —— `allow_insecure_remote`
 
-## 错误处理
+```toml
+[gateway]
+host = "0.0.0.0"
+allow_insecure_remote = true    # 危险：明文到远端客户端
+```
 
-该协议为常见失败模式定义了类型化错误：
+恢复 pre-hardening 行为（启动门 + 每连接门都撤销）。仅用于明知接受明文
+的受信任、隔离 LAN。绝不在公网接口上。
 
-| 错误 | 原因 |
-|-------|-------|
-| `AuthFailed` | HMAC 验证失败或握手期间出现意外消息 |
-| `InvalidMessage` | 收到当前状态的意外消息类型 |
-| `ConnectionClosed` | 远程端关闭套接字（读取到 0 字节） |
-| `Timeout` | 操作在预期时间范围内未完成 |
-| `Io` | 底层 I/O 错误（未找到套接字、权限被拒绝） |
-| `Json` | 消息无法序列化/反序列化 |
+## 集群节点的远程 RPC
 
-当认证失败时，服务器发送带有 `success: false` 的 `AuthResult` 和错误原因，然后关闭连接。
+集群节点（`aleph-server node --center ws://...`）通过反向 WS RPC 与
+中心通信：
+
+- 节点连接到中心 `/ws`，按 panel device 协议握手（设备 token / 启动票）；
+- 中心把 `agent.run` 委派给节点；
+- 节点上的 `exec.approval.resolve` 接受可选 `reason` 参数
+  （`ApprovalRequester` trait 现在返回 `outcome + reason`；不能携带 reason
+  的 transport 用 `From<ApprovalOutcome>`）—— 老节点忽略它。
+
+## 远端客户端 IP 解析（受信代理）
+
+per-IP 滥用保护（per-IP 连接上限、rate limiter、`Auth`-scope lockout）
+键控 **原始 socket peer 地址**（`peer_addr.ip()`，逐字）。
+
+`X-Forwarded-For` / 受信代理解析在 LAN-trust revert 中**移除**且**不**
+恢复 —— 配置里的 `trusted_proxy` key 是静默忽略的遗留字段，没有
+`src/gateway/trusted_proxy.rs`。在原始 peer 上保持 loopback 检查是有意
+为之：意味着 `is_loopback`（零配置操作员授权）永远不能被伪造的
+`X-Forwarded-For` 头伪造。
+
+权衡：网关前面挂反向代理时，每个客户端都塌成代理的 socket 地址，所以
+per-IP 保护限定的是**代理**而不是单个客户端。在上游（代理）终止
+client-identity 信任如果你需要 per-client 限制，并把 Gateway token 当
+作传输认证。（恢复 fail-closed、allowlist-门控的受信代理 XFF 解析
+—— 永远不让转发头影响 `is_loopback` —— 被追踪为未来增强。）
+
+## WS Origin 检查（最后一道）
+
+浏览器给每个 WebSocket upgrade 和跨域 `fetch` 附带一个不可伪造的
+`Origin` header。用户碰巧访问的恶意公共 web 页面仍然能**到达**
+`ws://127.0.0.1:18790/ws`（loopback 不会从浏览器被防火墙挡住），所以
+没有 origin check 它能打开本地 daemon 的控制信道 —— 跨域 WebSocket 混淆
+代理（及其 DNS-rebinding 变体）。origin gate
+（`src/gateway/origin_policy.rs`）被保留为浏览器表面的**唯一**验证。
+它防御公网，**不**防御 LAN 邻居。
+
+`OriginPolicy::is_allowed` 决定：
+
+| Origin | 判定 | 为什么 |
+|--------|------|-------|
+| **缺失 / 空** | 允许 | 原生客户端（CLI、bots、bridges、`tokio-tungstenite`）不发；只有浏览器发。 |
+| **loopback**（`127.0.0.0/8`、`::1`、`localhost`、`*.localhost`） | 允许 | 同机 UI。 |
+| **`tauri:` scheme** | 允许 | 桌面 shell 自有 webview origin，远程页面不可伪造。 |
+| **精确 allow-list 匹配**（`[gateway] allowed_origins`） | 允许 | 操作员配置的额外 origins（用于拆分 panel / API 部署）。 |
+| **同源**（Origin authority == 请求 `Host`） | 仅当 `Host` 是 IP literal 或 loopback 时允许 | IP 到达的 LAN 部署（`http://10.10.10.6:18790`）无需配置即可工作；IP literal 不能 DNS-rebind。**域名** `Host` **不**自动允许 —— 部署必须把它的 origin 加到 `allowed_origins`。 |
+| 其他（公共 web 域名） | **拒绝** | |
+
+> **DNS-rebinding —— 已防御**。经典 DNS-rebinding 攻击把一个域名
+> （`evil.com`）rebind 到 gateway 自己的地址，所以受害者的页面携带
+> `Origin == Host == evil.com` 会溜过朴素的同源检查。Aleph 通过把同源分支
+> 门控在 `Host` 上关闭这个：同源**仅当** `Host` 是 IP literal 或
+> loopback 时自动允许（`127.0.0.0/8`、`::1`、`localhost`、
+> `*.localhost` 或裸 IPv4 / IPv6 地址）。rebinding 攻击必须用域名（A 记录
+> 是被 rebind 的那个），域名 `Host` 不再通过同源 —— 它落到拒绝。权衡：
+> 零配置**域名**部署（从 `aleph.example.com` 提供 panel，没有
+> `allowed_origins`）现在被拒，必须把它的 origin 加到 `[gateway]
+> allowed_origins`。IP 到达的 LAN 部署和 loopback 访问不受影响。
+
+**逃生口 —— `allow_any_origin`**：设 `[gateway] allow_any_origin = true`
+无条件信任每个 Origin（`OriginPolicy::allow_any`）。仅用于自己前面挂了
+反向代理 / auth 层的部署；它让 agent 可以被用户浏览器访问的任何 web 页面
+驱动，所以除非你知道为什么，否则保持 `false`。
+
+## 限速与反滥用
+
+- **全局 `max_connections`** 上限
+- **per-IP 并发连接上限**（`gateway.max_connections_per_ip`，默认 64，
+  `0` 禁用，loopback 豁免）—— 远端 peer 打开大量空闲 socket 的 slot
+  耗尽防护。
+- **flood guard**（`src/gateway/server/flood_guard.rs`）—— 一个远端连接
+  持续探测（连发未授权 `connect`）被关闭。
+- **per-scope rate limiter**（`Auth`-scope 等）
+
+被 `AuthFailure` / `RateLimited` 关闭的连接记录在安全审计 log
+（`src/security/audit.rs`）。
+
+## 审计与追踪
+
+每个 JSON-RPC 请求解析一个 [W3C `traceparent`](https://www.w3.org/TR/trace-context/)：
+入站 `params.traceparent` 被尊重（其 trace id 被采用），否则 mint 一个
+新的 128-bit 根 trace。分发咽喉打开一个携带 `trace_id` / `span_id` 的
+`tracing` span，响应回显一个 `traceparent` 把 server 的 span 命名为父，
+所以多跳调用图能缝合在一起。这是轻量级传播层
+（`src/gateway/trace_context.rs`），**不是** OpenTelemetry 集成 —— OTel
+SDK 会为这个（考虑 Aleph 自己的 trace 持久化 + `tracing` 日志）违反
+R3 核心极简。
+
+> 注意：JSON-RPC middleware 链在 server 构造时构建一次并 per-connection
+> 克隆。per-connection 重建过去会在每个 connect 重新安装全局请求状态
+> 注册表，把 `/metrics` 请求生命周期计数器清零并低估在飞请求。
+
+## 指标 + 健康
+
+Gateway 暴露：
+
+- `GET /health` —— 活性探针
+- `GET /ready` —— 就绪探针
+- `GET /metrics` —— Prometheus 文本展示（v0.0.4）请求生命周期计数器、
+  连接 gauge、rate-limiter 压力，以及请求时长直方图
+  （`aleph_gateway_request_duration_ms`，由 per-request `elapsed_ms`
+  middleware 已经测得）；只导出聚合计数（无 payload / secret），和
+  probe 一样未认证。实现：
+  `src/gateway/server/metrics_endpoint.rs` +
+  `src/gateway/middleware/latency.rs`。
 
 ## 另请参阅
 
-- [执行审批](/docs/zh/security/exec-approval) — 生成 IPC 请求的审批系统
-- [设备配对](/docs/zh/security/pairing) — 设备在连接前如何建立信任
-- [Gateway 协议](/docs/zh/gateway/protocol) — 远程客户端使用的高级 RPC 协议
-
----
-
-## 26.7.x 补充
-
-### 失败关闭
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### 三级执行权限
-
-| 等级 | 行为 |
-|------|------|
-| `ask` | 每次审批；未知工具失败关闭（默认） |
-| `auto` | 幂等自动；破坏性仍审批 |
-| `full` | 全部自动（独立安全过滤除外） |
-
-### Action-aware Approval Gate
-
-26.7.15+ 审批门是动作感知的——人看到真实命令且授权指纹键绑定在命令上。单一强点 `src/tools/scoped/`。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
-
-### TOFU 证书信任
-
-26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use。共享决策核心 + 已固定信任存储 + SHA-256 指纹 + SAN/Subject 解析 + 审批面板 + macOS WKWebView / iOS Keychain 适配器。
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已回退，**单源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### `signed_operation_ledger`
-
-26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
-
-### 桌面 `open` / `launch` 命令注入
-
-26.7.21+ 修复：通过 `ShellExecuteW` 而非 shell。
-
-### Bundled 解压符号链接
-
-26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接。
-
-### 进程隔离内核
-
-26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口。
-
-### 详见
-
-- [架构红线 R1 / R3 / R10](/docs/zh/philosophy/redlines) — 硬约束
-- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与审批
-- [安全：配对](/docs/zh/security/pairing) — 设备配对
-- [安全：沙箱](/docs/zh/security/sandboxing) — OS 级沙箱
+- [安全概览](/docs/zh/security/overview) —— 网络边界 + Gateway token
+- [执行审批](/docs/zh/security/exec-approval) —— 通过 `exec.approval.*` RPC
+  路由
+- [配对](/docs/zh/security/pairing) —— 启动票 + 设备 token
+- [沙箱](/docs/zh/security/sandboxing) —— OS 级强制

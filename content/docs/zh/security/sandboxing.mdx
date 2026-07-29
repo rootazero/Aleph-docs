@@ -1,532 +1,402 @@
 ---
 title: "沙箱"
-description: "基于能力的执行沙箱，具有每个工具的权限声明、文件系统控制和平台原生强制执行"
+description: "WorkspaceSandbox 六步管道，平台原生强制（macOS / Linux / Windows），[sandbox.command_policy] 硬线命令过滤"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## 概览
 
-Aleph 的沙箱系统在工具执行周围强制执行细粒度的安全边界。不仅仅依赖审批提示来防止损害，沙箱在操作系统级别限制*进程可以做什么*——即使命令本身已被批准。
+`Sandbox` trait（`src/sandbox/mod.rs`）是 exec-class 工具与操作系统之间的
+**唯一** seam：
 
-沙箱模型是**基于能力**的：每个工具声明它需要的权限（文件系统路径、网络访问、内存限制），系统生成一个平台原生的沙箱配置文件，强制执行这些边界。声明 "对 `/tmp` 只读访问" 的工具物理上无法写入 `/tmp`，无论它运行什么命令。
+```rust
+#[async_trait]
+pub trait Sandbox: Send + Sync + 'static {
+    async fn execute(&self, command: SandboxCommand)
+        -> Result<SandboxOutput, SandboxError>;
+}
+```
 
-**源代码位置：**
-- 能力：`src/sandbox/capabilities.rs`
-- 工作空间：`src/sandbox/workspace.rs`
-- 驱动：`src/sandbox/driver.rs`
+生产装配的 `Arc<dyn Sandbox>` 指向 `WorkspaceSandbox`
+（`src/sandbox/workspace.rs`），它拥有三件事：
+
+1. **工作空间供应** —— 首次执行时物化
+   `~/.aleph/workspaces/{hash(session_id)}/`，保持会话生命周期，后续调用
+   复用。
+2. **能力强制** —— 把每个 `SandboxCommand` 与会话基线
+   `SandboxCapabilities` 分类，越界请求通过 `ApprovalGate` 升级，按
+   会话缓存已批准的升级。
+3. **OS 隔离** —— 把实际子进程启动委托给
+   `OsSandboxDriverTrait` 实现（macOS：`sandbox-exec` + Seatbelt；
+   Linux：`bwrap` + Landlock + seccomp-bpf + cgroup v2；Windows：
+   `AppContainer` / `RestrictedToken` / `JobObject`）。
+
+```
+exec-class 工具 (bash_exec, code_exec, …)
+        │   Arc<dyn Sandbox>
+        ▼
+WorkspaceSandbox   ──► ApprovalGate（能力升级）
+        │
+        │   OsSandboxDriverTrait
+        ▼
+OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 三级软降级
+```
+
+**源位置：**
+- Trait + re-export + 测试 helper：`src/sandbox/mod.rs`
+- 六步管道：`src/sandbox/workspace.rs`
+- 命令策略层：`src/sandbox/command_policy/`（`rules.rs`、
+  `normalize.rs`、`hooks.rs`）
+- 能力：`src/sandbox/capabilities.rs`（`SandboxCapabilities` +
+  `NetworkPolicy` + `is_within`）
+- OS 驱动：`src/sandbox/driver.rs`（trait）+ 平台实现
 - 工厂：`src/sandbox/factory.rs`
 - 配置：`src/sandbox/config.rs`
-- macOS 适配器：`src/exec/sandbox/executor.rs`（旧路径）
-- 审批门：`src/sandbox/exec_approval/gate.rs`
-- 审计日志：`src/tools/middleware/audit.rs`
+- 任务局部 `SESSION_ID`：`src/sandbox/context.rs`
+- Managed proxy：`src/sandbox/proxy/`（HTTP CONNECT + SOCKS5）
+- Linux / macOS / Windows 适配：`src/sandbox/platforms/`
 
-## 架构
+## 生命周期 —— 每会话一个工作空间
+
+`WorkspaceSandbox` 在 `RwLock` 后维护一个
+`HashMap<SessionId, Arc<SessionWorkspace>>`。`for_session(&sid)` 是入口：
+
+- **快路径**：`read().await` → 缓存命中 → 返回现有
+  `Arc<SessionWorkspace>`。
+- **慢路径**：`write().await` → 双重检查（另一个任务可能已创建）→
+  `tokio::fs::create_dir_all(cwd)` → 插入 map。
+
+磁盘路径是确定性的：
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    沙箱执行流程                               │
-│                                                               │
-│  工具声明                                                     │
-│  ┌────────────────────────────────────────────┐              │
-│  │ RequiredCapabilities {                      │              │
-│  │   base_preset: "file_processor",            │              │
-│  │   overrides: { network: AllowAll },         │              │
-│  │   parameter_bindings: { path → fs.rw }      │              │
-│  │ }                                           │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ 能力解析器                                   │              │
-│  │   预设 + 覆盖 + 绑定 → Caps                  │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ 信任检查 (Draft → Trial → Verified)         │              │
-│  │   范围违规升级                               │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ 平台适配器 (macOS sandbox-exec)              │              │
-│  │   生成 .sb 配置文件 → 执行 → 清理            │              │
-│  └────────────────────┬───────────────────────┘              │
-│                       │                                       │
-│                       ▼                                       │
-│  ┌────────────────────────────────────────────┐              │
-│  │ 审计日志                                     │              │
-│  └────────────────────────────────────────────┘              │
-└─────────────────────────────────────────────────────────────┘
+workspace_root / session_key_to_filename(session_id)
 ```
 
-## 能力模型
+`session_key_to_filename`（`src/sandbox/workspace.rs:114`）对
+JSON-serialized `SessionId` 做 SHA-256，截断到 16 字节（32 个 hex 字符）——
+路径短且跨每个 `SessionKey` 变体安全。
 
-`Capabilities` 结构体定义沙箱的四个维度：
+每个 `SessionWorkspace` 持有：
+
+- `cwd: PathBuf` —— 物化的目录
+- `baseline: SandboxCapabilities` —— 政策上限（今天：`::strict()`）
+- `granted_elevations: RwLock<HashSet<SandboxCapabilities>>` —— 本会话
+  缓存的用户已批准升级
+
+## 六步 `execute` 管道
+
+`WorkspaceSandbox::execute`（`src/sandbox/workspace.rs:124`）实现 spec §8
+管道：
+
+1. **Session resolve** —— `self.for_session(&cmd.session_id)` →
+   首次调用懒创建目录；否则返回缓存的 `Arc<SessionWorkspace>`。
+2. **cwd validate** —— `cmd.cwd` 要么是 `None`（默认为 workspace 根），
+   要么必须 `canonicalize + starts_with(&ws.cwd)`（BUG-3 hardening：符号
+   链接无法逃出）。其他情况返回 `SandboxError::CapabilityDenied { reason:
+   "cwd outside workspace root" }`。
+3. **Capability check** —— `cmd.capabilities.is_within(&ws.baseline)` 是
+   快路径（不审批）。否则查 `granted_elevations`；请求在已批准的范围内
+   通过。否则问 `ApprovalGate::request_approval_for_tool`。
+   - `ApprovalOutcome::Approved` → 把 `cmd.capabilities` 插入
+     `granted_elevations`（同一或更窄的未来请求被缓存）。
+   - `ApprovalOutcome::Denied` | `Timeout` →
+     `SandboxError::CapabilityDenied`。
+4. **Profile generate** —— `os_driver.profile_for(&caps, &cwd)` 返回一个
+   不透明的 `OsSandboxProfile`（macOS 上：SBPL profile 文本）。
+5. **Run** —— `os_driver.run(program, args, env, stdin, cwd, profile,
+   timeout, max_output_bytes)`。默认 60 秒超时、1 MiB 输出预算（stdout
+   + stderr 分割）。两者都可以在 `WorkspaceSandbox` 上通过
+   `with_timeout` / `with_max_output_bytes` 覆盖。`cmd.timeout` >
+   `capabilities.timeout_secs` > 配置的默认。
+6. **Audit** —— `tracing::info!(target: "capability_ledger", …)` 记录
+   `session_id`、`program`、`caps`、`exit_code`、`signal`、`duration_ms`。
+   这是 capability-ledger 钩子；下游 tracing 订阅者可以下沉到想要的
+   存储。
+
+管道内，`SandboxCapabilities::is_within`
+（`src/sandbox/capabilities.rs:36`）强制四个单调检查：`fs_read` ⊆（前缀）、
+`fs_write` ⊆（前缀）、`network`（`None ⊆ AllowHosts ⊆ AllowAll`）、
+`spawn_subprocess`（`false ⊆ any`）。
+
+## `SandboxCapabilities`
 
 ```rust
-pub struct Capabilities {
-    pub filesystem: Vec<FileSystemCapability>,
-    pub network: NetworkCapability,
-    pub process: ProcessCapability,
-    pub environment: EnvironmentCapability,
+pub struct SandboxCapabilities {
+    pub fs_read: Vec<PathBuf>,
+    pub fs_write: Vec<PathBuf>,
+    pub network: NetworkPolicy,
+    pub spawn_subprocess: bool,
+}
+
+pub enum NetworkPolicy {
+    None,
+    AllowAll,
+    AllowHosts { hosts: Vec<String> },
 }
 ```
 
-### 文件系统能力
+`::strict()`（等价于 `::default()`）是工作空间基线：cwd 外没有 fs 访问
+（OS 驱动通过 seatbelt profile 自动授予），没有网络，没有子进程生成。
+任何需要更多的命令必须经 `ApprovalGate` 升级。
 
-每个文件系统能力授予对特定路径的特定模式的访问：
+## 任务局部 `SESSION_ID`
+
+exec-class 工具不知道当前 session id —— 它们的 `AlephTool::execute`
+签名不携带。沙箱子系统使用 tokio `task_local!` 来传递 id 而不接触每个
+工具 trait：
+
+- `crate::sandbox::context::SESSION_ID` —— 在 `src/sandbox/context.rs`
+  声明
+- `current_session() -> Option<SessionId>` —— 读助手
+- **写入器**：`crate::session::invoke_with_session_trace`
+  （`src/session/tool_trace.rs:17`）把 `tool_svc.execute(...)` 包裹在
+  `SESSION_ID.scope(session_id.clone(), async move { ... })`。
+
+这给工具一个单一、窄的机制：
+`crate::sandbox::context::current_session()` 在 scope 内返回 `Some(sid)`、
+scope 外返回 `None`。需要一个工作空间但被在 session 外调用的工具可以
+选择自己的 fallback 策略（今天它们依赖调用方已经显式传了
+`SandboxCommand { session_id, ... }`）。
+
+## `SandboxConfig`
 
 ```rust
-pub enum FileSystemCapability {
-    ReadOnly { path: PathBuf },   // 对路径树的只读访问
-    ReadWrite { path: PathBuf },  // 对路径树的完全读/写访问
-    TempWorkspace,                // 自动创建的临时目录
+pub struct SandboxConfig {
+    pub workspace_root: PathBuf,       // 默认: ~/.aleph/workspaces
+    pub enabled: bool,                 // 默认: true
+    pub default_timeout_seconds: u64,  // 默认: 60
+    pub max_output_bytes: usize,       // 默认: 1 MiB
 }
 ```
 
-**TempWorkspace** 在系统临时路径下创建唯一的临时目录（例如 `/tmp/aleph-sandbox-Xk9mRa/`）。执行完成后自动清理该目录。
-
-### 网络能力
-
-```rust
-pub enum NetworkCapability {
-    Deny,                        // 无网络访问
-    AllowDomains(Vec<String>),   // 仅允许特定域
-    AllowAll,                    // 无限制的网络访问
-}
-```
-
-使用 `AllowDomains` 时，沙箱配置文件默认拒绝所有网络，并为每个域添加显式的允许规则：
-
-```
-(deny network*)
-(allow network-outbound (remote tcp "api.github.com:*"))
-(allow network-outbound (remote tcp "registry.npmjs.org:*"))
-```
-
-### 进程能力
-
-```rust
-pub struct ProcessCapability {
-    pub no_fork: bool,            // 防止生成子进程
-    pub max_execution_time: u64,  // 超时（秒）
-    pub max_memory_mb: Option<u64>,  // 内存限制
-}
-```
-
-### 环境能力
-
-```rust
-pub enum EnvironmentCapability {
-    None,        // 无环境变量
-    Restricted,  // 仅安全变量（PATH、HOME、USER）
-    Full,        // 完整环境传递
-}
-```
-
-### 默认值
-
-默认能力是保守的：
-
-```rust
-impl Default for Capabilities {
-    fn default() -> Self {
-        Self {
-            filesystem: vec![FileSystemCapability::TempWorkspace],
-            network: NetworkCapability::Deny,
-            process: ProcessCapability {
-                no_fork: true,
-                max_execution_time: 300,  // 5 分钟
-                max_memory_mb: Some(512),
-            },
-            environment: EnvironmentCapability::Restricted,
-        }
-    }
-}
-```
-
-<Callout type="warn">
-默认能力仅授予对临时工作空间的文件系统访问，并拒绝所有网络访问。工具必须显式请求它们需要的任何访问权限。
-</Callout>
-
-## 能力预设
-
-为简化工具声明，系统提供定义常见能力配置文件的预设模板：
-
-### `file_processor`
-
-用于处理本地文件而不需要网络访问的工具。
-
-| 维度 | 值 |
-|-----------|-------|
-| 文件系统 | TempWorkspace |
-| 网络 | Deny |
-| 进程 | no_fork、300 秒超时、512MB 内存 |
-| 环境 | Restricted |
-| 不可变 | `network`（不能覆盖为允许） |
-
-### `web_scraper`
-
-用于从网络获取数据的工具。
-
-| 维度 | 值 |
-|-----------|-------|
-| 文件系统 | TempWorkspace |
-| 网络 | AllowAll |
-| 进程 | no_fork、600 秒超时、1024MB 内存 |
-| 环境 | Restricted |
-| 不可变 | `filesystem`（不能添加任意路径） |
-
-### `code_analyzer`
-
-用于读取项目源代码的静态分析工具。
-
-| 维度 | 值 |
-|-----------|-------|
-| 文件系统 | ReadOnly `${WORKSPACE}` |
-| 网络 | Deny |
-| 进程 | no_fork、900 秒超时、2048MB 内存 |
-| 环境 | Restricted |
-| 不可变 | `network` |
-
-### `data_transformer`
-
-用于需要读取数据访问权限和可写工作空间的数据处理工具。
-
-| 维度 | 值 |
-|-----------|-------|
-| 文件系统 | TempWorkspace + ReadOnly `${PROJECT_ROOT}/data` |
-| 网络 | Deny |
-| 进程 | no_fork、1800 秒超时、4096MB 内存 |
-| 环境 | Restricted |
-| 不可变 | 无 |
-
-### 不可变字段
-
-每个预设可以声明不能被覆盖的字段。例如，`file_processor` 预设将 `network` 标记为不可变，意味着使用此预设的工具不能将其覆盖为 `AllowAll`。这防止了通过覆盖滥用进行权限升级。
-
-## 参数绑定
-
-工具可以基于其输入参数声明动态文件系统访问。例如，文件转换工具可能接收输入路径和输出路径——沙箱应该授予输入的读取权限和输出的写入权限：
-
-```rust
-pub struct ParameterBinding {
-    pub capability: String,      // "filesystem.read_only" 或 "filesystem.read_write"
-    pub validation: ValidationRule,  // is_file、is_directory、is_path
-    pub mapping: MappingType,    // single 或 each_element（用于数组）
-}
-```
-
-### 示例声明
-
-```rust
-RequiredCapabilities {
-    base_preset: "file_processor",
-    description: "转换图像格式",
-    overrides: CapabilityOverrides::default(),
-    parameter_bindings: {
-        "input_path" => ParameterBinding {
-            capability: "filesystem.read_only",
-            validation: ValidationRule::IsFile,
-            mapping: MappingType::Single,
-        },
-        "output_dir" => ParameterBinding {
-            capability: "filesystem.read_write",
-            validation: ValidationRule::IsDirectory,
-            mapping: MappingType::Single,
-        },
-    },
-}
-```
-
-在执行时，能力解析器将实际参数值替换到文件系统能力中，生成具有真实路径的具体 `Capabilities` 实例。
-
-## 信任阶段
-
-沙箱系统通过三个阶段实现渐进信任：
-
-```rust
-pub enum TrustStage {
-    Draft,     // 新生成的工具，等待首次审批
-    Trial,     // 已批准，等待首次执行确认
-    Verified,  // 已执行多次，进入静默模式
-}
-```
-
-### 阶段进展
-
-```
-Draft ──[所有者批准能力]──► Trial ──[N 次成功执行]──► Verified
-```
-
-- **Draft**：工具的能力声明显示给所有者进行审核。不允许执行。
-- **Trial**：工具可以执行，但每次执行都会触发一个审批提示，显示工具将要做什么。
-- **Verified**：工具在没有提示的情况下静默执行，使用先前批准的能力。
-
-### 升级
-
-如果已验证的工具尝试超过其声明的能力，系统会触发升级：
-
-```rust
-pub enum EscalationReason {
-    PathOutOfScope,       // 参数路径超出批准范围
-    SensitiveDirectory,   // 访问 ~/.ssh、~/.gnupg、~/.aws 等
-    UndeclaredBinding,    // 使用绑定中未声明的参数
-    FirstExecution,       // Trial 阶段工具的首次运行
-}
-```
-
-升级将工具重置为 Draft 阶段，需要重新审批：
-
-```rust
-pub struct EscalationTrigger {
-    pub reason: EscalationReason,
-    pub requested_path: Option<PathBuf>,
-    pub approved_paths: Vec<String>,
-}
-```
-
-### 敏感目录检测
-
-升级系统包含一个内置的敏感目录列表，始终触发升级：
-
-| 目录 | 内容 |
-|-----------|---------|
-| `~/.ssh/` | SSH 密钥和配置 |
-| `~/.gnupg/` | GPG 密钥 |
-| `~/.aws/` | AWS 凭据 |
-| `Keychain.app` | macOS 钥匙串 |
-| `~/.config/gcloud` | Google Cloud 凭据 |
-
-## 平台：macOS sandbox-exec
-
-在 macOS 上，使用 Apple 的 `sandbox-exec` 工具强制执行沙箱，使用 Seatbelt 配置文件语言（.sb 文件）。
-
-### 配置文件生成
-
-macOS 适配器从 `Capabilities` 结构体生成 Seatbelt 配置文件：
-
-```scheme
-(version 1)
-(allow default)
-
-;; 文件系统限制
-(deny file-write* (subpath "/Users/alice/project"))
-
-;; 网络限制
-(deny network*)
-```
-
-<Callout type="info">
-配置文件以 `(allow default)` 开头并有选择地拒绝操作，而不是以 `(deny default)` 开头并有选择地允许。这是因为 macOS `sandbox-exec` 通过信号终止尝试不允许的操作的进程，这会破坏 `echo` 和 `sh` 等基本工具。
-</Callout>
-
-### 执行
-
-命令用 `sandbox-exec` 包装：
-
-```bash
-sandbox-exec -f /tmp/aleph-profile-Xk9m.sb echo "hello"
-```
-
-适配器处理：
-1. 将配置文件写入临时 `.sb` 文件
-2. 通过 `sandbox-exec -f <profile>` 执行命令
-3. 捕获 stdout、stderr 和带超时的退出代码
-4. 清理配置文件和临时工作空间
-
-### 清理
-
-执行后（无论成功还是失败），适配器删除：
-- 临时沙箱配置文件
-- 临时工作空间目录（如果使用了 TempWorkspace）
-
-```rust
-fn cleanup(&self, profile: &SandboxProfile) -> Result<()> {
-    if profile.path.exists() {
-        std::fs::remove_file(&profile.path)?;
-    }
-    if let Some(ref workspace) = profile.temp_workspace {
-        if workspace.exists() {
-            std::fs::remove_dir_all(workspace)?;
-        }
-    }
-    Ok(())
-}
-```
-
-## 回退策略
-
-当沙箱强制执行不可用时（例如在 Linux 上 `sandbox-exec` 不存在），`FallbackPolicy` 确定行为：
-
-```rust
-pub enum FallbackPolicy {
-    Deny,              // 拒绝执行（默认）
-    RequestApproval,   // 在无沙箱执行前询问用户
-    WarnAndExecute,    // 记录警告并执行而不使用沙箱
-}
-```
-
-<Callout type="warn">
-默认回退策略是 `Deny`。将其更改为 `WarnAndExecute` 会在不支持平台的平台上完全移除沙箱保护。这应仅在受信任的开发环境中使用。
-</Callout>
-
-## Shell 命令沙箱
-
-除了工具的基于能力的沙箱之外，Aleph 还通过 `CodeExecutor` 为直接 shell 命令执行提供单独的沙箱层：
-
-### 命令拦截
-
-基于正则的 `CommandChecker` 在执行前拦截已知的危险模式：
-
-```rust
-const DEFAULT_BLOCKED: &[&str] = &[
-    r"rm\s+-rf\s+/\s*$",             // rm -rf /
-    r"sudo\s+",                      // 任何 sudo 命令
-    r"chmod\s+777\s+/",              // chmod 777 /
-    r":\(\)\s*\{\s*:\|:\u0026\s*\}\s*;:", // fork bomb
-    r">\s*/dev/sd[a-z]",             // 覆盖磁盘
-    r"mkfs\.",                       // 格式化文件系统
-    r"dd\s+if=.*of=/dev/",           // dd 到设备
-];
-```
-
-### 路径权限检查
-
-`PathPermissionChecker` 使用 glob 模式根据允许和拒绝列表验证文件路径：
-
-```rust
-pub struct PathPermissionChecker {
-    allowed_patterns: Vec<Pattern>,   // 允许的路径 glob
-    denied_patterns: Vec<Pattern>,    // 拒绝的路径 glob（优先检查）
-    max_file_size: u64,              // 文件操作的大小限制
-}
-```
-
-默认拒绝路径包括敏感凭据目录：
-
-| 模式 | 受保护内容 |
-|---------|-------------------|
-| `~/.ssh/**` | SSH 密钥 |
-| `~/.gnupg/**` | GPG 密钥 |
-| `~/.aws/**` | AWS 凭据 |
-| `~/.kube/**` | Kubernetes 配置 |
-| `/etc/passwd` | 系统用户 |
-| `/etc/shadow` | 密码哈希 |
-| `/etc/sudoers` | Sudo 配置 |
-
-<Callout type="info">
-拒绝路径优先于允许路径。即使 `~/**` 在允许列表中，`~/.ssh/**` 仍会被默认拒绝规则拒绝。
-</Callout>
-
-### 路径遍历检测
-
-系统检测并拒绝路径遍历尝试：
-
-```rust
-fn has_path_traversal(&self, path: &Path) -> bool {
-    let path_str = path.to_string_lossy();
-    path_str.contains("..") || path_str.contains("./")
-}
-```
-
-对 `/tmp/../etc/passwd` 的请求在路径甚至未被检查允许/拒绝列表之前就被拒绝。
-
-### 运行时限制
-
-`CodeExecutor` 支持限制哪些语言运行时可用：
-
-```rust
-pub struct CodeExecutor {
-    allowed_runtimes: Vec<String>,  // 空 = 允许所有
-    timeout_seconds: u64,           // 执行超时
-    // ...
-}
-```
-
-如果 `allowed_runtimes` 设置为 `["bash", "python3"]`，尝试通过 `node` 执行 JavaScript 将被拒绝。
-
-## 审计日志
-
-每个沙箱执行都记录在结构化审计日志中：
-
-```rust
-pub struct SandboxAuditLog {
-    pub skill_id: String,
-    pub capabilities: Capabilities,
-    pub status: ExecutionStatus,
-    pub platform: String,
-    pub timestamp: DateTime<Utc>,
-}
-
-pub enum ExecutionStatus {
-    Success { exit_code: i32, duration_ms: u64 },
-    Timeout { duration_ms: u64 },
-    Error { error: String },
-}
-```
-
-这提供了关于授予了什么能力、什么平台强制执行了它们以及执行是否成功的完整记录。
+serde 读 `[sandbox]` TOML 段并填默认值。测试 / CI 可以设 `enabled = false`
+来禁用子系统；`build_sandbox` 这时会返回 `NoopSandbox`，它的 `execute`
+总是用 `SandboxError::Other("sandbox disabled: …")` 报错 —— 这是有意的
+fail-fast，不是静默绕过。
+
+## 平台实现
+
+### macOS —— sandbox-exec + Seatbelt
+
+`src/sandbox/platforms/macos/seatbelt.rs` 走完整的 codex
+`restricted_read_only_platform_defaults.sbpl`（mach-lookups 到
+logd / trustd / runningboard / analyticsd、IOSurface、
+system-mac-syscall、firmlink ancestors、terminal / PTY / dev handles、
+`/tmp` scratch space、opt-homebrew lib）。
+
+**`NetworkPolicy::AllowHosts`** 走**managed proxy**（Cycle 6）——
+macOS 不再要求 hostname 在调用点预先解析为 IP：
+- `WorkspaceSandbox::maybe_spawn_proxy` 在 `127.0.0.1:0` 上 spawn 一个
+  in-process HTTP CONNECT + SOCKS5 proxy；
+- `cmd.capabilities.network` 被收紧到 `AllowHosts(["127.0.0.1"])`；
+- 注入标准 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量；
+- seatbelt profile 收敛到"allow loopback only"；
+- proxy 在内部强制 hostname allowlist（精确名、`*.suffix` 通配符、IP 字面量）。
+
+### Linux —— bwrap + Landlock + seccomp-bpf + cgroup v2
+
+`src/sandbox/platforms/linux/bwrap.rs`（`#[cfg(target_os = "linux")]`-gated）。
+
+**Defense-in-depth（SP-2）**：bwrap 的命名空间隔离之下还有两个 LSM 机制，
+由 bwrap 在挂载命名空间内启动的隐藏 `aleph-server sandbox-init` 子命令
+应用：
+
+- **Landlock**（内核 ≥ 5.13）：在 bwrap 已经给子的挂载里 in-process FS ACL。
+  `READ_FILE | READ_DIR | EXECUTE` 在 `SYSTEM_READ_PATHS`（`/usr`、`/lib`、
+  `/lib64`、`/bin`、`/sbin`、`/etc`）+ `SandboxCapabilities.fs_read` 上；
+  完全 RW + Exec 在 `SandboxCapabilities.fs_write` + 会话 cwd 上。
+- **seccomp-bpf**（内核 ≥ 3.5）：syscall denylist，返回 `EPERM`，覆盖文件
+  系统操作（`mount` / `umount` / `pivot_root` / `chroot`）、内核重载
+  （`kexec_*`）、模块加载（`*_module`）、eBPF、perf、`ptrace`、跨进程内存
+  （`process_vm_readv` / `process_vm_writev` —— 在 `allow_fork=true`
+  共享 PID-ns 路径下的独立读 / 写原语，target 不能读
+  `aleph-server` 地址空间）、内核 keyring、`userfaultfd`、io_uring、
+  `mknodat`、swap、syslog、reboot、命名空间切换、`clone` / `unshare` 带
+  `CLONE_NEWUSER`（嵌套 user-ns 逃逸）、文件系统句柄逃逸原语
+  `open_by_handle_at` / `name_to_handle_at`（用不透明句柄重新打开 inode，
+  无路径名，绕过**基于路径**的 Landlock 层次检查 —— 拒绝它们关闭了
+  Landlock 与 seccomp 限制层之间的缝隙）。
+- **seccomp socket gate**（`SeccompNetworkMode`，按 `NetworkPolicy`
+  派生）：
+  - `Unrestricted`（`AllowAll` / 原始 `AllowHosts`）—— seccomp 不能按 IP
+    过滤；不限制 socket family。
+  - `UnixOnly`（`None`）—— 仅允许 `AF_UNIX`，deny `connect`，deny 其余
+    socket surface（`accept` / `accept4` / `bind` / `listen` 等），让一个
+    残留 / `AF_UNIX` fd 无法立起意外的端点。镜像 codex Restricted arm。
+  - `ProxyRouted`（loopback 折叠的 `AllowHosts`，在 netns→UDS→loopback
+    bridge 后面）—— 仅允许 `AF_INET` / `AF_INET6` 到达本地 bridge，deny
+    `AF_UNIX` socketpair。Phase B 把 Cycle 6 的 managed proxy 扩到 Linux。
+
+**cgroup v2 资源限制（SP-5）**：在 cgroup v2 已委派给用户时，
+`BubblewrapDriver::run` 在 aleph-server 自己的 cgroup 下创建一个 per-
+execution sub-cgroup 并应用：
+
+- **`memory.max`** 从 `SandboxCapabilities.max_memory_mb`（RSS-based，让
+  `mmap(PROT_NONE)` 绕过 `RLIMIT_AS` 的把戏被抓到）。
+  `memory.swap.max=0` 始终（无 swap-pressure 逃逸）。
+- **`cpu.max`** 从 `LinuxSandboxConfig.cpu_quota_percent`。`None` →
+  不限；`Some(50)` → 一个核的 50%。
+- **`pids.max`** 从 `LinuxSandboxConfig.max_pids`（默认 `Some(200)`）——
+  fork bomb 防御。
+
+`SandboxCapabilities.max_memory_mb` 在所有三个 OS 上限制沙箱进程的虚拟
+地址空间：
+
+- macOS / Linux：通过 `pre_exec` 在沙箱 helper 上 `setrlimit(RLIMIT_AS)`。
+- Windows：`JOBOBJECT_EXTENDED_LIMIT_INFORMATION.ProcessMemoryLimit`。
+
+`SandboxCapabilities.timeout_secs` 是 `SandboxConfig.default_timeout_seconds`
+的 per-call 覆盖，作为 `WorkspaceSandbox::execute` 的 wall-clock 超时。
+优先级，最具体的优先：显式 `SandboxCommand.timeout` >
+`capabilities.timeout_secs` > 配置的默认。`capabilities.timeout_secs` 是
+**唯一**的 timeout 载体 —— 内部 `ProcessPolicy` 不再有 `timeout_secs`
+字段。
+
+### Windows —— AppContainer（首选）→ RestrictedToken → JobObject
+
+`src/sandbox/platforms/windows/`。
+
+SP-6 三级软降级链（`sandbox-init-windows`）：
+
+1. **AppContainer**（SP-6）：per-execution 唯一 profile 通过
+   `CreateAppContainerProfile`；capability SID 从
+   `SandboxCapabilities.network` 派生（`AllowAll` ⇒ `internetClient` /
+   `privateNetworkClientServer`；`None` ⇒ nothing）；
+   `CreateProcessW` 带 `EXTENDED_STARTUPINFO_PRESENT` +
+   `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`。target 在 Low IL 之下
+   信任级运行，带 capability-gated 资源访问。Profile 在 `wait` 后
+   `DeleteAppContainerProfile`。AppContainer setup 失败时软降到 tier 2。
+2. **Restricted token + Low IL**（SP-3a）：
+   `CreateRestrictedToken(self, DISABLE_MAX_PRIVILEGE)` →
+   `SetTokenInformation(TokenIntegrityLevel = S-1-16-4096)` →
+   `CreateProcessAsUserW(target)`。target 没特权、Low IL。
+3. **`CreateProcessW` 底线**：host token、Medium IL，仅在 JobObject 内。
+   最后一道 —— JobObject 限制跨所有三级始终应用。
+
+JobObject（cycle 1）：active-process limit（fork bomb 防御）、
+kill-on-close、die-on-unhandled-exception、虚拟内存上限、UI 限制。
+
+Cycle 3 / 5 收紧了 `{.git, .aleph, .codex, .agents}` 的 DACL —— 现有
+路径打上 `DENY_ACCESS` ACE，缺失路径创建 stub 然后打 ACE（NTFS ACL 不能
+按名 deny "create a child named `.git`"）。Cycle 5 收紧 symlink
+escapes（`push_metadata_protection_args` 走
+`protected_paths::first_writable_symlink_component` —— 在 writable root
+内的 symlink 是 TOCTOU 载体）。
+
+Windows 上的 `AllowHosts` **仍然硬失败**，带包含精确预解析 IP 的可读
+拒绝消息 —— AppContainer SID 模型不能原生表达按 hostname 的网络过滤。
+WFP（SP-3b）需要 admin 并被无限期推迟。
+
+### R1 carve-out —— 进程隔离 FFI 留在内核
+
+沙箱是 `src/` 里直接调平台 FFI 的**唯一**地方
+（`windows-sys` 在 `src/sandbox/platforms/windows/*`、
+`src/sandbox/windows_init/*`），这是**有意的 R1 carve-out，不是违反**。
+restricted-token / job-object / AppContainer / integrity-level / SID·ACL
+调用必须由父**在 spawn 时**做出 —— 你无法从一个独立 helper 沙箱化一个
+进程，把 spawn-time restricted token 走一个 IPC round-trip 会削弱安全
+模型。`src/builtin_tools/desktop/session_lock.rs` 里的本地 PID 活性探测
+（`OpenProcess` / `GetExitCodeProcess`）也出于同样原因留在内核。
+
+R1 瞄准桌面 UI / 屏幕 / Vision 这些**四肢**，它们仍然走 Swift bridge 证明
+—— 由 `src/` 携带零直接 `cocoa` / `objc` / `core-graphics` 使用证明。
+
+## `[sandbox.command_policy]` —— 硬线命令过滤
+
+`src/sandbox/command_policy/` 在 OS 沙箱**之前**增加命令**内容**级的
+hard-filter，模仿 clawshell 的 DLP `[[patterns]]` 引擎，但专门用于 shell
+命令，并通过 `regex::RegexSet`（Aho-Corasick 备份）单次扫描求值，而不是
+顺序 `Vec<Regex>` 扫描。它是 R7 批准的硬过滤，**不是**意图分类器：
+它拒绝一小套经过策划的"永远不合法"的模式并审计一个略大的可疑集合；
+它从不推理模型意图。
+
+- **布线**：实现为 `SandboxBeforeHook`（`RateLimitHook` 的兄弟），并由
+  `build_sandbox` **第一个**安装在 hook 链里 —— 一个被阻止的命令在消耗
+  rate-limit 预算或到达驱动之前被拒绝。**管道零变更** —— 它复用现有的
+  `hooks.run_before()` → `Deny` 路径，工作空间已经把它映射到
+  `SandboxError::Other`。
+- **规则集**（`rules.rs`）：`Block` = fork bomb、`rm --no-preserve-root`、
+  裸根 `rm -rf /` / `rm -rf //` / `/.`（cycle 7 收紧 multi-slash /
+  dot bypass）、`dd of=/dev/<disk>`、`mkfs /dev/…`、重定向到裸块设备、
+  `wipefs` / `blkdiscard` / `shred` 一个设备。`Warn`（仅审计） =
+  `rm -rf` 绝对系统路径、`curl|wget … | sh`、`chmod 777` 系统路径、
+  写到 `/etc/{passwd,shadow,sudoers}`、`/dev/tcp/` reverse shell、host
+  shutdown / reboot、`sudo -S` / `--stdin` / `--askpass` / `-s`、写到
+  `~/.ssh/authorized_keys`。
+- **Windows 形状**（2026-06-15 添加，2026-07-27 加深）：`Block` =
+  `format <drive:>` / `Format-Volume`；驱动器 / 注册表单元根的递归
+  删除（`del` / `rd` / `rmdir /s` 与 `Remove-Item -Recurse` 全部别名）、
+  shadow-copy 销毁（`vssadmin delete shadows` / `wmic shadowcopy
+  delete`）、backup-catalog 销毁（`wbadmin delete catalog|systemstatebackup`）、
+  raw-disk 销毁（`Clear-Disk -RemoveData`、`diskpart … clean`、写到
+  `\\.\PhysicalDriveN`）、`bcdedit /delete`、`bcdedit /set …
+  recoveryenabled No`、`bootstatuspolicy ignoreallfailures`、全 hive
+  `reg delete HKLM /f`。`Warn` = Windows 系统位置的递归删除
+  （`\Windows`、`\Program Files`、`\ProgramData`、bare `\Users` 根）、
+  `powershell -EncodedCommand`（包装本身）、下载执行 cradle
+  （`IEX (…).DownloadString`、`iwr … | iex`、`certutil -urlcache`、
+  `bitsadmin /transfer`）、禁用 Defender、禁用防火墙、弱化执行策略、
+  AMSI 篡改、事件日志清除、本地账户后门、自动启动持久化、ACL takeover。
+- **规范化**（`normalize.rs`）折叠 shell 逐字执行的 evasion：隐形字符、
+  cmd `^` 与 PowerShell `` ` `` 转义、空引号对，以及三个 Windows 特定
+  读法（`\` 的双重读法、路径前缀规范化、`-EncodedCommand` 展开）。因为
+  这发生在规范化器里，**早于** tier 分割，`enforcement = "off"` 不能恢复
+  盲点。
+- **配置**（`[sandbox.command_policy]`）：`enabled`、`enforcement`
+  （`block` / `warn` / `off`）、`use_default_rules`、`custom_rules[]`
+  （`{name, regex, action, description}`）。一个格式错的 custom regex
+  **安全失败** —— boot log 出错的规则名并 fallback 到策划的默认值，
+  而不是没过滤器地运行。
+- **扫描目标**：`program` + 空格连接的 `args` + 任何 UTF-8 `stdin` 载荷
+  （`bash -s` 大脚本路径），限制到 256 KiB。
+- **审计**：匹配 log 到 `command_policy` tracing target（与
+  `capability_ledger` / `sandbox_rate_limit` 并行）。
+- **非破坏**：默认只 block 基本上没有合法工作空间用途的模式；相对路径
+  `rm -rf build/` 与普通命令不受影响。OS 沙箱仍是真正的强制器。
+
+## 测试模式
+
+沙箱栈在每个 seam 都可测，无需真实子进程或 OS 沙箱：
+
+- **Fake OS driver** —— 实现 `OsSandboxDriverTrait`，统计 `run` 调用，
+  返回 canned `SandboxOutput`。被 `src/sandbox/workspace.rs` 单元测试与
+  集成测试使用。
+- **Fake approval requester** —— 实现 `ApprovalRequester`，把结果 box
+  给 `ApprovalGate::new(cfg, Some(Box::new(requester)))`。单元测试用它
+  驱动步骤 3 的每个分支（approve / deny / cached）。
+- **`MockSandbox`**（`src/sandbox/mod.rs:50`，`#[cfg(test)]`）—— 记录
+  每个 `SandboxCommand` 并返回 canned `SandboxOutput`。被 exec-class 工具
+  （`bash_exec`、`code_exec`）用来断言它们走沙箱 seam。
+- **集成** —— `tests/sandbox_capability_approval.rs` 用 fake driver + fake
+  requester 装配走完整管道。四种情况：strict caps 跳过审批；网络提升
+  approve 到达驱动；spawn denied 返回 `CapabilityDenied` 不到达驱动；
+  审批在同一会话内跨两次调用缓存。
+
+不接触 exec 的测试可以通过构造 `SandboxConfig { enabled: false, .. }`
+完全跳过子系统 —— `build_sandbox` 返回 `NoopSandbox`。
+
+## Desktop Bridge 边界
+
+Swift `AlephBridge` helper 进程运行在 Rust 沙箱**之外**：它必须在自己的
+bundle 里持有 camera / microphone / speech / accessibility TCC 授权，并调
+用不能跑在 `sandbox-exec` profile 里的原生框架。反过来，Rust core 保持
+沙箱友好因为所有原生 API 调用都通过 helper over stdio 代理。
+
+绝不能被任何 bridge handler 违反的硬规则：
+
+- Bridge 进程**不得**打开任何 TCP 或 Unix domain socket。IPC 只使用继承的
+  stdio pipes。
+- Bridge **不得**读写 `~/.aleph/data/`、`.shared_token` 文件或任何其他
+  vault 路径。Vault 访问专属于 Rust core。任何第二个进程并发写入会损坏
+  加密 vault 并不可恢复地破坏存储的 API key、OAuth token 与 embedding key。
+- 权限状态由 macOS TCC 拥有；bridge 仅通过 `perm.check` 反映它，并在
+  `-32001` 错误中返回 `PermissionGuide`。bridge 不授予也不撤销权限。
+- 任何未来新增的 bridge handler **必须**包含一条注释解释它为什么不碰
+  `~/.aleph/`。bridge 代码评审检查这个不变量。
 
 ## 另请参阅
 
-- [执行审批](/docs/zh/security/exec-approval) — 决定是否执行的审批系统
-- [IPC 协议](/docs/zh/security/ipc) — 沙箱工具的审批请求如何通信
-- [工具系统](/docs/zh/architecture/tools) — 工具如何声明和使用沙箱能力
-
----
-
-## 26.7.x 补充
-
-### 失败关闭
-
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
-
-### 三级执行权限
-
-| 等级 | 行为 |
-|------|------|
-| `ask` | 每次审批；未知工具失败关闭（默认） |
-| `auto` | 幂等自动；破坏性仍审批 |
-| `full` | 全部自动（独立安全过滤除外） |
-
-### Action-aware Approval Gate
-
-26.7.15+ 审批门是动作感知的——人看到真实命令且授权指纹键绑定在命令上。单一强点 `src/tools/scoped/`。斜杠快路径、`tools.invoke`、后台延续旁路**全部**被强制走审批门。
-
-### TOFU 证书信任
-
-26.7.18+ 自签名 TLS 的客户端信任：Trust-on-First-Use。共享决策核心 + 已固定信任存储 + SHA-256 指纹 + SAN/Subject 解析 + 审批面板 + macOS WKWebView / iOS Keychain 适配器。
-
-### Pairing 单源路由器
-
-26.7.21+：频道本地 pairing store 已回退，**单源**于入站路由器。Telegram / Discord / iMessage 共用同一 pairing store。
-
-### 真实客户端 IP
-
-26.7.17+：`[gateway] trusted_proxy` 决定网关是否读取真实客户端 IP。
-
-### `signed_operation_ledger`
-
-26.7.26+：每代理签名密钥 + 签名操作账本（`~/.aleph/ops.log`）。签发者所属链路由身份链路回放验证。
-
-### 桌面 `open` / `launch` 命令注入
-
-26.7.21+ 修复：通过 `ShellExecuteW` 而非 shell。
-
-### Bundled 解压符号链接
-
-26.7.21+：打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接。
-
-### 进程隔离内核
-
-26.7.x：沙箱 restricted-token / job-object / AppContainer / 完整性级别 / SID·ACL 系统调用在 spawn 时就地发起。R1 立意之外的合法开口。
-
-### 详见
-
-- [架构红线 R1 / R3 / R10](/docs/zh/philosophy/redlines) — 硬约束
-- [安全：执行审批](/docs/zh/security/exec-approval) — `exec_tier` 与审批
-- [安全：配对](/docs/zh/security/pairing) — 设备配对
-- [安全：沙箱](/docs/zh/security/sandboxing) — OS 级沙箱
+- [安全概览](/docs/zh/security/overview) —— trust boundary + tier
+- [执行审批](/docs/zh/security/exec-approval) —— action-aware 门
+- [配对](/docs/zh/security/pairing) —— 设备信任建立

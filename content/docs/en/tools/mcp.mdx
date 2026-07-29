@@ -1,77 +1,75 @@
 ---
 title: "MCP Integration"
-description: "How Aleph integrates with the Model Context Protocol for extensible tool servers"
+description: "How Aleph integrates with the Model Context Protocol to connect external tool servers"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## What is MCP?
 
-The [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) is an open standard that defines how AI applications communicate with external tool servers. It provides a structured way for LLMs to discover and invoke tools, read resources, and retrieve prompts from external processes.
+The [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) is an
+open standard defining how AI applications communicate with external tool
+servers. It gives an LLM a structured way to discover and invoke tools,
+read resources, and retrieve prompts from external processes.
 
-Aleph acts as an **MCP client**, connecting to one or more MCP servers that provide tools, resources, and prompts. This architecture lets you extend Aleph's capabilities without modifying its core — simply run an MCP server alongside Aleph.
+Aleph acts as an **MCP client**, connecting to one or more MCP servers that
+expose tools, resources, and prompts. This architecture lets you extend
+Aleph's capabilities without modifying its core — just run an MCP server
+alongside Aleph.
 
 <Callout type="info">
-MCP is one of three Extension kinds (`Skill`, `Plugin`, `Mcp`). For everyday use, you discover and install MCP servers through the unified [Extensions Store](/docs/en/concepts/extensions-store), which browses all three kinds by functional category. This page covers the underlying MCP client mechanics.
+MCP is one of three extension types (`Skill`, `Plugin`, `Mcp`). This page
+covers the underlying MCP client mechanism — the extension store is the
+day-to-day surface.
 </Callout>
 
 ## Architecture
 
+Three layers:
+
+1. **`McpClient`** (`src/mcp/client.rs`) — manages connections to external
+   MCP servers, tool discovery, and `tools/call` invocation.
+2. **`McpManager`** (`src/mcp/manager/`) — an actor orchestrating server
+   lifecycle with health monitoring and circuit breaking.
+3. **`McpHandler`** (`src/tools/handlers/mcp.rs`) — wraps each discovered
+   tool as a `LoopTool`, registered in the shared `LoopToolRegistry` under
+   `<server>__<tool>`.
+
+A fourth component — **`McpToolBridge`** (`src/mcp/tool_bridge.rs`) —
+subscribes to the manager's event broadcast and incrementally syncs tools
+into the registry. It is also the **only** place that registers the
+capability-gated builtins (`mcp_read_resource` / `mcp_list_resources` /
+`mcp_list_resource_templates` / `mcp_get_prompt` / `mcp_list_prompts` /
+`mcp_login`).
+
 ```
-┌──────────────────────────────┐
-│        Aleph Core            │
-│                              │
-│  ┌────────────────────────┐  │
-│  │    McpManager (Actor)  │  │      ┌────────────────────────┐
-│  │                        │──┼──────│  MCP Server: Filesystem │
-│  │  ┌──────────────────┐  │  │      └────────────────────────┘
-│  │  │   McpClient      │  │  │
-│  │  │                  │──┼──┼──────┌────────────────────────┐
-│  │  │  tool_location   │  │  │      │  MCP Server: GitHub     │
-│  │  │  external_servers│  │  │      └────────────────────────┘
-│  │  └──────────────────┘  │  │
-│  │                        │──┼──────┌────────────────────────┐
-│  │  Health monitoring     │  │      │  MCP Server: Database   │
-│  │  Circuit breaker       │  │      └────────────────────────┘
-│  │  Auto-restart          │  │
-│  └────────────────────────┘  │
-│                              │
-│  ┌────────────────────────┐  │
-│  │   AlephToolServer     │  │
-│  │   (unified registry)  │  │
-│  └────────────────────────┘  │
-└──────────────────────────────┘
+Aleph Core
+├── McpManager (Actor)
+│   ├── McpClient (per server)
+│   ├── health monitoring + circuit breaker
+│   └── auto-restart
+│
+├── McpToolBridge
+│   ├── ToolsChanged event → register / unregister McpHandler
+│   └── capability aggregation → reconcile_capability_tools()
+│
+└── LoopToolRegistry
+    ├── Builtin handlers
+    ├── <server>__<tool> (per server)
+    └── Capability-gated builtin tools
 ```
 
-The integration has three layers:
+## Transport types
 
-1. **McpClient** (`src/mcp/client.rs`) — Manages connections to external MCP servers, tool discovery, and tool invocation
-2. **McpManager** (`src/mcp/manager/`) — An actor that orchestrates server lifecycles with health monitoring and circuit breaker patterns
-3. **McpToolWrapper** (`src/builtin_tools/mcp_wrapper.rs`) — Wraps MCP tools as `AlephToolDyn` instances for registration in the `AlephToolServer`
-
-## Transport Types
-
-Aleph supports three MCP transport mechanisms:
-
-| Transport | Use Case | Connection |
+| Transport | Use case | Connection |
 |-----------|----------|------------|
-| **Stdio** | Local processes | Spawns a child process, communicates via stdin/stdout |
-| **HTTP** | Remote servers | Standard HTTP request/response |
-| **SSE** | Remote servers with streaming | Server-Sent Events for real-time updates |
+| **Stdio** | Local process | Spawns subprocess; communicates over stdin/stdout |
+| **HTTP** | Remote server | Standard HTTP request/response |
+| **SSE** | Remote server with streaming | Server-Sent Events for real-time updates |
 
-```rust
-pub enum McpTransportType {
-    Stdio,  // Subprocess communication
-    Http,   // HTTP transport
-    Sse,    // Server-Sent Events
-}
-```
+## Server configuration
 
-## Server Configuration
-
-### Persistent Configuration
-
-MCP server configurations are stored in `~/.aleph/mcp_config.json`:
+Server config lives in `~/.aleph/mcp_config.json`:
 
 ```json
 {
@@ -82,7 +80,7 @@ MCP server configurations are stored in `~/.aleph/mcp_config.json`:
       "name": "Filesystem Server",
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects"],
+      "args": ["-y", "@anthropic/mcp-server-filesystem", "/Users/me/projects"],
       "env": {},
       "requires_runtime": "node",
       "auto_start": true,
@@ -104,319 +102,263 @@ MCP server configurations are stored in `~/.aleph/mcp_config.json`:
 }
 ```
 
-### Configuration Options
+### Field reference
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | Yes | Unique server identifier |
-| `name` | string | Yes | Human-readable display name |
-| `transport` | string | Yes | `stdio`, `http`, or `sse` |
-| `command` | string | Stdio only | Command to execute |
-| `args` | array | No | Command arguments |
-| `url` | string | HTTP/SSE only | Server endpoint URL |
-| `env` | object | No | Environment variables |
-| `requires_runtime` | string | No | Required runtime (`node`, `python`, `bun`) |
-| `auto_start` | boolean | No | Start automatically (default: true) |
-| `timeout_seconds` | integer | No | Request timeout in seconds |
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `id` | Yes | — | Unique server identifier |
+| `name` | No | same as `id` | Display name |
+| `transport` | No | `stdio` | `stdio` / `http` / `sse` |
+| `command` | stdio only | — | Executable path |
+| `args` | No | `[]` | Command arguments |
+| `url` | http / sse only | — | Server URL |
+| `env` | No | `{}` | Environment variables |
+| `requires_runtime` | No | `null` | `node` / `python` / `bun` |
+| `auto_start` | No | `true` | Start on server boot |
+| `timeout_seconds` | No | `60` | Connection timeout (seconds) |
 
-### Environment Variable Expansion
+### Environment variable expansion
 
-Configuration values support `${VAR}` syntax for environment variable expansion:
+Values support `${VAR}` expansion. Unknown variables are left as-is, so you
+can safely reference variables that may not be set everywhere.
 
-```json
-{
-  "env": {
-    "API_KEY": "${MY_API_KEY}",
-    "HOME": "${HOME}"
-  },
-  "command": "${HOME}/.local/bin/my-server"
+### Restart rules
+
+The config file is **not** auto-reloaded and there is **no** MCP-management
+RPC surface. After editing you must `aleph-server stop && aleph-server
+start` for changes to take effect.
+
+## Tool registration and naming
+
+When a server starts, the bridge calls
+`src/tools/handlers/registration.rs::register_mcp_tools`, which
+instantiates a `McpHandler` for each discovered tool and places it in the
+shared registry. The registered name is composed by
+`McpHandler::qualified_name` (`src/tools/handlers/mcp.rs`), the **single
+source of naming truth**:
+
+```rust
+pub fn qualified_name(&self) -> String {
+    let short = self.tool_name
+        .strip_prefix(&format!("{}:", self.server_id))
+        .unwrap_or(&self.tool_name);
+    sanitize_tool_name(&format!("{}__{}", self.server_id, short))
 }
 ```
 
-Unknown variables are left as-is, so you can safely reference variables that may not be set in all environments.
+Concretely:
 
-## McpManager Actor
+- An inner name `get_weather` becomes `<server>__get_weather`
+  (`weather__get_weather`).
+- Any character outside `[A-Za-z0-9_-]` is mapped to `_`.
+- The name is truncated to 64 characters (the alphabet OpenAI function
+  calling / Anthropic / Gemini all accept).
 
-The `McpManager` uses the actor pattern for safe concurrent server management:
+The `__` is a namespace separator — the model sees it as part of the name.
+Don't put colons or dots in your inner tool names (they map to `_` and can
+produce confusing collisions).
+
+## Capability-gated builtins
+
+These tools appear in the registry **only while at least one connected
+server advertises the matching capability**:
+
+| Tool | Capability that triggers it |
+|------|-----------------------------|
+| `mcp_read_resource` | Any server with `resource_count > 0` or `resource_template_count > 0` |
+| `mcp_list_resources` | Same as above (paired with `mcp_read_resource`) |
+| `mcp_list_resource_templates` | Same as above (a template-only server also triggers it) |
+| `mcp_get_prompt` | Any server with `prompt_count > 0` |
+| `mcp_list_prompts` | Same as above (paired with `mcp_get_prompt`) |
+| `mcp_login` | Any server whose transport is not `Stdio` (remote OAuth) |
+
+`reconcile_capability_tools` re-syncs the capability set on every manager
+event (`ToolsChanged` / `ServerStarted` / `ServerStopped` / `ServerCrashed`)
+and after a broadcast `Lagged`. The resource reader and its discovery twin
+**share one gate**: both are present or both are absent — otherwise the
+model either has a reader with no way to discover URIs or a discovery tool
+with nothing to read.
+
+## `resolve_server_qualified` — longest-prefix match
+
+URIs arriving at `mcp_read_resource` / `mcp_get_prompt` are in
+`<server>:<rest>` form. `src/builtin_tools/mcp_resource.rs::resolve_server_qualified`
+uses **longest-prefix** match to strip exactly one server prefix:
 
 ```rust
-// Create the actor and handle
+fn server_prefix_candidates(qualified: &str) -> Vec<(&str, &str)> {
+    let mut out: Vec<(&str, &str)> = qualified
+        .match_indices(':')
+        .map(|(idx, _)| (&qualified[..idx], &qualified[idx + 1..]))
+        .collect();
+    out.reverse();  // longest first
+    out
+}
+```
+
+The previous shortest/first-match implementation mis-routed when one
+server id was a colon-prefix of another: a resource on a server literally
+named `gh:sub` also satisfies `get_client("gh")`, so it resolved to the
+`gh` server and stripped the wrong layer. Iterating right-to-left (longest
+first), `get_client` returns `None` for any non-server prefix (e.g., the
+`file://` inside a `file:///…` URI), so the first hit is the longest
+**registered** server id.
+
+`qualified_id` re-prefixes the already-server-qualified id with the server
+id again, producing a **doubled** segment
+(`github:github:file:///R.md`). This is load-bearing: `mcp_read_resource`
+strips the leading `server:` layer, and the client's own prefix resolution
+strips the second, so a verbatim round-trip lands the bare URI at the
+server. Presenting the id as opaque keeps the model from "helpfully"
+collapsing the doubled segment and breaking the round-trip.
+
+## Annotation-driven metadata
+
+MCP servers advertise tool metadata via the `annotations` field in
+`tools/list`. `McpHandler::with_flags` maps them onto
+`ToolDefinitionMetadata`:
+
+| Annotation | Field | Meaning |
+|------------|-------|---------|
+| `readOnlyHint: true` | `concurrent_safe` | Auto-retry |
+| `idempotentHint: true` | `idempotent` | Tier treats as safe |
+| `destructiveHint: true` | `requires_approval` | Ask tier still prompts |
+
+`ScopedToolService` (`src/tools/scoped/`) reads these two fields, **not**
+tool names. Undeclared = `false` = non-idempotent = mutating = Ask tier
+holds fail-closed. By design — no name-glob override is allowed on top of
+this.
+
+## Schema quarantine
+
+`unusable_tool_schema_reason` (`src/tools/handlers/registration.rs`) flags
+schemas that **every** provider would reject:
+
+- The top-level schema is not a JSON object.
+- The `type` is not `"object"` and not an array containing `"object"`.
+
+A missing `type` is tolerated (providers default to object-shaped tool
+parameters). Individual unsupported keywords (`$ref`, `format`, …) are
+intentionally left alone — keyword stripping is provider-specific and
+handled elsewhere (Gemini schema cleaner).
+
+A quarantined tool is skipped with a warning; it never poisons the turn
+with a 400.
+
+## McpManager actor
+
+McpManager uses the actor pattern for safe concurrent server management:
+
+```rust
 let (actor, handle) = McpManagerActor::new(None).await?;
-
-// Spawn the actor task
 tokio::spawn(actor.run());
-
-// Use the handle for all operations
 handle.add_server(config).await?;
 handle.list_servers().await?;
 handle.shutdown().await?;
 ```
 
-### Server Lifecycle Commands
-
-The manager supports the full server lifecycle via commands:
+### Server lifecycle commands
 
 | Command | Description |
 |---------|-------------|
-| `AddServer` | Register a new server configuration |
+| `AddServer` | Register a new server config |
 | `RemoveServer` | Remove a server by ID |
-| `StartServer` | Start a stopped server |
-| `StopServer` | Stop a running server |
-| `RestartServer` | Restart a specific server |
-| `ListServers` | List all servers with status |
-| `GetStatus` | Get detailed status for a server |
-| `AggregateTools` | Get tools from all servers |
-| `AggregateResources` | Get resources from all servers |
-| `AggregatePrompts` | Get prompts from all servers |
-| `ReloadConfig` | Reload configuration from disk |
-| `Shutdown` | Graceful shutdown of all servers |
+| `StartServer` / `StopServer` / `RestartServer` | Lifecycle control |
+| `ListServers` | List servers with status |
+| `GetStatus` | Detailed status for one server |
+| `AggregateTools` / `AggregateResources` / `AggregatePrompts` | Cross-server aggregation |
+| `ReloadConfig` | Reload config from disk |
+| `Shutdown` | Gracefully shut down all servers |
 
-### Event System
+### Events
 
-The manager broadcasts events to subscribers for real-time monitoring:
+The manager broadcasts these events for real-time sync (the bridge
+consumes them):
 
 ```rust
-let mut events = handle.subscribe();
-while let Ok(event) = events.recv().await {
-    match event {
-        McpManagerEvent::ServerStarted { server_id, tool_count, .. } => {
-            println!("{} started with {} tools", server_id, tool_count);
-        }
-        McpManagerEvent::ServerCrashed { server_id, error, .. } => {
-            eprintln!("{} crashed: {}", server_id, error);
-        }
-        _ => {}
-    }
-}
-```
-
-## Health Monitoring
-
-The McpManager implements a circuit breaker pattern for server health:
-
-```
-Healthy -> Degraded (2+ failures) -> Unhealthy (5+ failures) -> Restarting -> Healthy
-                                                              -> Dead (max restarts exceeded)
-```
-
-| Status | Description |
-|--------|-------------|
-| `Healthy` | Server is operating normally |
-| `Degraded` | Some failures detected (2-4 consecutive) |
-| `Unhealthy` | Circuit open (5+ consecutive failures) |
-| `Restarting` | Server is being restarted |
-| `Dead` | Maximum restarts exceeded |
-| `Stopped` | Server intentionally stopped |
-
-Health tracking includes:
-- Consecutive failure counting
-- Restart window management (prevents restart storms)
-- Last error message retention
-- Elapsed time since last health check
-
-## Tool Discovery
-
-When an MCP server starts, Aleph automatically discovers its tools:
-
-```rust
-// Server starts and lists its tools
-let tools = connection.list_tools().await;
-
-// Tools are registered in the tool location map
-for tool in &tools {
-    tool_location_map.insert(tool.name.clone(), ToolLocation::External(server_name));
-}
-```
-
-Discovered tools are available to the agent alongside built-in tools. The `AlephToolServer` treats them identically — the agent does not need to know whether a tool is built-in or provided by an MCP server.
-
-## Tool Invocation
-
-When the agent calls an MCP tool:
-
-1. The `AlephToolServer` resolves the tool name to its MCP server
-2. The `McpClient` sends a JSON-RPC `tools/call` request to the server
-3. The server executes the tool and returns a result
-4. The result is forwarded to the LLM as a `tool_result`
-
-```rust
-pub async fn call_tool(&self, name: &str, args: Value) -> Result<McpToolResult> {
-    // Try server-prefixed tool name (e.g., "github:create_issue")
-    if let Some((server_name, _)) = name.split_once(':') {
-        if let Some(connection) = servers.get(server_name) {
-            return connection.call_tool(name, args).await;
-        }
-    }
-
-    // Try all servers
-    for connection in servers.values() {
-        if connection.has_tool(name).await {
-            return connection.call_tool(name, args).await;
-        }
-    }
-
-    Err(AlephError::McpToolNotFound(name.to_string()))
-}
-```
-
-## Resources and Prompts
-
-Beyond tools, Aleph also supports MCP resources and prompts:
-
-### Resources
-
-Read structured data from MCP servers:
-
-```rust
-// List available resources
-let resources = client.list_resources().await;
-
-// Read a resource by URI
-let content = client.read_resource("filesystem:file:///path/to/file").await?;
-```
-
-The `mcp_read_resource` built-in tool exposes this to the agent.
-
-### Prompts
-
-Retrieve prompt templates from MCP servers:
-
-```rust
-// List available prompts
-let prompts = client.list_prompts().await;
-
-// Get a prompt with arguments
-let result = client.get_prompt("github:review_pr", Some(args)).await?;
-```
-
-The `mcp_get_prompt` built-in tool exposes this to the agent.
-
-## Sampling Support
-
-Aleph supports MCP sampling requests, where the server asks the client (Aleph) to generate text using its LLM. This enables advanced server-side orchestration:
-
-```rust
-// Set up sampling handler
-client.set_sampling_callback(|request| async {
-    // Forward to Aleph's LLM provider
-    let response = provider.complete(request.messages).await?;
-    Ok(SamplingResponse { content: response })
-}).await;
-```
-
-## Runtime Checks
-
-Before starting a server, Aleph verifies that the required runtime is available:
-
-```rust
-ExternalServerConfig {
-    name: "my-server".to_string(),
-    command: "npx".to_string(),
-    args: vec!["-y", "@my/mcp-server"],
-    requires_runtime: Some("node".to_string()),
+pub enum McpManagerEvent {
+    ServerStarted { server_id, tool_count, .. },
+    ServerStopped { server_id, .. },
+    ServerCrashed { server_id, error, .. },
+    ServerRestarting { server_id, .. },
+    ServerRemoved { server_id, .. },
+    ToolsChanged { server_id, .. },
     // ...
 }
 ```
 
-Supported runtimes: `node`, `python`, `bun`. If the runtime is not found, the server is skipped with a warning rather than failing the entire startup.
+A `Lagged` reconnect triggers a **full resync** (`resync_all`) — the bridge
+never tries to guess at missed transitions from memory.
 
-## Startup Report
+## Health monitoring
 
-The `start_external_servers` method returns a report detailing which servers started successfully and which failed:
+McpManager implements a circuit-breaker pattern:
 
-```rust
-let report = client.start_external_servers(configs).await;
-
-println!("Started: {:?}", report.succeeded);  // ["filesystem", "github"]
-println!("Failed: {:?}", report.failed);       // [("database", "connection refused")]
-
-if !report.all_succeeded() {
-    eprintln!("Some MCP servers failed to start");
-}
+```
+Healthy → Degraded (2+ failures) → Unhealthy (5+ failures)
+                                       ↓
+                                   Restarting
+                                       ↓
+                                   Dead (max restarts exceeded)
 ```
 
-This allows Aleph to continue operating even when some MCP servers are unavailable.
+Health tracking includes: consecutive-failure count, restart-window
+management (to prevent restart storms), last-error retention, and time
+since last health check.
 
-## Remote Servers
+## Tool invocation
 
-For MCP servers running on remote machines, use HTTP or SSE transport:
+When the agent calls an MCP tool:
 
-```json
-{
-  "id": "remote-api",
-  "name": "Remote API Server",
-  "transport": "http",
-  "url": "https://mcp.example.com/api",
-  "headers": {
-    "Authorization": "Bearer ${API_TOKEN}"
-  },
-  "timeout_seconds": 60
-}
-```
+1. `LoopToolRegistry` resolves `<server>__<tool>` to a `McpHandler`.
+2. `McpHandler::invoke` calls `McpClient::call_tool` (using the inner
+   namespaced short name).
+3. The server executes the tool and returns a result.
+4. The result is forwarded to the LLM as a `ToolOutput`.
 
-```json
-{
-  "id": "streaming-server",
-  "name": "Streaming Server",
-  "transport": "sse",
-  "url": "https://mcp.example.com/sse",
-  "timeout_seconds": 300
-}
-```
+Error mapping: `NetworkError` / `IoError` → `ToolError::Transport`;
+`McpTimeout` / `Timeout` → `ToolError::Timeout`; everything else →
+`ToolError::Execution`. All error messages pass through
+`mcp::redact_mcp_error` before display — a server that echoes back a
+secret-bearing argument or URL cannot leak it into conversation history.
 
-<Callout type="info">
-When `transport` is set to `auto`, Aleph defaults to HTTP. Future versions may add automatic transport detection via capability negotiation.
-</Callout>
+## OAuth and remote servers
 
-## Security Considerations
+Remote MCP servers use OAuth. The `mcp_login` builtin tool (present only
+when at least one server's transport is non-stdio) drives the browser
+OAuth flow and persists tokens under `mcp/auth/`.
 
-- **Process isolation**: Stdio MCP servers run as separate processes with their own permissions
-- **Environment variables**: Sensitive values like API keys should use `${VAR}` expansion rather than being stored in plaintext
-- **Tool confirmation**: MCP tools can be placed in the `requireConfirmation` list in tool filtering configuration
-- **Network boundaries**: Remote MCP servers should use HTTPS with proper authentication headers
-- **Runtime validation**: Required runtimes are checked before server launch to prevent arbitrary command execution
+Remote server URLs must pass SSRF validation (`mcp/transport/http.rs` uses
+`ssrf::validate_url`) — private network, link-local, and DNS-rebinding
+targets are rejected.
 
-## Best Practices
+## Runtime checks
 
-1. **Use `auto_start: true`** for essential servers that should always be available
-2. **Set reasonable timeouts** to prevent hanging operations
-3. **Specify `requires_runtime`** to get clear error messages when dependencies are missing
-4. **Use environment variables** for secrets — never hardcode API keys in configuration
-5. **Monitor events** via the manager's event system for operational visibility
-6. **Group related tools** into a single MCP server to reduce connection overhead
+`requires_runtime` lets the manager verify Node / Python / Bun availability
+before starting a server. A missing dependency skips that one server with
+a warning — it does not fail the whole boot.
 
----
+## Security notes
 
-## 26.7.x Addendum
+- **Process isolation**: stdio MCP servers run as separate processes.
+- **Environment variables**: use `${VAR}` expansion for sensitive values
+  (API keys, etc.); never hardcode.
+- **OAuth token storage**: remote-server OAuth tokens are written to the
+  encrypted vault by the Rust core; the `AlephBridge` and any other process
+  must not read or write any `~/.aleph/` path.
+- **Tool approval**: make approval work via `destructiveHint` declarations
+  or explicit entries in `[policies.tool_permissions]`.
+- **Network boundary**: remote MCP servers use HTTPS with appropriate
+  auth headers.
+- **Runtime validation**: required runtimes are checked before server
+  start, preventing arbitrary command execution.
 
-### Toolset Reorganized
+## Best practices
 
-26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`.
-
-### Parallel Execution
-
-`src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
-
-### `tools.defer_mcp_tools` / `enable_tool_search`
-
-26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
-
-### MCP On-Demand Discovery
-
-26.7.17+: `McpResourceIndexLayer` is retracted. `mcp_list_*` tools discover on demand; a `cat`-guard read-steer routes to native MCP / skill / plugin reads.
-
-### `file_read` Supports Images
-
-26.6.29+: `file_read` now supports images (`image_read`); unchanged file reads are de-duplicated across turns via a read cache.
-
-### Fail-Closed
-
-Unknown tools **fail closed** under the `ask` tier.
-
-### `plugin.install` Unified Entry
-
-26.7.21+: classifies by source (marketplace / zip / path) and routes uniformly.
-
-### Full `tools.*` / `mcp.*` / `extensions.*` RPC
-
-See [Gateway Methods Reference](/docs/en/gateway/methods).
+1. Set `auto_start: true` for foundational servers that must always be up.
+2. Set reasonable timeouts to prevent hangs.
+3. Set `requires_runtime` for clear errors when a dependency is missing.
+4. Use environment variables for secrets — never hardcode API keys.
+5. Subscribe to manager events to monitor server health and tool changes.
+6. Group related tools into a single MCP server to reduce connection
+   overhead.

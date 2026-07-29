@@ -1,361 +1,257 @@
 ---
 title: "Device Pairing"
-description: "8-character code-based pairing protocol for establishing trust between Aleph and new devices or channel senders"
+description: "Trust establishment via bootstrap tickets / device tokens (for new devices) and 6-character codes (for channel senders)"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-Device pairing is Aleph's trust establishment protocol. Before a new device (macOS app, iOS client, web browser) or a new chat sender (Telegram user, Discord member) can interact with Aleph, they must complete a pairing flow that verifies the connection is authorized by the server owner.
+Device pairing is Aleph's trust-establishment protocol. New devices
+(macOS app, iOS client, web browser) or new chat senders (Telegram users,
+Discord members, iMessage unknowns) must complete a flow that verifies
+"the connection is authorized by the server owner" before interacting with
+Aleph.
 
-The protocol uses short-lived **8-character Base32 codes** displayed to the owner, who confirms or rejects the pairing request. This is conceptually similar to Bluetooth pairing or TV app activation -- simple enough for non-technical users while cryptographically sound.
+Two trust-establishment paths:
+
+| Type | For | Credential |
+|------|-----|------------|
+| **Device pairing** | Remote Panel / phone / CLI client | `aleph-bt-*` bootstrap ticket exchanged for `aleph-dt-*` device token |
+| **Channel sender pairing** | Unknown Telegram / Discord / iMessage senders | 6-character alphanumeric code (single-source inbox store) |
+
+Both are managed through **RPC** (`pairing.list` / `pairing.approve` /
+`pairing.reject` / `gateway.ticket.create`) — not CLI commands.
 
 **Source locations:**
-- Pairing manager: `src/gateway/security/pairing.rs`
-- Device store: `src/gateway/device_store.rs`
-- Crypto utilities: `src/gateway/security/crypto.rs`
-- Security store: `src/gateway/security/store.rs`
-- CLI commands: `src/bin/aleph_server/commands/pairing.rs`
-- Device commands: `src/bin/aleph_server/commands/devices.rs`
+- Device ticket + token manager: `src/gateway/security/device_token_manager.rs`
+- Channel pairing store: `src/gateway/pairing_store.rs`
+- Device registry (shared with cluster nodes): `src/gateway/security/store/devices.rs`
+- Crypto helpers: `src/gateway/security/crypto.rs`
+- Security storage: `src/gateway/security/store/`
+- CLI: `src/bin/aleph-server/commands/pair.rs`, `bootstrap_token.rs`
+- Ticket / device RPC: `src/gateway/handlers/gateway_ticket.rs`,
+  `src/gateway/handlers/gateway_devices.rs`
 
-## Why Pairing?
+## Why pairing?
 
-Aleph is a self-hosted AI assistant with access to your files, shell, and online accounts. Allowing unrestricted connections would be a significant security risk. The pairing protocol solves three problems:
+Aleph is a self-hosted AI assistant with access to your files, shell, and
+online accounts. Allowing unrestricted connections would be a major security
+risk. The pairing protocol addresses three problems:
 
-1. **Identity verification** -- Ensures the connecting device or user is authorized by the server owner.
-2. **Key exchange** -- Devices submit their public key during pairing, enabling cryptographic authentication for future connections.
-3. **Scope limitation** -- Channel senders can be granted limited permissions at pairing time.
+1. **Authentication** — ensure the connecting device or user is authorized
+   by the server owner.
+2. **Key exchange** — devices submit or receive key material during pairing
+   that authenticates future connections.
+3. **Scope limiting** — chat senders gain bounded permissions at pairing.
 
-## Pairing Types
+## Device pairing (remote Panel / CLI)
 
-The system supports two types of pairing through a unified `PairingRequest` enum:
+### Flow
 
-### Device Pairing
+```
+Device                          Gateway                         Operator
+ │                                │                              │
+ │── gateway.ticket.create ──────►│                              │
+ │                                │                              │
+ │◄── { ticket: "aleph-bt-x",    ─│                              │
+ │     urls: [...] } ────────────│                              │
+ │                                │                              │
+ │   [device / QR scan / typed]   │                              │
+ │   [URLs are server-resolved,   │                              │
+ │    carry ?bt=aleph-bt-x]       │                              │
+ │                                │                              │
+ │── WS /ws connect {             │                              │
+ │     bootstrap_ticket:          │                              │
+ │     "aleph-bt-x" } ──────────►│                              │
+ │                                │                              │
+ │   [exchange_bootstrap_ticket]  │                              │
+ │   [mint device_token]          │                              │
+ │                                │                              │
+ │◄── { device_token:            ─│                              │
+ │     "aleph-dt-…",              │                              │
+ │     role: "operator" } ────────│                              │
+ │                                │                              │
+ │   [device persists token       │                              │
+ │    for subsequent reconnects]  │                              │
+```
 
-Used for desktop apps, mobile apps, and CLI clients:
+### Bootstrap ticket — `aleph-bt-*`
 
-```rust
-PairingRequest::Device {
-    request_id: String,
-    code: String,              // 8-char Base32 code
-    device_name: String,       // "Alice's MacBook Pro"
-    device_type: Option<DeviceType>,  // iOS, macOS, Android, CLI, Web
-    public_key: Vec<u8>,       // Ed25519 public key (32 bytes)
-    fingerprint: DeviceFingerprint,   // SHA256(public_key)[..16]
-    remote_addr: Option<String>,
-    created_at: i64,
-    expires_at: i64,
+The `aleph-bt-*` ticket is a 5-minute TTL, single-use credential. Its
+entire purpose is to keep long-lived credentials (device_token, shared
+Gateway token) **out of URLs and QR codes**.
+
+`gateway.ticket.create` returns:
+
+```json
+{
+  "ticket": "aleph-bt-...",
+  "urls": [
+    "http://192.168.1.20:18790/?bt=aleph-bt-...",
+    "http://[fd00::1]:18790/?bt=aleph-bt-..."
+  ],
+  "expires_at": "..."
 }
 ```
 
-### Channel Pairing
+The `urls` field is assembled server-side (`tls::discover_interface_ips`)
+— a Panel building it from its own `window.location` would emit
+`http://127.0.0.1:<port>/…` whenever the operator generates the ticket
+from the local desktop App, which a remote operator would never see.
 
-Used for verifying senders on chat platforms:
+### Device token — `aleph-dt-*`
 
-```rust
-PairingRequest::Channel {
-    request_id: String,
-    code: String,              // 8-char Base32 code
-    channel: String,           // "telegram", "discord", "imessage"
-    sender_id: String,         // Platform-specific user ID
-    metadata: Option<Value>,   // Additional context
-    created_at: i64,
-    expires_at: i64,
-}
+After successfully exchanging a bootstrap ticket, the handshake returns
+an `aleph-dt-*` device token. The Panel persists it and submits it as
+`connect.device_token` on every subsequent reconnect.
+
+Device tokens:
+
+- Long-lived, bound to one paired device.
+- SHA-256-hashed at rest in `security.db`.
+- Verified through `connect::resolve_connect_auth` in the `connect`
+  handshake.
+
+### Headless cores: the CLI path
+
+You can mint a ticket or print the recovery token without the daemon
+running:
+
+```bash
+# Mint a 5-minute bootstrap ticket
+aleph-server pair                    # default TTL = 300s
+aleph-server pair --ttl 3600         # 1 hour (clamped to 60..=86400)
+
+# Print the shared Gateway token (recovery / manual entry)
+aleph-server bootstrap-token
 ```
 
-## Pairing Flow
+`aleph-server pair` opens the 0600 `security.db` (WAL) directly — the
+daemon does not need to be running. `aleph-server bootstrap-token`
+prints the shared Gateway token for manual recovery (pasting into the
+Panel / iOS app's "Authorize" dialog).
 
-### Device Pairing Sequence
+### Revocation
 
-```
-Device                          Gateway                         Owner
-  │                                │                              │
-  │── POST /pair/request ─────────►│                              │
-  │   { name, type, public_key }   │                              │
-  │                                │                              │
-  │◄── { code: "XKRF4B7N" } ──────│                              │
-  │                                │                              │
-  │   [Device displays code]       │── Notification ─────────────►│
-  │                                │   "New device: Alice's MB"   │
-  │                                │   "Code: XKRF4B7N"          │
-  │                                │                              │
-  │                                │◄── aleph pairing approve ────│
-  │                                │    XKRF4B7N                  │
-  │                                │                              │
-  │                                │── [Generate device_id] ──►   │
-  │                                │── [Store in device_store] ►  │
-  │                                │── [Issue signed token] ──►   │
-  │                                │                              │
-  │◄── { device_id, token } ───────│                              │
-  │                                │                              │
-  │   [Device stores token for     │                              │
-  │    future authentication]      │                              │
-```
+Two granularities, both **immediately** effective:
 
-### Channel Sender Pairing Sequence
+- `gateway.token.rotate` — regenerates the shared token, revokes **every**
+  paired device, and closes every remote socket.
+- `gateway.devices.revoke {device_id}` — revokes **one** device only:
+  drops its live sessions back to the login wall synchronously, then
+  closes its socket (WS 4001 `device_revoked`). `gateway.devices.list`
+  is the inventory, with a live `connected` flag.
 
-When a new user sends a message through Telegram or Discord:
+Both are scoped to `device_type = 'panel'` and never touch cluster
+nodes. `device_id` is client-asserted and the `devices` table shares one
+namespace with cluster nodes — the exchange refuses a `device_id` that
+already names a non-Panel device (and `cluster::admit_node` refuses the
+mirror case). Without that guard, one ticket could buy an operator
+token the Panel roster cannot see and no revoke path can reach.
+
+## Channel sender pairing
+
+A new chat sender (Telegram user, Discord member, iMessage unknown) takes
+a lighter flow: a **6-character alphanumeric code** in the **single**
+inbox pairing store (`src/gateway/pairing_store.rs`) — channels no longer
+carry their own pairing store.
 
 ```
-Sender                          Gateway                         Owner
+Sender                        Gateway                         Operator
   │                                │                              │
   │── "Hello, Aleph" ─────────────►│                              │
   │   (from unknown sender)        │                              │
-  │                                │── Generate pairing code ──►  │
+  │                                │── generate 6-char code ─►    │
   │◄── "Please verify with code:   │                              │
-  │     MRKV52HJ" ────────────────│                              │
-  │                                │── Notification ─────────────►│
+  │     MRKV52" ──────────────────│                              │
+  │                                │── notify ──────────────────►│
   │                                │   "New sender on Telegram"   │
-  │                                │   "Code: MRKV52HJ"          │
+  │                                │   "Code: MRKV52"             │
   │                                │                              │
-  │                                │◄── aleph pairing approve ────│
-  │                                │    MRKV52HJ                  │
-  │                                │                              │
-  │                                │── [Store approved sender] ►  │
+  │                                │◄── pairing.approve ─────────│
+  │                                │    { channel, code }         │
   │                                │                              │
   │◄── "You're verified!" ─────────│                              │
 ```
 
-## Pairing Codes
+### 6-character codes
 
-### Generation
-
-Pairing codes are 8-character strings drawn from a restricted Base32 alphabet that excludes visually confusing characters:
-
-```rust
-pub const PAIRING_CODE_LENGTH: usize = 8;
-pub const PAIRING_CODE_CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-```
-
-Excluded characters: `0` (zero), `1` (one), `I` (capital I), `O` (capital O). This avoids confusion when codes are read aloud or displayed in ambiguous fonts.
-
-The code space is `28^8 = ~377 billion` possible codes, making collisions effectively impossible within the 10-request capacity window.
-
-### Expiration
-
-Codes expire after **5 minutes** by default:
+Channel pairing codes are **6 alphanumeric characters** (not 8-character
+Base32 — the latter was removed):
 
 ```rust
-const DEFAULT_PAIRING_EXPIRY_MS: i64 = 5 * 60 * 1000;
-```
-
-Expired codes are automatically rejected. A cleanup routine periodically purges expired requests from the database.
-
-### Capacity Limits
-
-To prevent abuse, the system limits pending pairing requests:
-
-```rust
-const MAX_PENDING_REQUESTS: usize = 10;
-```
-
-If the limit is reached, new pairing requests are rejected with a `TooManyPending` error until existing requests expire or are resolved.
-
-## Cryptographic Foundation
-
-### Ed25519 Key Pairs
-
-Devices generate an Ed25519 key pair at installation time. The public key is submitted during pairing:
-
-```rust
-pub fn generate_keypair() -> ([u8; 32], [u8; 32]) {
-    let signing_key = SigningKey::generate(&mut OsRng);
-    let verifying_key = signing_key.verifying_key();
-    (signing_key.to_bytes(), verifying_key.to_bytes())
+fn generate_code() -> String {
+    // 6 alphanumeric characters, ambiguous chars (0/O, 1/I/l) excluded
+    ...
 }
 ```
 
-### Device Fingerprints
+### Expiry and capacity
 
-Each device is identified by a fingerprint derived from its public key -- the first 16 hex characters of `SHA256(public_key)`:
+`[routing] pairing_code_expiry_secs` controls expiry (default **24 h**,
+`0` = never expire). Codes are automatically rejected once expired;
+periodic cleanup removes expired requests from the database.
 
-```rust
-pub struct DeviceFingerprint(pub String);
+The pending-request count is capped at `MAX_PENDING_REQUESTS = 10` —
+beyond that, new requests are refused with `TooManyPending`.
 
-impl DeviceFingerprint {
-    pub fn from_public_key(public_key: &[u8]) -> Self {
-        let hash = Sha256::digest(public_key);
-        let hex = hex::encode(hash);
-        Self(hex[..16].to_string())
-    }
-}
-```
-
-Example fingerprint: `a1b2c3d4e5f6a7b8`
-
-### Token Signing
-
-After pairing is confirmed, the Gateway issues a signed token using HMAC-SHA256:
-
-```rust
-pub fn hmac_sign(secret: &[u8], token: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .expect("HMAC accepts any key length");
-    mac.update(token.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-```
-
-The issued token has the format `{token}:{signature}`. Verification uses constant-time comparison to prevent timing attacks:
-
-```rust
-pub fn hmac_verify(secret: &[u8], token: &str, signature: &str) -> Result<(), CryptoError> {
-    let expected = hmac_sign(secret, token);
-    if subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into() {
-        Ok(())
-    } else {
-        Err(CryptoError::HmacVerificationFailed)
-    }
-}
-```
-
-## Device Management
-
-### Approved Device Storage
-
-Approved devices are stored in a SQLite database at `~/.aleph/devices.db`:
-
-```rust
-pub struct ApprovedDevice {
-    pub device_id: String,
-    pub device_name: String,
-    pub device_type: Option<String>,  // macos, ios, android, cli, web
-    pub approved_at: String,          // ISO 8601
-    pub last_seen_at: Option<String>,
-    pub permissions: Vec<String>,     // ["*"] = full access
-}
-```
-
-### CLI Commands
-
-Manage devices and pairing requests through the CLI:
+### RPC management
 
 ```bash
-# List pending pairing requests
-aleph pairing list
-
-# Approve a pairing request
-aleph pairing approve XKRF4B7N
-
-# Reject a pairing request
-aleph pairing reject XKRF4B7N
-
-# List approved devices
-aleph devices list
-
-# Revoke a device
-aleph devices revoke <device-id>
+# via aleph-server gateway call
+aleph-server gateway call -p '{"channel":"telegram"}' pairing.list
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.approve
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.reject
 ```
 
-Example output for `aleph devices list`:
+Or through the Panel Settings → Pairing UI. **There is no** `aleph pairing
+approve` CLI command — it all goes through RPC.
 
-```
-Approved devices:
-DEVICE ID                            NAME                 TYPE       APPROVED AT
-------------------------------------------------------------------------------------------
-a1b2c3d4-e5f6-...                    Alice's MacBook      macos      2026-01-28T12:00:00
-b2c3d4e5-f6a7-...                    Alice's iPhone       ios        2026-02-01T09:30:00
-```
+## Device vs channel pairing
 
-### Revoking Access
+| | Device | Channel sender |
+|---|--------|----------------|
+| Credential | `aleph-dt-*` device token (long-lived) | Sender ID (inbound router store) |
+| Bootstrap | `aleph-bt-*` ticket (5 min TTL, single-use) | 6-character alphanumeric code |
+| Storage | `devices` table (Panel type) | `pairing_requests` table |
+| Revocation granularity | Single device (`gateway.devices.revoke`) | Sender (`pairing.reject` or `pairing.revoke`) |
+| Carrier | WS `/ws` connect handshake (`device_token` param) | Inbound message |
+| Shared secret | Shared Gateway token for recovery only (never in URL/QR) | — |
 
-When a device is revoked, it is removed from the approved devices database. Any existing tokens for that device become invalid:
+## Crypto primitives
 
-```rust
-pub fn revoke_device(&self, device_id: &str) -> SqliteResult<bool> {
-    let rows = conn.execute(
-        "DELETE FROM approved_devices WHERE device_id = ?1",
-        params![device_id],
-    )?;
-    Ok(rows > 0)
-}
-```
+### Device tickets / tokens
 
-### Updating Permissions
+`device_token_manager` generates:
 
-Device permissions can be narrowed after initial pairing:
+- Bootstrap ticket: `uuid` + TTL stamp.
+- Device token: `uuid`, SHA-256-hashed at rest.
 
-```rust
-pub fn update_permissions(
-    &self,
-    device_id: &str,
-    permissions: &[String],
-) -> SqliteResult<bool>;
-```
+### Shared Gateway token
 
-<Callout type="info">
-By default, newly approved devices receive full access (`["*"]`). You can restrict a device to specific tool categories (e.g., `["translate", "search"]`) after pairing.
-</Callout>
+Generated at boot by `SharedTokenManager`, HMAC-SHA256-hashed,
+constant-time verified. `aleph-server bootstrap-token` is the **only**
+path that prints it; it must never travel in a URL, QR, or `Referer`
+header.
 
-## Security Guarantees
+### Security guarantees
 
-1. **Short-lived codes** -- Pairing codes expire in 5 minutes, limiting the attack window.
-2. **Capacity throttling** -- Maximum 10 pending requests prevents resource exhaustion.
-3. **Unique codes** -- The system retries up to 10 times to generate a code that does not collide with existing pending requests.
-4. **Owner-only approval** -- Only the server owner (via CLI or authenticated interface) can approve pairing requests.
-5. **One-time use** -- Confirmed pairing codes are deleted from the database immediately.
-6. **Constant-time verification** -- Token verification uses constant-time comparison to prevent timing side-channels.
-7. **Cryptographic identity** -- Devices are identified by Ed25519 public keys, enabling future challenge-response authentication.
+1. **5-minute bootstrap tickets** — single-use; limits credential-leak
+   window.
+2. **Per-device revocable tokens** — no need to rotate the global
+   shared token.
+3. **Fail-closed** — failed `exchange_bootstrap_ticket` does not promote
+   the connection.
+4. **`device_id` namespace isolation** — Panel devices and cluster-node
+   IDs do not share.
+5. **Immediate revocation** — not at the next handshake.
 
-## See Also
+## See also
 
-- [Execution Approval](/docs/en/security/exec-approval) -- Permission system that paired devices interact with
-- [IPC Protocol](/docs/en/security/ipc) -- Local communication protocol used by paired desktop clients
-- [Gateway Authentication](/docs/en/gateway/auth) -- How authenticated sessions are established after pairing
-
----
-
-## 26.7.x Addendum
-
-### Fail-Closed
-
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
-
-### Three-Tier Execution Permissions
-
-| Tier | Behavior |
-|------|----------|
-| `ask` | Prompt for approval before every execution; unknown tools fail closed (default) |
-| `auto` | Idempotent tools auto-allow; destructive tools still need approval |
-| `full` | All auto-allow (besides the hard security filter) |
-
-### Action-Aware Approval Gate
-
-26.7.15+ the approval gate is action-aware — the human sees the actual command and the grant fingerprint **keys on it**. Single choke point at `src/tools/scoped/`. The slash fast-path, `tools.invoke`, and the background-continuation bypass are **all** forced through the gate.
-
-### TOFU Certificate Trust
-
-26.7.18+ client-side trust for self-signed TLS: Trust-on-First-Use. Shared decision core + pinned trust store + SHA-256 fingerprint + SAN/Subject parsing + approval splash + macOS WKWebView / iOS Keychain adapters.
-
-### Pairing Single-Sourced on the Router
-
-26.7.21+: the channel-local pairing store is retracted — access / pairing / allowlists **single-sourced** on the inbound router. Telegram / Discord / iMessage share the same pairing store.
-
-### Real Client IP
-
-26.7.17+: `[gateway] trusted_proxy` decides whether the gateway reads the real client IP.
-
-### Signed Operation Ledger
-
-26.7.26+: per-agent signing key + signed operation ledger (`~/.aleph/ops.log`). Replay-verifiable against the chain the signer belongs to.
-
-### Desktop `open` / `launch` Command Injection
-
-26.7.21+ fix: dispatched through `ShellExecuteW` instead of a shell.
-
-### Bundled-Extraction Symlink Planting
-
-26.7.21+: bundled-content extraction refuses symlink planting via `symlink_metadata`.
-
-### Process-Isolation Kernel
-
-26.7.x: sandbox restricted-token / job-object / AppContainer / integrity-level / SID·ACL syscalls are issued in-place at spawn. A legitimate carve-out from R1.
-
-### See Also
-
-- [Architectural Redlines R1 / R3 / R10](/docs/en/philosophy/redlines) — hard constraints
-- [Security: Execution Approval](/docs/en/security/exec-approval) — `exec_tier` and approval
-- [Security: Pairing](/docs/en/security/pairing) — device pairing
-- [Security: Sandbox](/docs/en/security/sandboxing) — OS-level sandbox
+- [Security Overview](/docs/en/security/overview) — trust boundary + Gateway
+  token
+- [Execution Approval](/docs/en/security/exec-approval) — permission system
+  the paired device interacts with
+- [IPC](/docs/en/security/ipc) — WebSocket control plane after pairing
+- [Sandboxing](/docs/en/security/sandboxing) — OS-level enforcement

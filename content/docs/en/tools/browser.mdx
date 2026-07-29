@@ -1,179 +1,179 @@
 ---
 title: "Browser Automation"
-description: "Controlling a Chromium browser via CDP for web navigation, interaction, and data extraction"
+description: "Per-action browser tools over Playwright CLI / Chrome DevTools MCP for navigation, interaction, and data extraction"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## Overview
 
-Aleph includes a full browser automation system that gives the AI agent the ability to navigate the web, interact with page elements, extract content, and capture screenshots. The system uses the Chrome DevTools Protocol (CDP) to control a Chromium instance, with an ARIA accessibility tree for structured page understanding.
+Aleph's browser automation is exposed to the agent as a set of
+**focused, single-responsibility tools** — not a single `browser` tool
+with an `action` discriminator. Each tool wraps one action (click, navigate,
+screenshot, snapshot, fill, press a key, upload, hover, scroll, evaluate
+JS, …) and shares the browser instance through `Arc<ProfileManager>`.
+
+Two backends are supported underneath:
+
+- **Playwright CLI** (`src/browser/playwright_cli_backend.rs`)
+- **Chrome DevTools MCP** (`src/browser/chrome_mcp_backend.rs`)
+
+Both surface through a unified `BrowserBackend` trait — the `browser_*`
+tools are backend-agnostic; a profile picks which one starts.
 
 **Source locations:**
-- Runtime: `src/browser/runtime.rs`
-- Actions: `src/browser/actions.rs`
-- Snapshots: `src/browser/snapshot.rs`
-- Types: `src/browser/types.rs`
-- Tool wrapper: `src/builtin_tools/browser.rs`
-- Discovery: `src/browser/discovery.rs`
+- Backends: `src/browser/backend.rs`
+- Per-action tools: `src/builtin_tools/browser_tools/` (one file per action)
+- Profile management: `src/browser/profile.rs`, `src/browser/manager.rs`
+- Network policy: `src/browser/network_policy.rs` (SSRF guard)
+- Tab registry: `src/browser/tab_registry.rs`
+- Chromium discovery: `src/browser/discovery.rs`
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│               BrowserTool                    │
-│          (AlephTool interface)               │
-│                                             │
-│  Arc<Mutex<Option<BrowserRuntime>>>          │
-│  Optional ApprovalPolicy                    │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│             BrowserRuntime                   │
-│        (CDP transport layer)                │
-│                                             │
-│  Browser (chromiumoxide)                    │
-│  HashMap<TabId, Page>                       │
-│  CDP event loop (tokio task)               │
-└──────────────────┬──────────────────────────┘
-                   │ Chrome DevTools Protocol
-                   ▼
-┌─────────────────────────────────────────────┐
-│             Chromium Instance                │
-│      (headless or headed mode)              │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                  builtin_tools/browser_tools/*                      │
+│                                                                     │
+│   browser_open → browser_navigate → browser_snapshot                │
+│          ↓              ↓                  ↓                         │
+│   browser_click / browser_type / browser_fill_form / browser_hover  │
+│   browser_scroll / browser_drag / browser_upload / browser_press_key│
+│   browser_screenshot / browser_evaluate / browser_console            │
+│   browser_dialog / browser_emulate / browser_resize / browser_wait_for│
+│   browser_pdf / browser_network / browser_cookies / browser_tabs    │
+└──────────────────────────────┬─────────────────────────────────────┘
+                               │ Arc<ProfileManager>
+                               ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                       ProfileManager                                │
+│                                                                     │
+│   Profile { id, backend: PlaywrightCliBackend | ChromeMcpBackend,  │
+│             headless, user_data_dir, … }                             │
+└──────────────────────────────┬─────────────────────────────────────┘
+                               │ BrowserBackend trait
+              ┌────────────────┴───────────────────┐
+              ▼                                    ▼
+┌──────────────────────────┐         ┌──────────────────────────────┐
+│  PlaywrightCliBackend    │         │  ChromeMcpBackend             │
+│  (CLI subprocess)        │         │  (Chrome DevTools MCP server) │
+└──────────────────────────┘         └──────────────────────────────┘
 ```
 
-The `BrowserTool` is the `AlephTool` implementation that the agent interacts with. It wraps a `BrowserRuntime` in `Arc<Mutex<Option<...>>>` so the tool can be cloned (required by the `AlephTool` trait) while sharing a single browser instance. The `BrowserRuntime` manages the actual Chromium process via the `chromiumoxide` crate.
+## Browser backends
 
-## Launch Modes
+Each profile binds to one backend at creation:
 
-Aleph supports three ways to obtain a browser instance:
+| Backend | When to use |
+|---------|-------------|
+| `PlaywrightCliBackend` | Default; broadest coverage, no external service. |
+| `ChromeMcpBackend` | When you already run a Chrome DevTools MCP server or want fine-grained CDP control. |
 
-| Mode | Description | Configuration |
-|------|-------------|---------------|
-| **Auto** | Automatically discover a Chromium binary on the system | `LaunchMode::Auto` |
-| **Binary** | Use a specific browser executable path | `LaunchMode::Binary { path }` |
-| **Connect** | Connect to an existing browser via WebSocket | `LaunchMode::Connect { endpoint }` |
+`browser_profile` creates / lists / deletes profiles; `browser_session`
+queries the currently active session.
 
-### Browser Configuration
+## Element targeting
 
-```rust
-pub struct BrowserConfig {
-    pub mode: LaunchMode,           // Auto, Binary, or Connect
-    pub headless: bool,             // Headless mode (default: false)
-    pub cdp_port: u16,              // CDP port (default: 9222)
-    pub user_data_dir: Option<String>, // Custom profile directory
-    pub extra_args: Vec<String>,    // Extra Chromium command-line args
-}
-```
+Three targeting methods, by priority:
 
-### Chromium Discovery
+### 1. ARIA `ref_id` (preferred)
 
-In `Auto` mode, Aleph searches for Chromium in well-known locations. The `find_chromium()` function checks platform-specific paths to locate a suitable browser binary.
-
-## The Browser Tool
-
-The `browser` tool exposes all browser operations through a single tool with an `action` parameter. This design gives the agent a consistent interface without needing to remember dozens of separate tool names.
-
-### Typical Workflow
-
-The agent follows this workflow to interact with a web page:
-
-```
-start -> open_tab -> snapshot -> click/type/fill -> screenshot -> stop
-```
-
-1. **Start** the browser (headed or headless)
-2. **Open a tab** to a URL
-3. **Take a snapshot** to get the ARIA accessibility tree with `ref_id`s
-4. **Interact** with elements using `ref_id`s from the snapshot
-5. **Screenshot** to verify the result visually
-6. **Stop** the browser when done
-
-### Actions Reference
-
-#### Lifecycle
-
-| Action | Description | Parameters |
-|--------|-------------|------------|
-| `start` | Launch a browser instance | Optional: `headless` (bool) |
-| `stop` | Shut down the browser | None |
-
-```json
-{ "action": "start" }
-{ "action": "start", "headless": true }
-{ "action": "stop" }
-```
-
-#### Tab Management
-
-| Action | Description | Parameters |
-|--------|-------------|------------|
-| `open_tab` | Open a new tab | `url` (required) |
-| `close_tab` | Close an existing tab | `tab_id` (required) |
-| `list_tabs` | List all open tabs | None |
-| `navigate` | Navigate a tab to a URL | `tab_id`, `url` (both required) |
-
-```json
-{ "action": "open_tab", "url": "https://example.com" }
-{ "action": "list_tabs" }
-{ "action": "navigate", "tab_id": "ABC123", "url": "https://other.com" }
-{ "action": "close_tab", "tab_id": "ABC123" }
-```
-
-#### Element Interaction
-
-| Action | Description | Parameters |
-|--------|-------------|------------|
-| `click` | Click an element | `tab_id`, `ref_id` or `selector` |
-| `type` | Append text to an element | `tab_id`, `ref_id` or `selector`, `text` |
-| `fill` | Replace element value | `tab_id`, `ref_id` or `selector`, `text` |
-| `scroll` | Scroll page or element | `tab_id`, `direction` (up/down/left/right) |
-| `hover` | Hover over an element | `tab_id`, `ref_id` or `selector` |
-
-```json
-{ "action": "click", "tab_id": "ABC123", "ref_id": "e42" }
-{ "action": "type", "tab_id": "ABC123", "ref_id": "e7", "text": "search query" }
-{ "action": "fill", "tab_id": "ABC123", "selector": "input#email", "text": "user@example.com" }
-{ "action": "scroll", "tab_id": "ABC123", "direction": "down" }
-{ "action": "hover", "tab_id": "ABC123", "ref_id": "e15" }
-```
-
-#### Observation
-
-| Action | Description | Parameters |
-|--------|-------------|------------|
-| `screenshot` | Capture a tab as PNG | `tab_id`, optional `full_page` |
-| `snapshot` | Get ARIA accessibility tree | `tab_id` |
-| `evaluate` | Run JavaScript in the tab | `tab_id`, `js` |
-
-```json
-{ "action": "screenshot", "tab_id": "ABC123", "full_page": true }
-{ "action": "snapshot", "tab_id": "ABC123" }
-{ "action": "evaluate", "tab_id": "ABC123", "js": "document.title" }
-```
-
-## Element Targeting
-
-Elements can be targeted using three methods, in order of priority:
-
-### 1. ARIA Ref ID (Preferred)
-
-Each element in an ARIA snapshot has a unique `ref_id`. This is the most reliable targeting method because it references elements by their accessibility tree position:
+Every element in an ARIA snapshot has a unique `ref_id`. This is the most
+reliable targeting because it references the element through its position
+in the accessibility tree:
 
 ```json
 { "action": "click", "tab_id": "...", "ref_id": "e42" }
 ```
 
-The agent obtains `ref_id`s by first taking a `snapshot`:
+Take a `browser_snapshot` first to obtain the `ref_id`.
+
+### 2. Coordinates `(x, y)`
+
+Fallback when `ref_id` is unavailable — pass viewport coordinates directly.
 
 ```json
-{ "action": "snapshot", "tab_id": "..." }
+{ "action": "click", "tab_id": "...", "x": 312, "y": 540 }
 ```
 
-Which returns:
+### 3. CSS selector — **removed**
+
+`browser_click` (and the other targeting tools) no longer accept a
+`selector` field. Passing `selector` now returns:
+
+```
+CSS selector targeting is no longer supported. Use 'ref_id' from browser_snapshot.
+```
+
+ARIA `ref_id` and coordinates are both stable and universal.
+
+## Tool catalog
+
+### Lifecycle
+
+| Tool | Description |
+|------|-------------|
+| `browser_profile` | Create / list / delete profiles. |
+| `browser_session` | Query the currently active session. |
+| `browser_open` | Start the profile's browser instance and open a new tab. |
+| `browser_tabs` | List / open / close tabs. |
+
+### Navigation and observation
+
+| Tool | Description |
+|------|-------------|
+| `browser_navigate` | Navigate an existing tab to a URL. |
+| `browser_snapshot` | Read the ARIA accessibility tree. |
+| `browser_screenshot` | Capture screenshot (PNG / JPEG / WebP), with optional `full_page`. |
+| `browser_evaluate` | Execute JavaScript in the tab. |
+
+### Element interaction
+
+| Tool | Description |
+|------|-------------|
+| `browser_click` | Click an element (`ref_id` or coordinates; `double=true` for double-click). |
+| `browser_type` | Append text (**appends** to the value, fires an `input` event). |
+| `browser_fill_form` | Fill multiple fields in one structured JSON call. |
+| `browser_press_key` | Press a single key (`Enter` / `Tab` / arrows / etc.). |
+| `browser_hover` | Fire `mouseenter` / `mouseover`. |
+| `browser_scroll` | Scroll (direction + delta). |
+| `browser_select` | Pick an option on a `<select>`. |
+| `browser_drag` | Drag (`from` + `to`). |
+| `browser_upload` | Upload a file through a file input. |
+
+### Observation and debugging
+
+| Tool | Description |
+|------|-------------|
+| `browser_console` | Read console logs. |
+| `browser_network` | Read network requests / responses. |
+| `browser_cookies` | List / set / clear cookies. |
+| `browser_dialog` | Accept / dismiss browser dialogs (alert / confirm / prompt). |
+
+### Session state
+
+| Tool | Description |
+|------|-------------|
+| `browser_emulate` | Emulate device / network conditions. |
+| `browser_resize` | Viewport size. |
+| `browser_wait_for` | Wait for selector / text / function return. |
+| `browser_pdf` | Save the tab as PDF. |
+
+## Typical workflow
+
+```
+browser_open → browser_snapshot → browser_click / browser_fill_form
+                                  → browser_screenshot (optional verify)
+                                  → browser_evaluate (optional extraction)
+                                  → browser_close_tab (or end browser_session)
+```
+
+Every tool takes a `profile` field (default `"default"`) plus
+backend-specific extras.
+
+## ARIA accessibility snapshot
+
+Snapshots give a structured view of the page. `browser_snapshot` returns:
 
 ```json
 {
@@ -198,243 +198,87 @@ Which returns:
 }
 ```
 
-### 2. CSS Selector
+`ref_id` is valid for one snapshot only; the next `browser_snapshot`
+reassigns them.
 
-When a `ref_id` is not available, use a CSS selector:
+## Approval policy
 
-```json
-{ "action": "click", "tab_id": "...", "selector": "button.submit" }
-{ "action": "fill", "tab_id": "...", "selector": "#login-form input[type='email']", "text": "user@example.com" }
-```
+All `browser_*` tools accept a user-defined `ApprovalPolicy`
+(`src/approval/`) that gates sensitive actions:
 
-The selector is resolved using `document.querySelector()` and `getBoundingClientRect()`.
+| Action category | Gated |
+|-----------------|-------|
+| `browser_open`, `browser_profile`, `browser_session`, `browser_close_tab` | No (lifecycle) |
+| `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_cookies` | No (read-only) |
+| `browser_navigate`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_scroll`, `browser_select`, `browser_drag`, `browser_upload`, `browser_evaluate`, `browser_dialog`, `browser_emulate`, `browser_resize`, `browser_pdf` | Yes (navigation / mutation / input) |
 
-### 3. Coordinates (Internal)
+When the policy denies, the call returns `success: false` with the reason;
+when it requires confirmation, it returns `success: false` with
+`Approval required: …` — the agent relays that to the user.
 
-Actions are ultimately resolved to viewport coordinates `(x, y)` internally. The `Coordinates` variant exists for programmatic use but is not typically used by the agent directly.
+## Network policy
 
-## Action Implementation
+All browser navigation goes through `BrowserSsrfGuard`
+(`src/browser/network_policy.rs`) — sharing `SsrfPolicy` with the tool SSRF
+engine. Private network, link-local, loopback, and cloud-metadata endpoints
+are rejected by default.
 
-All browser actions work by resolving the target to viewport coordinates and then executing JavaScript in the page context:
+## Graceful degradation
 
-### Click
-
-Resolves target to `(x, y)`, then uses `document.elementFromPoint(x, y).click()`.
-
-### Type
-
-Focuses the target element, then appends text to its `value` property and dispatches an `input` event with `bubbles: true`.
-
-### Fill
-
-Similar to type, but replaces the entire value instead of appending. Dispatches both `input` and `change` events to ensure frameworks (React, Vue, etc.) detect the change.
-
-### Scroll
-
-Uses `scrollBy()` with `behavior: 'smooth'` and a fixed delta of 300px in the specified direction.
-
-### Hover
-
-Dispatches `mouseenter` and `mouseover` events at the target coordinates to trigger CSS `:hover` styles and JavaScript event listeners.
-
-## Screenshots
-
-Screenshots are captured as PNG (default) or JPEG and returned as Base64-encoded data:
-
-```rust
-pub struct ScreenshotResult {
-    pub data_base64: String,  // Base64-encoded image
-    pub width: u32,           // Image width in pixels
-    pub height: u32,          // Image height in pixels
-    pub format: String,       // "png" or "jpeg"
-}
-```
-
-### Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `full_page` | boolean | false | Capture entire scrollable page |
-| `format` | string | "png" | Image format: `png`, `jpeg`, `webp` |
-| `quality` | integer | 80 | JPEG quality (1-100) |
-
-## ARIA Accessibility Snapshot
-
-The accessibility snapshot provides a structured representation of the page:
-
-```rust
-pub struct AriaSnapshot {
-    pub elements: Vec<AriaElement>,   // Flat list of elements
-    pub page_title: Option<String>,   // Document title
-    pub page_url: Option<String>,     // Current URL
-    pub focused_ref: Option<String>,  // Currently focused element
-}
-
-pub struct AriaElement {
-    pub ref_id: String,               // Unique reference ID
-    pub role: String,                 // ARIA role (button, textbox, link, etc.)
-    pub name: Option<String>,         // Accessible name
-    pub value: Option<String>,        // Current value (for inputs)
-    pub state: Vec<String>,           // States (focused, checked, disabled, etc.)
-    pub bounds: Option<ElementRect>,  // Viewport position and size
-    pub children: Vec<AriaElement>,   // Nested elements
-}
-```
-
-The snapshot is the primary way the agent understands page structure. By reading the ARIA tree, the agent can identify interactive elements, understand their purpose, and target them by `ref_id`.
-
-## Approval Policy
-
-The browser tool supports an approval policy for gating sensitive actions. When configured, mutating actions require approval before execution:
-
-| Action Category | Requires Approval |
-|----------------|-------------------|
-| `start`, `stop` | No |
-| `list_tabs`, `screenshot`, `snapshot`, `scroll`, `hover` | No (read-only) |
-| `open_tab`, `navigate` | Yes (navigation) |
-| `click` | Yes (mutation) |
-| `type`, `fill` | Yes (input) |
-| `evaluate` | Yes (JavaScript execution) |
-
-```rust
-let policy = Arc::new(MyApprovalPolicy::new());
-let tool = BrowserTool::new().with_approval_policy(policy);
-```
-
-When a policy denies an action:
+`browser_*` calls against an unconfigured profile return a friendly
+message instead of an error:
 
 ```json
 {
   "success": false,
-  "message": "Action denied by approval policy: navigation to untrusted domain"
+  "message": "No browser profile configured. Use browser_profile to create one first."
 }
 ```
 
-When a policy requires user confirmation:
+The agent can create a profile and start a browser without error-handling
+boilerplate.
 
-```json
-{
-  "success": false,
-  "message": "Approval required: Confirm navigation to https://example.com",
-  "data": {
-    "approval_required": true,
-    "prompt": "Confirm navigation to https://example.com"
-  }
-}
-```
+## Security notes
 
-## Configuration
+- **Process isolation**: the browser runs as a separate Chromium process
+  inside its own sandbox.
+- **Headless mode**: use `headless: true` in production to avoid visual
+  interference.
+- **Approval policy**: gate sensitive actions (navigation, JS evaluation,
+  upload) through the approval system.
+- **User data directory**: use a dedicated browser profile to isolate
+  cookies and storage from the user's personal browser.
+- **JS evaluation**: `browser_evaluate` can execute arbitrary JS in the
+  page context — powerful but should be gated by an approval policy in
+  security-sensitive deployments.
+- **Anti-automation flags**: default Chromium flags reduce bot detection,
+  but some sites may still block automated access.
 
-Configure the browser tool in Aleph's configuration:
-
-```json
-{
-  "browser": {
-    "headless": false,
-    "cdp_port": 9222,
-    "user_data_dir": "~/.aleph/browser-profile",
-    "extra_args": [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-infobars",
-      "--no-first-run"
-    ]
-  }
-}
-```
-
-<Callout type="info">
-The flags `--disable-blink-features=AutomationControlled` and `--disable-infobars` are added automatically to reduce detection by anti-bot systems.
-</Callout>
-
-## Graceful Degradation
-
-When no browser is running, action calls return a friendly message rather than throwing an error:
-
-```json
-{
-  "success": false,
-  "message": "Browser is not running. Use action 'start' to launch a browser first."
-}
-```
-
-This allows the agent to detect that a browser is needed and start one without error-handling boilerplate.
-
-## Security Considerations
-
-- **Process isolation**: The browser runs as a separate Chromium process with its own sandbox
-- **Headless mode**: Use `headless: true` in production to prevent visual interference
-- **Approval policies**: Gate sensitive actions (navigation, JavaScript execution) through the approval system
-- **User data directory**: Use a dedicated browser profile to isolate cookies and storage from the user's personal browser
-- **JavaScript evaluation**: The `evaluate` action can execute arbitrary JS in page context — this is powerful but should be gated by approval policies in security-sensitive deployments
-- **Anti-automation flags**: Default Chromium flags reduce bot detection, but some sites may still block automated access
-
-## Example: Search and Extract
-
-A typical agent workflow using the browser tool:
+## Example: search and extract
 
 ```
-Agent: I'll search for the latest Rust release notes.
+1. browser_profile(action="create", id="default", headless=true)
+   → profile created
 
-1. browser(action="start", headless=true)
-   -> "Browser started successfully."
+2. browser_open(profile="default", url="https://blog.rust-lang.org/")
+   → tab_id="TAB_001"
 
-2. browser(action="open_tab", url="https://blog.rust-lang.org/")
-   -> { "tab_id": "TAB_001" }
+3. browser_snapshot(profile="default", tab_id="TAB_001")
+   → { elements: [
+         { ref_id: "e1", role: "heading", name: "Rust Blog" },
+         { ref_id: "e5", role: "link", name: "Rust 1.84.0" },
+         …
+       ]}
 
-3. browser(action="snapshot", tab_id="TAB_001")
-   -> { elements: [
-        { ref_id: "e1", role: "heading", name: "Rust Blog" },
-        { ref_id: "e5", role: "link", name: "Rust 1.84.0" },
-        ...
-      ]}
+4. browser_click(profile="default", tab_id="TAB_001", ref_id="e5")
+   → success
 
-4. browser(action="click", tab_id="TAB_001", ref_id="e5")
-   -> "Clicked."
+5. browser_snapshot(profile="default", tab_id="TAB_001")
+   → new ref ids for the announcement page
 
-5. browser(action="snapshot", tab_id="TAB_001")
-   -> { elements: [{ ref_id: "e1", role: "heading", name: "Announcing Rust 1.84.0" }, ...] }
+6. browser_evaluate(profile="default", tab_id="TAB_001",
+                    js="document.body.innerText")
+   → extracted text
 
-6. browser(action="evaluate", tab_id="TAB_001", js="document.body.innerText")
-   -> "Announcing Rust 1.84.0 ..."
-
-7. browser(action="stop")
-   -> "Browser stopped."
+7. browser_tabs(action="close", tab_id="TAB_001")
 ```
-
-The agent uses snapshots to understand page structure, clicks links by `ref_id`, and extracts content via JavaScript evaluation.
-
----
-
-## 26.7.x Addendum
-
-### Toolset Reorganized
-
-26.7.x the built-in toolset (~19+ tools) is reorganized in `src/builtin_tools/`.
-
-### Parallel Execution
-
-`src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
-
-### `tools.defer_mcp_tools` / `enable_tool_search`
-
-26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
-
-### MCP On-Demand Discovery
-
-26.7.17+: `McpResourceIndexLayer` is retracted. `mcp_list_*` tools discover on demand; a `cat`-guard read-steer routes to native MCP / skill / plugin reads.
-
-### `file_read` Supports Images
-
-26.6.29+: `file_read` now supports images (`image_read`); unchanged file reads are de-duplicated across turns via a read cache.
-
-### Fail-Closed
-
-Unknown tools **fail closed** under the `ask` tier.
-
-### `plugin.install` Unified Entry
-
-26.7.21+: classifies by source (marketplace / zip / path) and routes uniformly.
-
-### Full `tools.*` / `mcp.*` / `extensions.*` RPC
-
-See [Gateway Methods Reference](/docs/en/gateway/methods).
