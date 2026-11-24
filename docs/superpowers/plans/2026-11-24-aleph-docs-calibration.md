@@ -204,9 +204,10 @@ pnpm exec next build && pnpm exec tsc --noEmit && pnpm exec eslint
 - 重写 `content/docs/{zh,en}/architecture/{desktop-bridge,overview,1-2-3-4-model}.mdx`。
 - 定点修订 `index.mdx`、`philosophy/redlines.mdx`、`security/{overview,ipc}.mdx`、`gateway/auth.mdx`、
   `development/{contributing,building}.mdx`、`interfaces/webchat.mdx`。
-- 口径落地：**站点不再保留 Tauri 架构描述**。全站仅剩 4 处 Tauri 字样 ——
-  `development/building.mdx`（过渡期提示，含「遗留 / 将删除」豁免词）与
-  `desktop-hosts/overview.mdx` 的 `## 历史：旧桌面壳的 daemon 托管` 小节，以及 changelog 历史条目。
+- 口径落地：**站点不再保留 Tauri 架构描述**。终态全站只剩 9 行 Tauri 字样，
+  逐行分类见 `docs/VERIFICATION-2026-11.md` 的人工结论表 —— 全部落在
+  `terminology.mdx`（Legacy Shell 词条）、`development/building.mdx`（过渡期提示，含「遗留 / 将删除」豁免词）、
+  `desktop-hosts/overview.mdx`（`## 历史：旧桌面壳的 daemon 托管` 小节）与 changelog 历史条目。
 - 新增事实纠正：站点原写 Rust 1.95 / toolchain pin `1.96.0`，真实为根 `Cargo.toml` `rust-version = "1.99"`
   与 `rust-toolchain.toml` `channel = "1.99.1"`（`scripts/fix_msrv.py` 已修 12 个文件）。
 
