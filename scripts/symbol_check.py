@@ -48,10 +48,25 @@ DOUBLE_UNDERSCORE_RE = re.compile(r"__")
 SOURCE_RE = re.compile(r"(\.(rs|ts|tsx|js|mjs|cjs|py|swift|sh|toml|json|yml|yaml)|justfile)$")
 JUST_RE = re.compile(r"\bjust\s+([a-zA-Z0-9_-]+)")
 CRATE_RE = re.compile(r"^aleph-[a-z0-9]+(?:-[a-z0-9]+)*$")
+# 看起来像 crate、其实不是 Rust crate 的名字。`aleph-bridge` 是 Swift helper
+# 的可执行文件名（`desktop/macos/bridge/` 的 Swift package 名是 `AlephBridge`，
+# justfile 只把产物软链成 `aleph-bridge`），仓库里没有同名 crate。
+CRATE_ALIASES = {
+    "aleph-bridge",
+}
+# 判定「这个 token 被当成 crate 说」的距离窗口：crate 字样必须紧邻 token，
+# 且中间不能跨句。用 120 字符窗口会把同一段里别的主语也算进来
+# （例如 Swift CLI 附近的 "Swift package"）。
+CRATE_MENTION_RE = re.compile(r"\b(crate|package|workspace member|workspace crate)s?\b")
+CRATE_MENTION_MAX_DISTANCE = 40
+CRATE_SENTENCE_BREAKS = "。；;！!？?\n"
 
 # 免检小节：历史（描述当时）与规划中（描述将来）都不要求当下存在。
+# 中英文必须对称：英文页用 "History:" / "Planned:" / "Deprecated ..."，
+# 只豁免中文会让英文侧的同一段历史叙述被误判成现状腐化。
 EXEMPT_HEADING_RE = re.compile(
-    r"历史|规划中|已废弃|历史记录|Historical|Superseded|Deprecated|Planned|Planning"
+    r"历史|规划中|已废弃|历史记录"
+    r"|Historical|History|Superseded|Deprecated|Planned|Planning|Retracted|Removed"
 )
 
 # 站点自己造的词、协议名等：形状像符号但不是代码里的标识符。
@@ -188,6 +203,32 @@ def known_just_targets(repo: Path) -> set[str]:
     return targets
 
 
+def claims_crate(text: str, start: int, end: int) -> bool:
+    """True when the token is itself called a crate / package / workspace member.
+
+    The crate word has to sit right next to the token and stay inside the same
+    sentence. A wider window misattributes neighbouring subjects: the macOS
+    bridge page says "the Swift package lives in ...", and the `aleph-bridge`
+    binary name sits in that same paragraph without ever being a crate.
+    """
+    for match in CRATE_MENTION_RE.finditer(text):
+        if match.end() <= start:
+            gap = text[match.end() : start]
+            distance = len(gap)
+        elif match.start() >= end:
+            gap = text[end : match.start()]
+            distance = len(gap)
+        else:
+            distance = 0
+            gap = ""
+        if distance > CRATE_MENTION_MAX_DISTANCE:
+            continue
+        if any(break_char in gap for break_char in CRATE_SENTENCE_BREAKS):
+            continue
+        return True
+    return False
+
+
 def exempt_lines(text: str) -> list[bool]:
     """逐行标记该行是否落在「历史 / 规划中」小节里。"""
     exempt: list[bool] = []
@@ -270,13 +311,9 @@ def main() -> int:
             token = span.group(1).strip().rstrip(".,;:")
             if not CRATE_RE.match(token):
                 continue
-            if token in crates:
+            if token in crates or token in CRATE_ALIASES:
                 continue
-            window = text[span.end() : span.end() + 120].lower()
-            mentions_crate = any(
-                word in window
-                for word in ("crate", "package", "workspace member", "workspace crate")
-            )
+            mentions_crate = claims_crate(text, span.start(), span.end())
             cargo_command = re.search(rf"cargo\b[^\n]*\b{re.escape(token)}\b", text)
             if mentions_crate or cargo_command:
                 violations.append(f"{rel}: crate 不存在：{token}")
