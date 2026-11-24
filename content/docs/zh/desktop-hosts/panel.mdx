@@ -1,100 +1,124 @@
 ---
 title: "Panel 宿主"
-description: "Panel 是什么、如何被桌面宿主加载、改完代码后如何让修改生效，以及宿主、Panel 与 Gateway 之间的通道"
+description: "Leptos WASM 与 TSX Panel 的构建产物、嵌入方式和 Gateway 传输"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
-本页说明 Panel 如何构建、嵌入 Gateway、被桌面宿主加载，以及改动 Panel 之后怎样让修改真正生效。
+本页说明两种 Panel 怎样构建、由谁加载，以及改动后要刷新哪个产物。
 
 ## Panel 是什么
 
-Panel 是 `interfaces/webchat/` 里的 Rust + Leptos 单页应用（crate `aleph-panel`，库名 `aleph_panel`，编译为 WASM）。所有产品 UI 都在这里，桌面宿主只提供窗口和系统集成，不再有第二套业务界面（红线 R2：产品 UI 只有一个真值源；`docs/reference/DESKTOP_SHELL.md`）。
+Panel 有两个渲染器：`interfaces/webchat/Cargo.toml` 定义 Rust + Leptos 的 `aleph-panel`，编译为 WASM；`interfaces/panel/App.tsx` 是 TSX Panel 入口，由 `interfaces/panel/nsh.json` 声明其宿主能力。两者共用 `shared/ui_logic/src/panel/mod.rs` 的运行时无关模型。共用的是模型，不是同一个前端包。
 
-同一份 Panel 既能在浏览器里打开 Gateway 的地址使用，也能被 [桌面宿主](./overview) 放进 WebView。宿主加载的地址是连接目标的根路径（`shared/client/src/connection_target.rs` 的 `ConnectionTarget::panel_url`），不带凭据或启动材料。
+## 两条构建链
 
-## 构建与嵌入链
+| 构建产物 | 由谁加载 |
+|---|---|
+| Leptos WASM：`interfaces/webchat/dist/` | 发布版 `aleph-server` 在编译时嵌入，运行时从二进制读取（`src/gateway/control_plane/assets.rs`）。 |
+| TSX Web：interfaces/panel/out-web/ | Gateway 的原生 TLS 路由可在 `/v1/panel/` 从磁盘提供静态包（`src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs`）。 |
+| TSX 原生 bundle：interfaces/panel/out-bundle/ | NSH 桌面壳开启 `tsx-panel` 后在编译时嵌入（`desktop/nsh-shell/src/panel_surface.rs`）。 |
 
-### 资源如何进入 Gateway
+### Leptos WASM（默认发布产物）
 
-Panel 的构建产物 `interfaces/webchat/dist/*` 在 `aleph-server` 编译期通过 `rust_embed` 静态嵌入二进制（`src/gateway/control_plane/assets.rs`，嵌入目录由 `folder` 属性指定为 `interfaces/webchat/dist/`）。运行中的 Gateway 不会从磁盘读取 `dist/*`。
+发布流程校验并使用已提交的 Leptos WASM 资源，不在发布任务中重建 WASM（`.github/workflows/aleph-app-release.yml`）。`src/gateway/control_plane/assets.rs` 的 `rust_embed` 将 `interfaces/webchat/dist/` 编入发布版 `aleph-server`。运行中的发布版不会从磁盘读取该目录。
 
-### 刷新步骤
+刷新时按顺序执行三步：
 
-完整链路有三步，缺一不可（`docs/reference/DESKTOP_SHELL.md` 的「Panel ↔ Daemon 资源嵌入链与刷新」）：
+1. 运行 `just wasm`，重建 `aleph_panel.js`、`aleph_panel_bg.wasm`、`tailwind.css` 和 `index.html` 等资源。配方将 Rust 库编译到 `wasm32-unknown-unknown`，经 `wasm-bindgen` 生成 Web 输出，并执行与 `just check-dist` 相同的 JS/WASM 配对检查（`justfile`、`scripts/check_panel_dist.mjs`）。
+2. 运行 `cargo build --release -p alephcore --bin aleph-server`，把新的 `interfaces/webchat/dist/` 编入二进制（`Cargo.toml`、`src/gateway/control_plane/assets.rs`）。
+3. 停止旧进程，再用新二进制启动。以本地 release 构建为例，运行 `./target/release/aleph-server stop`，再运行 `./target/release/aleph-server start`（`src/bin/aleph-server/cli.rs`）。只跑 `just wasm` 不会刷新仍在运行的发布版。
 
-1. `just wasm`：重建 `interfaces/webchat/dist/` 下的 `aleph_panel.js`、`aleph_panel_bg.wasm`、`tailwind.css`、`index.html`。配方内部执行 `cargo build -p aleph-panel --lib --target wasm32-unknown-unknown --profile wasm-release`，再用 `wasm-bindgen --target web` 输出到 `interfaces/webchat/dist/`，并校验 js 与 wasm 是匹配的一对（`just check-dist`，`scripts/check_panel_dist.mjs`）。
-2. `cargo build --release -p alephcore --bin aleph-server`：让 `rust_embed` 把新的 `dist/` 烧进二进制。
-3. 替换正在运行的 `aleph-server`：先停掉旧进程，再用新二进制启动。开发环境下是 `./target/release/aleph-server stop`，然后 `cargo run --release -p alephcore --bin aleph-server start`。Windows 无法覆盖正在运行的 exe，必须先停。
+### TSX Panel
 
-<Callout type="warn" title="改完看不到效果">
-几乎都是漏了第 2、3 步。单独运行 `just wasm` 只更新磁盘上的文件；`just dev`（先 `just wasm` 再 `cargo run`）只在 Gateway 尚未启动时有效。已经在跑的 Gateway 必须替换二进制并重启，才能看到 Panel 的改动。
-</Callout>
+| 命令 | 用途（配方见 `justfile`） |
+|---|---|
+| `just panel-tsx-test` | 运行 `nsh test`、`nsh check`，以及 `interfaces/panel/web/host.test.mjs` 的 Node 测试。 |
+| `just panel-tsx-web` | 先运行 `nsh check`，再用 `nsh package --target web` 生成 interfaces/panel/out-web/。 |
+| `just panel-tsx-bundle` | 先运行 `nsh check`，再用 `nsh build` 生成 interfaces/panel/out-bundle/。 |
 
-## 模块化 Panel
+Web 打包不会自动启用静态路由。将 Gateway 配置 `[gateway]` 下的 `panel_web_dir` 指向 interfaces/panel/out-web/，原生 TLS 路由才会在 `/v1/panel/` 挂载这个磁盘目录；未配置则不挂载（`src/gateway/config.rs`、`src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
-`interfaces/webchat/Cargo.toml` 里有 `panel-modular` feature，默认不开（`default = ["legacy-terminal"]`）。启用后 `PanelShell` 才会参与渲染，真实的渲染点在 `interfaces/webchat/src/app.rs`（`crate::panel::PanelShell`）。`panel-tab-spike` 依赖 `panel-modular`，另有 `runtime-qa` 用于运行时验证。
+### 模块化 Panel（可选）
 
-模块化面板不是另一个生产 UI 权威：它是同一个 Panel 的可选渲染路径，桌面宿主托管的始终是同一个 Leptos/WASM Panel（`docs/reference/DESKTOP_SHELL.md`）。模块化构建走 `just wasm-modular`，与默认的 `just wasm` 分开。
+`panel-modular` 是 Leptos 的可选 feature，不是 TSX 构建路径。它默认关闭；开启后由 `interfaces/webchat/src/app.rs` 渲染 `PanelShell`（feature 定义见 `interfaces/webchat/Cargo.toml`）。`just wasm-modular` 将模块化构建放入 interfaces/webchat/.panel-modular-dist/ 暂存，并在那里执行报告和测试；默认发布仍使用 `interfaces/webchat/dist/`（`justfile`、`.github/workflows/aleph-app-release.yml`）。
 
-> **状态：规划中** — 蓝图为 `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`（单一共享 TSX 源、带 Web 回退的原生组件、由 Core 持有能力与授权）；共享 TSX 渲染与 S4 快照/回放尚未实现，当前实现见 `interfaces/webchat/src/app.rs`。
+## NSH 桌面宿主如何嵌入 TSX Panel
+
+### 编译开关
+
+`tsx-panel` 默认关闭，当前接入的是 macOS 的 NSH JS 运行时（`desktop/nsh-shell/Cargo.toml`、`desktop/nsh-shell/src/main.rs`）。开启后，如果 `bundle.js` 或 `capabilities.json` 缺失，构建会失败并提示先运行 `just panel-tsx-bundle`（`desktop/nsh-shell/build.rs`）。
+
+### 原生组件 `aleph/panel-surface`
+
+`desktop/nsh-shell/src/panel_surface.rs` 用 `include_str!` 把 bundle 和能力清单编入壳二进制，并注册 `aleph/panel-surface`。组件在 NSH 的 `AppView` 中加载 JS 源码。同一时刻最多一个 surface；第二个不会加载 Panel。
+
+### 宿主函数
+
+`interfaces/panel/nsh.json` 声明四个宿主函数。桌面由 `desktop/nsh-shell/src/panel_host.rs` 实现，Web 由 `interfaces/panel/web/host.js` 实现。
+
+| 函数 | 两端的行为（见上述实现） |
+|---|---|
+| `aleph.rpc` | 接收 `method` 和 `params`，返回 `result` 或含 `code`、`message` 的 `error`。 |
+| `aleph.pair` | 桌面恒返回错误，由操作系统认证 Desktop IPC；Web 将设备令牌或一次性票据提交给 `/v1/session`。 |
+| `aleph.connect` | 发起连接；断线后可用它重新连接。 |
+| `aleph.connection` | 读取连接状态；同名事件在状态变化时携带 `state`、`endpoint`、`subject`、`pairing`。 |
+
+### 选择渲染器
+
+在支持 `tsx-panel` 的构建中，非 QA 启动设置 `ALEPH_SHELL_PANEL=tsx` 会挂载 `aleph/panel-surface`；未设置时挂载 `web_view`，不同时运行两者。无效或不受支持的显式选择会让壳拒绝启动，而不是回退到 WebView（`desktop/nsh-shell/src/main.rs`）。
+
+在 macOS 上，先用 `--desktop-ipc` 指定 socket 路径并启动 Gateway（`src/bin/aleph-server/cli.rs`），再运行：
+
+```sh
+just shell-tsx-dev /absolute/path/to/socket
+```
+
+配方先重建 bundle，再带 `tsx-panel` 启动壳，并把传入的绝对路径设为 `ALEPH_SHELL_PANEL_IPC`（`justfile`、`desktop/nsh-shell/src/panel_host.rs`）。
 
 ## 宿主与 Panel 的通道
 
-宿主与 Panel 之间只有一条窄通道：WebView 的 `window.nsh.postMessage`。消息类型定义在 `shared/protocol/src/panel_shell.rs`，宿主侧实现在 `desktop/nsh-shell/src/panel_bridge.rs`，页内脚本是 `desktop/nsh-shell/src/panel_bridge.js`。
+TSX 桌面和 Web 使用上节的宿主函数。下述消息、校验和导航只适用于 NSH 的 Leptos WebView 路径：`desktop/nsh-shell/src/main.rs` 在挂载 `web_view` 时启动桥接，页面通过 `window.nsh.postMessage` 向宿主发消息（`desktop/nsh-shell/src/panel_bridge.js`）。WebView 加载连接目标的根路径，不在 URL 中携带凭据或启动材料（`desktop/nsh-shell/src/shell_host.rs`、`shared/client/src/connection_target.rs`）。
 
 ### 消息形状
 
-所有消息都是带 `kind` 标签的 JSON（kebab-case），并拒绝未知字段（`deny_unknown_fields`）。
+WebView 桥接使用带 `kind` 标签的 JSON。`shared/protocol/src/panel_shell.rs` 的 `ShellRequest` 和 `PanelReply` 用 kebab-case 标签并拒绝未知字段。
 
-| 方向 | 类型 | `kind` | 作用 |
-|---|---|---|---|
-| 宿主到 Panel | `ShellRequest::Probe` | `probe` | 探测 Panel 是否就绪，携带 `request` |
-| 宿主到 Panel | `ShellRequest::CredentialsReady` | `credentials-ready` | 通知 Panel 凭据通道已绑定到某个 `document` |
-| 宿主到 Panel | `ShellRequest::OpenChat` | `open-chat` | 让 Panel 导航到 Chat |
-| 宿主到 Panel | `ShellRequest::CredentialReply` | `credential-reply` | 凭据调用的结果 |
-| 宿主到 Panel | `ShellRequest::AutostartReply` | `autostart-reply` | 登录项状态的结果 |
-| Panel 到宿主 | `PanelReply::Ready` | `ready` | 回应 `probe`，带 `document` |
-| Panel 到宿主 | `PanelReply::ChatOpened` | `chat-opened` | 回应 `open-chat` |
-| Panel 到宿主 | `PanelReply::Notify` | `notify` | 请求系统通知，带 `title`、`body` |
-| Panel 到宿主 | `PanelReply::CredentialRequest` | `credential-request` | 凭据调用，`call` 为 `CredentialCall` |
-| Panel 到宿主 | `PanelReply::AutostartRequest` | `autostart-request` | 读取登录项状态 |
+| 方向 | `kind`（见 `shared/protocol/src/panel_shell.rs`） |
+|---|---|
+| 宿主到 Panel | `probe`、`credentials-ready`、`open-chat`、`credential-reply`、`autostart-reply` |
+| Panel 到宿主 | `ready`、`chat-opened`、`notify`、`credential-request`、`autostart-request` |
 
-`CredentialCall` 按 `operation` 区分：`load`、`save`（`lease_id` 加 `credential`）、`delete`（`lease_id`）。`CredentialReply` 按 `outcome` 区分：`loaded`、`saved`、`deleted`、`failed`。`AutostartStatus` 按 `status` 区分：`enabled`、`disabled`、`requires_approval`、`unavailable`、`failed`。
+`CredentialCall` 用 `operation` 区分 `load`、`save` 和 `delete`；`CredentialReply` 用 `outcome` 表示结果，`AutostartStatus` 用 `status` 表示登录项状态（`shared/protocol/src/panel_shell.rs`）。
 
 ### 校验与限制
 
-- Panel 发给宿主的每条消息都带前缀 `aleph-shell-v1:<随机 uuid>:`（宿主每次启动生成），宿主只处理带这一前缀的消息（`desktop/nsh-shell/src/panel_bridge.rs`）。
-- 单条消息上限 16384 字节（宿主的 `MESSAGE_LIMIT` 与页内脚本的 16384 检查）。
-- `document` 是页面加载时随机生成的 32 位小写十六进制串（`valid_document`）；所有请求必须绑定当前页面的 `document`，页面重载后旧的凭据租约与待处理请求都会失效。
-- 页内脚本只在顶层窗口、且 `location.origin` 等于宿主传入的 Panel origin 时安装（`desktop/nsh-shell/src/panel_bridge.js`）。
-- 通知标题必须非空且不超过 256 字节，正文不超过 2048 字节（`valid_notification`）。
+- 壳启动时生成形如 `aleph-shell-v1:<uuid>:` 的随机前缀，宿主只接收带该前缀的页内消息，JSON 负载上限为 16 KiB（`desktop/nsh-shell/src/main.rs`、`desktop/nsh-shell/src/panel_bridge.rs`）。
+- 页内脚本仅在顶层窗口、且 `location.origin` 匹配预期来源时安装。每次加载生成一个 32 字符的小写十六进制 `document`；绑定文档的消息必须匹配当前文档，导航时宿主清理文档状态并使旧凭据租约失效（`desktop/nsh-shell/src/panel_bridge.js`、`desktop/nsh-shell/src/panel_bridge.rs`、`shared/protocol/src/panel_shell.rs`）。
+- 通知标题须非空且不超过 256 字节，正文不超过 2048 字节（`shared/protocol/src/panel_shell.rs`、`desktop/nsh-shell/src/panel_bridge.rs`）。
 
 ### 导航流程
 
-页面加载后，宿主以 350 毫秒间隔发送 `probe`，最长等待 15 秒；Panel 以 `ready` 回复并给出 `document`，宿主随后发送 `credentials-ready`。需要打开 Chat（`aleph://open` 或点击通知）时，宿主发送 `open-chat` 并等待 `chat-opened`，2 秒内没有确认就放弃，不重放动作。
+宿主在最多 15 秒的探测窗口内发送 `probe`，每次等待回复 350 毫秒。Panel 回 `ready` 并提供 `document`，宿主再发 `credentials-ready`。收到精确的 `aleph://open` 或点击 Chat 通知时，宿主待文档就绪后发送 `open-chat`，最多等 2 秒接收 `chat-opened`；超时则丢弃该次动作，不重放（`desktop/nsh-shell/src/panel_bridge.rs`）。
 
 ## 传输矩阵
 
-Panel 与 Gateway 之间有三种入口，权限各不相同：
+| 渲染路径 | 到 Gateway 的传输 | 认证与准入 |
+|---|---|---|
+| Leptos（浏览器或 WebView） | 旧 `/ws` 上的 WebSocket JSON-RPC（`interfaces/webchat/src/context.rs`、`src/gateway/server/mod.rs`）。 | 沿用旧入口的认证；`system.hello` 只协商协议，不建立调用者身份（`src/gateway/server/connection/upgrade.rs`、`src/gateway/handlers/system_hello.rs`）。 |
+| TSX（NSH 桌面） | `aleph.rpc` 走 `AlephClient::connect_local` 建立的本地 Desktop IPC 连接，macOS 用 Unix socket（`desktop/nsh-shell/src/panel_host.rs`、`shared/client/src/connection.rs`）。 | 同账号由操作系统认证；Unix socket 的父目录须由该用户持有、权限为 `0700`（`shared/client/src/local_ipc.rs`、`src/gateway/server/connection/local_ipc.rs`）。 |
+| TSX（Web） | 同源 `wss://…/v1/ws`，子协议 `aleph.protocol.v1`。二进制消息由 4 字节大端长度和 UTF-8 JSON 组成，首帧为 `system.hello`（`interfaces/panel/web/host.js`、`shared/protocol/src/framing.rs`）。 | 原生 TLS 路由校验来源，`POST /v1/session` 签发短期、仅限当前主机的 Cookie，引用现有的设备凭据（`src/gateway/server/connection/web_v1.rs`）。 |
 
-| 入口 | 传输 | 认证 | 能做什么 |
-|---|---|---|---|
-| 旧 `/ws` | Gateway 端口（默认 18790）上的 WebSocket JSON-RPC | 既有的 `/ws` 认证；`system.hello` 只做协议探测，不准入、不设置身份（`src/gateway/handlers/system_hello.rs`） | 现有 Panel 与客户端使用的完整 RPC，经共享分发（`src/gateway/server/connection/rpc.rs`） |
-| S1-B 只读 Desktop IPC | Unix domain socket；`aleph-server start --desktop-ipc <socket>` 显式开启（`src/gateway/server/connection/local_ipc.rs`） | 同账号的 OS 认证，socket 位于调用方持有的 0700 目录；不回退到 TCP 或 WebSocket | 仅 `health`、`sessions.list`；有界帧（`shared/protocol/src/framing.rs`：4 字节头，单帧上限 8 MiB），并发请求上限 8，hello 超时 5 秒（`shared/client/src/local_ipc.rs`） |
-| S1-C 只读 Web v1 | 原生 TLS 监听上的 `POST /v1/session` 与 `GET /v1/ws`（`src/gateway/server/connection/web_v1.rs`） | 同源检查；已配对设备或用户明确绑定的一次性 ticket 换取短期、仅限主机的 Cookie，Cookie 引用已有的设备凭据，不改变 Core 主体 | `system.hello` 之后的有界二进制 `health`、`sessions.list`；不支持由代理终止 TLS |
-
-桌面宿主自带的 `--desktop-ipc-status` 查询走的是第二行（见 [桌面宿主](./overview)）。Panel 在 WebView 里仍使用第一行的既有传输，旧入口和现有 Panel 没有换线。
-
-三种入口的验证回执：`docs/superpowers/runs/2026-11-23-nsh-panel-s1a-shared-dispatch-verification.md`、`docs/superpowers/runs/2026-11-23-nsh-panel-s1b-desktop-ipc-verification.md`、`docs/superpowers/runs/2026-11-23-nsh-panel-s1c-web-v1-verification.md`。S1-B 的 macOS 证据与待完成的 Linux 原生、Windows Named Pipe 工作是分开记录的。
+Desktop IPC 和 Web v1 共用只读方法列表：`health`、`sessions.list`、`panel.capabilities.snapshot`。其他 RPC 不会从这两个入口进入 Core（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`）。
 
 ## 已知限制
 
-| 限制 | 谁负责 | 还差什么 |
-|---|---|---|
-| 深链只能打开 Chat | 宿主与 Panel 共同 | 宿主目前只处理精确等于 `aleph://open` 的 URL（`desktop/nsh-shell/src/panel_bridge.rs`）；把其它 `aleph://` URL 路由到具体视图，需要宿主转发路径并由 Panel 增加处理程序。`docs/reference/DESKTOP_SHELL.md` 的 follow-ups 对此有记录 |
-| 冷启动深链可能早于 Panel 加载完成 | 宿主 | `open-chat` 要等 `probe` 得到 `ready` 后才发出，探测 15 秒内没有确认则放弃，该次动作不会重放 |
-| 窗口拖拽区扩展 | 未核实 | `docs/reference/DESKTOP_SHELL.md` 记录的是旧壳需要宿主侧处理程序；`interfaces/webchat/src/app.rs` 里的拖拽相关代码仍沿用旧壳的属性名，NSH 侧没有找到对应实现，本页不对 NSH 的拖拽行为下结论 |
-| 模块化面板与 S4 快照/回放 | Panel | 见上文「模块化 Panel」的规划中说明 |
+- 桌面 TSX 只连本地 Desktop IPC；例如以 `--connect` 指定的 WebSocket 目标会返回 `unavailable`，不会回退到 WebSocket。`ALEPH_SHELL_PANEL_IPC` 是 socket 路径，但布局存储键的 endpoint 部分固定为 `desktop-ipc`，不随 socket 路径变化（`desktop/nsh-shell/src/panel_host.rs`、`interfaces/panel/shell/Shell.tsx`、`shared/ui_logic/src/panel/layout.rs`）。
+- `tsx-panel` 默认关闭；当前桌面发布流水线仍打包过渡期遗留的 Tauri 壳及带 Leptos 资源的 `aleph-server`，没有 NSH TSX 发布步骤（`desktop/nsh-shell/Cargo.toml`、`.github/workflows/aleph-app-release.yml`）。
+- TSX 尚未覆盖全部经典 Panel 标签页；需要经典渲染器的标签页会显示不可用提示（`interfaces/panel/shell/Shell.tsx`）。
+
+> **状态：规划中** — S4 的一致性快照与持久观察事件回放见 `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`。当前 TSX 获取的是能力快照（`interfaces/panel/shell/Shell.tsx`），这不等同于会话或任务状态的恢复；Gateway 的 `system.hello` 没有宣布快照或回放特性（`src/gateway/handlers/system_hello.rs`）。
+
+## 历史：S1 传输验证
+
+2026-11-23 的回执记录了在 TSX 接入前对既有 RPC 分发、Desktop IPC 和 Web v1 的分阶段验证。当时的只读试验覆盖 `health` 和 `sessions.list`；这不是上方现行的方法列表。见 `docs/superpowers/runs/2026-11-23-nsh-panel-s1a-shared-dispatch-verification.md`、`docs/superpowers/runs/2026-11-23-nsh-panel-s1b-desktop-ipc-verification.md`、`docs/superpowers/runs/2026-11-23-nsh-panel-s1c-web-v1-verification.md`。后续平台验证另见 `docs/superpowers/runs/2026-11-23-nsh-panel-s1b-linux-native-retest.md`、`docs/superpowers/runs/2026-11-23-nsh-panel-s1b-windows-named-pipe-verification.md`；这两份回执验证的是 IPC，不是 TSX surface 的平台覆盖。
 
 延伸阅读：[桌面宿主](./overview)。

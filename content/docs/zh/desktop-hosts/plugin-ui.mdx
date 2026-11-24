@@ -1,6 +1,6 @@
 ---
 title: "插件 UI"
-description: "插件能否带 UI、能带什么样的 UI、由谁渲染与授权：Panel 标签页、能力 UI 表面，以及规划中的混合插件 UI"
+description: "插件能否带 UI、能带什么样的 UI、由谁渲染与授权：一个 SDK 面与两个宿主适配器、Leptos 侧插件标签页、能力 UI 表面，以及规划中的受限 TSX 插件视图与动态 UI 分发"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -11,20 +11,65 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 插件 UI 属于 [Panel](./panel) 的职责范围。所有产品 UI 只有一个呈现源，桌面宿主只做平台与协议适配，Core 保持唯一的业务事实与授权权威（红线 R2，`docs/reference/REDLINES.md`；宿主「只承载 webview，不含业务 UI」见 `docs/reference/DESKTOP_SHELL.md`）。因此插件贡献 UI 的方式是在 Panel 内扩展，而不是往宿主进程里塞代码。
 
-当前代码里有两条与插件 UI 相关的现状通道：
+当前代码里有三条与插件 UI 相关的通道：
 
 | 通道 | 作用 | 入口 |
 |---|---|---|
-| 插件 Panel 标签页 | 插件声明一个标签页，Core 发布其不可变资源，Panel 按需加载 | `src/extension/panel_publication/mod.rs` |
+| 一个 SDK 面（TSX 渲染器） | 同一份 TSX 源码在 Desktop 与 Web 两端各由一个宿主适配器供能；当前只渲染三个内置 tab | `interfaces/panel/nsh.json`、`interfaces/panel/src/lib.rs` |
+| 插件 Panel 标签页（Leptos 侧） | 插件声明一个标签页，Core 发布其不可变资源，Panel 按需加载 | `src/extension/panel_publication/mod.rs` |
 | 能力 UI 表面（UI surface） | 一个由 Core 持有的显示/输入能力，Panel 负责渲染并回执 | `src/capability/ui_surface.rs` |
+
+前两条对应两种插件 UI 通路：TSX 渲染器（NSH UI set `aleph/panel`）与 Leptos 渲染器的 DOM 模块 ABI。两者读同一份模型实现（`shared/ui_logic/src/panel/`），但插件的 DOM 模块 ABI 目前只在 Leptos 侧真正执行；TSX 侧把它显示为不可用（见「规划中：受限 TSX 插件视图」）。
+
+## 一个 SDK 面，两个宿主适配器
+
+TSX 渲染器（`interfaces/panel/`，crate `aleph-panel-ui`，NSH UI set `aleph/panel`）让 Desktop 与 Web 渲染同一份 TSX 源码。它对外只有两个动作：用 `host.call("aleph.rpc", { method, params })` 发起 JSON-RPC，用 `host.on("aleph.connection", …)` 订阅连接状态事件（`interfaces/panel/shell/Shell.tsx`；挂载模块拿到的窄 SDK 见 `interfaces/panel/shell/sdk.ts`）。`aleph.pair`、`aleph.connect`、`aleph.connection` 三个 host 函数同属这一套宿主契约，由两个宿主适配器各自实现。
+
+### 宿主能力声明
+
+`interfaces/panel/nsh.json` 声明了这个 UI set：`id = "com.aleph.panel"`、`name = "Aleph Panel"`、`version = "0.1.0"`、`build = 1`、`rust = "."`，浏览器宿主入口是 `web.host = "./web/host.js"`。它通过 `capabilities` 段里的 `host` 列表授予四个名字：
+
+```text
+["aleph.rpc", "aleph.pair", "aleph.connect", "aleph.connection"]
+```
+
+这里只授予名字，不设方法白名单：`aleph.rpc` 到底能调哪些方法，由 Gateway 的 v1 方法集统一决定（见「授权点」）。`aleph.connection` 既是 host 函数（读取当前连接状态），也是同名事件（连接状态变化时推送）。
+
+### 桌面适配器
+
+`desktop/nsh-shell/src/panel_host.rs` 是这套 `nsh/host` 契约的桌面侧实现。四个 host 函数（`FUNCTIONS` 常量）行为如下：
+
+| host 函数 | 桌面侧行为 |
+|---|---|
+| `aleph.rpc` | 经 `AlephClient::connect_local` 走 Desktop IPC 调本地 Gateway；单次调用超时 `CALL_TIMEOUT = 30s` |
+| `aleph.pair` | 恒返回错误（错误码 `PANEL_HOST_UNAVAILABLE`）：Desktop IPC 由操作系统认证，桌面壳从不请求配对 |
+| `aleph.connect` | 掉线后重开一条 Desktop IPC 连接 |
+| `aleph.connection` | 返回当前连接状态；事件 `aleph.connection` 载荷为 `{ state, endpoint, subject, pairing }` |
+
+桌面 Panel 只达本地 Gateway 的 Desktop IPC，绝不走 WebSocket：`Target::resolve` 对 `--connect` 显式目标、非 Unix 平台、未设置 `ALEPH_SHELL_PANEL_IPC`、或路径不是绝对 socket 路径，一律返回 `Unavailable`。`IPC_ENV = "ALEPH_SHELL_PANEL_IPC"` 是已运行 Gateway 的 Desktop IPC socket 绝对路径；而 `ENDPOINT = "desktop-ipc"` 只是布局存储键——Gateway 每次启动都换新 socket 路径，布局需要能跨启动存活。错误码统一为 `PANEL_HOST_UNAVAILABLE = -32090`（`shared/protocol/src/panel.rs`），与 Web 侧一致。
+
+### Web 适配器
+
+`interfaces/panel/web/host.js` 是浏览器宿主，把 shell 的 `host.call(...)` 接到 Gateway 的 Protocol v1 WebSocket（同源）。文件头注释把它的职责限定为四件事：帧编解码、请求 id 关联、`system.hello`、连接事件。
+
+- 端点：同源 `${endpoint.replace(/^http/, "ws")}/v1/ws`（`http` 变 `ws`、`https` 变 `wss`）；子协议 `aleph.protocol.v1`。
+- 帧：二进制 WebSocket 消息，每帧是 4 字节大端长度前缀加 UTF-8 JSON；首帧 `system.hello`。
+- golden 向量：`shared/protocol/tests/fixtures/v1_frames.json`。
+- 错误码：`HOST_UNAVAILABLE = -32090`（与 `PANEL_HOST_UNAVAILABLE` 一致）、`AUTH_REQUIRED = -32000`、`INVALID_PARAMS = -32602`、`INVALID_REQUEST = -32600`。
+- `aleph.pair` 走 `POST /v1/session`（`bootstrap_ticket` 或 `device_token`），HTTP 204 才 `connect()`。
+- 运行环境不支持 WebSocket 或没有页面 origin 时上报 `unavailable` 且从不连接。
+
+测试用 `node --test interfaces/panel/web/host.test.mjs`，它属于 `just panel-tsx-test` 的一环。
+
+## 现状：插件 Panel 标签页（Leptos 侧）
+
+这是 Leptos 渲染器的 DOM 模块 ABI 通道。插件声明的标签页目标 ABI 是 DOM：在 TSX 渲染器里，这些 tab 的 `renderer` 是 `"dom"`（`interfaces/panel/src/lib.rs`），被显示为不可用；插件把自己的 UI 挂进 TSX 侧尚未开放（见「规划中：受限 TSX 插件视图」）。
 
 <Callout type="warn" title="Panel 侧默认未编译">
 
 Panel 侧加载插件标签页和渲染能力 UI 表面的代码全部位于 `interfaces/webchat/src/panel/`，整个模块只在 opt-in feature `panel-modular` 下编译（`interfaces/webchat/src/lib.rs` 的 `#[cfg(feature = "panel-modular")]`；`interfaces/webchat/Cargo.toml` 中默认 feature 是 `legacy-terminal`，且 `panel-modular` 要求 `--no-default-features`）。默认构建的 Panel 不会加载插件标签页。Gateway 与 Core 侧的发布、资源路由和 UI 表面方法没有 feature 门控。
 
 </Callout>
-
-## 现状：插件 Panel 标签页
 
 ### 清单声明
 
@@ -56,7 +101,7 @@ Panel 侧加载插件标签页和渲染能力 UI 表面的代码全部位于 `in
 - 准入（`src/extension/panel_publication/admission.rs`）：入口文件先规范化路径，再拒绝根目录之外的路径（`panel.asset_outside_root`）、非普通文件、超出上限的文件（`panel.asset_entry_limit`）和完整性不匹配（`panel.asset_integrity_mismatch`）。单个入口上限 `ENTRY_LIMIT` 为 4 MiB，一代资源总量上限 `GENERATION_LIMIT` 为 64 MiB。
 - 发布仓库（`src/extension/panel_publication/mod.rs`）：资源身份 `PanelAssetIdentity` 由 `plugin_id`、`plugin_version`、`tab_id`、`source_revision` 组成。替换时修订号不大于当前值即拒绝（`Stale`），每一代资源一经提交不再修改。只有满足以下条件的声明会被发布：来源为社区（`Community`）、信任级别为 `Trusted`、状态为已启用、`public_base` 为 `./tabs/`、入口位于 `./tabs/<plugin_id>/<version>/` 之下。
 - 资源路由（`src/gateway/server/panel_asset_route.rs`）：挂载 `/tabs`、`/tabs/`、`/tabs/{*entry}`，是单独的鉴权 HTTP 入口。即使 Core 管理器尚未就绪也会挂载，此时直接拒绝请求，而不是回落到 SPA 页面（`src/gateway/server/mod.rs`）。
-- Panel 侧（`interfaces/webchat/src/panel/`）：`discovery.rs` 按连接发现能力快照，`source.rs` 只持有不可变快照，`loader.rs` 在浏览器内加载模块，`sdk.rs` 是给模块的窄 SDK。
+- Panel 侧：模型层（`shared/ui_logic/src/panel/`）的 `discovery.rs` 按连接发现能力快照，`source.rs` 只持有不可变快照；Leptos 渲染器（`interfaces/webchat/src/panel/`）的 `loader.rs` 在浏览器内加载模块，`sdk.rs` 是给模块的窄 SDK。
 
 ### 信任边界
 
@@ -101,21 +146,25 @@ Gateway 只负责 JSON-RPC 与调用方/会话校验，表面、待确认回执�
 
 能力本身的模型见 [能力系统](../concepts/capability-system)。
 
-## 规划中：混合插件 UI
+## 授权点
 
-> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 的 ADR-003（2026-11 快照，文件声明其规定目标架构，不代表当前仓库已具备）；当前实现见 `src/extension/panel_publication/mod.rs` 与 `src/capability/ui_surface.rs`。
+TSX 壳通过 `aleph.rpc` 能调什么，不取决于两个宿主适配器，而取决于 Gateway 的 v1 方法集。`src/gateway/server/connection/mod.rs` 把两个 v1 入口（Desktop IPC 与 Web `/v1/ws`）挂到同一份 `V1_METHODS`，避免两端漂移：
 
-ADR-003 把插件拆成两部分：服务器侧的 Core 部分，和桌面侧的 UI 模块（UI 清单、TSX 模块、视图定义），后者运行在 NSH Runtime 中，经 UI Bridge 与客户端连接。设计要点：
+```text
+V1_METHODS = ["health", "sessions.list", "panel.capabilities.snapshot"]
+```
 
-- UI 清单里的能力声明是**请求**，不是授权；每个副作用都由服务器授权。
-- 两部分通过 `plugin_id`、版本和 API 版本关联；Core 部分缺失时 UI 降级。
-- 验收要求：不绕过能力内核，卸载时释放资源，拒绝不兼容的版本。
+`panel.capabilities.snapshot` 是常量 `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`（`shared/protocol/src/panel.rs`）。列表之外的方法在到达 Core 之前就被 `METHOD_NOT_FOUND` 拒绝；变更类方法（如 `PANEL_PROJECT_SELECT_METHOD = "panel.project.select"`）在后续阶段批准前保持关闭（`src/gateway/server/connection/mod.rs` 的 `V1_METHODS` 注释）。
 
-## 规划中：受限 TSX 的边界
+快照处理在 `src/gateway/handlers/panel_capabilities.rs`：`handle` 读 `manager.panel_ui_capability_snapshot()` 返回标准快照；`handle_select` 目前恒返回 `denied`。也就是说，宿主适配器只负责把调用送到 Gateway，方法是否可用是 Gateway 的单一裁决。
 
-> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 的 ADR-005（2026-11 快照）；当前实现见 `interfaces/webchat/src/panel/sdk.rs`（同源受信代码，非沙箱）。
+## 规划中：受限 TSX 插件视图
 
-ADR-005 规定插件视图以受限 TSX 运行在隔离的视图容器中。
+> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 的 ADR-005（2026-11 快照）。TSX 渲染器与宿主契约已经落地（见「一个 SDK 面，两个宿主适配器」），但 ADR-005 描述的「插件视图以受限 TSX 跑在隔离容器里」尚未实现。
+
+当前 TSX 渲染器只渲染三个内置 tab：`overview`、`sessions`、`capabilities`（`interfaces/panel/src/lib.rs` 的 `SHELL_MODULES`）。插件把自己的 UI 挂进 TSX 侧尚未开放；社区插件的标签页目标 ABI 是 DOM，在 TSX 侧显示为 unavailable，而不是执行其模块。
+
+ADR-005 规划的受限边界（仍为规划中）：
 
 | 允许 | 禁止 |
 |---|---|
@@ -136,7 +185,10 @@ ADR-009 要求 UI 以不可变、可校验的制品分发。制品元数据包�
 
 | 职责 | 负责方 | 现状锚点 |
 |---|---|---|
-| 渲染插件标签页与能力 UI 表面 | Panel | `interfaces/webchat/src/panel/shell.rs` |
+| 为 TSX 壳提供 `aleph.rpc` 等 host 函数（桌面） | NSH 宿主 | `desktop/nsh-shell/src/panel_host.rs` |
+| 为 TSX 壳提供 host 函数（浏览器） | 浏览器宿主 | `interfaces/panel/web/host.js` |
+| 渲染 TSX 壳的三个内置 tab | TSX 渲染器 | `interfaces/panel/src/lib.rs` |
+| 渲染插件标签页与能力 UI 表面（Leptos 侧） | Panel | `interfaces/webchat/src/panel/shell.rs` |
 | 发布插件资源、保存 UI 表面状态 | Core | `src/extension/panel_publication/mod.rs`、`src/capability/ui_surface.rs` |
 | 鉴权交付资源、转发 UI 方法 | Gateway | `src/gateway/server/panel_asset_route.rs`、`src/gateway/capability_ui.rs` |
 | 授权副作用 | Core | `docs/reference/REDLINES.md`（R2） |
@@ -151,3 +203,5 @@ ADR-009 要求 UI 以不可变、可校验的制品分发。制品元数据包�
 `src/capability/ui.rs` 旁边曾有一个同步的旧版 UI 处理器和一个内存中的显示/输入桩。2026-11-20 的断线审计确认没有任何生产路径注册过这个处理器，因此连同桩一起移除（审计记录 `review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`，CUI-02）。此后唯一的 UI 能力路径是 `src/capability/ui_surface.rs` 加上 Gateway 的 `src/gateway/capability_ui.rs`。
 
 插件 Panel 标签页的发布链（`src/extension/panel_publication/`）不是被替代的旧模型，它与能力 UI 表面是并存的两条通道。
+
+本页早先把「混合插件 UI」与「受限 TSX 的边界」整体标为规划中。TSX 渲染器与宿主契约落地后，已实现部分迁入「一个 SDK 面，两个宿主适配器」，仍为规划的受限沙箱保留在「规划中：受限 TSX 插件视图」。

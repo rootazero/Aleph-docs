@@ -1,81 +1,90 @@
 ---
 title: "Panel Runtime"
-description: "Panel internals: the assembly chain, capability snapshots and discovery, the optional modular Panel feature, loading and failure paths, the narrow ABI handed to plugin modules, and the capability UI surface"
+description: "How the Panel runs: one runtime-neutral model (shared/ui_logic/src/panel/) shared by a Leptos renderer and a TSX renderer; the registry, projection, discovery and stable-ID layout, and where each renderer's boundary lies"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-This page describes how the Panel runs internally: how the parts are assembled, where capability snapshots come from and how they are accepted, how plugin tabs are loaded and unloaded, and what a plugin module can actually call. The host-side view (build, embedding, the host-to-Panel channel) is in [Panel Host](./panel); the external contract for plugin UI is in [Plugin UI](./plugin-ui).
+This page explains what the Panel is made of: one runtime-neutral model layer and the two renderers that read it. For the host's side (building, embedding, host channels) see [Panel host](./panel); for the external plugin UI contract see [Plugin UI](./plugin-ui).
 
-## What the Panel is
+## What the Panel runtime is
 
-The Panel is the Rust + Leptos single-page app in `interfaces/webchat/` (crate `aleph-panel`, library `aleph_panel`, compiled to WASM). It is the single source of truth for product UI; the desktop host only provides a window and system integration (redline R2, see `docs/reference/REDLINES.md`).
+Panel code is split into a model and renderers. The model decides which tabs exist, which of them may be mounted and in what order they appear. A renderer only draws that result and handles user input.
 
-The Panel code splits into two layers:
+| Layer | Location | Crate | Role |
+|---|---|---|---|
+| Model | `shared/ui_logic/src/panel/` | `shared-ui-logic` (feature `panel`) | Registry, descriptor projection, snapshot sources, connection-scoped discovery, stable-ID layout; depends only on `aleph-protocol` |
+| Leptos renderer | `interfaces/webchat/` | `aleph-panel` | Rust + Leptos compiled to WASM; the modular Panel lives in `interfaces/webchat/src/panel/` behind the `panel-modular` feature |
+| TSX renderer | `interfaces/panel/` | `aleph-panel-ui` | NSH UI set `aleph/panel`; Desktop and Web render the same TSX source |
 
-| Layer | Code location | Compiled by default |
-|---|---|---|
-| Regular Panel | `MainContent` in `interfaces/webchat/src/app.rs`, views under `interfaces/webchat/src/platform/wide/views/` | Yes |
-| Modular Panel | The whole `interfaces/webchat/src/panel/` directory, reached through `pub mod panel;` in `interfaces/webchat/src/lib.rs` | No, requires the `panel-modular` feature |
+**Both renderers read the same model implementation (`shared_ui_logic::panel`); there are not two copies of the logic.** The module comment in `shared/ui_logic/src/panel/mod.rs` says so directly:
 
-<Callout type="warn" title="Modular Panel is an opt-in feature">
-The default feature in `interfaces/webchat/Cargo.toml` is `legacy-terminal`; `panel-modular = []` is a separate, empty feature. The default build does **not** contain the modular Panel: without `panel-modular`, `app.rs` renders the regular `MainContent` and nothing under `interfaces/webchat/src/panel/` is compiled at all. The runtime described on this page only exists when `panel-modular` is explicitly enabled.
+> Runtime-neutral Panel model shared by every Panel renderer. These modules depend only on `aleph_protocol` ... The Leptos Panel and the TSX Panel read the same code, so the read-side index has a single implementation.
+
+How each renderer pulls in the model:
+
+- Leptos: `interfaces/webchat/Cargo.toml` declares `panel-modular = ["shared-ui-logic/panel"]`, and with that feature on, `interfaces/webchat/src/app.rs` and `interfaces/webchat/src/context.rs` call `shared_ui_logic::panel::projection` and `shared_ui_logic::panel::discovery` directly.
+- TSX: `interfaces/panel/Cargo.toml` depends on `shared-ui-logic` with `default-features = false, features = ["panel"]`, and `interfaces/panel/src/lib.rs` is a thin binding over the model.
+
+<Callout type="warn" title="The default build is still the regular Leptos Panel">
+The default feature in `interfaces/webchat/Cargo.toml` is `legacy-terminal`; `panel-modular` must be enabled explicitly, and without it `interfaces/webchat/src/lib.rs` does not compile `pub mod panel;`. The TSX renderer is opt-in on the desktop host as well: the `tsx-panel` feature in `desktop/nsh-shell/Cargo.toml` is off by default, and the surface is mounted only when `ALEPH_SHELL_PANEL=tsx` is set (`desktop/nsh-shell/src/main.rs`).
 </Callout>
 
-## The assembly chain
+## Model layer: shared/ui_logic/src/panel/
 
-### The four parts
+The model consists of five modules (`shared/ui_logic/src/panel/mod.rs`), compiled only under `#[cfg(feature = "panel")]` in `shared/ui_logic/src/lib.rs`:
 
-The modular Panel runtime is assembled from four parts:
+| Module | Responsibility |
+|---|---|
+| `shared/ui_logic/src/panel/registry.rs` | Tab membership and enabled state; no loading, no UI side effects |
+| `shared/ui_logic/src/panel/projection.rs` | Validates a capability snapshot into a registry and resolves routes to mount targets |
+| `shared/ui_logic/src/panel/source.rs` | Immutable capability snapshot sources |
+| `shared/ui_logic/src/panel/discovery.rs` | Snapshot discovery fenced by connection epoch and request generation |
+| `shared/ui_logic/src/panel/layout.rs` | Persisted layout (order, hidden tabs, active tab) and its restore rules |
 
-```text
-PanelShell            interfaces/webchat/src/panel/shell.rs
-  |-- PanelProjection  descriptors -> mountable tab projection
-  |     `-- TabRegistry  pure membership and enabled-state projection
-  |-- PanelLoader      in-browser loading and unloading of plugin modules
-  |-- PanelSdk         the narrow ABI given to plugin modules
-  `-- CapabilitySurface  renders the capability UI surface owned by Core
-```
+The first four files used to live in `interfaces/webchat/src/panel/` and moved as a whole to `shared/ui_logic/src/panel/` in commit `2f541e81a` (2026-11-23). `shared/ui_logic/src/panel/layout.rs` was added alongside the TSX renderer.
 
-- `PanelShell` has the signature `pub fn PanelShell(projection: PanelProjection, initial_tab: Option<PanelTabKey>) -> impl IntoView` (`interfaces/webchat/src/panel/shell.rs`). It builds `PanelLoader::new(projection.registry())` itself, then calls `provide_context(host.clone())` to put the host state into the Leptos context — the SDK on the plugin-module side obtains its own tab descriptor through exactly that context.
-- `PanelProjection` holds nothing but a `registry: TabRegistry` (`shared/ui_logic/src/panel/projection.rs`); it performs no loading and touches no DOM.
-- The header comment of `TabRegistry` says it plainly: "Pure tab membership and enabled mount projections; no loading or UI effects." (`shared/ui_logic/src/panel/registry.rs`)
-- While rendering, `PanelShell` takes its navigation buttons from `registry.rows()`, hands the plugin mount points to the `data-panel-sidebar-root` and `data-panel-content-root` divs, takes the failure state from `PanelLoadStatus`, and renders a retry button (`interfaces/webchat/src/panel/shell.rs`).
+### Tab registry
 
-Data flows in one direction:
-
-```text
-capability snapshot  (source.rs / discovery.rs)
-   -> PanelProjection  (projection.rs)   validates descriptors
-   -> TabRegistry      (registry.rs)     membership + enabled state
-   -> PanelLoader      (loader.rs)       looks up the descriptor by key and mounts
-   -> PanelSdk         (sdk.rs)          the narrow ABI visible to modules
-```
-
-### Descriptor projection
-
-The job of `PanelProjection` is to turn "protocol-level declarations" into "tabs this session may mount":
-
-- `builtins(label)` builds a projection with builtin entries only; `from_snapshot` and `replace_snapshot` build one from a capability snapshot.
-- `replace_snapshot` rejects a snapshot whose revision is not greater than the current one, returning `PanelProjectionError::StaleSnapshot` — an old snapshot must not overwrite a newer one.
-- `select_route` projects the current route into a `PanelRoute`: `Legacy` (the regular Panel), `Modular(PanelTabKey)` (some plugin tab), or `Unavailable` (no mountable target).
-- `PanelProjectionError` covers the rejection reasons for descriptors, origin, trust, permissions, integrity, entry paths, versions and revisions, and offers `reason_code()` for a stable reason code (`shared/ui_logic/src/panel/projection.rs`).
-
-The three projection methods on the registry side (`shared/ui_logic/src/panel/registry.rs`):
+`TabRegistry` (`shared/ui_logic/src/panel/registry.rs`) is a small registry indexed by `PanelTabKey`. Its file header reads: "Pure tab membership and enabled mount projections; no loading or UI effects."
 
 | Method | Meaning |
 |---|---|
-| `rows()` | All entries, sorted by `(order, key.qualified())`, used to render navigation |
-| `ordered()` | Only entries whose status is `PanelTabStatus::Enabled`, the mount candidates |
-| `active_after_removal()` | Picks the next mountable entry after one is removed |
+| `new(builtins)` | Host initialization of built-in entries; duplicate keys are rejected, not overwritten |
+| `insert_or_replace(descriptor)` | Registers or replaces a plugin entry; claiming the built-in namespace returns `RegistryError::BuiltInShadowed`; replacing an entry clears its asset integrity |
+| `remove(key)` / `get(key)` | Removal and lookup |
+| `rows()` | Every entry, sorted by `(order, key.qualified())`; status rows stay queryable |
+| `ordered()` | Only `PanelTabStatus::Enabled` entries, i.e. the mount candidates |
+| `active_after_removal(removed)` | First mountable entry in projection order other than the removed key |
+| `source_revision()` | Snapshot revision the registry was built from |
+| `set_asset_integrity()` / `asset_integrity()` | Record and read an asset integrity digest per key |
 
-The split between `TabRegistry::insert_or_replace` and `insert_builtin` is described under "The builtin namespace" below.
+- The built-in namespace is `BUILTIN_NAMESPACE = "aleph"`, documented as "Only the host's explicit built-in initialization may populate this namespace."
+- `validate_descriptor` requires non-empty `plugin_id`, `tab_id`, `label` and `entry`, forbids `:` in `plugin_id` and `tab_id` (the qualified key uses a colon separator), requires `entry` to pass `valid_relative_entry`, and requires `api_major` to equal `PANEL_UI_API_MAJOR`.
+- `RegistryError` has exactly three variants: `BuiltInShadowed`, `DuplicateKey`, `InvalidEntry`.
 
-## Capability snapshots and discovery
+### Descriptor projection
 
-### Immutable snapshots
+`PanelProjection` (`shared/ui_logic/src/panel/projection.rs`) holds a single `TabRegistry` and turns protocol declarations into the tabs this connection may mount:
 
-The shape of a capability snapshot is defined at the protocol layer in `shared/protocol/src/panel.rs`; the Panel-side entry point is the trait `PanelUiCapabilitySource`:
+- `builtins(label)` builds a projection from the built-in terminal source alone; `from_snapshot(snapshot)` builds one from a capability snapshot.
+- `replace_snapshot(snapshot)` is atomic: a revision that is not newer returns `PanelProjectionError::StaleSnapshot`, and a snapshot that fails validation leaves the old projection in place.
+- If any declaration's `source_revision` differs from the snapshot's `revision`, the whole snapshot is rejected with `RevisionMismatch`.
+- `validate_declaration` checks each origin differently. `BuiltIn` must sit in the `aleph` namespace with trust `Verified`. `Community` must not claim `aleph`, must have trust `Trusted`, must pass `supported_community_permission` for every permission, must carry asset integrity, and its entry must live under `./tabs/<plugin_id>/<plugin_version>/`.
+- Every `PanelProjectionError` variant maps to a stable code via `reason_code()`, for example `invalid_identity`, `unacceptable_trust`, `missing_asset_integrity`, `stale_snapshot`, `selection_unavailable`.
+
+Route resolution:
+
+| Method | Behavior |
+|---|---|
+| `select_route(path, projection)` | Returns a `PanelRoute`: `Legacy` for any path other than `/terminal`; `Unavailable` for `/terminal` when there is no projection or the terminal entry is not enabled; otherwise `Modular(PanelTabKey)` |
+| `route_key(path)` | Resolves only `/terminal`, and only to the enabled built-in terminal key |
+| `explicit_key(path)` | Parses only the two-segment path `/panel/<plugin_id>/<tab_id>`, and both segments must pass `valid_identity_segment` |
+| `select_explicit(key, source_revision)` | The caller must pass the current revision or get `StaleSnapshot`; a missing or disabled entry yields `SelectionUnavailable` |
+
+### Snapshot sources
+
+Snapshot sources (`shared/ui_logic/src/panel/source.rs`, header: "Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.") only produce snapshots; they have no write path:
 
 ```rust
 pub trait PanelUiCapabilitySource {
@@ -83,132 +92,273 @@ pub trait PanelUiCapabilitySource {
 }
 ```
 
-(`shared/ui_logic/src/panel/source.rs`; the header comment reads "Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.")
-
-The protocol layer also defines the composition of a snapshot:
-
-| Type | Role |
-|---|---|
-| `PanelUiCapabilitySnapshot` | The snapshot itself: `revision` plus a `declarations` list; `new()` sorts by origin (builtin before community) and then by qualified key |
-| `PanelUiCapabilityOrigin` | Entry origin: `BuiltIn` or `Community` |
-| `PanelUiTrust` | Entry trust level: `Verified` or `Trusted` |
-| `PanelTabDescriptor` | Descriptor of a single tab: `key`, `label`, `icon`, `order`, `entry`, `api_major`, `trust`, `permissions`, `status`, `status_detail` |
-| `PanelTabKey` | Tab identity: `plugin_id` plus `tab_id`; `qualified()` joins them into the colon-separated display key |
-| `PanelTabStatus` | Tab status: `Enabled`, `Disabled`, `Incompatible`, `Failed` |
-| `PANEL_UI_API_MAJOR` | Major version of the plugin UI API, currently `1` |
-
-Snapshots have no write path: a source implementation only produces them, and the projection layer only reads and validates them (`shared/ui_logic/src/panel/source.rs`, `shared/ui_logic/src/panel/projection.rs`). Two concrete sources exist: `BuiltInTerminalSource` (the builtin terminal tab) and `FixturePanelUiCapabilitySource` (a test fixture). The builtin terminal's tab id is `terminal-pilot` in a `panel-tab-spike` build and `terminal` otherwise; the community fixture snapshot `community_fixture_snapshot()` exists only under `panel-tab-spike`.
+- `BuiltInTerminalSource`: revision `0` with a single `BuiltIn` terminal declaration. The terminal tab id is `terminal-pilot` in `panel-tab-spike` builds and `terminal` otherwise.
+- `FixturePanelUiCapabilitySource`: a test fixture; `community_fixture_snapshot()` exists only under `panel-tab-spike`.
 
 ### Connection-scoped discovery
 
-Snapshots are not fetched once. They are bound to the connection and fenced by epoch and request generation. The state machine lives in `shared/ui_logic/src/panel/discovery.rs` (header comment: "Connection-scoped discovery state for the canonical Panel capability snapshot."):
+`PanelDiscoveryState` (`shared/ui_logic/src/panel/discovery.rs`) ties the snapshot to a connection and fences acceptance on three things: connection epoch, request generation and snapshot revision. It only handles discovery; it never projects declarations into mounts.
 
-- `PanelDiscoveryStatus`: `Disconnected`, `Loading`, `Ready`, `Error{message}`.
-- `SnapshotUpdate`: `Accepted`, `StaleEpoch`, `StaleRequest`, `StaleRevision` — the three kinds of "stale" being a changed connection epoch, a superseded request generation, and a snapshot revision that is not newer.
-- `begin_connection(epoch)` starts one query when a new connection is established: it keeps the previous snapshot so the UI can keep rendering, and bumps the request generation.
-- `accept_snapshot` accepts only when epoch, request generation and revision all line up; otherwise it returns the matching stale reason.
-- `disconnect` moves the state back to `Disconnected` while keeping the last known snapshot. `mark_error` only applies when the epoch and request generation match and the connection is not already disconnected; it clears the current snapshot and sets the status to `Error{message}`.
+| Method | Behavior |
+|---|---|
+| `begin_connection(epoch)` | Starts a query for a new connection, keeps the previous snapshot, bumps the request generation and enters `Loading`; an older epoch returns `None` |
+| `accept_snapshot(epoch, snapshot)` | Accepts a snapshot under the current request generation |
+| `accept_snapshot_for_request(epoch, request_generation, snapshot)` | Accepts only the result of the request that currently owns the state |
+| `accept_context_snapshot_for_request(...)` | Same, and also takes the project context carried by `PanelUiContextSnapshot`; a project context generation that goes backwards within one connection counts as a stale request |
+| `invalidate_context()` | Called before sending a project selection: advances the context epoch and request generation, clears the snapshot and enters `Loading` |
+| `mark_error(epoch, message)` | Applies only to the current epoch and request generation; clears the snapshot and sets `Error` |
+| `disconnect(epoch)` | Bumps the request generation and sets `Disconnected` without inventing an empty snapshot |
+| `snapshot()` / `status()` | Read the current snapshot and status |
 
-The actual call from the Panel side is `refresh_panel_discovery` in `interfaces/webchat/src/context.rs`, which goes through the Gateway RPC method `panel.capabilities.snapshot` (protocol constant `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`, `shared/protocol/src/panel.rs`). Project context is selected through the other method, `panel.project.select` (`PANEL_PROJECT_SELECT_METHOD`), corresponding to `PanelProjectSelection` and `PanelUiContextSnapshot` (`shared/protocol/src/panel.rs`).
+- `PanelDiscoveryStatus`: `Disconnected`, `Loading`, `Ready`, `Error { message }`.
+- `SnapshotUpdate`: `Accepted`, `StaleEpoch`, `StaleRequest`, `StaleRevision` — wrong connection epoch, superseded request generation, or a revision that is not newer.
+- `decode_snapshot(value)` decodes JSON into a `PanelUiCapabilitySnapshot` without going through any browser projection.
 
-## Modular Panel (optional feature)
+### Stable-ID layout and restore
 
-### Plugin tab descriptors
+`shared/ui_logic/src/panel/layout.rs` defines the persisted tab layout. Its file header states the boundary:
 
-For a plugin to show up in Panel navigation, it must supply a `PanelTabDescriptor` that passes validation. Validation happens in two layers:
+> A layout stores only stable `PanelTabKey`s and plain data. It never stores descriptors, entries or permissions, so restoring a layout can rearrange what the current snapshot offers but can never make a tab mountable.
 
-Protocol layer (`shared/protocol/src/panel.rs`):
+| Symbol | Description |
+|---|---|
+| `PanelLayout { version, order, hidden, active }` | The layout itself; `order`, `hidden` and `active` hold nothing but `PanelTabKey` values |
+| `LAYOUT_VERSION` | Current layout version, `1` |
+| `STORAGE_PREFIX` | Private constant `"aleph.panel.layout.v1"` |
+| `layout_storage_key(endpoint, subject)` | `aleph.panel.layout.v1:<endpoint>:<subject>` with a subject, `aleph.panel.layout.v1:<endpoint>` without one; without a subject, every user on the device shares the endpoint's layout |
+| `LayoutSlot::Live(key)` / `LayoutSlot::Unavailable(key)` | One position in the restored tab strip |
+| `LayoutRepair::Corrupt` / `LayoutRepair::UnknownVersion(u32)` | Why a stored layout was replaced by the default |
+| `RestoredLayout { layout, slots, repair }` | Restore result: the layout to write back, the visible slots, and the repair reason |
 
-- Identity segments must be well formed: `valid_identity_segment`, `valid_version_segment`, `valid_path_segment`.
-- The entry must be a relative single file path: `valid_relative_entry` rejects an empty string, a leading `/`, a `\` and a `:`, and requires every path segment to be valid.
-- Asset integrity must be verifiable: `valid_asset_integrity` requires a `sha256-` prefix followed by a 32-byte base64 digest.
-- Permissions must be on the allowlist: `supported_community_permission` only admits a limited set of permission names (for example `pty.list`, `pty.spawn`, `pty.attach`, `pty.input`, `pty.resize`, `pty.close`, `config.get`, `sessions.list`, plus `events.subscribe` with a concrete topic); wildcards are not accepted.
+The subject in the storage key comes from the optional opaque field `HelloResult.subject` in the `system.hello` result (`shared/protocol/src/system_hello.rs`), which the Gateway derives per user in `subject_for` (`src/gateway/handlers/system_hello.rs`). It exists only for client-side storage keys; it is not an identity, and clients must not derive authority from it. It is absent on the legacy `/ws` entry point and when the Gateway has no key, in which case the layout is shared per endpoint.
 
-Registry layer (`shared/ui_logic/src/panel/registry.rs`):
+The edit methods only touch plain data: `PanelLayout::move_one(key, forward)` swaps with a neighbour, `PanelLayout::set_hidden(key, hidden)` (hiding the active tab clears `active`), `PanelLayout::select(key)` (records the active tab; whether it is live is decided by restore), and `PanelLayout::default_for(registry)` builds the default layout from `ordered()`.
 
-- `validate_descriptor` requires `plugin_id`, `tab_id`, `label` and `entry` to be non-empty, and requires `plugin_id` and `tab_id` to contain no `:` (the qualified key uses a colon separator); `api_major` must equal `PANEL_UI_API_MAJOR`.
-- Failures return a `RegistryError`: `BuiltInShadowed`, `DuplicateKey`, `InvalidEntry`.
+`restore(raw, registry)` follows these rules:
 
-### The builtin namespace
+1. With nothing stored, it uses the default layout. Invalid JSON or a missing `version` reports `Corrupt`; a version other than `LAYOUT_VERSION` reports `UnknownVersion`. Both fall back to the default layout.
+2. The order is the stored order followed by any newly offered mountable keys from the registry, deduplicated.
+3. Of the keys that are not hidden, those in the current `ordered()` become `Live`; the rest become `Unavailable`.
+4. The stored active tab is kept only if it is still `Live`; otherwise the first `Live` slot becomes active.
 
-The builtin namespace constant is `BUILTIN_NAMESPACE = "aleph"` (`shared/ui_logic/src/panel/registry.rs`):
+This yields three invariants. A layout stores only stable `PanelTabKey` values and plain data. Restoring can only rearrange tabs the current snapshot already offers; it can never make a tab mountable. A tab the snapshot no longer offers renders as an `Unavailable` placeholder that renderers never execute (the comment on `LayoutSlot::Unavailable`: "Renderers show a placeholder and never execute it."). A damaged layout only resets presentation; it never touches sessions or plugins.
 
-- `insert_builtin` is the only entry point for the host to initialise builtin entries, and it accepts only the `aleph` namespace.
-- `insert_or_replace` is used for plugin entries; if a plugin tries to take the `aleph` namespace, it gets `RegistryError::BuiltInShadowed` instead of overwriting the builtin entry.
+## Renderer layer
 
-## Loading and failures
+### Leptos renderer (interfaces/webchat/)
 
-### The loading flow
+`interfaces/webchat/` is still the default Panel implementation (crate `aleph-panel`, compiled to WASM). Regular pages are rendered by `interfaces/webchat/src/app.rs`; with `panel-modular` enabled, `interfaces/webchat/src/panel/` supplies the browser-side pieces of the modular Panel:
 
-Loading happens in the browser. The header comment of `interfaces/webchat/src/panel/loader.rs` states the boundary: "Browser-local loading. The shared host registry is a descriptor projection only." — the registry is only a descriptor projection; the real loading, mounting and unloading happen inside the page.
+```text
+PanelShell            interfaces/webchat/src/panel/shell.rs
+  |-- PanelProjection   shared_ui_logic::panel::projection
+  |     `-- TabRegistry  shared_ui_logic::panel::registry
+  |-- PanelLoader       interfaces/webchat/src/panel/loader.rs
+  |-- PanelSdk          interfaces/webchat/src/panel/sdk.rs
+  `-- CapabilitySurface interfaces/webchat/src/panel/capability_surface.rs
+```
 
-The flow:
+- `PanelShell(projection: PanelProjection, initial_tab: Option<PanelTabKey>)` (`interfaces/webchat/src/panel/shell.rs`) drives navigation from `registry.rows()` and places plugin mount points in two divs, `data-panel-sidebar-root` and `data-panel-content-root`.
+- `PanelHostState` (`interfaces/webchat/src/panel/mod.rs`) holds the shared model's registry in an `Arc<Mutex<TabRegistry>>`; only the Shell mutates it.
+- Routing and discovery: `interfaces/webchat/src/app.rs` calls `PanelProjection::builtins`, `select_route`, `explicit_key` and `from_snapshot`; `refresh_panel_discovery` in `interfaces/webchat/src/context.rs` drives `PanelDiscoveryState`.
+- The Leptos side does not use `shared/ui_logic/src/panel/layout.rs` today; the stable-ID layout is used only by the TSX renderer.
 
-1. `PanelLoader::activate(key, sidebar_root, content_root, sdk)` is called. No matching descriptor → `InvalidDescriptor`; the entry's status is not `Enabled` → `Cancelled`; `api_major` mismatch → `UnsupportedApiMajor`.
-2. The browser bridge (`interfaces/webchat/src/panel/loader/browser.rs`, header: "WASM-only JS bridge. Never exports DashboardState or transport handles.") calls the page-registered `globalThis.__alephLoadPanelModule`. The registration point is `interfaces/webchat/index.html`, and the implementation is `loadPanelModule` in `interfaces/webchat/panel_loader.js`, which requires a module to expose both the `describe` and `mount` ABI entry points and checks integrity against the `sha256-` SRI value; a mismatch → `IntegrityMismatch`, a malformed value → `InvalidAssetIntegrity`.
-3. The entry resource of a community module needs a one-shot credential (`sdk.asset_credential()`); failure to obtain it → `AssetFetchFailed`. A failure to import → `ImportFailed`.
-4. A failing mount → `MountFailed`; a failing unmount → `UnmountFailed`; a cancellation during the process → `Cancelled`.
+The next three sections describe **Leptos-side** mechanisms. The DOM module ABI for plugin tabs (`describe` + `mount`) exists only on this side; the TSX renderer does not load such modules.
 
-The state machines: `PanelLoadStatus` is `Idle`, `Loading{key}`, `Mounted{key}`, `Failed{key, error}`; the mount layer additionally has `PanelMountState` (`Idle`, `Loading{key}`, `Mounted{key, handle}`, `Failed{key, error}`, `Disabled`) and `PanelModuleHandle`, which holds a release function that runs at most once and falls back to disposing the browser-side resources in `Drop` (`interfaces/webchat/src/panel/mod.rs`).
+### Leptos side: loading and failure
 
-### Failure types
+The header of `interfaces/webchat/src/panel/loader.rs`: "Browser-local loading. The shared host registry is a descriptor projection only."
 
-All variants of `PanelLoadError` (`interfaces/webchat/src/panel/loader.rs`):
+1. `PanelLoader::activate(key, sidebar_root, content_root, sdk)`: a missing descriptor yields `InvalidDescriptor`, an entry that is not `Enabled` yields `Cancelled`, and a mismatched `api_major` yields `UnsupportedApiMajor`.
+2. The browser bridge `interfaces/webchat/src/panel/loader/browser.rs` ("WASM-only JS bridge. Never exports DashboardState or transport handles.") calls `globalThis.__alephLoadPanelModule`, registered in `interfaces/webchat/index.html` and implemented by `loadPanelModule` in `interfaces/webchat/panel_loader.js`. A module must export both `describe` and `mount`, and its integrity is checked against a `sha256-` SRI digest.
+3. `deactivate()` releases the current mount and invalidates the in-flight load; `reconcile()` checks after a projection change that the descriptor is still valid and `Enabled`, and otherwise falls back to `deactivate()`. Revocation only releases UI; it never triggers provider or session lifecycle operations.
+
+`PanelLoadError` variants (`interfaces/webchat/src/panel/loader.rs`):
 
 | Variant | Trigger |
 |---|---|
-| `ImportFailed` | The module failed to import |
-| `AssetFetchFailed` | The entry resource could not be fetched (including credential failure) |
+| `ImportFailed` | The module import failed |
+| `AssetFetchFailed` | Fetching the entry asset failed, including failure to obtain the one-time credential |
 | `InvalidAssetIntegrity` | The integrity field is malformed |
-| `IntegrityMismatch` | The integrity digest does not match the actual resource |
-| `InvalidDescriptor` | The registry has no matching descriptor |
+| `IntegrityMismatch` | The digest does not match the fetched asset |
+| `InvalidDescriptor` | No matching descriptor in the registry |
 | `UnsupportedApiMajor` | `api_major` differs from `PANEL_UI_API_MAJOR` |
 | `MountFailed` | The module threw while mounting |
 | `UnmountFailed` | The module threw while unmounting |
 | `Cancelled` | The entry is not `Enabled`, or the load was cancelled |
 
-`deactivate()` releases the current mount and invalidates that load's generation; `reconcile()` checks, after the host projection changes, whether the current descriptor is still valid and still `Enabled`, and otherwise degrades to `deactivate()`. The code comment is explicit: revocation only releases UI and never triggers provider or session lifecycle operations (`interfaces/webchat/src/panel/loader.rs`).
+### Leptos side: plugin module ABI
 
-## What a plugin module gets
-
-A plugin module receives `PanelSdk` (`interfaces/webchat/src/panel/sdk.rs`), a narrow ABI, rather than the host's internal state. The file's comment is unambiguous:
+Plugin modules receive `PanelSdk` (`interfaces/webchat/src/panel/sdk.rs`), a narrow ABI. The file header says:
 
 > Browser modules receive only the narrow SDK ABI, never this adapter's private DashboardState or Shell context. Same-origin code is trusted/verified code, not sandboxed by these permission checks.
 
-The key points:
+- **This is not a sandbox**: permission checks decide whether a call is allowed; they provide no isolation. The trust levels are `PanelUiTrust` in `shared/protocol/src/panel.rs`.
+- Public methods: `invoke`, `subscribe`, `connection`, `navigate`, `theme`, `locale`, `dispose`. What the browser actually hands to a module is `BrowserPanelSdk` (`interfaces/webchat/src/panel/loader/browser.rs`).
+- `PanelSdkError`: `Denied`, `InvalidMethod`, `InvalidNavigation`, `Disposed`. A missing host context, or the module's own tab being absent from the registry or not enabled, all produce `Denied`.
+- `subscribe` requires an `events.subscribe:<topic>` permission naming a concrete topic. Each subscription buffers at most 256 events (`SUBSCRIPTION_PENDING_CAPACITY`) and drops the oldest on overflow.
 
-- **This is not a sandbox.** Same-origin code is trusted or verified code; the permission checks only decide whether a given call is allowed, they do not provide isolation. Same-origin policy and the `Verified`/`Trusted` grading are part of the trust model (`PanelUiTrust` in `shared/protocol/src/panel.rs`).
-- `PanelSdk` privately holds a `DashboardState` and obtains the host context through `use_context::<PanelHostState>()`. `authorize()` fails closed: no host context available → `PanelSdkError::Denied`; the module's own tab is missing from the registry or its status is not `Enabled` → likewise `Denied`; the SDK has been disposed or the connection is gone → `PanelSdkError::Disposed`.
-- The public methods are `invoke`, `subscribe`, `connection`, `navigate`, `theme`, `locale`, `dispose`. What is actually exported to modules in the browser is `BrowserPanelSdk` (`interfaces/webchat/src/panel/loader/browser.rs`), exposing only `invoke`, `subscribe`, `connection`, `navigate`, `theme`, `locale`.
-- `subscribe` requires a permission of the form `events.subscribe:<topic>` with a concrete topic; wildcards are rejected (`interfaces/webchat/src/panel/sdk.rs`). The subscription buffer holds at most 256 events.
-- Navigation is constrained: `PanelSdkError::InvalidNavigation` means the navigation target is not allowed, and an invalid method name yields `PanelSdkError::InvalidMethod`.
+### Leptos side: capability UI surface
 
-## The capability UI surface
+The capability surface presents UI capabilities owned by Core. It is a separate mechanism from plugin tabs:
 
-The capability UI surface is how a Core-owned UI capability is rendered in the Panel. It is a different mechanism from plugin tabs:
+- The component is `interfaces/webchat/src/panel/capability_surface.rs`. It subscribes to `DISPLAY_TOPIC = "capabilities.ui.display"` and acknowledges each render by calling `capabilities.ui.ack`.
+- The protocol messages `UiAttachment`, `UiDisplayMessage` and `UiRenderAck` are defined in `shared/protocol/src/capability.rs`.
+- Ownership sits with Core: `UI_NAMESPACE = "aleph/ui"` (`src/capability/ui.rs`), with the Gateway-side implementation in `src/capability/ui_surface.rs`. A plugin cannot declare a core surface of its own.
 
-- The component lives in `interfaces/webchat/src/panel/capability_surface.rs` and subscribes to the constant `DISPLAY_TOPIC = "capabilities.ui.display"`.
-- The protocol messages are in `shared/protocol/src/capability.rs`: `UiAttachment` (surface id plus mount generation), `UiDisplayMessage` (surface id, mount generation, request id, text), `UiRenderAck` (surface id, mount generation, request id, whether it was rendered).
-- The flow: the Panel subscribes to the display event → receives text → renders → sends the `capabilities.ui.ack` confirmation in a `requestAnimationFrame` callback, so Core learns that the frame actually landed.
-- Ownership of this capability is on the Core side: the namespace constant `UI_NAMESPACE = "aleph/ui"` is defined in `src/capability/ui.rs`, and the Gateway-side implementation is `src/capability/ui_surface.rs`. In other words, the capability UI surface is owned and authorised by the runtime; a plugin cannot declare a core surface for itself.
+### TSX renderer (interfaces/panel/)
 
-For the plugin UI path (plugin tabs, trust levels, host authorisation) see [Plugin UI](./plugin-ui).
+`interfaces/panel/` is an NSH app (`interfaces/panel/nsh.json`: `id` is `com.aleph.panel`, `name` is `Aleph Panel`, `version` is `0.1.0`, and `rust` points at this directory). Its Rust part is the crate `aleph-panel-ui` (`interfaces/panel/Cargo.toml`, depending on `nsh-core = "=0.6.0"`).
 
-## Planned work
+`interfaces/panel/src/lib.rs` exposes the UI set with `#[native_module("aleph/panel")]` and exports the module `PanelModel`. Its header calls it "A thin binding over the runtime-neutral Panel model": the TSX shell calls these functions and never re-implements the rules. Values cross the boundary as JSON (`unknown` on the TS side).
 
-The items below are **not implemented**; they are recorded here as blueprints only and must not be read as current state:
+| Function | Model it calls |
+|---|---|
+| `view(snapshot, stored_layout)` | `PanelProjection::from_snapshot` + `restore`; returns `revision`, `tabs`, `slots`, `layout`, `stored`, `repair`, `projectionError` |
+| `layout_key(endpoint, subject)` | `layout_storage_key` |
+| `move_tab(stored, key, forward)` | `PanelLayout::move_one` |
+| `set_hidden(stored, key, hidden)` | `PanelLayout::set_hidden` |
+| `select(stored, key)` | `PanelLayout::select` |
 
-> **Status: planned** — Blueprint: `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`. The target shape is a single shared TSX source plus native components with a Web fallback, with Core owning capabilities and authorisation; the current Panel is still a single Leptos/WASM implementation (`interfaces/webchat/src/app.rs`, `interfaces/webchat/src/panel/`).
+The TSX side renders three built-in modules itself (`SHELL_MODULES`, components in `interfaces/panel/modules/`):
 
-> **Status: planned** — Blueprint: ADR-003 in `docs/research/NSH_ADR-001~009.md`: plugin UI adopts a Hybrid shape. In the current implementation plugin UI is loaded in the browser through `interfaces/webchat/src/panel/loader.rs`, with no separate Hybrid rendering layer.
+| key | label | icon | order | Component |
+|---|---|---|---|---|
+| `aleph:overview` | Overview | `layout-dashboard` | -30 | `interfaces/panel/modules/Overview.tsx` |
+| `aleph:sessions` | Sessions | `messages-square` | -20 | `interfaces/panel/modules/Sessions.tsx` |
+| `aleph:capabilities` | Capabilities | `blocks` | -10 | `interfaces/panel/modules/Capabilities.tsx` |
 
-> **Status: planned** — Blueprint: ADR-005 in `docs/research/NSH_ADR-001~009.md`: restricted TSX. The current `interfaces/webchat/src/panel/sdk.rs` exposes a fixed narrow ABI and has no TSX expression evaluator.
+- These modules are merged into the Core snapshot as `BuiltIn` declarations, so they pass the same projection validation as Core's own built-ins. When Core already declares the same key, Core's descriptor wins.
+- If the snapshot is missing, malformed or rejected by the projection, only these three modules remain and `projectionError` carries the reason code. No part of a rejected snapshot is ever mounted.
+- Every tab carries a `renderer` field: `tsx` for the three built-ins, and **`dom` for every other tab, meaning the Leptos Panel's DOM module ABI; the TSX side shows those tabs as unavailable**.
+- A mounted module receives `PanelSdk` from `interfaces/panel/shell/sdk.ts` (`invoke`, `subscribe`, `connection`, `navigate`, `dispose`), bound to one tab key and one connection generation. After `dispose()`, or once the connection generation moves on, results of earlier calls are dropped instead of reaching the module. Here `subscribe` listens to connection state, not to event topics as on the Leptos side.
+- The rest of the shell lives in `interfaces/panel/shell/`: `interfaces/panel/shell/Shell.tsx`, `interfaces/panel/shell/LayoutEditor.tsx`, `interfaces/panel/shell/PairingForm.tsx`, `interfaces/panel/shell/view.ts`.
 
-> **Status: planned** — Blueprint: ADR-009 in `docs/research/NSH_ADR-001~009.md`: distribution, caching and rollback of dynamic UI packages. Today there is only the statically embedded Panel resource (`src/gateway/control_plane/assets.rs`) and in-page module loading (`interfaces/webchat/panel_loader.js`), with no distribution or rollback chain.
+### TSX host functions
 
-## How this page relates to the others
+The TSX shell requests four host functions through the `host` list inside the `capabilities` section of `interfaces/panel/nsh.json`. Their contract is written in the header of `interfaces/panel/web/host.js`:
 
-- [Panel Host](./panel): the host-side view — build, embedding into the Gateway, the host-to-Panel message channel, and the refresh steps.
-- [Plugin UI](./plugin-ui): the external contract for plugin UI — plugin tabs, trust levels, and the host authorisation entry points.
-- [WebChat](../interfaces/webchat): the overall shape of the Panel as users see it.
-- [Desktop host overview](./overview): the division of labour between the NSH host process and the Gateway.
+```text
+"aleph.rpc"        { method, params } -> { result } | { error: { code, message } }
+"aleph.pair"       { bootstrap_ticket } | { device_token } -> { result: null } | { error }
+"aleph.connect"    null -> opens a new socket (after a drop)
+"aleph.connection" null -> the current connection state
+event "aleph.connection"  { state, endpoint, subject, pairing }
+```
+
+The same TSX source has two host adapters:
+
+| Target | Adapter | Connection |
+|---|---|---|
+| Web | `interfaces/panel/web/host.js` | Same-origin Protocol v1 WebSocket (subprotocol `aleph.protocol.v1`, frames with a 4-byte big-endian length prefix, first frame `system.hello`); without `WebSocket` or a page origin it reports `unavailable` and never connects |
+| Desktop | `desktop/nsh-shell/src/panel_host.rs` | Only the local Gateway's Desktop IPC; hosted by the native component `aleph/panel-surface` in `desktop/nsh-shell/src/panel_surface.rs` |
+
+Both adapters answer `PANEL_HOST_UNAVAILABLE` (-32090) when they have no Gateway connection. The code is produced client-side; the Gateway never returns it. Golden frame vectors are in `shared/protocol/tests/fixtures/v1_frames.json`, and the Web adapter's tests are in `interfaces/panel/web/host.test.mjs`. Host-side details are on [Panel host](./panel).
+
+## Protocol contract
+
+### Panel v1 methods and constants
+
+Defined in `shared/protocol/src/panel.rs`:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `PANEL_UI_API_MAJOR` | `1` | Panel UI API major version; a descriptor's `api_major` must equal it |
+| `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD` | `"panel.capabilities.snapshot"` | Read-only RPC returning the canonical capability snapshot |
+| `PANEL_PROJECT_SELECT_METHOD` | `"panel.project.select"` | Sets the authenticated device's server-owned project selection |
+| `PANEL_PROJECT_GENERATION_HEADER` | `"x-aleph-panel-project-generation"` | Response metadata for host fencing; never accepted as request authorization |
+| `PANEL_HOST_UNAVAILABLE` | `-32090` | Error code a host adapter answers when it has no Gateway connection |
+
+Main types:
+
+| Type | Role |
+|---|---|
+| `PanelTabKey` | `plugin_id` + `tab_id`; `qualified()` joins them as `plugin:tab` |
+| `PanelTabDescriptor` | `key`, `label`, `icon`, `order`, `entry`, `api_major`, `trust`, `permissions`, `status`, `status_detail` |
+| `PanelTabStatus` | `Enabled`, `Disabled`, `Incompatible`, `Failed` |
+| `PanelUiTrust` | `Verified`, `Trusted` |
+| `PanelUiCapabilityOrigin` | `BuiltIn`, `Community` |
+| `PanelUiCapabilityDeclaration` | A descriptor plus `origin`, `plugin_version`, `asset_integrity`, `public_base`, `source_revision` |
+| `PanelUiCapabilitySnapshot` | `revision` + `declarations`; `new()` sorts by origin (built-ins first), then by qualified key |
+| `PanelProjectSelection` / `PanelUiContextSnapshot` | The project selection (`project_id`, `generation`) and the snapshot that carries it |
+
+On the Gateway side, `V1_METHODS` in `src/gateway/server/connection/mod.rs` is the single method set shared by the v1 entry points: `health`, `sessions.list` and `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`. The snapshot handler is in `src/gateway/handlers/panel_capabilities.rs`.
+
+### Descriptor validation
+
+The protocol's validation functions (`shared/protocol/src/panel.rs`) are shared by the registry and the projection:
+
+- `valid_identity_segment`, `valid_version_segment`, `valid_path_segment`: the alphabets for identity, version and path segments.
+- `valid_relative_entry`: the entry must be relative; empty values, a leading `/`, and any `\` or `:` are rejected.
+- `valid_asset_integrity`: a `sha256-` prefix followed by a base64 digest of 32 bytes.
+- `supported_community_permission`: the permission allowlist for community entries; `events.subscribe` must name a concrete topic, and wildcards are not accepted.
+
+## Data flow overview
+
+```text
+panel.capabilities.snapshot (Gateway)
+        |
+        v
+PanelDiscoveryState          discovery.rs   epoch / request generation / revision fences
+        |  PanelUiCapabilitySnapshot
+        v
+PanelProjection              projection.rs  validates each declaration; whole snapshot accepted or rejected
+        |
+        v
+TabRegistry                  registry.rs    rows() every status row / ordered() mountable
+        |
+        +--> Leptos: PanelShell -> PanelLoader -> DOM modules (describe + mount)
+        |
+        +--> TSX:    PanelModel.view() -> Shell.tsx -> built-in TSX modules
+
+Stored layout (aleph.panel.layout.v1:<endpoint>[:<subject>])
+        |
+        v
+restore(raw, &TabRegistry)   layout.rs      -> RestoredLayout { layout, slots, repair }
+        |
+        v
+LayoutSlot::Live (mountable)  /  LayoutSlot::Unavailable (placeholder, never executed)
+```
+
+On the layout side, only the TSX renderer is wired in today (`interfaces/panel/src/lib.rs`).
+
+## Build and test entry points
+
+The Aleph repository's `justfile` has a set of recipes for each renderer:
+
+| Recipe | Purpose |
+|---|---|
+| `just wasm` | Builds the Leptos WASM Panel into `interfaces/webchat/dist/` |
+| `just wasm-modular` | Builds the Leptos output with the modular Panel enabled into a separate staging directory; the default release output is unchanged |
+| `just check-dist` | Verifies the committed Leptos dist is a matched js + wasm pair |
+| `just panel-tsx-test` | `nsh test` + `nsh check` + `node --test interfaces/panel/web/host.test.mjs` |
+| `just panel-tsx-web` | Packages the TSX Panel's web build |
+| `just panel-tsx-bundle` | Builds the TSX bundle embedded by the desktop host; a `tsx-panel` build without the bundle fails in `desktop/nsh-shell/build.rs` and points to this recipe |
+| `shell-tsx-dev` (argument `socket`) | Builds the bundle first, then starts the desktop host with `ALEPH_SHELL_PANEL=tsx`, `ALEPH_SHELL_PANEL_IPC=<socket>` and the `tsx-panel` feature |
+
+## Planned
+
+The items below are not implemented. Do not read them as current state.
+
+> **Status: planned** — Blueprint: `docs/superpowers/specs/2026-11-23-nsh-panel-s2-customizable-shell-design.md` (design document, approved 2026-11-23). Phases beyond S2: chat, send and cancel (S3), snapshot + replay (S4), page-by-page migration of Leptos pages (S5), and switching the default renderer plus a release pipeline (Phase 11 gates). Today the default is still the Leptos renderer (`interfaces/webchat/`), and the TSX renderer is opt-in (`tsx-panel` in `desktop/nsh-shell/Cargo.toml`).
+
+> **Status: planned** — Blueprint: ADR-003 (Hybrid plugin UI) and ADR-009 (distribution, caching and rollback of dynamic UI packages) in `docs/research/NSH_ADR-001~009.md`. Today community plugin tabs can only be loaded through the Leptos-side DOM module ABI (`interfaces/webchat/src/panel/loader.rs`) and show as unavailable on the TSX side (`interfaces/panel/src/lib.rs`); there is no distribution or rollback path.
+
+> **Status: planned** — Blueprint: ADR-005 in `docs/research/NSH_ADR-001~009.md`: restricted TSX UI generated by agents (Generated UI), running in an isolated container under a restricted runtime; the S2 design explicitly lists Generated UI as out of scope. Today the TSX renderer renders only its own three built-in modules (`SHELL_MODULES` in `interfaces/panel/src/lib.rs`) and executes no externally supplied TSX.
+
+## History: the single Leptos Panel description
+
+The first version of this page described the Panel as "a Rust + Leptos single-page app in `interfaces/webchat/`", placed the registry, projection, discovery and snapshot sources under `interfaces/webchat/src/panel/`, and recorded `panel-modular = []` as an empty feature.
+
+That description matched the code before commit `2f541e81a` (2026-11-23):
+
+- The four model files `discovery.rs`, `projection.rs`, `registry.rs` and `source.rs` moved as a whole to `shared/ui_logic/src/panel/`, and the Leptos side now depends on `shared-ui-logic`.
+- `panel-modular` now enables `shared-ui-logic/panel` and is no longer an empty feature (`interfaces/webchat/Cargo.toml`).
+- "A single shared TSX source as the target shape" used to be marked planned as a whole. The shared TSX shell, with Desktop and Web rendering the same source, has since landed in `interfaces/panel/`; the remainder is listed under "Planned" above.
+
+## Related pages
+
+- [Panel host](./panel): the host's side, covering builds, embedding in the Gateway, the desktop `aleph/panel-surface`, and host channels.
+- [Plugin UI](./plugin-ui): the external plugin UI contract, covering plugin tabs, trust levels and host authorization.
+- [WebChat](../interfaces/webchat): how the Panel appears to users as a whole.
+- [Desktop hosts overview](./overview): how the NSH host process and the Gateway divide the work.

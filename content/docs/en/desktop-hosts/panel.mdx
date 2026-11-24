@@ -1,100 +1,124 @@
 ---
 title: "Panel Host"
-description: "What the Panel is, how the desktop host loads it, how to make a change take effect, and the channels between host, Panel and Gateway"
+description: "How the Leptos WASM and TSX Panels are built, loaded, and connected to the Gateway"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
-This page explains how the Panel is built, embedded into the Gateway and loaded by the desktop host, and how to make a Panel change actually take effect.
+This page explains how each Panel is built, what loads it, and which artifact to refresh after a change.
 
 ## What the Panel is
 
-The Panel is the Rust + Leptos single-page app in `interfaces/webchat/` (crate `aleph-panel`, library name `aleph_panel`, compiled to WASM). All product UI lives here. The desktop host only provides a window and system integration, and there is no second business UI (red line R2: product UI has a single source of truth; `docs/reference/DESKTOP_SHELL.md`).
+The Panel has two renderers. `interfaces/webchat/Cargo.toml` defines the Rust and Leptos `aleph-panel`, which compiles to WASM. `interfaces/panel/App.tsx` is the TSX Panel entry point, and `interfaces/panel/nsh.json` declares its host capabilities. Both use the runtime-neutral model in `shared/ui_logic/src/panel/mod.rs`. They share the model, not the frontend package.
 
-The same Panel can be opened in a browser at the Gateway address, or placed in a WebView by the [desktop host](./overview). The address the host loads is the root of the connection target (`ConnectionTarget::panel_url` in `shared/client/src/connection_target.rs`), with no credentials or bootstrap material.
+## Two build chains
 
-## Build and embed chain
+| Build artifact | What loads it |
+|---|---|
+| Leptos WASM: `interfaces/webchat/dist/` | Compiled into the release `aleph-server` and served from the binary at runtime (`src/gateway/control_plane/assets.rs`). |
+| TSX Web: interfaces/panel/out-web/ | The Gateway's native TLS router can serve this static package from disk at `/v1/panel/` (`src/gateway/server/mod.rs`, `src/gateway/server/connection/web_v1.rs`). |
+| TSX native bundle: interfaces/panel/out-bundle/ | Compiled into the NSH desktop shell when `tsx-panel` is enabled (`desktop/nsh-shell/src/panel_surface.rs`). |
 
-### How assets get into the Gateway
+### Leptos WASM (default release artifact)
 
-The build output `interfaces/webchat/dist/*` is statically embedded into the `aleph-server` binary at compile time through `rust_embed` (`src/gateway/control_plane/assets.rs`, the embedded folder is set by the `folder` attribute to `interfaces/webchat/dist/`). A running Gateway never reads `dist/*` from disk.
+The release workflow checks and uses the committed Leptos WASM assets rather than rebuilding WASM in the release jobs (`.github/workflows/aleph-app-release.yml`). `src/gateway/control_plane/assets.rs` uses `rust_embed` to compile `interfaces/webchat/dist/` into the release `aleph-server`. At runtime, the release binary never reads that directory from disk.
 
-### Refresh steps
+To refresh the embedded Panel, follow these three steps in order:
 
-The full chain has three steps, and none can be skipped (the chapter "Panel ↔ Daemon 资源嵌入链与刷新" in `docs/reference/DESKTOP_SHELL.md`):
+1. Run `just wasm` to rebuild assets including `aleph_panel.js`, `aleph_panel_bg.wasm`, `tailwind.css`, and `index.html`. The recipe compiles the Rust library for `wasm32-unknown-unknown`, runs `wasm-bindgen` to generate the Web output, and runs the same JS/WASM pairing check as `just check-dist` (`justfile`, `scripts/check_panel_dist.mjs`).
+2. Run `cargo build --release -p alephcore --bin aleph-server` to embed the new `interfaces/webchat/dist/` in the binary (`Cargo.toml`, `src/gateway/control_plane/assets.rs`).
+3. Stop the old process and start the new binary. For a local release build, run `./target/release/aleph-server stop`, then `./target/release/aleph-server start` (`src/bin/aleph-server/cli.rs`). Running `just wasm` alone does not update a release server that is still running.
 
-1. `just wasm` rebuilds `aleph_panel.js`, `aleph_panel_bg.wasm`, `tailwind.css` and `index.html` under `interfaces/webchat/dist/`. The recipe runs `cargo build -p aleph-panel --lib --target wasm32-unknown-unknown --profile wasm-release`, then `wasm-bindgen --target web` into `interfaces/webchat/dist/`, and checks that the js and wasm files are a matching pair (`just check-dist`, `scripts/check_panel_dist.mjs`).
-2. `cargo build --release -p alephcore --bin aleph-server` makes `rust_embed` bake the new `dist/` into the binary.
-3. Replace the running `aleph-server`: stop the old process, then start the new binary. In development that is `./target/release/aleph-server stop` followed by `cargo run --release -p alephcore --bin aleph-server start`. Windows cannot overwrite a running exe, so stop it first.
+### TSX Panel
 
-<Callout type="warn" title="Changes do not show up">
-This is almost always a skipped step 2 or 3. `just wasm` alone only updates files on disk, and `just dev` (which runs `just wasm` and then `cargo run`) only helps when the Gateway is not already running. A Gateway that is already running must have its binary replaced and be restarted before it picks up Panel changes.
-</Callout>
+| Command | What it does (recipes in `justfile`) |
+|---|---|
+| `just panel-tsx-test` | Runs `nsh test`, `nsh check`, and the Node tests in `interfaces/panel/web/host.test.mjs`. |
+| `just panel-tsx-web` | Runs `nsh check`, then uses `nsh package --target web` to write interfaces/panel/out-web/. |
+| `just panel-tsx-bundle` | Runs `nsh check`, then uses `nsh build` to write interfaces/panel/out-bundle/. |
 
-## Modular Panel
+Packaging for the Web does not enable the static route. Set `panel_web_dir` under `[gateway]` to interfaces/panel/out-web/ to mount that directory at `/v1/panel/` on the native TLS router. The route is not mounted when the directory is unset (`src/gateway/config.rs`, `src/gateway/server/mod.rs`, `src/gateway/server/connection/web_v1.rs`).
 
-`interfaces/webchat/Cargo.toml` has a `panel-modular` feature that is off by default (`default = ["legacy-terminal"]`). Only when it is enabled does `PanelShell` take part in rendering; the real render sites are in `interfaces/webchat/src/app.rs` (`crate::panel::PanelShell`). `panel-tab-spike` depends on `panel-modular`, and `runtime-qa` is for runtime verification.
+### Modular Panel (opt-in)
 
-The modular panel is not a second production UI authority: it is an optional rendering path of the same Panel, and the desktop host always hosts the same Leptos/WASM Panel (`docs/reference/DESKTOP_SHELL.md`). The modular build goes through `just wasm-modular`, separate from the default `just wasm`.
+`panel-modular` is an optional Leptos feature, not a TSX build path. It is off by default; enabling it makes `interfaces/webchat/src/app.rs` render `PanelShell` (feature definition in `interfaces/webchat/Cargo.toml`). `just wasm-modular` stages the modular build in interfaces/webchat/.panel-modular-dist/ and runs reporting and tests against that output. The default release still uses `interfaces/webchat/dist/` (`justfile`, `.github/workflows/aleph-app-release.yml`).
 
-> **Status: planned** — the blueprint is `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md` (one shared TSX source, Native Components with Web fallbacks, and Core-owned capability and authorization). Shared TSX rendering and S4 snapshot/replay are not implemented; for the current implementation see `interfaces/webchat/src/app.rs`.
+## How the NSH desktop host embeds the TSX Panel
 
-## Channel between host and Panel
+### Build feature
 
-There is one narrow channel between host and Panel: the WebView's `window.nsh.postMessage`. The message types are defined in `shared/protocol/src/panel_shell.rs`, the host side is implemented in `desktop/nsh-shell/src/panel_bridge.rs`, and the in-page script is `desktop/nsh-shell/src/panel_bridge.js`.
+`tsx-panel` is disabled by default and currently integrates with the NSH JavaScript runtime on macOS (`desktop/nsh-shell/Cargo.toml`, `desktop/nsh-shell/src/main.rs`). With the feature enabled, the build fails if `bundle.js` or `capabilities.json` is missing and tells you to run `just panel-tsx-bundle` first (`desktop/nsh-shell/build.rs`).
 
-### Message shapes
+### Native component `aleph/panel-surface`
 
-Every message is JSON tagged by `kind` (kebab-case), and unknown fields are rejected (`deny_unknown_fields`).
+`desktop/nsh-shell/src/panel_surface.rs` uses `include_str!` to compile the bundle and capability manifest into the shell and registers `aleph/panel-surface`. The component loads the JavaScript source in an NSH `AppView`. Only one surface can be active at a time; a second surface does not load the Panel.
 
-| Direction | Type | `kind` | Purpose |
-|---|---|---|---|
-| Host to Panel | `ShellRequest::Probe` | `probe` | Probe whether the Panel is ready; carries `request` |
-| Host to Panel | `ShellRequest::CredentialsReady` | `credentials-ready` | Tell the Panel the credential channel is bound to a `document` |
-| Host to Panel | `ShellRequest::OpenChat` | `open-chat` | Ask the Panel to navigate to Chat |
-| Host to Panel | `ShellRequest::CredentialReply` | `credential-reply` | Result of a credential call |
-| Host to Panel | `ShellRequest::AutostartReply` | `autostart-reply` | Result of the login-item status read |
-| Panel to host | `PanelReply::Ready` | `ready` | Answers `probe`; carries `document` |
-| Panel to host | `PanelReply::ChatOpened` | `chat-opened` | Answers `open-chat` |
-| Panel to host | `PanelReply::Notify` | `notify` | Requests an OS notification with `title` and `body` |
-| Panel to host | `PanelReply::CredentialRequest` | `credential-request` | Credential call; `call` is a `CredentialCall` |
-| Panel to host | `PanelReply::AutostartRequest` | `autostart-request` | Read the login-item status |
+### Host functions
 
-`CredentialCall` is discriminated by `operation`: `load`, `save` (`lease_id` plus `credential`) and `delete` (`lease_id`). `CredentialReply` is discriminated by `outcome`: `loaded`, `saved`, `deleted` and `failed`. `AutostartStatus` is discriminated by `status`: `enabled`, `disabled`, `requires_approval`, `unavailable` and `failed`.
+`interfaces/panel/nsh.json` declares four host functions. `desktop/nsh-shell/src/panel_host.rs` implements them on desktop, and `interfaces/panel/web/host.js` implements them on the Web.
+
+| Function | Behavior on each host (see implementations above) |
+|---|---|
+| `aleph.rpc` | Takes `method` and `params`; returns `result` or an `error` with a `code` and `message`. |
+| `aleph.pair` | Always returns an error on desktop, where the operating system authenticates Desktop IPC. The Web host submits a device token or a one-time ticket to `/v1/session`. |
+| `aleph.connect` | Opens a connection and can reconnect after a drop. |
+| `aleph.connection` | Reads the current connection state. The event of the same name carries `state`, `endpoint`, `subject`, and `pairing` when the state changes. |
+
+### Choosing a renderer
+
+In a build that supports `tsx-panel`, set `ALEPH_SHELL_PANEL=tsx` for a non-QA launch to mount `aleph/panel-surface`. Leave it unset to mount `web_view`. The two do not run at the same time. An invalid or unsupported explicit selection makes the shell refuse to start rather than fall back to the WebView (`desktop/nsh-shell/src/main.rs`).
+
+On macOS, start the Gateway with `--desktop-ipc` set to the socket path (`src/bin/aleph-server/cli.rs`), then run:
+
+```sh
+just shell-tsx-dev /absolute/path/to/socket
+```
+
+The recipe rebuilds the bundle, launches the shell with `tsx-panel`, and sets `ALEPH_SHELL_PANEL_IPC` to the supplied absolute path (`justfile`, `desktop/nsh-shell/src/panel_host.rs`).
+
+## Communication between the host and Panel
+
+Desktop and Web TSX use the host functions above. The messages, validation, and navigation below apply only to the NSH path that loads Leptos in a WebView. `desktop/nsh-shell/src/main.rs` starts the bridge when it mounts `web_view`, and the page sends messages to the host through `window.nsh.postMessage` (`desktop/nsh-shell/src/panel_bridge.js`). The WebView loads the root of the connection target without credentials or bootstrap material in the URL (`desktop/nsh-shell/src/shell_host.rs`, `shared/client/src/connection_target.rs`).
+
+### Message shape
+
+The WebView bridge uses JSON tagged by `kind`. `ShellRequest` and `PanelReply` in `shared/protocol/src/panel_shell.rs` use kebab-case tags and reject unknown fields.
+
+| Direction | `kind` (see `shared/protocol/src/panel_shell.rs`) |
+|---|---|
+| Host to Panel | `probe`, `credentials-ready`, `open-chat`, `credential-reply`, `autostart-reply` |
+| Panel to host | `ready`, `chat-opened`, `notify`, `credential-request`, `autostart-request` |
+
+`CredentialCall` distinguishes `load`, `save`, and `delete` by `operation`; `CredentialReply` carries the outcome under `outcome`, and `AutostartStatus` carries the login item state under `status` (`shared/protocol/src/panel_shell.rs`).
 
 ### Validation and limits
 
-- Every message the Panel sends to the host carries the prefix `aleph-shell-v1:<random uuid>:` (generated on each host launch), and the host only processes messages with that prefix (`desktop/nsh-shell/src/panel_bridge.rs`).
-- A single message is limited to 16384 bytes (`MESSAGE_LIMIT` in the host and the 16384 check in the in-page script).
-- `document` is a 32-character lowercase hex string generated randomly when the page loads (`valid_document`). Every request must be bound to the current page's `document`, and a page reload invalidates old credential leases and pending requests.
-- The in-page script installs only in the top-level window and only when `location.origin` equals the Panel origin the host passed in (`desktop/nsh-shell/src/panel_bridge.js`).
-- A notification title must be non-empty and at most 256 bytes, and the body at most 2048 bytes (`valid_notification`).
+- The shell generates a random prefix of the form `aleph-shell-v1:<uuid>:` at startup. The host accepts only page messages with that prefix and limits the JSON payload to 16 KiB (`desktop/nsh-shell/src/main.rs`, `desktop/nsh-shell/src/panel_bridge.rs`).
+- The injected script installs only in the top-level window when `location.origin` matches the expected origin. Each load generates a 32-character lowercase hexadecimal `document`. Document-bound messages must match the current document. On navigation, the host clears document state and invalidates old credential leases (`desktop/nsh-shell/src/panel_bridge.js`, `desktop/nsh-shell/src/panel_bridge.rs`, `shared/protocol/src/panel_shell.rs`).
+- A notification title must be nonempty and at most 256 bytes; its body is limited to 2048 bytes (`shared/protocol/src/panel_shell.rs`, `desktop/nsh-shell/src/panel_bridge.rs`).
 
 ### Navigation flow
 
-After the page loads, the host sends `probe` every 350 ms for up to 15 seconds. The Panel answers `ready` with its `document`, and the host then sends `credentials-ready`. When Chat has to be opened (`aleph://open` or a notification press), the host sends `open-chat` and waits for `chat-opened`; if nothing confirms within 2 seconds it gives up and does not replay the action.
+The host sends `probe` during a probe window of up to 15 seconds, waiting 350 ms per attempt. The Panel replies with `ready` and its `document`, and the host sends `credentials-ready`. On an exact `aleph://open` match or a click on a Chat notification, the host waits for the document to be ready, sends `open-chat`, and waits up to two seconds for `chat-opened`. On timeout, it drops the action without replaying it (`desktop/nsh-shell/src/panel_bridge.rs`).
 
 ## Transport matrix
 
-There are three ways in from a Panel or client to the Gateway, each with different privileges:
-
-| Entry | Transport | Authentication | What it can do |
-|---|---|---|---|
-| Legacy `/ws` | WebSocket JSON-RPC on the Gateway port (default 18790) | The existing `/ws` authentication; `system.hello` is only a protocol probe and neither admits nor sets identity (`src/gateway/handlers/system_hello.rs`) | The full RPC surface used by the current Panel and clients, through shared dispatch (`src/gateway/server/connection/rpc.rs`) |
-| S1-B read-only Desktop IPC | Unix domain socket, opted in with `aleph-server start --desktop-ipc <socket>` (`src/gateway/server/connection/local_ipc.rs`) | Same-account OS authentication; the socket sits in a 0700 directory owned by the caller; no fallback to TCP or WebSocket | Only `health` and `sessions.list`; bounded frames (`shared/protocol/src/framing.rs`: 4-byte header, 8 MiB payload cap), at most 8 in-flight requests, 5-second hello timeout (`shared/client/src/local_ipc.rs`) |
-| S1-C read-only Web v1 | `POST /v1/session` and `GET /v1/ws` on the native TLS listener (`src/gateway/server/connection/web_v1.rs`) | Same-origin check; an active paired device or an explicitly user-bound one-time ticket yields a short-lived, host-only Cookie that references an existing device credential and does not change the Core principal | After `system.hello`, bounded binary `health` and `sessions.list`; TLS terminated by a proxy is not supported |
-
-The host's own `--desktop-ipc-status` query uses the second row (see [Desktop host](./overview)). Inside the WebView the Panel still uses the first row's existing transport; the legacy entry and the current Panel were not moved to a new wire.
-
-Verification receipts for the three entries: `docs/superpowers/runs/2026-11-23-nsh-panel-s1a-shared-dispatch-verification.md`, `docs/superpowers/runs/2026-11-23-nsh-panel-s1b-desktop-ipc-verification.md` and `docs/superpowers/runs/2026-11-23-nsh-panel-s1c-web-v1-verification.md`. The S1-B receipt records macOS evidence separately from the outstanding Linux native and Windows Named Pipe work.
-
-## Known limitations
-
-| Limitation | Owner | What is missing |
+| Renderer path | Transport to the Gateway | Authentication and admission |
 |---|---|---|
-| Deep links can only open Chat | Host and Panel together | The host handles only a URL exactly equal to `aleph://open` (`desktop/nsh-shell/src/panel_bridge.rs`); routing other `aleph://` URLs to specific views needs the host to forward the path and the Panel to add a handler. The follow-ups in `docs/reference/DESKTOP_SHELL.md` record this |
-| A cold-start deep link may arrive before the Panel has loaded | Host | `open-chat` is sent only after `probe` gets `ready`; if nothing is acknowledged within 15 seconds the host gives up and that action is not replayed |
-| Extending the window drag region | Not verified | `docs/reference/DESKTOP_SHELL.md` records a need for a host-side handler in the old shell; the drag-related code in `interfaces/webchat/src/app.rs` still uses the old shell's attribute names and no matching NSH implementation was found, so this page draws no conclusion about drag behavior in NSH |
-| Modular panel and S4 snapshot/replay | Panel | See the planned-status note under "Modular Panel" above |
+| Leptos (browser or WebView) | WebSocket JSON-RPC on legacy `/ws` (`interfaces/webchat/src/context.rs`, `src/gateway/server/mod.rs`). | Uses the legacy ingress authentication. `system.hello` negotiates protocol details but does not establish the caller's identity (`src/gateway/server/connection/upgrade.rs`, `src/gateway/handlers/system_hello.rs`). |
+| TSX (NSH desktop) | `aleph.rpc` uses a local Desktop IPC connection opened by `AlephClient::connect_local`, over a Unix socket on macOS (`desktop/nsh-shell/src/panel_host.rs`, `shared/client/src/connection.rs`). | The operating system authenticates the same user. The Unix socket's parent directory must be owned by that user with mode `0700` (`shared/client/src/local_ipc.rs`, `src/gateway/server/connection/local_ipc.rs`). |
+| TSX (Web) | Same-origin `wss://…/v1/ws` with the `aleph.protocol.v1` subprotocol. Binary messages contain a four-byte big-endian length followed by UTF-8 JSON; the first frame is `system.hello` (`interfaces/panel/web/host.js`, `shared/protocol/src/framing.rs`). | The native TLS router checks the origin. `POST /v1/session` issues a short-lived, host-only cookie that references an existing device credential (`src/gateway/server/connection/web_v1.rs`). |
 
-Further reading: [Desktop host](./overview).
+Desktop IPC and Web v1 share a read-only method list: `health`, `sessions.list`, and `panel.capabilities.snapshot`. Other RPCs do not reach Core through these two ingress paths (`src/gateway/server/connection/mod.rs`, `shared/protocol/src/panel.rs`).
+
+## Known limits
+
+- Desktop TSX reaches only local Desktop IPC. For example, a WebSocket target set with `--connect` reports `unavailable` rather than falling back to WebSocket. `ALEPH_SHELL_PANEL_IPC` is a socket path, but the endpoint portion of the layout storage key is always `desktop-ipc`, even if the socket path changes (`desktop/nsh-shell/src/panel_host.rs`, `interfaces/panel/shell/Shell.tsx`, `shared/ui_logic/src/panel/layout.rs`).
+- `tsx-panel` is off by default. The desktop release workflow still packages the transitional legacy Tauri shell and `aleph-server` with its Leptos assets; it has no NSH TSX release step (`desktop/nsh-shell/Cargo.toml`, `.github/workflows/aleph-app-release.yml`).
+- TSX does not yet cover every classic Panel tab. Tabs that require the classic renderer show an unavailable message (`interfaces/panel/shell/Shell.tsx`).
+
+> **Status: Planned** — The S4 consistent snapshot and durable observation replay are described in `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`. The TSX Panel currently fetches a capability snapshot (`interfaces/panel/shell/Shell.tsx`), which is not session or task recovery. The Gateway does not advertise snapshot or replay features in `system.hello` (`src/gateway/handlers/system_hello.rs`).
+
+## History: S1 transport verification
+
+The November 23, 2026 reports record staged verification of the existing RPC dispatch path, Desktop IPC, and Web v1 before the TSX integration. The read-only trials covered `health` and `sessions.list`; that is not the current method list above. See `docs/superpowers/runs/2026-11-23-nsh-panel-s1a-shared-dispatch-verification.md`, `docs/superpowers/runs/2026-11-23-nsh-panel-s1b-desktop-ipc-verification.md`, and `docs/superpowers/runs/2026-11-23-nsh-panel-s1c-web-v1-verification.md`. Follow-up platform reports in `docs/superpowers/runs/2026-11-23-nsh-panel-s1b-linux-native-retest.md` and `docs/superpowers/runs/2026-11-23-nsh-panel-s1b-windows-named-pipe-verification.md` verify IPC, not TSX surface support on those platforms.
+
+Further reading: [Desktop Hosts](./overview).

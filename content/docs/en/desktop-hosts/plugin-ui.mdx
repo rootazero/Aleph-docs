@@ -1,6 +1,6 @@
 ---
 title: "Plugin UI"
-description: "Whether a plugin can ship UI, what kind of UI, and who renders and authorizes it: Panel tabs, the capability UI surface, and the planned hybrid plugin UI"
+description: "Whether a plugin can ship UI, what kind of UI, and who renders and authorizes it: one SDK surface with two host adapters, the Leptos-side plugin tabs, the capability UI surface, and the planned restricted TSX plugin views and dynamic UI distribution"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -11,20 +11,65 @@ This page answers the three questions plugin authors ask most: can a plugin ship
 
 Plugin UI lives inside the [Panel](./panel). There is exactly one source of product UI; desktop hosts only adapt platforms and protocols, and Core remains the single authority for business state and authorization (redline R2, `docs/reference/REDLINES.md`; the host "hosts the webview only; no business UI" per `docs/reference/DESKTOP_SHELL.md`). A plugin contributes UI by extending the Panel, not by injecting code into the host process.
 
-Two current-state channels in the code relate to plugin UI:
+Three current-state channels in the code relate to plugin UI:
 
 | Channel | Purpose | Entry point |
 |---|---|---|
-| Plugin Panel tab | A plugin declares a tab; Core publishes its immutable assets; the Panel loads them on demand | `src/extension/panel_publication/mod.rs` |
+| One SDK surface (TSX renderer) | One TSX source, powered on Desktop and Web by one host adapter each; today it renders only three built-in tabs | `interfaces/panel/nsh.json`, `interfaces/panel/src/lib.rs` |
+| Plugin Panel tab (Leptos side) | A plugin declares a tab; Core publishes its immutable assets; the Panel loads them on demand | `src/extension/panel_publication/mod.rs` |
 | Capability UI surface | A display/input capability held by Core; the Panel renders it and acknowledges each frame | `src/capability/ui_surface.rs` |
+
+The first two are two distinct plugin-UI paths: the TSX renderer (NSH UI set `aleph/panel`) and the Leptos renderer's DOM module ABI. Both read one model implementation (`shared/ui_logic/src/panel/`), but a plugin's DOM module ABI currently runs only on the Leptos side; the TSX side shows it as unavailable (see "Planned: restricted TSX plugin views").
+
+## One SDK surface, two host adapters
+
+The TSX renderer (`interfaces/panel/`, crate `aleph-panel-ui`, NSH UI set `aleph/panel`) renders the same TSX source on Desktop and Web. It has only two outward actions: it sends JSON-RPC with `host.call("aleph.rpc", { method, params })` and subscribes to connection state with `host.on("aleph.connection", …)` (`interfaces/panel/shell/Shell.tsx`; the narrow SDK handed to a mounted module is in `interfaces/panel/shell/sdk.ts`). The `aleph.pair`, `aleph.connect`, and `aleph.connection` host functions belong to the same host contract, implemented by each of the two adapters.
+
+### Host capability declaration
+
+`interfaces/panel/nsh.json` declares this UI set: `id = "com.aleph.panel"`, `name = "Aleph Panel"`, `version = "0.1.0"`, `build = 1`, `rust = "."`, with the browser host entry at `web.host = "./web/host.js"`. It grants four names through the `host` list inside the `capabilities` section:
+
+```text
+["aleph.rpc", "aleph.pair", "aleph.connect", "aleph.connection"]
+```
+
+This grants names only, not a method allowlist: which methods `aleph.rpc` may call is decided centrally by the Gateway's v1 method set (see "The authorization point"). `aleph.connection` is both a host function (reading the current connection state) and an event of the same name (pushed when the state changes).
+
+### Desktop adapter
+
+`desktop/nsh-shell/src/panel_host.rs` is the desktop side of this `nsh/host` contract. The four host functions (the `FUNCTIONS` constant) behave as follows:
+
+| Host function | Desktop behavior |
+|---|---|
+| `aleph.rpc` | Calls the local Gateway over Desktop IPC via `AlephClient::connect_local`; per-call timeout `CALL_TIMEOUT = 30s` |
+| `aleph.pair` | Always returns an error (code `PANEL_HOST_UNAVAILABLE`): Desktop IPC is authenticated by the operating system, so the desktop shell never asks for pairing |
+| `aleph.connect` | Reopens a Desktop IPC connection after a drop |
+| `aleph.connection` | Returns the current connection state; the `aleph.connection` event carries `{ state, endpoint, subject, pairing }` |
+
+The desktop Panel reaches only a local Gateway over Desktop IPC, never a WebSocket: `Target::resolve` returns `Unavailable` for an explicit `--connect` target, a non-Unix platform, a missing `ALEPH_SHELL_PANEL_IPC`, or a path that is not an absolute socket path. `IPC_ENV = "ALEPH_SHELL_PANEL_IPC"` is the absolute Desktop IPC socket path of an already-running Gateway; `ENDPOINT = "desktop-ipc"` is only the layout storage key — the Gateway binds a fresh socket path on every start, and the layout must survive one. The error code is uniformly `PANEL_HOST_UNAVAILABLE = -32090` (`shared/protocol/src/panel.rs`), the same as on the Web.
+
+### Web adapter
+
+`interfaces/panel/web/host.js` is the browser host, connecting the shell's `host.call(...)` to the Gateway's Protocol v1 WebSocket on the same origin. Its header limits its job to four things: frame encoding/decoding, request-id correlation, `system.hello`, and connection events.
+
+- Endpoint: same-origin `${endpoint.replace(/^http/, "ws")}/v1/ws` (`http` becomes `ws`, `https` becomes `wss`); subprotocol `aleph.protocol.v1`.
+- Frames: binary WebSocket messages, each one a 4-byte big-endian length prefix plus UTF-8 JSON; the first frame is `system.hello`.
+- Golden vectors: `shared/protocol/tests/fixtures/v1_frames.json`.
+- Error codes: `HOST_UNAVAILABLE = -32090` (matching `PANEL_HOST_UNAVAILABLE`), `AUTH_REQUIRED = -32000`, `INVALID_PARAMS = -32602`, `INVALID_REQUEST = -32600`.
+- `aleph.pair` POSTs to `/v1/session` (`bootstrap_ticket` or `device_token`) and only calls `connect()` on HTTP 204.
+- When the runtime lacks WebSocket or a page origin, it reports `unavailable` and never connects.
+
+Tests run with `node --test interfaces/panel/web/host.test.mjs`, which is part of `just panel-tsx-test`.
+
+## Current state: plugin Panel tabs (Leptos side)
+
+This is the Leptos renderer's DOM module ABI channel. A declared plugin tab targets the DOM ABI: in the TSX renderer its `renderer` is `"dom"` (`interfaces/panel/src/lib.rs`), shown as unavailable; mounting a plugin's UI into the TSX side is not yet open (see "Planned: restricted TSX plugin views").
 
 <Callout type="warn" title="Not compiled into the default Panel">
 
 All Panel-side code that loads plugin tabs or renders the capability UI surface lives in `interfaces/webchat/src/panel/`, and the whole module is compiled only under the opt-in feature `panel-modular` (`#[cfg(feature = "panel-modular")]` in `interfaces/webchat/src/lib.rs`; in `interfaces/webchat/Cargo.toml` the default feature is `legacy-terminal`, and `panel-modular` requires `--no-default-features`). A default Panel build does not load plugin tabs. The Gateway and Core sides — publication, the asset route, and the UI surface methods — are not feature-gated.
 
 </Callout>
-
-## Current state: plugin Panel tabs
 
 ### Manifest declaration
 
@@ -56,7 +101,7 @@ manifest panel field
 - Admission (`src/extension/panel_publication/admission.rs`): the entry path is canonicalized, then rejected if it escapes the root (`panel.asset_outside_root`), is not a regular file, exceeds the limit (`panel.asset_entry_limit`), or fails integrity (`panel.asset_integrity_mismatch`). `ENTRY_LIMIT` is 4 MiB per entry; `GENERATION_LIMIT` is 64 MiB per generation.
 - Publication store (`src/extension/panel_publication/mod.rs`): an asset identity `PanelAssetIdentity` is `plugin_id`, `plugin_version`, `tab_id`, and `source_revision`. A replacement whose revision is not greater than the current one is rejected (`Stale`); a committed generation never changes. A declaration is published only if its origin is `Community`, its trust is `Trusted`, its status is enabled, its `public_base` is `./tabs/`, and its entry sits under `./tabs/<plugin_id>/<version>/`.
 - Asset route (`src/gateway/server/panel_asset_route.rs`): mounts `/tabs`, `/tabs/`, and `/tabs/{*entry}` as a separate authenticated HTTP ingress. It is mounted even before a Core manager exists; in that case requests are refused rather than falling back to the SPA page (`src/gateway/server/mod.rs`).
-- Panel side (`interfaces/webchat/src/panel/`): `discovery.rs` discovers the capability snapshot per connection, `source.rs` holds immutable snapshots only, `loader.rs` loads modules in the browser, and `sdk.rs` is the narrow SDK handed to modules.
+- Panel side: the model layer (`shared/ui_logic/src/panel/`) has `discovery.rs` discovering the capability snapshot per connection and `source.rs` holding immutable snapshots only; the Leptos renderer (`interfaces/webchat/src/panel/`) has `loader.rs` loading modules in the browser and `sdk.rs` as the narrow SDK handed to modules.
 
 ### Trust boundary
 
@@ -101,21 +146,25 @@ The Gateway owns only JSON-RPC and caller/session checks; the surface, pending a
 
 For the capability model itself, see [Capability system](../concepts/capability-system).
 
-## Planned: hybrid plugin UI
+## The authorization point
 
-> **Status: planned** — blueprint is ADR-003 in `docs/research/NSH_ADR-001~009.md` (2026-11 snapshot; the file states it defines the target architecture and does not describe what the repository already has); current implementation: `src/extension/panel_publication/mod.rs` and `src/capability/ui_surface.rs`.
+What the TSX shell may call through `aleph.rpc` does not depend on either host adapter; it depends on the Gateway's v1 method set. `src/gateway/server/connection/mod.rs` mounts the two v1 entries (Desktop IPC and Web `/v1/ws`) onto one `V1_METHODS` list so they cannot drift apart:
 
-ADR-003 splits a plugin into two parts: a server-side Core part, and a desktop UI module (UI manifest, TSX modules, view definitions) that runs in the NSH Runtime and connects through the UI Bridge and the client. Key points:
+```text
+V1_METHODS = ["health", "sessions.list", "panel.capabilities.snapshot"]
+```
 
-- Capability declarations in the UI manifest are **requests**, not grants; the server authorizes every side effect.
-- The two parts are linked by `plugin_id`, version, and API version; the UI degrades when the Core part is missing.
-- Acceptance criteria: no bypass of the capability kernel, resources released on uninstall, incompatible versions rejected.
+`panel.capabilities.snapshot` is the constant `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD` (`shared/protocol/src/panel.rs`). Anything outside the list is rejected with `METHOD_NOT_FOUND` before it reaches Core; mutating methods such as `PANEL_PROJECT_SELECT_METHOD = "panel.project.select"` stay off until a later stage approves them (the `V1_METHODS` comment in `src/gateway/server/connection/mod.rs`).
 
-## Planned: boundaries of restricted TSX
+The snapshot handler is `src/gateway/handlers/panel_capabilities.rs`: `handle` reads `manager.panel_ui_capability_snapshot()` and returns the canonical snapshot; `handle_select` currently always returns `denied`. In other words, a host adapter only delivers the call to the Gateway — method availability is the Gateway's single ruling.
 
-> **Status: planned** — blueprint is ADR-005 in `docs/research/NSH_ADR-001~009.md` (2026-11 snapshot); current implementation: `interfaces/webchat/src/panel/sdk.rs` (trusted same-origin code, not sandboxed).
+## Planned: restricted TSX plugin views
 
-ADR-005 specifies that plugin views run as restricted TSX inside an isolated view container.
+> **Status: planned** — blueprint is ADR-005 in `docs/research/NSH_ADR-001~009.md` (2026-11 snapshot). The TSX renderer and the host contract have landed (see "One SDK surface, two host adapters"), but ADR-005's "plugin views run as restricted TSX inside an isolated container" is not yet implemented.
+
+The TSX renderer currently renders only three built-in tabs: `overview`, `sessions`, and `capabilities` (`SHELL_MODULES` in `interfaces/panel/src/lib.rs`). Mounting a plugin's UI into the TSX side is not yet open; a community plugin's tab targets the DOM ABI and is shown as unavailable on the TSX side rather than having its module executed.
+
+The restricted boundary ADR-005 specifies (still planned):
 
 | Allowed | Forbidden |
 |---|---|
@@ -136,7 +185,10 @@ ADR-009 requires UI to ship as immutable, verifiable artifacts. Artifact metadat
 
 | Responsibility | Owner | Current-state anchor |
 |---|---|---|
-| Rendering plugin tabs and the capability UI surface | Panel | `interfaces/webchat/src/panel/shell.rs` |
+| Serving `aleph.rpc` and the other host functions to the TSX shell (desktop) | NSH host | `desktop/nsh-shell/src/panel_host.rs` |
+| Serving the host functions to the TSX shell (browser) | Browser host | `interfaces/panel/web/host.js` |
+| Rendering the TSX shell's three built-in tabs | TSX renderer | `interfaces/panel/src/lib.rs` |
+| Rendering plugin tabs and the capability UI surface (Leptos side) | Panel | `interfaces/webchat/src/panel/shell.rs` |
 | Publishing plugin assets, holding UI surface state | Core | `src/extension/panel_publication/mod.rs`, `src/capability/ui_surface.rs` |
 | Authenticated asset delivery, relaying UI methods | Gateway | `src/gateway/server/panel_asset_route.rs`, `src/gateway/capability_ui.rs` |
 | Authorizing side effects | Core | `docs/reference/REDLINES.md` (R2) |
@@ -151,3 +203,5 @@ Host-side details are on the [desktop hosts overview](./overview).
 A synchronous legacy UI handler and an in-memory display/input stub used to sit beside `src/capability/ui.rs`. The 2026-11-20 severed-wire audit found that no production path ever registered that handler, so it was removed together with the stub (audit record `review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`, CUI-02). Since then the only UI capability path is `src/capability/ui_surface.rs` plus the Gateway's `src/gateway/capability_ui.rs`.
 
 The plugin Panel tab publication chain (`src/extension/panel_publication/`) is not a superseded legacy model; it coexists with the capability UI surface as a second channel.
+
+This page earlier marked "hybrid plugin UI" and "boundaries of restricted TSX" as planned wholesale. After the TSX renderer and host contract landed, the implemented part moved into "One SDK surface, two host adapters", and the still-planned restricted sandbox stays under "Planned: restricted TSX plugin views".
