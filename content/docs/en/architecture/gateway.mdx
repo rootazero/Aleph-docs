@@ -20,8 +20,8 @@ The three entries share one RPC execution and event dispatch core. They differ i
 | Entry | Transport | Authentication | Method surface | Limits | Code |
 |-------|-----------|----------------|----------------|--------|------|
 | `/ws` | WebSocket (compatibility entry) | `connect` handshake for a role | Full RPC method set | The state's `max_connections`, plus a per-client-IP concurrency cap with a loopback exemption | `src/gateway/server/connection/upgrade.rs` |
-| Desktop IPC | Unix domain socket | Same user account (`require_same_user`) | Read-only: `system.hello`, `health`, `sessions.list` | `MAX_CONNECTIONS=8`, `WIRE_BUDGET=16 MiB`, `WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | WebSocket over native TLS | Session cookie obtained from `POST /v1/session` | Full RPC method set | `MAX_MESSAGE=1 MiB`, `MAX_SESSIONS=256`, `MAX_SOCKETS=8`, TTL 300s | `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC | Unix domain socket | Same user account (`require_same_user`) | `health`, `sessions.list`, `panel.capabilities.snapshot` (`V1_METHODS`) | `MAX_CONNECTIONS=8`, `WIRE_BUDGET=16 MiB`, `WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | WebSocket over native TLS | Session cookie obtained from `POST /v1/session` | `health`, `sessions.list`, `panel.capabilities.snapshot` (`V1_METHODS`) | `MAX_MESSAGE=1 MiB`, `MAX_SESSIONS=256`, `MAX_SOCKETS=8`, TTL 300s | `src/gateway/server/connection/web_v1.rs` |
 
 ### Compatibility WebSocket Entry
 
@@ -45,7 +45,7 @@ Once a connection is established, the following constraints apply (`src/gateway/
 
 - **Same user account**: `require_same_user` (`shared/client/src/local_ipc.rs:181`) checks the peer uid and disconnects on mismatch.
 - **The first frame must be `system.hello`**: otherwise the gateway replies `AUTH_REQUIRED` / `system.hello must be first`.
-- **Method allowlist**: `execute` lets through `health` and `sessions.list` only, and answers everything else with `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`.
+- **Method allowlist**: `execute` decides with `v1_mounted` (`src/gateway/server/connection/mod.rs`) and lets through only `health`, `sessions.list`, and `panel.capabilities.snapshot` from `V1_METHODS`; everything else gets `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`.
 - **Identity**: the role comes from `active_desktop_owner`, and the caller user is pinned to `OWNER_USER_ID`.
 - **No network rights**: the connection's origin is recorded as `NO_NETWORK_ORIGIN` (0.0.0.0), so it never receives a permission that requires a network origin.
 
@@ -76,6 +76,8 @@ Two gates run first:
 - **Throttle**: `throttle` charges the client's IP against `RateLimitScope::Auth` and answers 429 when the quota is exhausted.
 
 The session is bound in a `WebBinding` (`store`, `origin`, `token_id`, `device_id`, `user`, `expires`). `current_role` returns `None` once the binding expires, and on every call it re-checks with `active_device_principal` that the device token is still valid and still belongs to the same user.
+
+In addition, `panel_routes` (`src/gateway/server/connection/web_v1.rs`) serves the TSX Panel static web package under `/v1/panel/`, **only on the native TLS router** (so the page is same-origin with the Cookie-authenticated `/v1/ws`). The response carries `Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'; img-src 'self' blob: data:; connect-src 'self'` and `X-Content-Type-Options: nosniff`.
 
 ## Connections and Identity
 
@@ -130,7 +132,8 @@ Response:
     "server": { "name": "aleph-server", "version": "26.9.1" },
     "connection_id": "conn-...",
     "features": [],
-    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 }
+    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 },
+    "subject": "0123456789abcdef0123456789abcdef"
   }
 }
 ```
@@ -140,6 +143,7 @@ Response:
 - `features` is the intersection of what the client asked for and what the server implements (`negotiate_features`). The server currently passes an empty implementation list, so the negotiated result is always an empty array — a client cannot assume a feature is available just because it listed `snapshot` in the handshake.
 - `limits` are hints rather than enforced transport limits; the source comment says `legacy wire hints, not enforced transport limits`. The frame size limits that actually bind live on the Desktop IPC side (`MAX_FRAME_BYTES` and `MAX_INFLIGHT`).
 - `server.version` comes from the compile-time constant `ALEPH_VERSION`.
+- `subject` is an opaque per-user value the server computes for the session's bound user, used as a client-side storage key (Panel layout). It is **not an identity**, and clients must not derive authority from it (`shared/protocol/src/system_hello.rs`). It is the first 16 bytes of HMAC-SHA256 over `aleph.panel.subject.v1\0` concatenated with the user, hex-encoded (32 hex characters); it never contains the user id, and it changes when the secret rotates, which only resets client presentation state (`src/gateway/handlers/system_hello.rs`). On legacy `/ws` and when the Gateway has no shared-token secret, `subject` is `None`, and `skip_serializing_if` makes the field disappear entirely.
 
 ## Request Dispatch
 

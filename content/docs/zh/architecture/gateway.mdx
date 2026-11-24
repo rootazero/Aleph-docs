@@ -20,8 +20,8 @@ Aleph 网关是客户端与 agent、工具、工作流之间的控制平面：�
 | 入口 | 传输 | 认证方式 | 可用方法范围 | 上限 | 代码位置 |
 |------|------|----------|--------------|------|----------|
 | `/ws` | WebSocket（历史兼容入口） | `connect` 握手换角色 | 完整 RPC 方法集 | 状态上的 `max_connections`；另有按客户端 IP 的并发上限，loopback 豁免 | `src/gateway/server/connection/upgrade.rs` |
-| Desktop IPC | Unix domain socket | 同账号（`require_same_user`） | 只读：`system.hello`、`health`、`sessions.list` | `MAX_CONNECTIONS=8`、`WIRE_BUDGET=16 MiB`、`WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | 原生 TLS 上的 WebSocket | `POST /v1/session` 换会话 cookie | 完整 RPC 方法集 | `MAX_MESSAGE=1 MiB`、`MAX_SESSIONS=256`、`MAX_SOCKETS=8`、TTL 300s | `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC | Unix domain socket | 同账号（`require_same_user`） | `health`、`sessions.list`、`panel.capabilities.snapshot`（`V1_METHODS`） | `MAX_CONNECTIONS=8`、`WIRE_BUDGET=16 MiB`、`WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | 原生 TLS 上的 WebSocket | `POST /v1/session` 换会话 cookie | `health`、`sessions.list`、`panel.capabilities.snapshot`（`V1_METHODS`） | `MAX_MESSAGE=1 MiB`、`MAX_SESSIONS=256`、`MAX_SOCKETS=8`、TTL 300s | `src/gateway/server/connection/web_v1.rs` |
 
 ### 兼容 WebSocket 入口
 
@@ -45,7 +45,7 @@ Desktop IPC 是给桌面宿主用的只读入口：Unix domain socket，同账�
 
 - **同账号**：`require_same_user`（`shared/client/src/local_ipc.rs:181`）校验对端 uid，不匹配直接断开。
 - **首帧必须是 `system.hello`**：否则回 `AUTH_REQUIRED` / `system.hello must be first`。
-- **方法白名单**：`execute` 只放行 `health` 与 `sessions.list`，其余回 `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`。
+- **方法白名单**：`execute` 用 `v1_mounted`（`src/gateway/server/connection/mod.rs`）判定，只放行 `V1_METHODS` 里的 `health`、`sessions.list`、`panel.capabilities.snapshot`，其余回 `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`。
 - **身份**：角色取自 `active_desktop_owner`，调用方用户固定为 `OWNER_USER_ID`。
 - **不授予网络权限**：连接的 origin 记为 `NO_NETWORK_ORIGIN`（0.0.0.0），因此它拿不到任何要求网络来源的权限。
 
@@ -76,6 +76,8 @@ Web v1 是 Protocol v1 的目标网络入口：原生 TLS 上的 WebSocket，凭
 - **限速**：`throttle` 按客户端 IP 以 `RateLimitScope::Auth` 计配额，超限回 429。
 
 会话绑定在 `WebBinding` 上（`store`、`origin`、`token_id`、`device_id`、`user`、`expires`）。`current_role` 在绑定过期时返回 `None`，并且每次都要用 `active_device_principal` 复查设备令牌是否仍然有效、归属用户是否仍然一致。
+
+此外，`panel_routes`（`src/gateway/server/connection/web_v1.rs`）把 TSX Panel 的静态 web 包挂在 `/v1/panel/` 下，**只挂在原生 TLS 路由上**（这样页面与 Cookie 认证的 `/v1/ws` 同源）。响应带 `Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'; img-src 'self' blob: data:; connect-src 'self'` 与 `X-Content-Type-Options: nosniff`。
 
 ## 连接与身份
 
@@ -130,7 +132,8 @@ pub fn wall_admits(role: Option<&str>, method: &str) -> bool {
     "server": { "name": "aleph-server", "version": "26.9.1" },
     "connection_id": "conn-...",
     "features": [],
-    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 }
+    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 },
+    "subject": "0123456789abcdef0123456789abcdef"
   }
 }
 ```
@@ -140,6 +143,7 @@ pub fn wall_admits(role: Option<&str>, method: &str) -> bool {
 - `features` 是「客户端请求 ∩ 服务端实现」的交集（`negotiate_features`）。当前服务端传入的实现列表是空的，因此协商结果恒为空数组——客户端不能因为握手里列了 `snapshot` 就假定该特性可用。
 - `limits` 是提示值而不是传输层强制限制，源码注释写明 `legacy wire hints, not enforced transport limits`。真正生效的帧长限制在 Desktop IPC 侧（`MAX_FRAME_BYTES` 与 `MAX_INFLIGHT`）。
 - `server.version` 取编译期常量 `ALEPH_VERSION`。
+- `subject` 是服务端按会话绑定用户算出的不透明 per-user 值，用作客户端存储键（Panel 布局），**不是身份**，客户端不得据此推导权限（`shared/protocol/src/system_hello.rs`）。它由 HMAC-SHA256 作用于 `aleph.panel.subject.v1\0` 拼接 user、取前 16 字节 hex 编码得到（32 个 hex 字符），不含 user id，secret 轮换即改变，只会重置客户端展示状态（`src/gateway/handlers/system_hello.rs`）。旧 `/ws` 与 Gateway 没有 shared-token secret 时 `subject` 为 `None`，且 `skip_serializing_if` 让字段整个不出现。
 
 ## 请求分发
 

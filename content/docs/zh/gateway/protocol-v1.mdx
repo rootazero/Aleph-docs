@@ -1,15 +1,13 @@
 ---
 title: "Protocol v1"
-description: "Aleph 线上协议 v1：有界帧、system.hello 握手、特性协商、传输入口矩阵，以及尚未落地的部分。"
+description: "Aleph Protocol v1 的长度前缀帧、握手、Desktop IPC 与 Web v1 方法面，以及与旧 WebSocket 入口的区别。"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-本页说明如何接入一个新客户端：帧怎么切、握手怎么做、哪个入口能调用什么，以及蓝图里还没有实现的部分。
-
 ## Protocol v1 是什么
 
-Protocol v1 是 Gateway 的连接协议：**有界帧** + **握手** + **特性协商**。它解决三件事：帧边界可预测（先读定长帧头再分配内存）、能力可协商（双方各自声明支持什么）、握手可审计（版本不兼容时服务端明确拒绝）。
+Protocol v1 已用于 Gateway 的 **Desktop IPC** 和 **Web v1** 入口。两者以有界帧承载 JSON-RPC 2.0，并要求先完成 `system.hello` 握手。旧 `/ws` 仍提供兼容入口，不使用长度前缀（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`、`src/gateway/server/connection/mod.rs`）。
 
 | 部分 | 代码 |
 |------|------|
@@ -18,73 +16,47 @@ Protocol v1 是 Gateway 的连接协议：**有界帧** + **握手** + **特性�
 | 服务端握手处理 | `src/gateway/handlers/system_hello.rs` |
 | JSON-RPC 消息与错误码 | `shared/protocol/src/jsonrpc.rs` |
 
-消息语义仍是 JSON-RPC 2.0（见 [JSON-RPC](../api/jsonrpc)）；v1 只规定这些消息如何分帧、如何开场。
-
 <Callout type="info">
-旧的 `ws://127.0.0.1:18790/ws` 是历史兼容入口，不使用长度前缀分帧，见[旧 WebSocket 入口](./protocol)。
+NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 
-v1 的 **Desktop IPC** 与 **Web v1** 两个入口是给新客户端准备的。当前 NSH 桌面宿主仍走旧路径：它经 HTTP(S) origin 加载 Panel（`desktop/nsh-shell/src/shell_host.rs`），Panel 在 WebView 里再连 Gateway 的旧 `/ws`（`desktop/nsh-shell/src/credentials.rs`）。NSH 曾经用 v1 握手的那套参数见 `desktop/nsh-shell/src/connection.rs`——历史设计，见下方说明。
-</Callout>
-
-<Callout type="warn">
-`desktop/nsh-shell/src/connection.rs` 是 Phase 2 的原生连接设计，**没有**出现在 `desktop/nsh-shell/src/main.rs` 的 `mod` 声明里，因此不在当前编译出的 NSH 二进制中；`desktop/nsh-shell/Cargo.toml` 也没有额外的 `[[bin]]` 或 `[lib]`。本页引用它只是为了说明「NSH 曾经这样实现握手」，请勿当作现行行为——现行宿主与 Panel 的连接方式见[桌面宿主](/docs/zh/desktop-hosts/overview)。
+- **默认 Leptos Panel**：`web_view` 默认从 `http://127.0.0.1:18790/` 加载页面，Gateway WebSocket 默认是 `ws://127.0.0.1:18790/ws`（`desktop/nsh-shell/src/main.rs`、`desktop/nsh-shell/src/shell_host.rs`、`desktop/nsh-shell/src/credentials.rs`）。
+- **TSX Panel**：在 macOS 上以 `--features tsx-panel` 构建，再用 `ALEPH_SHELL_PANEL=tsx` 启用（不能与 QA 模式同时使用）。Panel 嵌入原生 AppView；宿主只通过 `ALEPH_SHELL_PANEL_IPC` 指定的绝对 socket 路径连接本地 Gateway。其他目标报告 `unavailable`，不会回退到 WebSocket（`desktop/nsh-shell/Cargo.toml`、`desktop/nsh-shell/src/main.rs`、`desktop/nsh-shell/src/panel_surface.rs`、`desktop/nsh-shell/src/panel_host.rs`）。
 </Callout>
 
 ## 帧格式
 
-一帧 = 4 字节**大端** `u32` 长度前缀 + UTF-8 载荷。长度只计载荷字节数，不含这 4 字节帧头。
+一帧 = 4 字节**大端** `u32` 长度前缀 + UTF-8 JSON 载荷。长度只计载荷字节数，不含帧头。`HEADER_BYTES` 为 4，`DEFAULT_MAX_PAYLOAD_BYTES` 为 8 388 608（8 MiB）。Desktop IPC 的 `MAX_FRAME_BYTES` 等于默认上限，Web v1 的 `MAX_MESSAGE` 为 1 MiB（`shared/protocol/src/framing.rs`、`shared/client/src/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
-```text
- 0        1        2        3        4 ...
-+--------+--------+--------+--------+---------------------------+
-|  len (u32, big-endian, payload bytes only)  |  UTF-8 JSON payload (len bytes) |
-+--------+--------+--------+--------+---------------------------+
-```
-
-`shared/protocol/src/framing.rs` 的常量与错误：
-
-```rust
-pub const HEADER_BYTES: usize = 4;
-pub const DEFAULT_MAX_PAYLOAD_BYTES: u32 = 8_388_608; // 8 MiB，不含帧头
-
-pub enum FrameError { Empty, Oversize, InvalidUtf8 }
-```
-
-`DEFAULT_MAX_PAYLOAD_BYTES` 是推荐上限；各端点自行强制自己的上限（Web v1 用 1 MiB，见下文传输矩阵）。
+`shared/protocol/src/framing.rs` 中的编解码函数：
 
 | 函数 | 语义 |
 |------|------|
-| `encode_header(payload_len, max_payload) -> Result<[u8; 4], FrameError>` | 长度为 0 返回 `Empty`；超过 `max_payload`（或放不进 `u32`）返回 `Oversize`；否则返回大端字节 |
-| `decode_header(header, max_payload) -> Result<u32, FrameError>` | 在读取或分配载荷**之前**校验声明的长度，规则同上 |
-| `split_frame(bytes, max_payload) -> Result<Option<(&str, &[u8])>, FrameError>` | 从缓冲区借出一个 UTF-8 载荷和未消费的后缀；不足一个完整帧返回 `Ok(None)`，表示还需要更多字节；`Err` 表示这条流的分帧到此终止；载荷不是合法 UTF-8 返回 `InvalidUtf8` |
+| `encode_header` | 返回大端帧头。长度为零返回 `Empty`；超过传入的上限或放不进 `u32` 返回 `Oversize` |
+| `decode_header` | 在读取或分配载荷前检查声明的长度，规则同上 |
+| `split_frame` | 借出一帧的 UTF-8 载荷和剩余字节，不解析 JSON。不足一帧返回 `Ok(None)`；UTF-8 无效返回 `InvalidUtf8`，分帧失败即终止该流的分帧 |
 
-上限是**闭区间**：长度恰好等于 `max_payload` 合法，大一个字节即 `Oversize`。
-
-字节级示例：载荷 `{"jsonrpc":"2.0","id":2,"method":"health"}` 共 42 个字节，帧头是 `00 00 00 2A`：
+上限包含端点：等于上限合法，多一个字节即 `Oversize`。例如，`{"jsonrpc":"2.0","id":2,"method":"health"}` 的载荷是 42 字节，帧头为 `00 00 00 2A`（`shared/protocol/src/framing.rs`）。
 
 ```text
 00 00 00 2A | 7B 22 6A 73 6F 6E 72 70 63 22 3A 22 32 2E 30 22 ... 7D
- ^^^^^^^^^^^   ^ 载荷共 42 字节（UTF-8 JSON）
- len = 42
+ 4 字节帧头 | 42 字节 UTF-8 JSON 载荷
 ```
 
-另外几个长度对应的帧头：
-
-| 载荷长度 | 帧头（十六进制） | 结果 |
-|---------|-----------------|------|
-| 12 | `00 00 00 0C` | 合法 |
-| 258 | `00 00 01 02` | 合法 |
-| 8 388 608 | `00 80 00 00` | 合法（等于默认上限） |
-| 8 388 609 | 不可编码 | `Oversize` |
-| 0 | 不可编码 | `Empty` |
-
-`framing.rs` 的单元测试覆盖了其中 258、8 388 608 与 8 388 609 三例。
+| 载荷长度 | 按默认上限编码的结果（`shared/protocol/src/framing.rs`） |
+|---------|------------------------------------------------------|
+| 12 | `00 00 00 0C` |
+| 258 | `00 00 01 02` |
+| 8 388 608 | `00 80 00 00` |
+| 8 388 609 | `Oversize` |
+| 0 | `Empty` |
 
 ## 握手 `system.hello`
 
-`system.hello` 是连接上的第一个业务请求：客户端报告协议版本、身份和希望启用的特性，服务端返回协商结果与连接限额。字段定义在 `shared/protocol/src/system_hello.rs`。
+`system.hello` 是两个 v1 入口的首个 RPC 请求。它协商版本、特性并返回连接限额，不是客户端的认证凭据（`shared/protocol/src/system_hello.rs`、`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
 ### 请求
+
+以下是请求示例，不是 NSH 宿主的实际默认值。`client` 中的 `name`、`version`、`platform`、`ui_runtime` 均为必填字符串；`features` 可以是空数组（`shared/protocol/src/system_hello.rs`）。
 
 ```json
 {
@@ -94,19 +66,19 @@ pub enum FrameError { Empty, Oversize, InvalidUtf8 }
   "params": {
     "protocol": { "major": 1, "minor": 0 },
     "client": {
-      "name": "aleph-nsh-desktop",
+      "name": "example-client",
       "version": "1.2.3",
       "platform": "linux",
-      "ui_runtime": "nsh"
+      "ui_runtime": "example"
     },
     "features": ["event_replay", "snapshot", "binary_channel"]
   }
 }
 ```
 
-`client` 的四个字段（`name`、`version`、`platform`、`ui_runtime`）都是必填字符串。`version` 为示例值。历史设计中 NSH 的取值来自 `desktop/nsh-shell/src/connection.rs` 的 `build_hello_params()`：`platform` 取 `std::env::consts::OS`，`ui_runtime` 为 `"nsh"`；该文件不在当前编译产物中（见本页开头说明）。
-
 ### 响应
+
+以下是 Desktop IPC 成功响应示例。服务端版本、连接 UUID 与 `subject` 值仅作示例（`src/gateway/handlers/system_hello.rs`、`src/gateway/server/connection/local_ipc.rs`）。
 
 ```json
 {
@@ -115,43 +87,44 @@ pub enum FrameError { Empty, Oversize, InvalidUtf8 }
   "result": {
     "protocol": { "major": 1, "minor": 0 },
     "server": { "name": "aleph-server", "version": "26.9.1" },
-    "connection_id": "conn-3f0c1b52-8a0e-4d0a-9b1a-6a6d2f0a7e11",
+    "connection_id": "ipc-3f0c1b52-8a0e-4d0a-9b1a-6a6d2f0a7e11",
     "features": [],
-    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 }
+    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 8 },
+    "subject": "0123456789abcdef0123456789abcdef"
   }
 }
 ```
 
-`server.version` 与 `connection_id` 中的 UUID 为示例值。`features` 为空数组的原因见下文「服务端行为」。
+### `subject`：客户端存储键
+
+`subject` 是不透明的、按用户区分的稳定值，用于 Panel 布局等客户端存储键。**它不是身份或凭据，客户端不得据此推导权限。** `panel_subject` 用 Gateway 的 shared-token secret 对 `"aleph.panel.subject.v1\0"`（末尾含 NUL）与用户 ID 的拼接做 HMAC-SHA256，取前 16 字节编码为 32 个十六进制字符。结果不含原始用户 ID；密钥轮换会改变存储键，只影响客户端展示状态（`src/gateway/handlers/system_hello.rs`、`src/gateway/security/crypto.rs`、`shared/protocol/src/system_hello.rs`）。
+
+旧 `/ws` 始终省略 `subject`。两个 v1 入口在无法取得 shared-token secret 时也省略该字段；`HelloResult` 的 `skip_serializing_if` 让整个字段不出现，而不是输出 `null`（`src/gateway/handlers/system_hello.rs`、`shared/protocol/src/system_hello.rs`）。
 
 ### 版本协商
 
-`negotiate_version(client, server) -> Option<ProtocolVersion>`：
-
-- major 不同返回 `None`，握手失败；
-- major 相同则返回 `{ major, minor: min(client.minor, server.minor) }`。
-
-服务端当前声明的版本是常量 `1.0`（`src/gateway/handlers/system_hello.rs`），所以成功响应的 `protocol.minor` 恒为 `0`。历史设计中的 NSH 客户端在收到 `result.protocol.major != 1` 时视为握手失败（`desktop/nsh-shell/src/connection.rs`，不在当前编译产物中）。
+`negotiate_version` 要求双方 major 相同，再取较小的 minor。Gateway 声明 `1.0`，因此 major 不是 1 时握手失败，成功时 minor 始终是 0（`shared/protocol/src/system_hello.rs`、`src/gateway/handlers/system_hello.rs`）。
 
 ### 特性协商
 
-`negotiate_features(requested, implemented) -> Vec<Feature>`：保留客户端请求、服务端实现、且为已知类型的特性，按**客户端顺序**输出并去重。
+`negotiate_features` 按客户端的偏好顺序，选择双方共有的已知特性并去重。未知字符串反序列化为 `Unknown(String)`，不影响解析，也不参加协商（`shared/protocol/src/system_hello.rs`）。
 
-| 特性字符串 | `Feature` 变体 | 含义（见源码注释） |
-|-----------|---------------|------------------|
-| `event_replay` | `EventReplay` | 从存储的流偏移重放事件 |
-| `snapshot` | `Snapshot` | 时间点能力快照 |
-| `binary_channel` | `BinaryChannel` | WebSocket 通道上的二进制分帧 |
-| 其他字符串 | `Unknown(String)` | 来自更新版本的特性；反序列化时原样保留，不会让旧客户端解析失败，但不会进入协商结果 |
+| 特性字符串 | `Feature` 变体（`shared/protocol/src/system_hello.rs`） |
+|-----------|-------------------------------------------------------|
+| `event_replay` | `EventReplay` |
+| `snapshot` | `Snapshot` |
+| `binary_channel` | `BinaryChannel` |
+
+服务端调用 `negotiate_features(&params.features, &[])`，实现列表为空，因此成功响应的 `features` 恒为 `[]`。特性标识能解析，不代表该特性已经启用（`src/gateway/handlers/system_hello.rs`）。
 
 ## 服务端行为
 
-`src/gateway/handlers/system_hello.rs` 的 `negotiate()` 按以下顺序处理：
+`src/gateway/handlers/system_hello.rs` 中的 `negotiate()` 按以下顺序处理：
 
-1. `params` 缺失：`INVALID_PARAMS`，消息 `Missing params`。
-2. `params` 解析为 `HelloParams` 失败：`INVALID_PARAMS`，消息 `Invalid system.hello params: <原因>`。
-3. major 不为 1：`INVALID_PARAMS`，消息 `incompatible protocol major version`。
-4. 成功：返回协商后的 `protocol`、`server`（`name` 固定为 `"aleph-server"`，`version` 取编译期 `ALEPH_VERSION`）、`connection_id`、`features`、`limits`。
+1. `params` 缺失：返回 `INVALID_PARAMS`，消息 `Missing params`。
+2. `params` 无法解析成 `HelloParams`：返回 `INVALID_PARAMS`，消息以 `Invalid system.hello params:` 开头，后接解析错误。
+3. major 不为 1：返回 `INVALID_PARAMS`，消息 `incompatible protocol major version`。
+4. 成功：返回 `protocol`、`server`（`name` 为 `aleph-server`，`version` 取编译期 `ALEPH_VERSION`）、`connection_id`、`features`、`limits` 和可选的 `subject`。
 
 ```json
 {
@@ -161,79 +134,75 @@ pub enum FrameError { Empty, Oversize, InvalidUtf8 }
 }
 ```
 
-**`features` 目前恒为空。** handler 调用的是 `negotiate_features(&params.features, &[])`，即服务端实现列表为空；NSH 即使请求了三个特性，也只会拿到 `[]`。特性协商的机制已就位，对应能力尚未实现，见下文「规划中」。
+三个入口复用 `negotiate()`，但各自提供连接 ID、限额与 `subject`（见表中各入口的源码）：
 
-**`connection_id` 与 `limits` 随入口不同。** 同一个 `negotiate()` 被三个入口复用，各自传入自己的值：
+| 入口 | `connection_id` | `limits.max_message_bytes` | `limits.max_inflight_requests` | `subject` | 代码 |
+|------|-----------------|---------------------------|-------------------------------|-----------|------|
+| 旧 `/ws` | `conn-<uuid4>` | 8 388 608（8 MiB，仅提示） | 128（仅提示） | 不返回 | `src/gateway/handlers/system_hello.rs` |
+| Desktop IPC | `ipc-<uuid4>` | `MAX_FRAME_BYTES`（8 388 608，强制） | `MAX_INFLIGHT`（8，强制） | 有密钥时，从 Gateway owner 用户生成 | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | `web-v1-<uuid4>` | `MAX_MESSAGE`（1 048 576，强制） | 1（串行处理） | 有密钥时，从 Web 会话绑定用户生成 | `src/gateway/server/connection/web_v1.rs` |
 
-| 入口 | `connection_id` | `limits.max_message_bytes` | `limits.max_inflight_requests` | 是否强制 |
-|------|-----------------|---------------------------|-------------------------------|---------|
-| 旧 `/ws`（`system_hello::handle`） | `conn-<uuid4>` | 8 388 608 | 128 | 否。源码注释为 legacy wire hints, not enforced transport limits，只是提示值 |
-| Desktop IPC | `ipc-<uuid4>` | `MAX_FRAME_BYTES`（8 388 608） | `MAX_INFLIGHT`（8） | 是，见下文 |
-| Web v1 | `web-v1-<uuid4>` | `MAX_MESSAGE`（1 048 576） | 1 | 帧上限强制；请求串行处理 |
-
-在 `/ws` 上，`system.hello` 是 `connect` 之后的探测方法：handler 注释写明它既不准入连接，也不设置身份。
+在旧 `/ws` 上，`system.hello` 是 `connect` 之后的可选版本探测，既不准入连接，也不设置身份（`src/gateway/handlers/system_hello.rs`）。
 
 ## 传输矩阵
 
 | 入口 | 传输 | 认证 | 能调用什么 | 代码 |
 |------|------|------|-----------|------|
-| 旧 `/ws`（历史兼容） | WebSocket Text 消息，无长度前缀 | 升级时检查传输与 `Origin`，再由 `connect` 认证 | 完整 RPC，见[方法参考](./methods) | `src/gateway/server/connection/upgrade.rs` |
-| Desktop IPC | Unix domain socket，长度前缀帧 | 校验对端为同一用户；不授予网络权限 | 只读：`system.hello`、`health`、`sessions.list` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | 原生 TLS 上的 WebSocket Binary 消息，每条消息恰好一帧 | 同源校验 + 会话 cookie（由设备令牌或引导票换取） | 只读：`system.hello`、`health`、`sessions.list` | `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC（Unix） | Unix domain socket，长度前缀帧 | 操作系统校验对端为同一用户，不授予网络权限 | 首帧 `system.hello`；之后 `health`、`sessions.list`、`panel.capabilities.snapshot` | `src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs` |
+| Desktop IPC（Windows，未开放） | 本地命名管道代码已入库 | 已实现账户认证，未启用 | 无：客户端连接和 Gateway 监听均受可用性开关限制 | `shared/client/src/local_ipc/windows.rs`、`src/gateway/server/connection/local_ipc/windows.rs`、`shared/client/src/local_ipc.rs` |
+| Web v1 | 原生 TLS 上的 WebSocket；每条 Binary 消息恰好一帧 | 同源校验与会话 cookie；以设备令牌或引导票换取会话 | 首帧 `system.hello`；之后 `health`、`sessions.list`、`panel.capabilities.snapshot` | `src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs` |
+| 旧 `/ws`（兼容） | WebSocket Text 消息，无长度前缀 | 升级时检查传输安全与 `Origin`（若提供），再由 `connect` 认证 | 旧版完整 RPC 面，仍受授权限制，见[方法参考](./methods) | `src/gateway/server/connection/upgrade.rs`、`src/gateway/server/connection/mod.rs` |
 
-认证细节见[身份认证](./auth)，安全边界见 [IPC 协议](../security/ipc)。
+`system.hello` 在握手时单独处理，不属于握手后的挂载清单。两个 v1 入口共用 `V1_METHODS` 与 `v1_mounted()`，只挂载上述三个只读方法，其中 `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD` 定义为 `panel.capabilities.snapshot`。`panel.project.select` 会改变状态，未挂载在 v1 上；未挂载的方法不会进入 Core；服务端返回 `METHOD_NOT_FOUND`，Web v1 触发限流时则直接断开（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`、`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+
+认证细节见[身份认证](./auth)，信任边界见 [IPC 协议](../security/ipc)。
 
 ### Desktop IPC
 
-入口由 `aleph-server start --desktop-ipc <socket>` 显式开启（`src/bin/aleph-server/cli.rs`）：路径必须是新的绝对 Unix socket 路径，位于调用方持有的 0700 目录；服务端退出后不会删除 socket 条目。仅 Unix 平台可用，其他平台返回 `Desktop IPC is unavailable on this platform`（`src/gateway/server/mod.rs`）。
+用 `aleph-server start --desktop-ipc <socket>` 显式开启。服务端要求使用调用方持有的 0700 目录下新的绝对 Unix socket 路径，不覆盖已有条目，也不在退出时删除 socket 条目（`src/bin/aleph-server/cli.rs`、`src/gateway/server/mod.rs`、`src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs`）。
 
-常量（`src/gateway/server/connection/local_ipc.rs` 与 `shared/client/src/local_ipc.rs`）：
+| 常量 | 值 | 含义 | 代码 |
+|------|----|------|------|
+| `MAX_CONNECTIONS` | 8 | 同时服务的 IPC 连接数；达到上限后暂停接受新连接 | `src/gateway/server/connection/local_ipc.rs` |
+| `WIRE_BUDGET` | 16 MiB | 每连接的在途载荷字节预算；校验帧头后、分配载荷前预留 | `src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs` |
+| `WRITE_TIMEOUT` | 5 秒 | 单次写帧超时 | `src/gateway/server/connection/local_ipc.rs` |
+| `NO_NETWORK_ORIGIN` | `0.0.0.0` | 用于连接状态的来源占位值，不授予网络权限 | `src/gateway/server/connection/local_ipc.rs` |
+| `MAX_FRAME_BYTES` | `DEFAULT_MAX_PAYLOAD_BYTES` | 单帧载荷上限 | `shared/client/src/local_ipc.rs` |
+| `MAX_INFLIGHT` | 8 | 每连接并发在途请求数 | `shared/client/src/local_ipc.rs`、`src/gateway/server/connection/local_ipc.rs` |
+| `HELLO_TIMEOUT` | 5 秒 | 首个请求的读取时限 | `shared/client/src/local_ipc.rs`、`src/gateway/server/connection/local_ipc.rs` |
 
-| 常量 | 值 | 含义 |
-|------|----|------|
-| `MAX_CONNECTIONS` | 8 | 同时服务的连接数；达到上限后暂停 `accept` |
-| `WIRE_BUDGET` | `16 * 1024 * 1024` | 每连接在途帧的字节预算；帧头校验通过后、分配载荷前先预留 |
-| `WRITE_TIMEOUT` | 5 秒 | 单次写帧超时 |
-| `NO_NETWORK_ORIGIN` | `0.0.0.0` | 连接的来源地址，不授予任何网络权限 |
-| `MAX_FRAME_BYTES` | `DEFAULT_MAX_PAYLOAD_BYTES` | 单帧载荷上限 |
-| `MAX_INFLIGHT` | 8 | 单连接并发在途请求数 |
-| `HELLO_TIMEOUT` | 5 秒 | 首帧 `system.hello` 的等待时限 |
-
-行为约束：
-
-- 首帧必须在 `HELLO_TIMEOUT` 内到达且是 `system.hello`，否则返回 `AUTH_REQUIRED`（`system.hello must be first`）并断开。
-- 请求必须是 `"jsonrpc": "2.0"` 且带字符串或整数 `id`；不带 `id` 的通知、其他形态的信封都会使连接终止。
-- 握手之后只放行 `health` 与 `sessions.list`；其他方法返回 `METHOD_NOT_FOUND`（`method not mounted on Desktop IPC`）。
-- 在途请求数达到 `MAX_INFLIGHT`，或出现重复的在途 `id`，连接以 `IPC request limit exceeded` 终止。
-- 响应超过帧上限时，改为返回 `INTERNAL_ERROR`（`response exceeds Desktop IPC limits`），不会破坏传输。
-- `parse_payload` 还限制 JSON 形态：嵌套深度 64（`MAX_DEPTH`）、单容器条目数 4096（`MAX_ITEMS`）、单字符串 65 536 字节（`MAX_STRING_BYTES`）。
+- 首个有效 RPC 请求不是 `system.hello` 时，返回 `AUTH_REQUIRED` 后断开；等不到首帧或首帧无效时，直接断开。握手结果中的 `subject` 来自 Gateway owner 用户（`src/gateway/server/connection/local_ipc.rs`）。
+- 请求必须声明 `"jsonrpc": "2.0"` 并带字符串或整数 `id`。不带 `id` 的通知和其他无效信封会结束连接；重复使用在途 `id` 或发送超出 `MAX_INFLIGHT` 的请求也会断开（`src/gateway/server/connection/local_ipc.rs`）。
+- `parse_payload` 限制嵌套深度（`MAX_DEPTH`，64）、每个容器的条目数（`MAX_ITEMS`，4096）及单字符串字节数（`MAX_STRING_BYTES`，65 536）。握手后的响应若超出大小或 JSON 形态限制，服务端用带原请求 `id` 的 `INTERNAL_ERROR` 替代（`shared/client/src/local_ipc.rs`、`src/gateway/server/connection/local_ipc.rs`）。
 
 ### Web v1
 
-仅在原生 TLS 模式下挂载：`native_tls_router` 把 `connection::web_v1::routes` 合并进路由（`src/gateway/server/mod.rs`）。
+`native_tls_router` 只在原生 TLS 路由上挂载 Web v1（`src/gateway/server/mod.rs`）。端点与限额定义在 `src/gateway/server/connection/web_v1.rs`：
 
 | 项 | 值 |
 |----|----|
-| 会话换取 | `POST /v1/session`，请求体上限 4096 字节 |
-| 请求体 | `{"device_token": "..."}` 或 `{"bootstrap_ticket": "..."}` |
-| 成功响应 | `204 No Content` + `Set-Cookie: __Host-aleph-v1=<uuid>; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=300` |
+| 会话换取 | `POST /v1/session`，请求体最多 4096 字节 |
+| JSON 请求体 | `{"device_token": "..."}` 或 `{"bootstrap_ticket": "..."}` |
+| 成功响应 | `204 No Content`，附带 `Set-Cookie: __Host-aleph-v1=<uuid>; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=300` 和 `Cache-Control: no-store` |
 | 升级 | `GET /v1/ws`，`Sec-WebSocket-Protocol` 必须恰为 `aleph.protocol.v1`，并携带上述 cookie |
-| 会话 TTL | 300 秒（`TTL`） |
-| 单帧上限 | 1 MiB（`MAX_MESSAGE`） |
+| 会话有效期 | 300 秒（`TTL`） |
+| 单帧载荷上限 | 1 MiB（`MAX_MESSAGE`），不含 4 字节帧头 |
 | 会话数 / 并发 socket | 256（`MAX_SESSIONS`）/ 8（`MAX_SOCKETS`） |
-| IO 超时 | 5 秒（`IO_TIMEOUT`） |
+| 读请求体和写 WebSocket 超时 | 5 秒（`IO_TIMEOUT`） |
 
-两个端点都先做同源校验（`same_origin`：`Origin` 必须与请求的 `Host` 对应的 `https` 来源一致），再按来源 IP 做速率限制（`throttle`）。失败时返回 `403`（来源不符）、`429`（限流）、`400`（请求体或子协议不合法）、`401`（凭据或 cookie 无效）、`503`（容量或服务未就绪）、`408`（读取请求体超时）。
+两条路由都先通过 `same_origin` 核对 `Origin`（必须与请求目标的 HTTPS 来源一致），再通过 `throttle` 按客户端 IP 限流。常见失败包括来源不符（403）、限流（429）、请求体不合法或子协议不符（400）、凭据或 cookie 无效（401）、容量不足或服务未就绪（503）及读取请求体超时（408）（`src/gateway/server/connection/web_v1.rs`）。
 
-升级后，每条 WebSocket 消息必须是 **Binary**，且恰好包含一个完整帧（`split_frame` 之后不得有剩余字节）；Text 消息或格式错误会使连接终止。首帧必须是 `system.hello`（5 秒内），之后只放行 `health` 与 `sessions.list`，其他方法返回 `METHOD_NOT_FOUND`（`method unavailable on Web v1`）。会话到期、设备凭据被撤销（每秒检查）或 Gateway 停止时，连接关闭。
+升级后，每条承载 RPC 的消息必须是 Binary，且恰好包含一个完整帧；Text 消息、帧不完整、有剩余字节或信封无效都会结束连接。首个 RPC 请求必须是 `system.hello`，且在 5 秒或会话到期前到达，以先到者为准。握手后每次处理一个请求；会话到期、设备凭据失效（每秒检查）或 Gateway 停止时关闭连接（`src/gateway/server/connection/web_v1.rs`）。
+
+配置静态包目录后，Gateway 只在原生 TLS 路由的 `/v1/panel/` 提供 TSX Panel 的 Web 静态包，使页面与使用 cookie 认证的 `/v1/ws` 同源。`panel_routes` 添加 `Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'; img-src 'self' blob: data:; connect-src 'self'` 和 `X-Content-Type-Options: nosniff`（`src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
 ### 旧 `/ws`
 
-旧入口用 WebSocket Text 消息承载 JSON 文本，依赖 WebSocket 自己的消息边界；收到 Binary 消息只记录警告并忽略（`src/gateway/server/connection/mod.rs`）。它保留完整 RPC 面，详见[旧 WebSocket 入口](./protocol)。
+旧入口以 WebSocket Text 消息边界划分 JSON-RPC 消息。收到 Binary 消息只记录警告并忽略（`src/gateway/server/mod.rs`、`src/gateway/server/connection/mod.rs`）。它保留旧 RPC 方法面，包括 `panel.capabilities.snapshot` 和 `panel.project.select`（`src/gateway/handlers/mod.rs`）。连接流程见[旧 WebSocket 入口](./protocol)。
 
 ## 事件与订阅
 
-事件以不带 `id` 的 JSON-RPC 通知下发，`method` 恒为 `"event"`（`TOPIC_EVENT_METHOD`，`shared/protocol/src/jsonrpc.rs`），主题和载荷在 `params` 里：
+旧 `/ws` 的主题事件是不带 `id` 的 JSON-RPC 通知，`method` 为 `event`（`TOPIC_EVENT_METHOD`），主题与载荷位于 `params` 的 `topic` 与 `data`（`shared/protocol/src/jsonrpc.rs`、`src/gateway/server/connection/mod.rs`）：
 
 ```json
 {
@@ -243,66 +212,67 @@ pub enum FrameError { Empty, Oversize, InvalidUtf8 }
 }
 ```
 
-主题名举例：`agent.run.complete`（`src/gateway/events/frame.rs`）、`session.lifecycle.changed`、`config.changed`（`src/gateway/event_visibility.rs`）。完整主题目录见[事件方法](./methods/events)。
-
-- 订阅用 `events.subscribe`，参数键是 `topics`（字符串模式，或 `{topic, where}` 过滤对象），见 `src/gateway/handlers/events.rs` 的 `SubscribeParams`。
-- 当前事件订阅**只在旧 `/ws` 上可用**。Desktop IPC 与 Web v1 只放行 `health` 与 `sessions.list`，没有挂载 `events.subscribe`，因此不会下发主题事件。
-- 可见性受 `src/gateway/event_visibility.rs`（按所有者与会话隔离）和 `src/gateway/event_scope.rs`（按角色拦截管理类主题）约束；订阅某个主题不代表能收到其他用户的事件。
+- 主题包括 `agent.run.complete`、`session.lifecycle.changed` 和 `config.changed`（`src/gateway/events/frame.rs`）。
+- `events.subscribe` 接收 `topics`：每项为字符串模式或 `{topic, where}` 过滤对象（`src/gateway/handlers/events.rs`）。只有旧 `/ws` 提供事件订阅；两个 v1 入口没有挂载该方法，也不下发主题事件（`src/gateway/server/connection/mod.rs`、`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+- 订阅并不绕过可见性检查；事件投递仍受所有者、会话和角色约束（`src/gateway/event_visibility.rs`、`src/gateway/event_scope.rs`）。详见[事件方法](./methods/events)。
 
 ## 错误模型
 
-错误分两层，处理方式不同：
+帧层错误不会生成 JSON-RPC 响应。Desktop IPC 通过 `decode_header` 检查长度（内部错误消息为 `invalid IPC frame length`），再解码 UTF-8；Web v1 通过 `split_frame` 检查完整性与 UTF-8，并拒绝尾部多余字节。失败时这两个入口都结束连接（`shared/protocol/src/framing.rs`、`shared/client/src/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
-| 层 | 例子 | 表现 |
-|----|------|------|
-| 帧层 | `FrameError::Empty`、`Oversize`、`InvalidUtf8` | 该条流无法继续分帧，连接终止，**没有** JSON-RPC 响应 |
-| JSON-RPC 层 | `INVALID_PARAMS`、`AUTH_REQUIRED`、`METHOD_NOT_FOUND` | 带原请求 `id` 的 `error` 响应，连接可继续（握手失败除外） |
+对有效 RPC 请求的拒绝通常返回带原 `id` 的 `error` 响应，不终止已建立的连接。握手失败则在发出错误后结束连接；Web v1 对未挂载方法使用独立的 `web-v1-unsupported:<ip>` 限流键，超限时直接断开（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
-帧层的具体表现：Web v1 的 `read` 用 `split_frame`，任何 `FrameError` 或尾部多余字节都使连接结束；Desktop IPC 用 `decode_header` 校验长度（失败即 `invalid IPC frame length`），载荷用 `String::from_utf8` 解码，失败同样使连接结束（`shared/client/src/local_ipc.rs`）。
+| 场景 | 错误码（`shared/protocol/src/jsonrpc.rs`） | 消息 | 代码 |
+|------|------------------------------------------|------|------|
+| 首个有效请求不是 `system.hello` | `AUTH_REQUIRED`（-32000） | `system.hello must be first` | `src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC 上的方法未挂载 | `METHOD_NOT_FOUND`（-32601） | `method not mounted on Desktop IPC` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 上的方法未挂载，未触发限流 | `METHOD_NOT_FOUND`（-32601） | `method unavailable on Web v1` | `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC 普通响应超出限制 | `INTERNAL_ERROR`（-32603） | `response exceeds Desktop IPC limits` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 响应超出限制 | 原错误码（若生成此响应时已传入）或 `INTERNAL_ERROR`（-32603） | `response exceeds Web v1 limits` | `src/gateway/server/connection/web_v1.rs` |
 
-错误码全集和语义见 [JSON-RPC](../api/jsonrpc)；v1 入口特有的拒绝消息：
-
-| 场景 | 代码 | 消息 |
-|------|------|------|
-| 首帧不是 `system.hello` | `AUTH_REQUIRED`（-32000） | `system.hello must be first` |
-| Desktop IPC 上调用其他方法 | `METHOD_NOT_FOUND`（-32601） | `method not mounted on Desktop IPC` |
-| Web v1 上调用其他方法 | `METHOD_NOT_FOUND`（-32601） | `method unavailable on Web v1` |
-| Desktop IPC 响应过大 | `INTERNAL_ERROR`（-32603） | `response exceeds Desktop IPC limits` |
-| Web v1 响应过大 | 原错误码或 `INTERNAL_ERROR` | `response exceeds Web v1 limits` |
+完整错误码见 [JSON-RPC](../api/jsonrpc)。
 
 ## 规划中：尚未落地的部分
 
-蓝图 `docs/research/NSH_PROTOCOL_V1.md` 自述为「设计基线，实施前需与当前仓库接口盘点对齐」，下列内容属于蓝图而非现状。
+> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §10「背压、流控和资源限制」。
+>
+> 蓝图规定按订阅限制待发送事件数与缓冲字节数，允许合并或丢弃 Ephemeral 事件；Durable 事件缓冲耗尽时断开或要求 resync。Desktop IPC 现有的每连接在途请求与字节预算不是按订阅的背压（`src/gateway/server/connection/local_ipc.rs`）。
 
-> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（§10 背压、流控和资源限制）；当前实现见 `src/gateway/server/connection/local_ipc.rs`（`MAX_INFLIGHT`、`WIRE_BUDGET`）与 `src/gateway/server/per_client_buffer.rs`。
+> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §9「Snapshot + Replay」。
+>
+> 订阅快照、基于游标的重放与历史不可用时的 resync 仍属蓝图。握手能识别相关特性名，但没有实现可供协商；已挂载的 `panel.capabilities.snapshot` 不是事件流快照（`shared/protocol/src/system_hello.rs`、`src/gateway/handlers/system_hello.rs`、`src/gateway/handlers/panel_capabilities.rs`）。
 
-蓝图要求每订阅的待发送事件与缓冲字节限额、Ephemeral 事件合并或丢弃、Durable 事件缓冲耗尽时断开或要求 resync。现状只有每连接的在途请求数与字节预算，没有按订阅的背压策略。
+> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §11「二进制数据通道」。
+>
+> 资源引用和独立的数据传输通道仍属蓝图。Web v1 的 Binary 消息只是 JSON 帧的容器；`BinaryChannel` 是可识别的特性名，未被协商启用（`src/gateway/server/connection/web_v1.rs`、`shared/protocol/src/system_hello.rs`、`src/gateway/handlers/system_hello.rs`）。
 
-> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（§9 Snapshot + Replay）；当前实现见 `shared/protocol/src/system_hello.rs`（仅 `Feature::EventReplay`、`Feature::Snapshot` 两个特性标识）。
+> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §8「Event Envelope」和 §9.5「去重和游标」。
+>
+> Durable/Ephemeral 分类、事件信封的游标字段及去重语义仍属蓝图。旧入口的主题事件使用上文所示的 `event` 通知信封（`shared/protocol/src/jsonrpc.rs`）。
 
-握手里已有这两个特性名，但服务端实现列表为空（`negotiate_features(&params.features, &[])`），不会协商成功。蓝图中的快照、订阅游标、历史不可用时的 resync、去重与游标语义均无对应实现。
-
-> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（§11 二进制数据通道）；当前实现见 `shared/protocol/src/system_hello.rs`（`Feature::BinaryChannel` 仅为特性标识）。
-
-没有二进制通道：Web v1 的 Binary 消息只是承载同一个 JSON 帧的容器，不是蓝图中的资源引用与数据传输通道。
-
-> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（§8 Event Envelope、§9.5 去重和游标）；当前实现见 `shared/protocol/src/jsonrpc.rs`（`TOPIC_EVENT_METHOD`）。
-
-当前事件信封是 `{"method":"event","params":{"topic","data"}}`，没有蓝图中的 Durable/Ephemeral 分类与游标字段。
-
-下面两个文件名容易被误认为是 v1 的重放与恢复实现，实际不是：
+以下文件不是 v1 的连接重放或恢复实现：
 
 | 文件 | 实际内容 |
 |------|---------|
-| `shared/protocol/src/trace_replay.rs` | Agent 执行追踪的查询 DTO：`AgentTraceReplay`、`AgentTraceReplayEntry`、`AgentTraceTaskSummary`，以及 `trace.list` 的 `AgentTraceListRow`、`AgentTraceListPage`、`AgentTraceListCursor`。它回放的是持久化的任务追踪，不是连接上的事件流偏移 |
-| `shared/protocol/src/resume.rs` | `ResumeReceipt` 与 `RefusedEntry`：崩溃后恢复中断运行（`agent.resume`、`POST /v1/admin/resume`、`aleph-server resume --json`）的统一回执，与连接断线重连无关 |
+| `shared/protocol/src/trace_replay.rs` | `AgentTraceReplay`、`AgentTraceReplayEntry`、`AgentTraceTaskSummary` 以及 `trace.list` 的 `AgentTraceListRow`、`AgentTraceListPage`、`AgentTraceListCursor` 是持久化任务追踪的查询 DTO，不是连接事件流的重放 |
+| `shared/protocol/src/resume.rs` | `ResumeReceipt` 与 `RefusedEntry` 描述崩溃后恢复中断运行的回执，供 `agent.resume`、`POST /v1/admin/resume` 和 `aleph-server resume --json` 使用，与连接重连无关 |
+
+## Windows 命名管道 Desktop IPC
+
+**代码已就位，尚未开放。** Windows 客户端代码校验显式本地端点（例如 `\\.\pipe\aleph`）并实现账户认证，Gateway 侧用 `PipeAccount` 绑定命名管道并验证客户端账户（`shared/client/src/local_ipc/windows.rs`、`src/gateway/server/connection/local_ipc/windows.rs`）。但 `local_ipc::AVAILABLE` 仍是 `cfg!(unix)`；公开的客户端连接与 Gateway 监听入口都受此开关限制，当前 Windows 上不可用（`shared/client/src/local_ipc.rs`、`shared/client/src/connection.rs`、`src/gateway/server/mod.rs`）。
 
 ## 迁移与兼容
 
-- **旧客户端**继续使用 `/ws` 与 `connect` 握手，无需改动；`connect` 之后也可以调用 `system.hello` 做版本探测，响应里的 `limits` 只是提示值。
-- **新客户端**应先握手再发业务方法：Desktop IPC 与 Web v1 强制 `system.hello` 为首帧，业务方法在握手前一律被拒。
-- 客户端应检查 `result.protocol.major`，不为 1 即放弃连接，并容忍响应 `features` 中出现自己不认识的字符串。
-- 需要订阅事件、调用写类方法的客户端，目前仍只能走 `/ws`。v1 入口的只读范围是现状，扩展方法面属于后续工作，本页不作承诺。
+- **新客户端**：按部署环境选择显式开启的 Desktop IPC 或原生 TLS 上的 Web v1。先发送 `system.hello`，核对返回的协议版本与限额，再调用挂载的只读方法。Desktop IPC 的 `AlephClient::connect_local` 不回退到网络传输，也不使用设备凭据（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs`、`shared/client/src/connection.rs`）。
+- **旧客户端**：继续使用 `/ws` 与 `connect`；需要时再调用 `system.hello` 探测版本，响应中的限额仅作提示。需要事件订阅或写操作的客户端仍应使用旧 RPC 入口（`src/gateway/server/connection/mod.rs`、`src/gateway/handlers/system_hello.rs`）。
+
+## 历史：NSH Phase 2 原生连接设计
+
+<Callout type="warn">
+`desktop/nsh-shell/src/connection.rs` 是 Phase 2 的原生连接设计，**没有**出现在 `desktop/nsh-shell/src/main.rs` 的 `mod` 声明里，因此不在当前编译出的 NSH 二进制中；`desktop/nsh-shell/Cargo.toml` 也没有额外的 `[[bin]]` 或 `[lib]`。`desktop/nsh-shell/src/runtime.rs`、`desktop/nsh-shell/src/session.rs`、`desktop/nsh-shell/src/supervisor.rs` 和 `desktop/nsh-shell/src/components/mod.rs` 同样未接入该二进制。不要将这些文件当作现行连接行为。
+</Callout>
+
+历史设计的 `build_hello_params()` 取 `std::env::consts::OS` 作为 `platform`，并用 `nsh` 作为 `ui_runtime`；历史客户端收到非 1 的 major 会判定握手失败（`desktop/nsh-shell/src/connection.rs`）。现行宿主连接方式见[桌面宿主](../desktop-hosts/overview)。
 
 ## 另请参阅
 

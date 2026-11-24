@@ -6,7 +6,7 @@ description: "The Gateway's historical compatibility endpoint: JSON-RPC 2.0 over
 import { Callout } from "fumadocs-ui/components/callout";
 
 <Callout type="warn">
-`/ws` is a historical compatibility endpoint, not the way to attach a new client. New clients and the NSH desktop host should use [Protocol v1](./protocol-v1): length-prefixed frames, the `system.hello` handshake, and the Desktop IPC / Web v1 entrances. The Panel runs inside the NSH host through a WebView, and the host owns the connection. This page describes the current state of `/ws` for maintaining older clients and for troubleshooting.
+`/ws` is a historical compatibility endpoint, not the way to attach a new client (the Desktop IPC / Web v1 entries of Protocol v1). The NSH desktop host has two shapes: the default Leptos `web_view` loads the Panel over `http://127.0.0.1:18790/` and connects to the legacy `/ws` (`desktop/nsh-shell/src/shell_host.rs`, `desktop/nsh-shell/src/credentials.rs`); the TSX Panel host, enabled with `ALEPH_SHELL_PANEL=tsx`, reaches only a local Desktop IPC and reports `unavailable` for any other target (`desktop/nsh-shell/src/panel_host.rs`). New clients should use [Protocol v1](./protocol-v1). This page describes the current state of `/ws` for maintaining older clients and for troubleshooting.
 </Callout>
 
 `/ws` carries JSON-RPC 2.0 in WebSocket Text messages: every RPC, event, and connection handshake shares one connection, and message boundaries come from WebSocket itself, with no length prefix. A Binary message is logged as a warning and ignored (`src/gateway/server/connection/mod.rs`).
@@ -98,7 +98,7 @@ Message shapes match [JSON-RPC](../api/jsonrpc); `/ws` adds no extra envelope.
 
 - The `timestamp` in the response is an example value; the fields are defined in `src/gateway/handlers/health.rs`.
 - An event is a notification without an `id`, with `method` always `"event"`. Subscribe with `events.subscribe`, whose parameter key is `topics` (`src/gateway/handlers/events.rs`). For the event catalog and the full error-code list, see [Event methods](./methods/events) and [JSON-RPC](../api/jsonrpc).
-- The full RPC catalog is in the [Method reference](./methods). Only `/ws` offers the full method surface; Desktop IPC and Web v1 currently admit only `health` and `sessions.list`.
+- The full RPC catalog is in the [Method reference](./methods). Only `/ws` offers the full method surface; the two v1 entries (Desktop IPC and Web v1) share `V1_METHODS` (`src/gateway/server/connection/mod.rs`) and admit only `health`, `sessions.list`, and `panel.capabilities.snapshot`.
 
 ## History: from an unversioned protocol to v1
 
@@ -106,9 +106,9 @@ Message shapes match [JSON-RPC](../api/jsonrpc); `/ws` adds no extra envelope.
 |------|-----------------|------|
 | `/ws` + `connect` | The handshake result carries only session fields such as `role`, `state_version`, and `keepalive`: no protocol version and no limit negotiation. Message boundaries rely on WebSocket | `src/gateway/handlers/connect.rs` |
 | `system.hello` probe on `/ws` | A version probe after `connect`; the handler comment calls it a legacy probe, and the `limits` in the response are hints, not enforced | `src/gateway/handlers/system_hello.rs` |
-| Protocol v1: Desktop IPC and Web v1 | Bounded length-prefixed frames, `system.hello` must be the first frame, limits are enforced by the transport; the entrances are read-only for now | `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs` |
+| Protocol v1: Desktop IPC and Web v1 | Bounded length-prefixed frames, `system.hello` must be the first frame, limits are enforced by the transport; the two entries share `V1_METHODS` and mount only `health`, `sessions.list`, and `panel.capabilities.snapshot` | `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs` |
 
-`/ws` keeps the full RPC surface and `connect` authentication, so older clients need no changes; it has not been removed, but it is no longer where new capabilities land. The parts of v1 that are not implemented yet (event replay, snapshots, a binary channel, backpressure policy) are listed in [the planned section of Protocol v1](./protocol-v1#planned-not-yet-implemented).
+`/ws` keeps the full RPC surface and `connect` authentication, so older clients need no changes; it has not been removed, but it is no longer where new capabilities land. The Desktop IPC and Web v1 entries of Protocol v1 have landed; see [Protocol v1](./protocol-v1) for the frame format, handshake, and transport matrix. The parts of v1 that are not implemented yet (event replay, snapshots, a binary channel, backpressure policy) are listed in [the planned section of Protocol v1](./protocol-v1#planned-not-yet-implemented).
 
 ## See also
 
