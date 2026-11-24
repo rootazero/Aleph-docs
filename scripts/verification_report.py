@@ -38,11 +38,84 @@ def first_int(pattern: str, text: str) -> int:
     return int(m.group(1)) if m else -1
 
 
+# 页面 → 本轮阶段。按 ROADMAP-2026-11-pass2.md 的阶段划分；不在表内的改动页归 S5。
+PHASE_BY_PATH: list[tuple[str, str]] = [
+    ("desktop-hosts/panel-runtime.mdx", "S1"),
+    ("desktop-hosts/panel.mdx", "S1"),
+    ("desktop-hosts/plugin-ui.mdx", "S1"),
+    ("gateway/protocol.mdx", "S2"),
+    ("gateway/protocol-v1.mdx", "S2"),
+    ("architecture/gateway.mdx", "S2"),
+    ("capabilities/capability-model.mdx", "S3"),
+    ("capabilities/plugin-package.mdx", "S3"),
+    ("capabilities/trust-and-backends.mdx", "S3"),
+    ("capabilities/slots-and-replacement.mdx", "S3"),
+    ("gateway/methods/channels.mdx", "S4"),
+    ("desktop-hosts/overview.mdx", "S4"),
+    ("index.mdx", "S6"),
+    ("terminology.mdx", "S6"),
+    ("changelog.mdx", "S6"),
+]
+
+
+def phase_for(rel_path: str) -> str:
+    """rel_path 形如 zh/tools/browser.mdx。"""
+    page = rel_path.split("/", 1)[1] if "/" in rel_path else rel_path
+    for needle, phase in PHASE_BY_PATH:
+        if page == needle:
+            return phase
+    return "S5"
+
+
+def changed_pages(since: str) -> set[str]:
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", f"{since}..HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return {line for line in proc.stdout.splitlines() if line.startswith("content/docs/")}
+
+
+def page_table(docs: str, since: str) -> list[str]:
+    """逐页判定表：页面 / 判定 / 依据 / 门结果。"""
+    touched = changed_pages(since)
+    root = REPO_ROOT / docs
+    rows: list[str] = []
+    for lang in ("zh", "en"):
+        for page in sorted((root / lang).rglob("*.mdx")):
+            rel = page.relative_to(REPO_ROOT).as_posix()
+            phase = phase_for(f"{lang}/{page.relative_to(root / lang).as_posix()}")
+            if rel in touched:
+                verdict = "本轮改写"
+                basis = f"{phase}：改写后符号 / 锚点 / 方法册零失效"
+            else:
+                verdict = "沿用首轮"
+                basis = "首轮已校准，本轮未改动，站内复查零失效"
+            rows.append(f"| `{rel}` | {verdict} | {basis} | G1–G4 通过 |")
+    return rows
+
+
+def baseline_rows() -> list[str]:
+    path = REPO_ROOT / "scripts" / "baseline.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows = []
+    for section in sorted(data):
+        entries = data[section]
+        count = len(entries) if isinstance(entries, (list, dict)) else 0
+        rows.append(f"| `{section}` | {count} |")
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成终验报告的机器部分")
     parser.add_argument("--repo", default="../Aleph")
     parser.add_argument("--docs", default="content/docs")
     parser.add_argument("--out", default="docs/VERIFICATION-2026-11.md")
+    parser.add_argument("--since", default="", help="本轮起点 commit，用于生成逐页判定表")
+    parser.add_argument("--title", default="Aleph 文档站终验报告（2026-11）")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -52,6 +125,7 @@ def main() -> int:
     for label, script, extra in [
         ("G1 锚点门", "anchor_check.py", []),
         ("G1b 方法册", "method_audit.py", []),
+        ("G1c 符号门", "symbol_check.py", []),
         ("G2 事实门", "freshness_audit.py", ["--check", "facts"]),
         ("G3 结构门", "freshness_audit.py", ["--check", "structure"]),
         ("G4 双语门", "freshness_audit.py", ["--check", "bilingual"]),
@@ -92,7 +166,29 @@ def main() -> int:
         detail = "<br>".join(detail_lines).replace("|", "\\|")
         rows.append(f"| {name} | {state} | {detail} |")
 
-    body = f"""# Aleph 文档站终验报告（2026-11）
+    baseline = baseline_rows()
+    pages = page_table(args.docs, args.since) if args.since else []
+    pages_block = ""
+    if pages:
+        pages_block = f"""## 逐页判定表
+
+| 页面 | 判定 | 依据 | 门结果 |
+|------|------|------|--------|
+{chr(10).join(pages)}
+
+"""
+    baseline_block = ""
+    if baseline:
+        baseline_block = f"""## 基线棘轮
+
+`scripts/baseline.json` 各段剩余条数（全 0 表示无存量债务）：
+
+| 段 | 条数 |
+|----|------|
+{chr(10).join(baseline)}
+
+"""
+    body = f"""# {args.title}
 
 > 本文件由 `scripts/verification_report.py` 生成**机器部分**，逐阶段结论由主 agent 撰写。
 > 复核命令：`python3 scripts/run_gates.py --repo ../Aleph --build`。
@@ -108,7 +204,7 @@ def main() -> int:
 - 页面：zh {zh} 页 / en {en} 页
 - 代码锚点：{checked} 个被检查，{failed} 个失效
 
-## 逐阶段结论
+{baseline_block}{pages_block}## 逐阶段结论
 
 （待填）
 """

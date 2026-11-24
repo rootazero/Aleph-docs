@@ -116,11 +116,14 @@ subagent 硬性要求：
 
 | 阶段 | 状态 | 六门结果 | 提交 |
 |---|---|---|---|
-| S0 | 进行中 | G1 PASS / G1b PASS / G1c PASS / G2 PASS / G3 PASS / G4 PASS / G5 未跑 | — |
-| S1 | 未开始 | — | — |
-| S2 | 未开始 | — | — |
-| S3 | 未开始 | — | — |
-| S4 | 未开始 | — | — |
-| S5 | 未开始 | — | — |
-| S6 | 未开始 | — | — |
-| S7 | 未开始 | — | — |
+| S0 | 完成 | G1 PASS / G1b PASS / G1c PASS / G2 PASS / G3 PASS / G4 PASS（G5 未跑） | `e079c42` |
+| S1 | 完成 | G1–G4 PASS（页面自身零失效） | `91b2689` |
+| S2 | 完成 | G1–G4 PASS（页面自身零失效） | `df9baf3` |
+| S3 | 完成 | G1–G4 PASS（页面自身零失效） | `5e704da` |
+| S4 | 完成 | G1–G4 PASS（页面自身零失效） | `f074ebb` |
+| 门禁加固 | 完成 | G1c PASS（symbol 基线 389 → 0） | `8a0aad1` |
+| S5 | 完成 | G1–G4 PASS（symbol 失效 448 → 0） | `04272f7` |
+| S6 | 完成 | G1–G4 PASS | `6fa5f1f` |
+| S7 | 完成 | G1 PASS / G1b PASS / G1c PASS / G2 PASS / G3 PASS / G4 PASS / G5 构建门 PASS（106.1s） | 待提交 |
+
+终验报告：`docs/VERIFICATION-2026-11-pass2.md`（逐页判定表 328 行 + 基线八段全 0 + 仍标「规划中」的 79 处归组）。
