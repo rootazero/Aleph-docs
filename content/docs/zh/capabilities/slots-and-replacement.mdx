@@ -110,7 +110,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 - 能力主分类是 `src/capability/descriptor.rs` 的 `CapabilityKind`（12 个变体），它是**分类**，不是可替换位；
 - provider 侧有 `ProviderId` 与 `ProviderState`（`src/capability/provider.rs`），它描述一个后端的生命周期，不是槽位；
-- 行为侧的注册表是 `src/extension/hooks/registry.rs`，它是 legacy hook 的注册表，wire 上仍是 24 变体 `HookEvent`。
+- 行为侧的注册表是 `src/extension/hooks/registry.rs`，它是 legacy hook 的注册表，既有 wire 表面仍使用 `crates/aleph-slot-api/src/hooks.rs` 的 24 变体 `HookEvent`，不是新 Hook@1 契约的生产分发器。
 
 ## 替换机制
 
@@ -120,11 +120,11 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 - 用户配置段 `[slots."<slot-id>"]`，键包括 `use`（取值形如 `builtin:` / `native:` / `wasm:` / `mcp:` / `plugin:`）、`mode`（替换 / 前插 / 后接 / 禁用）与 `fallback`；
 - 解析顺序五级：会话级覆盖 > 项目级 `.aleph/config.toml` > 用户级 `~/.aleph/config.toml` > 插件清单 claims > 内置；同一层里两个声明认领同一个单基数槽位时 **fail-closed**，进 `Conflicted`；
-- 生效路径是 `SlotResolver` → `SlotPlan`（纯值），工具类槽位走 `ToolHandlerRegistry::replace` / `register` / `unregister`，行为槽位走 HookRegistry，进程级槽位走 `CapabilitySlot<T>`；每次应用在所有权树里登记新的 owner generation，旧租约经租约复核失效；配置热换走 `config::live_apply` 的 `slots` 分支。
+- 蓝图术语 SlotResolver（槽位解析器）→ SlotPlan（纯值槽位计划）表示规划的生效路径，工具类槽位走 `ToolHandlerRegistry::replace` / `register` / `unregister`，行为槽位走 HookRegistry，进程级槽位走 `CapabilitySlot<T>`；每次应用在所有权树里登记新的 owner generation，旧租约经租约复核失效；配置热换走 `config::live_apply` 的 `slots` 分支。
 
 今天真实存在的是其中一小块：`src/tools/registry.rs` 的 `ToolHandlerRegistry::replace(descriptor, handler)` 已经实现「一次原子替换 handler 与描述符」，语义与蓝图一致——已持有旧 handler 的调用方继续拿稳定的 `Arc`，之后的 `resolve` 看到新的，名字从未注册过则返回 `ToolError::NotFound`。但它是**注册表内部操作**：调用方是插件加载与工具注册路径，不是用户配置。
 
-`SlotResolver`、`SlotPlan`、`[slots.*]` 配置段、`config::live_apply` 的 `slots` 分支在代码里都不存在。
+上述 SlotResolver 与 SlotPlan 仅是蓝图 §4.2 的术语，并无同名实现；当前 `src/config/live_apply.rs` 也没有 `slots` 分支或上述配置解析路径。
 
 ## 今天能替换什么
 
@@ -133,7 +133,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 1. **工具实现**：`src/tools/registry.rs` 的 `ToolHandlerRegistry::register` / `replace` / `unregister`。注册表用 `src/capability/versioned_registry.rs` 的不可变发布原语——`transact` 原子发布并广播，订阅者看到变更。
 2. **注册表快照替换**：`src/capability/facade.rs` 的 `CapabilityChange` 有 `Registered` / `Replaced` / `Unregistered` / `Invalidated` 四个变体，`CapabilityChangeStream::invalidate_and_resync` 在 owner generation 推进时发出 `Invalidated` 并保留最后一个已提交游标，订阅者重同步而不是从零重来。
 3. **provider 替换靠代失效**：`src/capability/provider.rs` 的 `ProviderLifecycle` 在**新的 start 开始时**分配新 generation，因此旧代租约在重启期间无效、在替换之后**依然无效**；`src/capability/facade.rs` 的 `ResolveError::StaleProvider` 就是「租约签发后 provider 被停止或替换」这一情形的显式表达。
-4. **用户配置驱动的换后端**：`src/config/types/tools.rs` 的 `McpServerConfig` 描述一个客户端侧 MCP 服务器条目（`command`、`args`、`env`、`cwd`、`requires_runtime`、`timeout_seconds`、`enabled`），用户在 `config.toml` 里换一个 MCP 服务器就是今天唯一由用户驱动的「换后端」。网关侧的暴露名单在 `src/gateway/mcp_face/config.rs` 的 `McpFaceConfig`：它的 `expose` 是白名单且可热生效，`enabled` 只在启动挂载路由时生效。
+4. **用户配置驱动的换后端**：`src/config/types/tools.rs` 的 `McpServerConfig` 描述一个客户端侧 MCP 服务器条目（`command`、`args`、`env`、`cwd`、`requires_runtime`、`timeout_seconds`、`enabled`），用户在 `config.toml` 里换一个 MCP 服务器是现有的一种用户驱动的「换后端」。网关侧的暴露名单在 `src/gateway/mcp_face/config.rs` 的 `McpFaceConfig`：它的 `expose` 是白名单且可热生效，`enabled` 只在启动挂载路由时生效。
 
 另外还有两条「明确不做」的配置边界，同样在 `src/config/types/tools.rs`：tool_service.default_timeout_seconds 是非默认值、tool_service.per_tool_seconds 是非空，都在解析配置时直接被拒，错误文本分别是 `tool_service.default_timeout_seconds is not supported until ToolService consumes it` 与 `tool_service.per_tool_seconds is not supported until ToolService consumes it`。这些字段是留给 ToolService 消费的预留位——配了会报错，而不是被静默忽略。
 
@@ -167,7 +167,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 | 三层模型（L1 内核 / L2 默认模块 / L3 替换面） | §2 | `src/capability/descriptor.rs` 的 `CapabilityKind` / `CapabilityDescriptor`；`src/capability/ownership.rs` 的 owner 与租约边界。没有「可替换面」的划分 | 规划中 |
 | 数据槽位目录 | §3.1 | `src/capability/descriptor.rs` 的 `CapabilityId` / `CapabilityKind`；`src/capability/provider.rs` 的 `ProviderId` / `ProviderState`。没有槽位 ID 目录 | 规划中 |
 | 行为槽位目录（契约统一 Hook@1） | §3.2 | `crates/aleph-slot-api/src/slot.rs` 的 `Hook` / `HookDescriptor` / `validate_hook_request`；`src/extension/hooks/registry.rs` 是 legacy hook 注册表 | 规划中（契约已写好，未接线） |
-| 槽位解析与 `SlotPlan` | §4.2 | 无 | 规划中 |
+| 蓝图的槽位解析器与纯值槽位计划（均未实现） | §4.2 | 无 | 规划中 |
 | 工具热换 | §4.3 | `src/tools/registry.rs` 的 `ToolHandlerRegistry::replace` 已有原子替换语义，但只被内部注册路径使用 | 部分落地 |
 | 应用时登记新 owner generation | §4.3 | `src/capability/ownership.rs` 的所有权树与租约复核；`src/capability/provider.rs` 的 generation 失效 | 部分落地 |
 | 配置热换的 `slots` 分支 | §4.3 | 无 | 规划中 |

@@ -7,8 +7,8 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 This page answers two questions: who **implements** a capability (the backend), and on what grounds a piece of third-party code is **allowed to run** (trust). The current code lives in `src/capability/` (backends and providers), `src/extension/` (plugin runtime and trust policy), and `crates/aleph-slot-api/src/approval.rs` (the approval surface).
 
-<Callout type="warn" title="Trust has two axes; only one exists">
-  The blueprint `docs/research/aleph_modularization_plan.md` §5.2 defines two trust axes: **load trust** (existing) and **capability authorization** (new). Only load trust actually runs today; capability authorization and the authorization model for slot replacement do not exist yet. Every item in this page that comes from a blueprint or an ADR is marked `Status: planned`. For the backend taxonomy see [Slots and replacement](./slots-and-replacement); for descriptors and ownership see the [Capability model](./capability-model).
+<Callout type="warn" title="Loading, grants, approval, and delegation are separate">
+  The blueprint `docs/research/aleph_modularization_plan.md` §5.2 defines two trust axes: **load trust** (existing) and **capability authorization** (new). This does not mean that all authorization mechanisms are absent: load trust is wired and WASM declaration checks exist. What remains unimplemented is the blueprint’s per-plugin ledger for elevated permissions. Operation approval contracts and the unmounted cross-session delegation registry are separate surfaces described below. Every item in this page that comes from a blueprint or an ADR is marked `Status: planned`. For the backend taxonomy see [Slots and replacement](./slots-and-replacement); for descriptors and ownership see the [Capability model](./capability-model).
 </Callout>
 
 ## What a backend is
@@ -37,7 +37,7 @@ Activation on the provider side is explicit. `src/capability/provider_registry.r
 
 ### Planned: six kinds of backend
 
-> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §5.1 (backends).
+> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §5.1 (backends).
 
 The blueprint splits backends into six kinds, each with its own isolation model and default permissions:
 
@@ -58,7 +58,7 @@ The blueprint adds three hard rules:
 
 The conceptual summary is in `docs/research/Everything-externally-composable-is-a-Capability.md` §3: **plugins are an assembly mechanism; capabilities are the semantics**.
 
-## The two trust axes
+## Four trust and authorization surfaces
 
 ### Load trust
 
@@ -73,11 +73,11 @@ pub struct OwnerTrustPolicy {
 
 Its API is `permissive()` (allow everything), `restrictive(allowlist)` (allow only the listed ids), `trust(id)`, `untrust(id)`, `allowlist()`, and `allows(plugin_id, origin)`. The decision rules live in `allows`: `Bundled` (built into Aleph) and `Config` (added explicitly by the operator) origins are **always trusted**; `Workspace` (project `.aleph/` directory), `Global` (`~/.aleph/` directory) and `ClaudeCache` (Claude Code cache directory) origins need an allowlist entry. When `enforce` is `false` everything is allowed, and the `Default` implementation returns `permissive()`.
 
-The trust decision happens **at plugin mount time, per plugin id** (`admit` in `src/extension/lifecycle.rs`: owner trust first, then the operator's durable preference in `plugins.toml`) — a `false` verdict stops a plugin from silently registering its capabilities, and the refusal lands on the plugin row as `blocked`.
+The trust decision happens **at plugin mount time, per plugin id** (`admit` in `src/extension/lifecycle.rs`: owner trust first, then the operator's durable preference in `plugins.toml`) — a `false` verdict stops a plugin from silently registering its capabilities, and a trust refusal records `Blocked`, while disabled or not-enabled plugins record `Disabled` (`src/extension/lifecycle.rs`).
 
 ### Capability authorization
 
-> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §5.2 (the two trust axes).
+> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §5.2 (the two trust axes).
 
 Capability authorization answers "which powers beyond additive registration may it take". The blueprint design is: always deny by default, **not affected by the load trust enforce switch**, with the grant stored on the plugin's entry in `plugins.toml` and bound to the plugin's content hash.
 
@@ -89,11 +89,19 @@ Authorization is by interactive confirmation or `aleph plugin grant <id> <item>`
 
 This axis **does not exist** today. `GrantScope` and `AuthorizationResult` in `crates/aleph-slot-api/src/approval.rs` are the approval surface (oriented at individual operations), not a per-plugin authorization ledger; `src/extension/plugin_trust.rs` is load trust, which is a different thing.
 
+### Operation approval contracts
+
+`crates/aleph-slot-api/src/approval.rs` defines shared operation approval types, not a plugin trust policy or plugin grant ledger. `GrantScope::Session` lasts for the remainder of a conversation in this process; `Always` survives restarts until revoked. `AuthorizationResult` has `Authorized`, `Denied`, and `NotAuthenticated` outcomes for authorization checks on approval actions. Sandbox execution approval uses its own `GrantStore` (`src/sandbox/exec_approval/grants.rs`), not the cross-session registry below.
+
+### Cross-session capability delegation (unmounted)
+
+`src/capability/grant.rs` implements `GrantRegistry`: one session delegates a capability to another, and the grantee’s transitive reference cannot exceed the grantor’s authority. Delegation chains have length checks and cycle detection, revocation cascades downstream, and grants support migration across session epochs. These are module semantics, not production behavior: the header records the 2026-11-20 severed-wire audit’s **NOT MOUNTED IN PRODUCTION** finding and states that there is no production consumer. `scripts/capability_wiring_audit.py` pins this unmounted surface so new unwired entry points cannot grow silently. It is not interchangeable with load trust, planned plugin grants, or operation approval.
+
 ## Plugin runtimes and their constraints
 
 ### WASM plugins
 
-WASM is the only third-party code runtime that is genuinely sandboxed today. Its capability declaration lives in `src/extension/runtime/wasm/capabilities.rs`:
+WASM plugins have a real VM and host-capability boundary, not just a blueprint. The execution host `WasmRuntime` is exported by `src/extension/runtime/mod.rs` and implemented in `src/extension/runtime/wasm/mod.rs`. The normalized manifest fields `wasm_capabilities` and `wasm_resource_limits` live in `src/extension/manifest/types.rs`; the former’s capability structure lives in `src/extension/runtime/wasm/capabilities.rs`:
 
 ```rust
 pub struct WasmCapabilities {
@@ -103,11 +111,15 @@ pub struct WasmCapabilities {
 }
 ```
 
-All three slots are `Option`, so not declaring one means not having it: `WorkspaceCapability{allowed_prefixes}` (workspace path prefixes), `HttpCapability{allowlist, credentials, rate_limit, timeout_secs, max_request_bytes, max_response_bytes}` (default timeout 30 seconds), `SecretsCapability{allowed_patterns}`.
+All three fields are `Option`: omitting one withholds the corresponding host capability (`src/extension/runtime/wasm/capabilities.rs`): `WorkspaceCapability{allowed_prefixes}` (workspace path prefixes), `HttpCapability{allowlist, credentials, rate_limit, timeout_secs, max_request_bytes, max_response_bytes}` (default timeout 30 seconds), `SecretsCapability{allowed_patterns}`.
 
-The resource limits are in `WasmResourceLimits` in `src/extension/runtime/wasm/limits.rs`, with defaults of 10 MB of memory, 10 million units of fuel, a 60 second timeout, 50 HTTP calls, 1000 log entries and 4096 bytes per log message.
+The resource limits are in `WasmResourceLimits` in `src/extension/runtime/wasm/limits.rs`, with defaults of 10 MiB of memory, 10 million units of fuel, a 60 second timeout, 50 HTTP calls, 1000 log entries and 4096 bytes per log message.
 
-The gate at execution time is in `src/extension/runtime/wasm/capability_kernel.rs`: every host call is checked, capability checking is **default-deny**, and a violation returns a `CapabilityError` (`NotDeclared` / `NotAllowed` / `RateLimited` / `ResourceExhausted` / `PathTraversal`). Credentials are injected on the host side; the plugin never sees plaintext. On the manifest side, `src/extension/runtime/wasm/mod.rs` parses capabilities starting from zero permissions (source comment: `default = zero permissions`) and installs a deny-all resolver by default.
+`WasmCapabilityKernel` is the execution-time security kernel for default-deny host checks, leak detection, audit logging, and resource counting. Violations return `CapabilityError` (`NotDeclared` / `NotAllowed` / `RateLimited` / `ResourceExhausted` / `PathTraversal`). An empty workspace prefix list grants no paths; secret resolution checks the declared patterns before consulting the host resolver (`src/extension/runtime/wasm/capability_kernel.rs`).
+
+`src/extension/runtime/wasm/mod.rs` applies the memory-page limit, fuel, and execution deadline to the Extism VM. The kernel enforces HTTP-call and logging quotas; `WasmResourceLimits` has no table-size or handle-count fields (`src/extension/runtime/wasm/limits.rs`, `src/extension/runtime/wasm/capability_kernel.rs`). Missing declarations start with zero permissions, but this is not a plugin grant ledger: the kernel accepts manifest declarations, while the blueprint’s item-by-item operator grants remain unimplemented. Ordinary plugins enable WASI; guests declaring contexts disable it. “Zero declared capabilities” therefore does not guarantee the absence of all ambient I/O (`src/extension/runtime/wasm/mod.rs`).
+
+Host-side credential injection keeps injected plaintext out of the guest. However, loading defaults to a deny-all secret resolver, and no production caller installs a real resolver: declaring credentials does not make them usable. The implemented default-deny behavior agrees with the blueprint in withholding undeclared host capabilities, not in delivering its content-hash-bound grant ledger (`src/extension/runtime/wasm/capability_kernel.rs`, `src/extension/runtime/wasm/mod.rs`).
 
 ### MCP and static plugins
 
@@ -115,7 +127,7 @@ The gate at execution time is in `src/extension/runtime/wasm/capability_kernel.r
 
 ### Third-party Rust plugins
 
-> **Status: planned（规划中）** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-004 (third-party Rust plugins use WASM / a separate process).
+> **状态：规划中** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-004 (third-party Rust plugins use WASM / a separate process).
 
 ADR-004's decision table is: officially bundled capabilities are compiled in statically and allowed; third-party WASM goes through a restricted WASM runtime and is the default preference; third-party process plugins run in a separate process with controlled IPC and are allowed on demand; **loading an arbitrary Rust dynamic library inside the host process is not supported as a general plugin mechanism**.
 
@@ -162,7 +174,7 @@ The path is made of: the panel module is dynamically imported by `interfaces/web
 
 **Same-origin therefore does not mean trusted**: integrity checking and admission still have to happen. `prepare(records, policy: &OwnerTrustPolicy)` in `src/extension/panel_publication/admission.rs` does that, with a 4 MiB limit per entry and a 64 MiB limit per publication; violations produce error codes such as `panel.asset_entry_limit` / `panel.asset_generation_limit` / `panel.asset_outside_root` / `panel.asset_integrity_mismatch`. The panel manifest is `PanelUiManifest` in `src/extension/manifest/types.rs`, carrying `tab_id`, `entry`, `api_major`, `permissions` and `asset_integrity`; its `validate()` yields the error codes `panel.invalid_identity` / `panel.invalid_presentation` / `panel.incompatible_api` / `panel.invalid_entry` / `panel.invalid_integrity`.
 
-> **Status: planned（规划中）** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-005 (Agent dynamic UI uses Restricted TSX).
+> **状态：规划中** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-005 (Agent dynamic UI uses Restricted TSX).
 
 ADR-005 requires that Agent-generated dynamic UI runs only inside an isolated view container and a restricted runtime: no arbitrary shell, process, filesystem or network access, no self-granting of capabilities, no changing approval state or plugin trust level, and three trust tiers by provenance — formal plugin UI (still bound by the host API permissions), Agent-generated ephemeral UI (minimal component set and the strictest resource limits), and UI whose provenance or integrity cannot be verified (not executed at all). None of this layer is implemented yet.
 

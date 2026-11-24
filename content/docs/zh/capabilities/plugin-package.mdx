@@ -7,7 +7,7 @@ description: "查阅插件目录的清单格式、归一化字段与加载边界
 
 ## 插件目录与加载边界
 
-插件以目录为加载单位：清单描述插件及其组件，入口文件等资源位于插件目录内。目录不一定有清单；没有匹配的清单时，读取器可以尝试自动发现（`src/extension/manifest/adapter.rs`、`src/extension/manifest/mod.rs`、`src/extension/manifest/types.rs`）。
+插件以目录为加载单位：清单描述插件及其组件，入口文件等资源位于插件目录内。目录不一定有清单：适配器注册表的最低优先级回退会识别技能、命令、代理、hook 或 MCP 配置等已知目录结构；这不同于只读取三个候选文件的目录元数据读取器。自动发现是真实路径，但不意味着任意空目录都能加载（`src/extension/manifest/adapter.rs`、`src/extension/manifest/adapters/auto_discover.rs`、`src/extension/manifest/mod.rs`）。
 
 清单解析、注册和执行是不同环节：清单适配器提供解析结果，`PluginRegistry` 保存插件注册项，而 WASM 执行由 `WasmRuntime` 提供。解析成功不等于插件已获准加载（`src/extension/manifest/adapter.rs`、`src/extension/lifecycle.rs`、`src/extension/registry/mod.rs`、`src/extension/runtime/mod.rs`）。安装位置、生命周期与使用方法见[扩展](../concepts/extensions)；插件 RPC 入口见[插件方法](../gateway/methods/plugins)。
 
@@ -45,7 +45,7 @@ description: "查阅插件目录的清单格式、归一化字段与加载边界
 | `permissions` | 请求的 Panel 权限，按社区权限集合校验。 |
 | `asset_integrity` | 入口的 SHA-256 完整性值：`sha256-` 加 Base64 摘要。 |
 
-字段与校验见 `src/extension/manifest/types.rs`、`shared/protocol/src/panel.rs`。声明本身不发布标签页：admission 先有界读取并核对入口（每入口 4 MiB、每代 64 MiB），Core 提交不可变发布代，Gateway 经鉴权的 `/tabs/{*entry}` 提供资源；Panel 从同源获取并加载 ES 模块，只向模块交付窄 SDK（`src/extension/panel_publication/admission.rs`、`src/extension/panel_publication/mod.rs`、`src/gateway/server/panel_asset_route.rs`、`interfaces/webchat/panel_loader.js`、`interfaces/webchat/src/panel/sdk.rs`）。发布与宿主细节见[插件 UI](../desktop-hosts/plugin-ui)。
+字段与校验见 `src/extension/manifest/types.rs`、`shared/protocol/src/panel.rs`。声明本身不发布标签页：admission 先有界读取并核对入口（`ENTRY_LIMIT` 每入口 4 MiB、`GENERATION_LIMIT` 每代 64 MiB），Core 提交不可变发布代，Gateway 经鉴权的 `/tabs/{*entry}` 提供资源；Panel 从同源获取并加载 ES 模块，只向模块交付窄 SDK（`src/extension/panel_publication/admission.rs`、`src/extension/panel_publication/mod.rs`、`src/gateway/server/panel_asset_route.rs`、`interfaces/webchat/panel_loader.js`、`interfaces/webchat/src/panel/sdk.rs`）。发布与宿主细节见[插件 UI](../desktop-hosts/plugin-ui)。
 
 ## 配置、权限与来源信任
 
@@ -54,6 +54,8 @@ description: "查阅插件目录的清单格式、归一化字段与加载边界
 | 配置结构 | `config_schema` 用 JSON Schema 描述配置，`ConfigUiHint` 提供字段显示提示。`validate_config_schema_declaration` 检查 schema 声明，`validate_config_against_schema` 按 schema 检查配置值。 | `src/extension/manifest/types.rs`、`src/extension/manifest/config_validation.rs` |
 | 权限与声明转换 | `PluginPermission` 表达插件权限。`declared_capabilities` 将清单段转换成能力声明；例如缺少 `background` 权限时跳过已声明的后台服务。 | `src/extension/manifest/types.rs`、`src/extension/manifest/declared_sections.rs` |
 | 来源准入 | `OwnerTrustPolicy` 判断插件 ID 与来源是否允许加载。在限制模式下，`Bundled` 与 `Config` 可通过；`Workspace`、`Global` 与 `ClaudeCache` 需要 ID 在允许列表。生命周期在检查启用状态之前应用此策略。 | `src/extension/plugin_trust.rs`、`src/extension/lifecycle.rs` |
+
+`OwnerTrustPolicy` 在 `enforce` 为 `false` 时全放行，但不绕过第二道启用闸。`PLUGINS_CONFIG_FILE` 定义文件名 `plugins.toml`；数据目录中的该文件保存 `PluginEntryConfig` 的持久偏好，`PluginsConfig::activation` 按来源判定是否启用，无显式偏好的 `ClaudeCache` 插件保持关闭。挂载先检查 owner trust，再检查此偏好：信任拒绝写入 `Blocked`，显式禁用或未启用写入 `Disabled`，不会静默注册能力（`src/extension/plugin_trust.rs`、`src/extension/types/plugins.rs`、`src/extension/plugin_state.rs`、`src/extension/lifecycle.rs`）。
 
 ## Claude Code 与 pi 兼容性
 

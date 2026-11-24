@@ -7,8 +7,8 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 本页回答两个问题：一个能力**由谁实现**（后端），以及一段第三方代码**凭什么被允许跑起来**（信任）。现状代码分布在 `src/capability/`（后端与提供者）、`src/extension/`（插件运行时与信任策略）、`crates/aleph-slot-api/src/approval.rs`（审批面）。
 
-<Callout type="warn" title="信任有两条轴，只有一条存在">
-  蓝图 `docs/research/aleph_modularization_plan.md` §5.2 定义了两个信任轴：**加载信任**（现有）与**能力授权**（新增）。今天只有加载信任这一条真的在跑；能力授权、槽位替换的授权模型都还不存在。本页凡属蓝图内容都标成「状态：规划中」。后端分类见 [槽位与替换](./slots-and-replacement)，描述符与所有权见 [Capability 模型](./capability-model)。
+<Callout type="warn" title="加载、授权、审批与委托不是同一条轴">
+  蓝图 `docs/research/aleph_modularization_plan.md` §5.2 定义了两个信任轴：**加载信任**（现有）与**能力授权**（新增）。这不等于所有授权机制都不存在：加载信任已接线，WASM 声明检查也已实现；尚未实现的是蓝图的按插件高权限授权账本。操作审批契约和未挂载的跨会话委托注册表分别见下文。本页凡属蓝图内容都标成「状态：规划中」。后端分类见 [槽位与替换](./slots-and-replacement)，描述符与所有权见 [Capability 模型](./capability-model)。
 </Callout>
 
 ## 后端是什么
@@ -58,7 +58,7 @@ provider 侧的激活是显式的。`src/capability/provider_registry.rs` 的 `P
 
 概念上的总纲在 `docs/research/Everything-externally-composable-is-a-Capability.md` §三：**插件是装配机制，能力才是语义**。
 
-## 信任的两个轴
+## 信任与授权的四个表面
 
 ### 加载信任
 
@@ -73,7 +73,7 @@ pub struct OwnerTrustPolicy {
 
 它的 API 是 `permissive()`（全放行）、`restrictive(allowlist)`（只放行白名单）、`trust(id)`、`untrust(id)`、`allowlist()`、`allows(plugin_id, origin)`。判定规则在 `allows` 里：`Bundled`（Aleph 内置）与 `Config`（operator 显式加入）来源**恒信任**；`Workspace`（项目 `.aleph/` 目录）、`Global`（`~/.aleph/` 目录）、`ClaudeCache`（Claude Code 缓存目录）三个来源需要白名单条目。`enforce` 为 `false` 时直接全部放行，`Default` 实现返回 `permissive()`。
 
-信任判定发生在**插件挂载时、按插件 id 逐个进行**（`src/extension/lifecycle.rs` 的 `admit`：先问 owner trust，再问 operator 在 `plugins.toml` 里的持久偏好）——一个 `false` 判决就是阻止一个插件静默注册它的能力，拒绝会落成插件行上的 `blocked` 状态。
+信任判定发生在**插件挂载时、按插件 id 逐个进行**（`src/extension/lifecycle.rs` 的 `admit`：先问 owner trust，再问 operator 在 `plugins.toml` 里的持久偏好）——一个 `false` 判决就是阻止一个插件静默注册它的能力，信任拒绝写入 `Blocked`，禁用或未启用则写入 `Disabled`（`src/extension/lifecycle.rs`）。
 
 ### 能力授权
 
@@ -89,11 +89,19 @@ pub struct OwnerTrustPolicy {
 
 现状里这条轴**不存在**。`crates/aleph-slot-api/src/approval.rs` 的 `GrantScope` / `AuthorizationResult` 是审批面（面向具体操作），不是按插件的授权账本；`src/extension/plugin_trust.rs` 是加载信任，两者是不同的东西。
 
+### 操作审批契约
+
+`crates/aleph-slot-api/src/approval.rs` 定义的是操作审批共享类型，不是插件信任策略或插件授权账本。`GrantScope` 的 `Session` 表示当前进程中会话的剩余时间，`Always` 表示跨重启、直到撤销；`AuthorizationResult` 的 `Authorized` / `Denied` / `NotAuthenticated` 表示审批动作的授权检查结果。沙箱执行审批使用自己的 `GrantStore`（`src/sandbox/exec_approval/grants.rs`），不是下述跨会话注册表。
+
+### 跨会话能力委托（未挂载）
+
+`src/capability/grant.rs` 已实现 `GrantRegistry`：一个会话向另一个会话委托能力，受托方的传递性引用不能超过授权方权限；委派链校验长度并检测环，撤销级联到下游，且支持跨会话纪元的迁移。这些是模块语义，不是线上行为：文件头记录 2026-11-20 severed-wire 审计的 **NOT MOUNTED IN PRODUCTION** 结论，并指出没有生产消费者。`scripts/capability_wiring_audit.py` 钉住此未挂载表面，防止新增入口悄悄漏接。它与加载信任、蓝图的插件授权、操作审批都不能互换。
+
 ## 插件运行时与约束
 
 ### WASM 插件
 
-WASM 是今天唯一真正被沙箱隔离的第三方代码运行时。它的能力声明在 `src/extension/runtime/wasm/capabilities.rs`：
+WASM 插件有真实的 VM 与宿主能力边界，并非仅有蓝图。执行宿主 `WasmRuntime` 由 `src/extension/runtime/mod.rs` 导出，实现位于 `src/extension/runtime/wasm/mod.rs`。归一化清单字段 `wasm_capabilities` 与 `wasm_resource_limits` 定义在 `src/extension/manifest/types.rs`；前者的能力结构在 `src/extension/runtime/wasm/capabilities.rs`：
 
 ```rust
 pub struct WasmCapabilities {
@@ -103,11 +111,15 @@ pub struct WasmCapabilities {
 }
 ```
 
-三个槽全是 `Option`，没声明就没有：`WorkspaceCapability{allowed_prefixes}`（工作区路径前缀）、`HttpCapability{allowlist, credentials, rate_limit, timeout_secs, max_request_bytes, max_response_bytes}`（默认超时 30 秒）、`SecretsCapability{allowed_patterns}`。
+三个字段全是 `Option`，未声明就没有对应宿主能力（`src/extension/runtime/wasm/capabilities.rs`）：`WorkspaceCapability{allowed_prefixes}`（工作区路径前缀）、`HttpCapability{allowlist, credentials, rate_limit, timeout_secs, max_request_bytes, max_response_bytes}`（默认超时 30 秒）、`SecretsCapability{allowed_patterns}`。
 
-资源上限在 `src/extension/runtime/wasm/limits.rs` 的 `WasmResourceLimits`，默认值是内存 10 MB、燃料 1000 万次、超时 60 秒、HTTP 调用上限 50 次、日志上限 1000 条、单条日志上限 4096 字节。
+资源上限在 `src/extension/runtime/wasm/limits.rs` 的 `WasmResourceLimits`，默认值是内存 10 MiB、燃料 1000 万次、超时 60 秒、HTTP 调用上限 50 次、日志上限 1000 条、单条日志上限 4096 字节。
 
-执行时的闸门在 `src/extension/runtime/wasm/capability_kernel.rs`：每次宿主调用都过闸，能力检查**默认拒绝**，越界时返回 `CapabilityError`（`NotDeclared` / `NotAllowed` / `RateLimited` / `ResourceExhausted` / `PathTraversal`），凭据由宿主侧注入、插件看不到明文。清单侧，`src/extension/runtime/wasm/mod.rs` 解析能力时按零权限起步（源码注释：`default = zero permissions`），并安装默认的全拒绝解析器。
+`WasmCapabilityKernel` 是执行期间的安全内核，负责宿主调用的默认拒绝检查、泄漏检测、审计与资源计数；越界返回 `CapabilityError`（`NotDeclared` / `NotAllowed` / `RateLimited` / `ResourceExhausted` / `PathTraversal`）。工作区空前缀列表不授予任何路径，secret 解析先匹配声明的模式，再查询宿主解析器（`src/extension/runtime/wasm/capability_kernel.rs`）。
+
+`src/extension/runtime/wasm/mod.rs` 将内存页上限、燃料和执行超时实际装入 Extism VM；HTTP 次数与日志限额由内核执行，不存在表大小或句柄数量这样的 `WasmResourceLimits` 字段（`src/extension/runtime/wasm/limits.rs`、`src/extension/runtime/wasm/capability_kernel.rs`）。清单未声明能力时按零权限起步，但这不是完整的插件授权账本：内核接收清单声明，蓝图的逐项 operator 授权仍未实现。普通插件启用 WASI，声明 context 的 guest 则关闭 WASI，因此不能把「零声明能力」泛化成所有 ambient I/O 的保证（`src/extension/runtime/wasm/mod.rs`）。
+
+凭据注入在宿主侧实现，guest 不接收注入的明文；但默认装入全拒绝 secret 解析器，生产没有安装真实解析器的调用方，故清单声明凭据并不使其可用。这里的默认拒绝与蓝图一致的是未声明宿主能力不放行，不是已经交付了按内容哈希绑定的授权账本（`src/extension/runtime/wasm/capability_kernel.rs`、`src/extension/runtime/wasm/mod.rs`）。
 
 ### MCP 与静态插件
 

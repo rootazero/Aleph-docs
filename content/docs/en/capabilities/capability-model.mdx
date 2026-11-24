@@ -9,12 +9,12 @@ This page answers one question: what makes up a runtime "capability" in Aleph, h
 
 <Callout type="warn" title="Read this first">
   Several modules in `src/capability/` are **written and tested but not mounted on a production path** (see "Mount status" below).
-  Every "current" statement on this page maps to a mounted code path; anything unmounted is marked as such and is not described as runtime behavior.
+  This page distinguishes production paths from defined but unmounted contracts and from plans in the blueprints.
 </Callout>
 
 ## What a capability is
 
-A runtime capability = one **descriptor** (`CapabilityDescriptor`) + one **owner** (`OwnerRef`) + one **visibility scope** (`VisibilityScope`) + a set of **contract facets** (`CapabilityFacet`).
+A capability’s **descriptor** (`CapabilityDescriptor`) records its **owner** (`OwnerRef`), its **visibility scope** (`VisibilityScope`), and a set of **behavior facets** (`CapabilityFacet`). The descriptor is defined in `src/capability/descriptor.rs`; the ownership and visibility types are in `src/capability/ownership.rs`.
 
 A descriptor only describes; it grants no authority. Authorization comes from ownership bindings, policy, and leases. The module comment in `src/capability/descriptor.rs` says it directly: the descriptor is the "kind-agnostic capability contract", the Tool and special-capability backends provide executable adapters, and the other kinds stay descriptive until their owning backend is mounted.
 
@@ -24,6 +24,14 @@ OwnershipTree        ──binds─────▶ who owns it, which generation
 Zahir::resolve       ──issues────▶ BackendLease (a lease carrying owner_generation)
 Zahir::validate_lease──rechecks──▶ checked again before use; refused once stale
 ```
+
+See `src/capability/ownership.rs` for the binding and `src/capability/zahir_facade.rs` for lease validation.
+
+### The boundary between the contract crate and the runtime
+
+`crates/aleph-slot-api/src/` contains 33 Rust source files, with the browser contracts organized under `crates/aleph-slot-api/src/browser/mod.rs`. The dependency runs one way, from `alephcore` to `aleph-slot-api`. The contract crate does no I/O, has no platform or LLM dependencies, uses Tokio’s `sync` feature but not its runtime, and holds no hidden state. `alephcore::error` re-exports the contract types rather than defining them a second time (`crates/aleph-slot-api/src/lib.rs`).
+
+`crates/aleph-slot-api/src/capability.rs` defines capability identity and service-graph relations shared by all hosts. `crates/aleph-slot-api/src/descriptor.rs` is the authoritative definition of tool-registry descriptors, replay contracts, and implementation contracts. `ContractVersion` is the slot contract type (`crates/aleph-slot-api/src/slot.rs`), not the protocol constant `HOOK_CONTRACT_VERSION` (`shared/protocol/src/hook.rs`).
 
 ## Descriptor
 
@@ -48,7 +56,7 @@ Zahir::validate_lease──rechecks──▶ checked again before use; refused o
 
 ### CapabilityKind and CapabilityFacet
 
-`CapabilityKind` has 12 variants:
+`CapabilityKind` has 12 variants (`src/capability/descriptor.rs`):
 
 ```rust
 pub enum CapabilityKind { Tool, Ambient, Terminal, Ui, Skill, Agent, Task, Resource, EventSource, Subscription, Plugin, Hook }
@@ -56,13 +64,15 @@ pub enum CapabilityKind { Tool, Ambient, Terminal, Ui, Skill, Agent, Task, Resou
 
 (The source puts one variant per line; it is folded here for layout.) `CapabilityKind::UI` is a compatibility spelling of `Ui`.
 
-Tool, Ambient, Terminal, and Ui have executable capability-layer adapters; the remaining kinds stay descriptive until their owning backend is mounted (comment in `src/capability/descriptor.rs`).
+Tool and special-capability backends provide executable adapters, but the enum alone does not tell you whether a backend is mounted (`src/capability/descriptor.rs`). Ambient, for example, defines a handler that the source marks as unregistered in production (`src/capability/ambient.rs`).
 
 `CapabilityFacet` is a behavior axis orthogonal to kind, with 5 variants: `Callable`, `EventSource`, `Subscription`, `ProviderLifecycle`, `ExternalEffect`. One provider can expose both an event source and callable operations without pretending the whole provider is a `Tool`.
 
-`CapabilityFacets(u8)` is a 5-bit set with `new` / `with` / `contains`; on a descriptor, `supports(facet)` queries it. Facets are descriptive metadata only; provider, owner, and descriptor authority stay in their existing sources.
+`CapabilityFacets(u8)` is a 5-bit set with `new` / `with` / `contains`; on a descriptor, `supports(facet)` queries it. Facets are descriptive metadata and confer no authority (`src/capability/descriptor.rs`).
 
 ### SchemaRef and the fingerprint
+
+`SchemaRef` is defined in `src/capability/descriptor.rs`:
 
 ```rust
 pub struct SchemaRef {
@@ -71,20 +81,19 @@ pub struct SchemaRef {
 }
 ```
 
-`fingerprint` is the SHA-256 of the canonicalized input schema, computed by `capability::backend::to_descriptor` (`src/capability/backend.rs`). The same schema with different key order yields the same fingerprint; change the schema and the fingerprint changes. `validate_lease` uses the fingerprint to tell whether the descriptor behind a lease is still the same one.
+`fingerprint` is the SHA-256 of the canonicalized input schema, computed by `capability::backend::to_descriptor` (`src/capability/backend.rs`). The same schema with different key order yields the same fingerprint; change the schema and the fingerprint changes. The facade’s `validate_lease` checks the fingerprint as part of verifying descriptor freshness (`src/capability/zahir_facade.rs`).
 
-### Do not misuse ProjectionMetadata.surface
+### Do not use surface as a projection marker
 
-<Callout type="warn" title="surface is always None in production">
-  `ProjectionMetadata.surface` is **never populated** in production. The 2026-11-20 severed-wire audit (SW-08, open since C03-8 on 2026-10-30; see `review-results/sev-wire-2026-11-20/cap-core-REPORT.md`) found that the projection layers that would name a surface are themselves not mounted, so every descriptor carries `None`.
-  Consumers must **not** read this field as a "projected" marker. The `Projection.metadata` returned by `Zahir::project` (`src/capability/zahir_facade.rs`) is also `ProjectionMetadata::default()`.
+<Callout type="warn" title="surface is not a projection marker">
+  The 2026-11-20 severed-wire audit recorded that the projection layer that would populate the `surface` field of `ProjectionMetadata` was not mounted (SW-08, open since C03-8 on 2026-10-30; `review-results/sev-wire-2026-11-20/cap-core-REPORT.md`). The live `project` implementation returns `ProjectionMetadata::default()`, so do not use `surface` to tell whether projection has happened (`src/capability/zahir_facade.rs`).
 </Callout>
 
 ## Ownership and lifetime
 
 ### Lifetime scopes and owners
 
-`LifetimeScope` (`src/capability/ownership.rs`) has 5 variants, longest to shortest:
+`LifetimeScope` (`src/capability/ownership.rs`) has 5 variants; `External` falls outside the in-process lifetime hierarchy:
 
 | Variant | Meaning |
 |---|---|
@@ -94,15 +103,17 @@ pub struct SchemaRef {
 | `Task` | Bound to one task |
 | `External` | Owned externally, outside this process's lifetime model |
 
-`OwnerRef` says who owns a capability binding: `Runtime`, `Session(SessionKey)`, `Run(RunId)`, or `Task(TaskId)`.
+`OwnerRef` (`src/capability/ownership.rs`) says who owns a capability binding: `Runtime`, `Session(SessionKey)`, `Run(RunId)`, or `Task(TaskId)`.
 
 <Callout type="info">
-  The codebase does **not yet** have a canonical run-id or task-id type. `RunId(pub String)` and `TaskId(pub String)` are temporary wrappers in `ownership.rs`, and the comments say to align them with a canonical type as soon as one exists.
+  The codebase does **not yet** have a canonical run-id or task-id type. `RunId(pub String)` and `TaskId(pub String)` are temporary wrappers in `src/capability/ownership.rs`, and the comments say to align them with a canonical type as soon as one exists.
 </Callout>
 
-On top of these scopes, `OwnershipTree` forms a five-level tree: Runtime → Session → Run → Task → EffectClaim (comment in `ownership.rs`). Two orthogonal axes apply: `LifetimeScope` is the RAII axis (how long a binding lives) and `VisibilityScope` is the ACL axis (who can see it).
+On top of these scopes, `OwnershipTree` forms a five-level tree: Runtime → Session → Run → Task → EffectClaim (comment in `src/capability/ownership.rs`). Two orthogonal axes apply: `LifetimeScope` is the RAII axis (how long a binding lives) and `VisibilityScope` is the ACL axis (who can see it).
 
 ### OwnerGeneration and FencingToken
+
+See `src/capability/ownership.rs` for generations, fencing tokens, and binding mutations:
 
 - `OwnerGeneration(pub u64)`: each binding has a current generation. A lease is valid only while the generation it recorded equals the binding's current one; re-issuing ownership or bumping the lifetime scope changes it.
 - `FencingToken(u64)`: private field, `Copy`. The only constructor is the owner layer's `pub(crate) fn new(nonce: u64)`, and counter monotonicity is the owner layer's contract. Every `claim` mints a fresh token, so a stale lease can never present an old token as live.
@@ -120,6 +131,8 @@ Once revoked or disposed, state cannot be undone, and every later `resolve` / `c
 
 ### OwnershipChange: the only observer-visible side effect
 
+`OwnershipChange` is defined in `src/capability/ownership.rs`:
+
 ```rust
 pub enum OwnershipChange {
     Bumped { generation: OwnerGeneration, scope: LifetimeScope },
@@ -130,6 +143,29 @@ pub enum OwnershipChange {
 ```
 
 (Multi-line in the source; condensed here.) It is emitted under `OwnershipTree`'s own mutex, in the same critical section that mutates state, and is the **only** observer-visible side effect of the tree's mutation methods. Observers subscribe through `OwnershipTree::subscribe_changes`; the stream does **not** route through any global bus, session event store, or approval authority. Subscribing is pure observation: it changes no state, does not advance the nonce, and registers no binding. A receiver that falls behind gets a lagged count and should reconcile against a fresh snapshot.
+
+### Lifecycle state machine and leases
+
+`LifecycleState` (`src/capability/lifecycle.rs`) has five states: created but not yet attached to an owner (`Created`), attached and eligible for activation (`Attached`), invocable and subscribable (`Active`), detaching (`Detaching`), and revoked (`Revoked`). `is_invocable` is true only in `Active`. The valid transitions include revocation before activation:
+
+```text
+Created → Attached → Active → Detaching → Revoked
+Created  ───────────────────────────────→ Revoked
+Attached ───────────────────────────────→ Revoked
+Active   ───────────────────────────────→ Revoked
+```
+
+A lifecycle `Lease` starts at `issued_at`. With a TTL, `is_expired` becomes true when elapsed time reaches the TTL; without one, time does not expire the lease. `time_remaining` returns `None` if there is no TTL or elapsed time exceeds it. `renew` resets the issue time and TTL but keeps the `OwnerGeneration` (`src/capability/lifecycle.rs`). This lease is distinct from the facade’s `BackendLease` (`src/capability/facade.rs`).
+
+`CapabilityLifecycle::transition_to` rejects transitions not shown above with `LifecycleError::InvalidTransition { from, to }`. Calling `revoke` again on a revoked capability returns the same error. `validate_activation` requires `Attached`, while `validate_lease` requires `Active`; both check the TTL and current owner generation. `renew_lease` accepts only `Active` and otherwise returns `NotInvocable` with the current state (`src/capability/lifecycle.rs`).
+
+### Activation gate
+
+For `CapabilityActivationController`, `Attached → Active` is the only transition guarded by constraints. Attaching is still registration, and runtime constraints do not block revocation. Activation checks the lease against the current owner generation; before an active capability is used, `validate_runtime` rechecks the lease and current constraints (`src/capability/activation.rs`).
+
+Production dispatch calls `admit_runtime` (`src/tools/scoped/dispatch.rs`). For constrained bindings, shared policy checks the current rules, activates the controller if it is still `Attached`, and revalidates the lifecycle. Production policy keeps constraint evaluation in the policy layer and gives the controller a lifecycle lease without a TTL (`src/capability/policy_runtime.rs`). Scoped tools also support optional compatibility controllers keyed by tool name and held as `Arc<dyn CapabilityActivation>` (`src/tools/scoped/mod.rs`, `src/tools/scoped/builder.rs`). Dispatch checks any registered controller, but the shared policy, not this map, manages production rules (`src/tools/scoped/dispatch.rs`, `src/capability/policy_runtime.rs`).
+
+The two `ActivationError` types are distinct. The type in `src/capability/activation.rs` reports lifecycle, constraint, or hook errors. The one in `src/capability/provider_registry.rs` is for provider activation and has the variants `Rejected`, `Failed`, `Unknown`, and `NotVisible`.
 
 ## Visibility
 
@@ -144,16 +180,18 @@ pub enum OwnershipChange {
 | `allowed_ids` | `Option<Vec<String>>` |
 | `approval` | `Option<String>` |
 
-`allowed_kinds` and `allowed_ids` are `String` on purpose rather than `CapabilityKind`: the `ownership` module must not depend on `descriptor::CapabilityKind`, or `descriptor` ↔ `ownership` would become a cycle. The strings are compared against kind and name spellings at describe time.
+`allowed_kinds` and `allowed_ids` are `String` on purpose rather than `CapabilityKind`: the `ownership` module must not depend on `descriptor::CapabilityKind`, or `descriptor` ↔ `ownership` would become a cycle. See `src/capability/policy.rs` for kind and name comparisons; which dimensions are checked depends on the call path.
+
+`src/scope/` handles a different set of scope concerns. `src/scope/authority.rs` resolves the execution identity when a background task fires, `src/scope/carried.rs` uses task-local state to carry memory, project, and agent context, and `src/scope/directory.rs` caches user names for display. These are not the ACL fields of `VisibilityScope` (`src/capability/ownership.rs`).
 
 ## Policy
 
 ### The live path: binding checks in the facade
 
-The admission path that actually runs in production is inside `ZahirFacade` (`src/capability/zahir_facade.rs`):
+In production, the facade resolves and rechecks the binding, and runtime policy checks call restrictions (`src/capability/zahir_facade.rs`, `src/capability/policy_runtime.rs`). The facade checks bindings as follows:
 
-- `resolve` looks up the binding in `OwnershipTree`. A missing binding with a revoked id returns `ResolveError::Revoked`, a missing binding that is not revoked returns `NotVisible`; on success the owner and owner generation at that moment are written into the `BackendLease`.
-- `validate_lease` rechecks that the provider generation has not changed, that the descriptor's `id` / `revision` / `schema.fingerprint` are unchanged, and, through `OwnershipTree::with_current_bindings`, that the binding is still the one the lease recorded (revoked → `Revoked`; missing or disposed → `Unknown`; generation or binding mismatch → `StaleOwner`).
+- After looking up the backend entry, `resolve` looks up the binding in `OwnershipTree`. A missing binding with a revoked id can return `ResolveError::Revoked`, a missing binding that is not revoked returns `NotVisible`; on success the owner and owner generation at that moment are written into the `BackendLease`.
+- `validate_lease` rechecks that the provider generation has not changed, that the descriptor's `id`, `revision`, and schema `fingerprint` are unchanged, and, through `OwnershipTree::with_current_bindings`, that the binding is still the one the lease recorded (revoked → `Revoked`; missing or disposed → `Unknown`; generation or binding mismatch → `StaleOwner`).
 
 ### The three-gate model
 
@@ -163,16 +201,15 @@ The admission path that actually runs in production is inside `ZahirFacade` (`sr
 2. **Principal gate**: does the requesting principal match the binding's owner.
 3. **Authority gate**: is the binding live, not revoked, not disposed, and at the expected generation.
 
-When `PolicyEngine::resolve` passes, it issues an opaque `CapabilityLease` whose fields are all `pub(crate)`, so callers cannot forge one; `PolicyEngine::validate_lease` rechecks it later.
+When `PolicyEngine::resolve` passes, it issues an opaque `CapabilityLease` whose fields are all `pub(crate)`, so callers outside the crate cannot forge one; `PolicyEngine::validate_lease` rechecks it later.
 
 <Callout type="warn" title="The three-gate resolve is not mounted in production">
-  The comments in `policy.rs` state (2026-11-20 severed-wire audit) that `PolicyEngine::resolve` has **no production call site**, and neither does `validate_visibility_scope`, which rides on it. As a result, the `allowed_kinds` / `allowed_ids` / `approval` / `workspace` / `session` dimensions of `VisibilityScope` are **not enforced at runtime today**; the source calls this "a known gap, not an intended behaviour".
-  The method is kept rather than deleted because it is the only place those five dimensions are enforced; wiring it is a product decision, not a cleanup.
+  The comments in `src/capability/policy.rs` record the 2026-11-20 severed-wire audit’s finding: `PolicyEngine::resolve` and its helper `validate_visibility_scope` have no production call sites. Do not treat their descriptor comparisons for `allowed_kinds` / `allowed_ids` / `approval` / `workspace` / `session` as production guarantees. Startup constraints and live admission do not depend on this `resolve` (`src/capability/production_init.rs`, `src/capability/policy_runtime.rs`).
 </Callout>
 
 ### Startup constraints (mounted)
 
-In production, `PolicyEngine` actually carries **startup constraints**. `build_capability_policy` (`src/capability/production_init.rs`) assembles `PolicyEngine::with_shared_tree` from the shared `OwnershipTree` and `config.policies.capability_constraints`; `aleph-server` calls it at startup (`src/bin/aleph-server/commands/start/capability_init.rs`). Its comment calls it "pure assembly, not authorization or a second ownership authority".
+In production, `PolicyEngine` actually carries **startup constraints**. `build_capability_policy` (`src/capability/production_init.rs`) assembles `PolicyEngine::with_shared_tree` from the shared `OwnershipTree` and the `capability_constraints` configuration under `policies`; `aleph-server` calls it at startup (`src/bin/aleph-server/commands/start/capability_init.rs`). Its comment calls it "pure assembly, not authorization or a second ownership authority".
 
 Constraints are configured per capability id, and each rule may carry a time window, a resource limit, and required conditions:
 
@@ -182,6 +219,14 @@ required_conditions = { provider_ready = true }
 ```
 
 The rule shape is in `src/config/types/policies/capability_constraints.rs`: `time` (`start_hour` / `end_hour`), `resource` (`unit` is `active_calls` or `pty_sessions`, plus `max_active`), and `required_conditions` (name to boolean). The struct uses `deny_unknown_fields`, so unknown keys are rejected. Violations are reported as `ConstraintViolation` (`src/capability/constraints.rs`), for example `TimeWindowClosed`, `ResourceLimitExceeded`, and `ConditionNotMet`.
+
+### Call context and runtime admission
+
+`CapabilityCallContext` records facts captured by an authenticated entry point (actor, principal, session, workspace, connection, and call id), not deserialized client claims. Runtime policy combines startup rules with current facts from the source that owns them. It manages restrictions, not descriptors, handlers, or ownership. The operation selects a `ResourceUse` of `Allocate`, `Existing`, or `Release`; The latter two skip allocation-only resource limit checks (`src/capability/policy_runtime.rs`, `src/capability/constraints.rs`).
+
+Tool dispatch checks admission with the trusted context (`src/tools/scoped/dispatch.rs`), and the registry tracks in-flight calls with `RunningCapabilityCall` (`src/tools/registry.rs`). The UI gateway entry point also builds a trusted context and checks admission (`src/gateway/capability_ui.rs`). When a connection closes, the connection layer delegates cleanup of its surfaces to the UI gateway (`src/gateway/server/connection/mod.rs`).
+
+Async special capabilities have a private dispatch boundary. `DomainToolCall` carries the trusted context, an optional owner actor, and a cancellation token through the task-local `DOMAIN_TOOL_CALL`. `CapabilityInvocationOrigin` is a `pub(crate)` enum: only the canonical authenticated entry points produce origin evidence, and client fields cannot construct it (`src/capability/special_dispatch.rs`, `src/tools/scoped/dispatch.rs`, `src/capability/tool_adapters.rs`, `src/capability/zahir_facade.rs`).
 
 ### PolicyDenial
 
@@ -204,6 +249,8 @@ The rule shape is in `src/config/types/policies/capability_constraints.rs`: `tim
 
 ## Effect claims
 
+`EffectClaim` is defined in `src/capability/ownership.rs`:
+
 ```rust
 pub struct EffectClaim {
     pub request_id: String,
@@ -212,12 +259,12 @@ pub struct EffectClaim {
 }
 ```
 
-`OwnershipTree::claim` records a claim against one capability binding and mints a fresh `fence`. It returns `None` if the capability is revoked, its lifetime is disposed, the owner does not match, or the fence counter is exhausted. `claim_state` returns `ClaimState::Active` or `Unknown`: `Active` means the binding the claim was made against is still live, not revoked, not disposed, and not re-issued since; revocation, disposal, parent-bump invalidation, or no such claim at all all count as `Unknown`.
+`OwnershipTree::claim` records a claim against a binding and mints a fresh `fence`. It returns `None` if the binding is missing, the capability is revoked, its lifetime has been disposed, the owner does not match, or the fence counter is exhausted. `claim_state` returns `ClaimState::Active` only if the binding is still live and the fence record matches the binding’s current generation and the claim’s owner. Revocation, disposal, a parent bump that clears the record, or a missing claim all yield `Unknown` (`src/capability/ownership.rs`).
 
 `src/capability/effect_claim.rs` is a pure reducer over `SessionEvent::EffectClaim*` event histories (states `Prepared` / `Claimed` / `Invoking` / `Succeeded` / `Failed` / `Unknown`) that stays fail-closed on duplicate active claims and illegal migrations.
 
 <Callout type="warn" title="effect_claim is not wired yet">
-  The header comment of `effect_claim.rs` says there is no production construction point for `SessionEvent::EffectClaim*`, so the reducer has no producer and no consumer outside its own tests. It is a documented deferral (see the Capability Phase 4 section of `AGENTS.md`), not a silent dead module. So "recognize a duplicate submission by its fence" is currently a contract of the reducer and `OwnershipTree`, not an end-to-end behavior.
+  The header comment of `src/capability/effect_claim.rs` says there is no production construction point for `SessionEvent::EffectClaim*`, so the reducer has no producer and no consumer outside its own tests. It is a documented deferral (see the Capability Phase 4 section of `AGENTS.md`), not a silent dead module. So "recognize a duplicate submission by its fence" is currently a contract of the reducer and `OwnershipTree`, not an end-to-end behavior.
 </Callout>
 
 ## Backend evidence and resolution
@@ -234,6 +281,8 @@ pub struct EffectClaim {
 | `Special` | `capture: CapturedSpecialEntry`, `provider_generation: u64` |
 
 ### BackendLease and ResolveError
+
+See `src/capability/facade.rs` for the type definitions and `src/capability/zahir_facade.rs` for resolution and validation.
 
 ```rust
 pub struct BackendLease {
@@ -252,14 +301,16 @@ There is one rule, and it cannot be broken: **a consumer must treat a lease as i
 | Variant | Meaning |
 |---|---|
 | `Unknown` | Lookup miss, missing binding (and not revoked), descriptor freshness mismatch, or any unclassifiable failure |
-| `NotVisible` | The caller's `Reference.visibility` has no binding for the id (resolve only) |
+| `NotVisible` | There is no binding for the id in the scope specified by the `visibility` field of the caller’s `Reference` (resolve only) |
 | `Revoked` | The binding has been revoked |
-| `StaleOwner` | The lease's `owner_generation` lags the current generation (validate only) |
+| `StaleOwner` | The lease's ownership binding or `owner_generation` differs from the current record (validate only) |
 | `StaleProvider` | The provider instance was stopped or replaced after the lease was minted |
 
 `StaleOwner` is never a resolve-time error: a freshly minted lease carries the generation read at resolve time, so it cannot be stale at construction.
 
 ### Snapshots and change streams
+
+These types belong to the in-process snapshot and registry change path, not to capability observation events (`src/capability/facade.rs`, `src/capability/zahir_facade.rs`).
 
 - `CapabilitySnapshot { capabilities, committed_cursor }`: contents are **frozen** for the snapshot's lifetime. A later mutation does not rewrite a held snapshot; it produces a new snapshot or a `CapabilityChange::Invalidated` event.
 - `Cursor(pub u64)`: a monotonic subscription position; `0` means "from the beginning". Note that `ZahirFacade::subscribe` ignores the caller's cursor: this synchronous, snapshot-anchored API has no replay, so it starts from the snapshot position, and a caller cursor ahead of the snapshot fails closed to the snapshot cursor.
@@ -268,37 +319,71 @@ There is one rule, and it cannot be broken: **a consumer must treat a lease as i
 
 `CapabilityChange` variants: `Registered`, `Replaced`, `Unregistered` (each with `id` and `revision`), and `Invalidated`.
 
+## Events and observation
+
+The stream in `src/capability/events.rs` records bounded, instance-scoped observations. It is neither an authority nor a replay log. It is separate from the facade’s `CapabilityChangeStream` (`src/capability/facade.rs`) and the ownership tree’s `OwnershipChange` notifications (`src/capability/ownership.rs`).
+
+A record commits to memory first, broadcasts next, and then runs the optional persistence hook. Persistence failures are reported after commit, so retrying produces duplicate observations. Hooks run outside the buffer lock and can finish out of order; sinks that need to reconstruct the order must sort by record sequence (`src/capability/events.rs`).
+
+`CapabilityEventType` serializes in `snake_case`. Its variants are `Created`, `Attached`, `Activated`, `Detaching`, `Invoked`, `Revoked`, `ConstraintViolation`, `PolicyViolation`, and `ExecutionFailed`. The enum describes what the stream can represent, not which variants have production emitters (`src/capability/events.rs`).
+
+### Trusted audiences and production wiring
+
+`EventAudience` distinguishes `OperatorOnly` from `Principal(PrincipalEventAudience)`. The latter records a `user_id`, and optional `session_key`, `workspace`, and `source_incarnation` fields. Trusted producers capture the audience at their boundary; clients cannot establish that authority through deserialization (`src/capability/event_audience.rs`). The gateway checks visibility for the connection before forwarding each record (`src/gateway/capability_events.rs`, `src/gateway/server/connection/mod.rs`).
+
+Server startup builds and mounts the stream (`src/bin/aleph-server/commands/start/capability_init.rs`, `src/bin/aleph-server/commands/start/mod.rs`). Source evidence and observations come through the PTY manager’s `SourceObservationReceipt` (`src/gateway/pty/manager.rs`), the tool registry (`src/tools/registry.rs`), and dispatch’s `InvocationObservation` (`src/tools/scoped/dispatch.rs`). This is not a reader for `src/capability/audit.rs`, whose header records the 2026-11-20 severed-wire audit finding that it had no production readers.
+
 ## Zahir
 
-`Zahir` is a trait in `src/capability/facade.rs`: every consumer (UI, MCP projection, ACP JSON projection) reads capabilities through this one surface. It never invokes a capability directly; it describes (`describe`), resolves into a lease (`resolve` / `validate_lease`), subscribes to change (`subscribe`), and projects (`project`), plus one entry point, `activate`, that runs a provider's activation hook.
+`Zahir` is a trait in `src/capability/facade.rs`: it defines a uniform interface for consumers to read capabilities, without implying that every transport is mounted. It never invokes a capability directly; it describes (`describe`), resolves into a lease (`resolve` / `validate_lease`), subscribes to change (`subscribe`), and projects (`project`), plus one entry point, `activate`, that runs a provider's activation hook.
 
 `ZahirFacade` (`src/capability/zahir_facade.rs`, module comment "The one live Zahir host") is its only live implementation. It is built by `ProjectionHost::mount*` (`src/capability/projection_host.rs`), and `aleph-server` calls `ProjectionHost::mount_with_runtime_and_events` at startup (`src/bin/aleph-server/commands/start/mod.rs`). It composes:
 
-- `ToolBackendAdapter`: its inner `crate::tools::registry::ToolHandlerRegistry` is the **single callable-Tool source of truth**;
+- `ToolBackendAdapter`: its inner `ToolHandlerRegistry` is the **single callable-Tool source of truth** (`src/tools/registry.rs`);
 - `Arc<OwnershipTree>`: the **single owner / revoke / dispose source**.
 
 The struct also holds a provider adapter, an optional `MemoryRuntime`, a `PolicyEngine`, the special-capability registry, and an event stream. It holds **no** second descriptor map, handler map, or owner counter.
 
-The registry broadcast is a live notification tap (256 slots, lag can drop), not a durable recovery source. `subscribe` drains it synchronously into a pure `CapabilityChangeStream`; a lagged receiver resyncs from a fresh snapshot and emits `CapabilityChange::Invalidated` rather than pretending it delivered every event. Durable recovery trusts only `SessionEventStore` (Capability Phase 4 section of `AGENTS.md`).
+The registry broadcast is a live notification tap (256 slots, lag can drop), not a durable recovery source. `subscribe` drains it synchronously into a pure `CapabilityChangeStream`; a lagged receiver resyncs from a fresh snapshot and emits `CapabilityChange::Invalidated` rather than pretending it delivered every event. The broadcast does not support durable recovery (`src/capability/zahir_facade.rs`); session event storage is a separate interface (`SessionEventStore` in `src/session/store.rs`).
+
+## Process-wide capability handles
+
+With a bare `OnceLock<Arc<T>>`, an install function, and a getter that falls back to a default, readers cannot tell “startup never installed it” from “startup installed this very value.” `CapabilitySlot::install` encapsulates writing the value and recording the outcome in one operation, writing first and then stamping the outcome in the `MetaGuard` pattern. The `else` branch of a conditional installation can call `CapabilitySlot::decline`. Name the missing input rather than the symptom: operators see `because` verbatim (`src/capability/mod.rs`).
+
+`Outcome` has two variants: `Installed` and `Declined { because }`. An outcome of `None` is not `Declined`: it means startup never reached that slot. `MissingSemantics` records what happens when a handle is absent: `IndistinguishableDefault { reads_as }`, `ConsumerDecides`, `FailsClosed`, or `FailsOpen`. The inventory is for capability handles whose absence could yield a wrong answer rather than a crash, not for every process-wide cache (`src/capability/mod.rs`).
+
+`MutableCapabilitySlot` deliberately omits `decline` (`src/capability/mod.rs`). Its only instance is `GLOBAL_POLICY` (`src/spend/mod.rs`), which the live configuration update path replaces (`src/config/live_apply.rs`).
+
+### Derived handle inventory
+
+The test-only census derives its inventory from installations in the file that defines the container, not a hand-maintained exclusion list (`src/capability/census.rs`). For `OnceLock`, `OnceCell`, and the `ArcSwap` family, `Written` means a call to `set`, `store`, or `swap`. First-caller-wins means `get_or_init` or `get_or_try_init` with an initializer that depends on an enclosing function’s arguments. An initializer that uses only data reachable from the container itself is a lazy cache: “not initialized yet” is the correct answer, so that container does not count as a handle.
 
 ## Mount status
 
-The table lists only modules whose source header comments carry the 2026-11-20 severed-wire audit record (`review-results/sev-wire-2026-11-20/`):
+This table distinguishes production wiring, test-only logic, and retained contracts that are not mounted. Dated entries cite findings from the 2026-11-20 severed-wire audit (`review-results/sev-wire-2026-11-20/`).
 
 | Module | Status | Basis |
 |---|---|---|
-| `src/capability/zahir_facade.rs` | Mounted (Tool / provider / special / memory resolution) | Module comment; built via `ProjectionHost` at `aleph-server` startup |
-| `src/capability/production_init.rs` | Mounted (startup constraints) | Called from `src/bin/aleph-server/commands/start/capability_init.rs` |
-| `src/capability/ui.rs`, `ui_surface.rs` | Mounted (`aleph/ui` namespace) | Header comment of `ui.rs` |
-| `PolicyEngine::resolve` | Not mounted | Comment in `policy.rs` |
-| `src/capability/ambient.rs` | Deferred on purpose, not mounted | Header comment: exposing process identity, user identity, and environment variables is a security-surface decision |
-| `src/capability/audit.rs` | Not mounted | Header comment: no production reader; the live path is `src/gateway/capability_events.rs` |
-| `src/capability/grant.rs` | Not mounted | Header comment: sandbox approval uses its own `GrantStore` (`src/sandbox/exec_approval/grants.rs`) |
-| `src/capability/effect_claim.rs` | Not wired | Header comment: no production `EffectClaim*` construction point |
+| `src/capability/zahir_facade.rs` | Mounted: Tool / provider / special / memory resolution | `src/capability/projection_host.rs`, `src/bin/aleph-server/commands/start/mod.rs` |
+| `src/capability/production_init.rs` | Mounted: startup constraints | `src/bin/aleph-server/commands/start/capability_init.rs` |
+| `src/capability/lifecycle.rs` | Wired for constrained bindings in runtime policy | `src/capability/activation.rs`, `src/capability/policy_runtime.rs` |
+| `src/capability/activation.rs` | Shared policy uses the controller; the scoped-tool layer has optional trait-based checks | `src/capability/policy_runtime.rs`, `src/tools/scoped/builder.rs`, `src/tools/scoped/dispatch.rs` |
+| `src/capability/policy_runtime.rs` | Mounted: live admission | `src/tools/scoped/dispatch.rs`, `src/gateway/capability_ui.rs` |
+| `src/capability/events.rs` | Mounted: capability observations | `src/bin/aleph-server/commands/start/capability_init.rs`, `src/gateway/capability_events.rs` |
+| `src/capability/event_audience.rs` | Wired: trusted audiences and connection filtering | `src/gateway/pty/manager.rs`, `src/gateway/capability_events.rs` |
+| `src/capability/special_dispatch.rs` | Wired: private invocation origin and task-local context | `src/tools/scoped/dispatch.rs`, `src/capability/tool_adapters.rs`, `src/gateway/capability_ui.rs` |
+| `src/capability/mod.rs` | `CapabilitySlot` records installation outcomes | `src/capability/mod.rs`; for the mutable instance see `src/spend/mod.rs` |
+| `src/capability/census.rs` | Test-only: derived handle inventory | `src/capability/mod.rs`, `src/capability/census.rs` |
+| `src/capability/ui.rs`, `src/capability/ui_surface.rs` | Mounted: `aleph/ui` | `src/gateway/capability_ui.rs` and both module headers |
+| `PolicyEngine::resolve` | The 2026-11-20 audit recorded it as unmounted | Header of `src/capability/policy.rs` |
+| `src/capability/ambient.rs` | The 2026-11-20 audit recorded no production registration; intentionally deferred | Header: exposing process identity, user identity, and environment variables is a security decision |
+| `src/capability/audit.rs` | The 2026-11-20 audit recorded no production reader | Header; the live path is `src/gateway/capability_events.rs` |
+| `src/capability/grant.rs` | The 2026-11-20 audit recorded `GrantRegistry` as unmounted | Header; `scripts/capability_wiring_audit.py` checks wiring, and sandbox approval uses `GrantStore` in `src/sandbox/exec_approval/grants.rs` |
+| `src/capability/effect_claim.rs` | Reducer not wired | Header: no production `EffectClaim*` construction point |
 
 ### The capability UI surface
 
-`src/capability/ui.rs` and `ui_surface.rs` are the **runtime-owned** `aleph/ui` surface capability (`UI_NAMESPACE = "aleph/ui"`). The live UI path is `capability::ui_surface` plus the gateway's `capability_ui` face, which owns rendering and input transport. It has **nothing to do** with plugin UI: plugin UI goes through `src/extension/panel_publication/`.
+`src/capability/ui.rs` and `src/capability/ui_surface.rs` are the **runtime-owned** `aleph/ui` surface capability (`UI_NAMESPACE = "aleph/ui"`). The live UI path runs through `src/capability/ui_surface.rs` and `src/gateway/capability_ui.rs` for rendering and input transport. It has **nothing to do** with plugin UI: plugin UI goes through `src/extension/panel_publication/`.
 
 ## Relation to the old model
 
@@ -306,7 +391,7 @@ The old model is "a plugin declares which capabilities it has": the `CapabilityD
 
 ## History: the removed legacy UI handler
 
-The 2026-11-20 severed-wire audit removed the legacy UI handler in `src/capability/ui.rs` that was never registered in production, along with the in-memory display / input stub: no production path ever registered that synchronous handler, so the whole "legacy UI handler" arm was a severed wire (`review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`, CUI-02). `ui.rs` now keeps only the typed UI capability contract (the namespace, the schema, and the descriptor the gateway publishes).
+The 2026-11-20 severed-wire audit removed the legacy UI handler in `src/capability/ui.rs` that was never registered in production, along with the in-memory display / input stub: no production path ever registered that synchronous handler, so the whole "legacy UI handler" arm was a severed wire (`review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`, CUI-02). `src/capability/ui.rs` now keeps only the typed UI capability contract (the namespace, the schema, and the descriptor the gateway publishes).
 
 ## Planned
 
@@ -314,8 +399,8 @@ The 2026-11-20 severed-wire audit removed the legacy UI handler in `src/capabili
 
 | Design intent | Blueprint section | Closest current implementation |
 |---|---|---|
-| **Protocol as projection**: one description, many exits; a new protocol is just a new adapter, with no change to Core | Section 12, "协议是投影" (protocols are projections) | `TransportTarget` (`Mcp` / `AcpJson` / `StateDatabase`) and `Zahir::project` (`src/capability/facade.rs`), but `Projection` carries only a list of capability ids and `ProjectionMetadata.surface` is always `None` (see above) |
-| **Reversible / durable effect classification**: uniform undo on owner release; effects that cross an irreversible boundary follow an "intent → execute → result" sandwich | Section 9, "Reversible Effects 与 Durable Effects", subsection 9.4 | `CapabilityFacet::ExternalEffect`, `EffectClaim`, and `OwnershipTree::dispose` (`src/capability/ownership.rs`); the reducer `src/capability/effect_claim.rs` is not wired yet |
-| **Dependency graph**: declared dependencies drive assembly order, revocation order, and `doctor` diagnostics; an unavailable dependency returns a structured "temporarily unavailable" error | Section 10, "Dependency Graph", subsection 10.2 | `Service` relation edges (`requires` / `provides` / `conflicts`) and `BackendLease`'s `required_resources` (`src/capability/facade.rs`); there is no separate dependency graph and no `doctor` diagnostic |
+| **Protocol as projection**: one description, many exits; a new protocol is just a new adapter, with no change to Core | Section 12, "协议是投影" (protocols are projections) | `TransportTarget` (`Mcp` / `AcpJson` / `StateDatabase`) and `Zahir::project` (`src/capability/facade.rs`), but `Projection` carries only a list of capability ids and the live implementation returns default `ProjectionMetadata` (`src/capability/zahir_facade.rs`) |
+| **Reversible / durable effect classification**: uniform undo on owner release; effects that cross an irreversible boundary follow an "intent → execute → result" sandwich | Section 9, "Reversible Effects 与 Durable Effects", subsection 9.4 | `CapabilityFacet::ExternalEffect` (`src/capability/descriptor.rs`), `EffectClaim`, and `OwnershipTree::dispose` (`src/capability/ownership.rs`); the reducer `src/capability/effect_claim.rs` is not wired yet |
+| **Dependency graph**: declared dependencies drive assembly order, revocation order, and `doctor` diagnostics; an unavailable dependency returns a structured "temporarily unavailable" error | Section 10, "Dependency Graph", subsection 10.2 | `Service` relation edges (`requires` / `provides` / `conflicts`, `crates/aleph-slot-api/src/capability.rs`) and `BackendLease`'s `required_resources` (`src/capability/facade.rs`); there is no separate dependency graph and no `doctor` diagnostic |
 
-The slot catalog, the replacement mechanism, and the unified dispatch registry live in the other blueprint, `docs/research/aleph_modularization_plan.md` (sections 3, 4, and 8); see the "Planned" section of [Capabilities and Plugins](../concepts/capability-system).
+> **Status: planned** — the slot catalog, replacement mechanism, and unified dispatch registry come from a separate blueprint, `docs/research/aleph_modularization_plan.md` (sections 3, 4, and 8). See the "Planned" section of [Capabilities and Plugins](../concepts/capability-system).

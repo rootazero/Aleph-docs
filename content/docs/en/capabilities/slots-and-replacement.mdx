@@ -88,7 +88,7 @@ The modules exported by `crates/aleph-slot-api/src/lib.rs` are the contract cove
 
 ## The three-layer model and the slot catalog
 
-> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §2 three-layer model, §3 slot catalog.
+> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §2 three-layer model, §3 slot catalog.
 
 The blueprint splits capabilities into three layers: L1 kernel (not replaceable), L2 default modules, and L3 replacement surface. It gives one table of data slots and one table of behaviour slots, with slot IDs shaped like:
 
@@ -110,21 +110,21 @@ Three things in the current code come closest, and none of them is a slot catalo
 
 - the primary capability classification is `CapabilityKind` (12 variants) in `src/capability/descriptor.rs`; it is a **classification**, not a replaceable position;
 - the provider side has `ProviderId` and `ProviderState` in `src/capability/provider.rs`, which describe the lifecycle of one backend, not a slot;
-- the behaviour side is registered by `src/extension/hooks/registry.rs`, the legacy hook registry, whose wire form is still the 24-variant `HookEvent`.
+- the behaviour side is registered by `src/extension/hooks/registry.rs`, the legacy hook registry. Its existing wire surface still uses the 24-variant `HookEvent` from `crates/aleph-slot-api/src/hooks.rs`; it is not a production dispatcher for the new Hook@1 contract.
 
 ## The replacement mechanism
 
-> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §4 replacement mechanism (§4.1 user configuration, §4.2 resolution order, §4.3 activation and hot swap).
+> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §4 replacement mechanism (§4.1 user configuration, §4.2 resolution order, §4.3 activation and hot swap).
 
 The blueprint shape is:
 
 - a user configuration section `[slots."<slot-id>"]` with the keys `use` (values shaped like `builtin:`, `native:`, `wasm:`, `mcp:`, `plugin:`), `mode` (replace / prepend / append / disable), and `fallback`;
 - a five-level resolution order: session-level override > project-level `.aleph/config.toml` > user-level `~/.aleph/config.toml` > plugin manifest claims > builtin; when two declarations at the same level claim the same single-cardinality slot the result is **fail-closed** and lands in `Conflicted`;
-- an activation path of `SlotResolver` → `SlotPlan` (a pure value), with tool slots going through `ToolHandlerRegistry::replace` / `register` / `unregister`, behaviour slots through the hook registry, and process-level slots through `CapabilitySlot<T>`; every application registers a new owner generation in the ownership tree, invalidating older leases on re-check, and configuration hot swap goes through the `slots` branch of `config::live_apply`.
+- an activation path of the blueprint terms SlotResolver (slot resolver) → SlotPlan (a pure-value slot plan), with tool slots going through `ToolHandlerRegistry::replace` / `register` / `unregister`, behaviour slots through the hook registry, and process-level slots through `CapabilitySlot<T>`; every application registers a new owner generation in the ownership tree, invalidating older leases on re-check, and configuration hot swap goes through the `slots` branch of `config::live_apply`.
 
 What really exists today is a small part of that: `ToolHandlerRegistry::replace(descriptor, handler)` in `src/tools/registry.rs` already implements "replace the handler and the descriptor in one atomic swap" with exactly the semantics the blueprint describes — callers already holding the previous handler keep their stable `Arc`, subsequent `resolve` sees the new one, and a name that was never registered returns `ToolError::NotFound`. But it is an **internal registry operation**: its callers are the plugin loading and tool registration paths, not user configuration.
 
-`SlotResolver`, `SlotPlan`, the `[slots.*]` configuration section, and the `slots` branch of `config::live_apply` do not exist in the code.
+SlotResolver and SlotPlan above are blueprint §4.2 terms, not implemented symbols. The current `src/config/live_apply.rs` likewise has no `slots` branch or parser for that configuration path.
 
 ## What can be replaced today
 
@@ -133,7 +133,7 @@ Only four kinds of replacement really exist today:
 1. **Tool implementations**: `ToolHandlerRegistry::register` / `replace` / `unregister` in `src/tools/registry.rs`. The registry is built on the immutable publication primitive in `src/capability/versioned_registry.rs` — `transact` publishes a new revision atomically and broadcasts, so subscribers see the change.
 2. **Registry snapshot replacement**: `CapabilityChange` in `src/capability/facade.rs` has the four variants `Registered`, `Replaced`, `Unregistered`, and `Invalidated`, and `CapabilityChangeStream::invalidate_and_resync` emits `Invalidated` when the owner generation advances while keeping the last committed cursor, so a subscriber resyncs instead of restarting from zero.
 3. **Provider replacement by generation invalidation**: `ProviderLifecycle` in `src/capability/provider.rs` allocates a new generation when a **new start begins**, so a lease from an older generation is invalid during a restart and **remains invalid after a replacement**; `ResolveError::StaleProvider` in `src/capability/facade.rs` is the explicit expression of "the provider was stopped or replaced after the lease was issued".
-4. **User-configuration-driven backend swapping**: `McpServerConfig` in `src/config/types/tools.rs` describes a client-side MCP server entry (`command`, `args`, `env`, `cwd`, `requires_runtime`, `timeout_seconds`, `enabled`), so swapping an MCP server in `config.toml` is the only user-driven "change the backend" that exists. On the gateway side the exposure list lives in `McpFaceConfig` in `src/gateway/mcp_face/config.rs`: its `expose` is an allowlist that can take effect hot, while `enabled` only matters when routes are mounted at boot.
+4. **User-configuration-driven backend swapping**: `McpServerConfig` in `src/config/types/tools.rs` describes a client-side MCP server entry (`command`, `args`, `env`, `cwd`, `requires_runtime`, `timeout_seconds`, `enabled`), so swapping an MCP server in `config.toml` is one existing user-driven "change the backend" that exists. On the gateway side the exposure list lives in `McpFaceConfig` in `src/gateway/mcp_face/config.rs`: its `expose` is an allowlist that can take effect hot, while `enabled` only matters when routes are mounted at boot.
 
 There are also two configuration fields that are deliberately refused, also in `src/config/types/tools.rs`: a non-default tool_service.default_timeout_seconds and a non-empty tool_service.per_tool_seconds are rejected while the configuration is parsed, with the error texts `tool_service.default_timeout_seconds is not supported until ToolService consumes it` and `tool_service.per_tool_seconds is not supported until ToolService consumes it`. Those fields are reserved for the ToolService to consume — configuring them is an error, not a silent no-op.
 
@@ -148,7 +148,7 @@ Today the behaviour is **fail-closed**, with no fallback:
 - after a lease is invalidated, `ResolveError::StaleOwner` / `StaleProvider` in `src/capability/facade.rs` refuses further use;
 - before dispatching a special capability, `src/capability/special.rs` checks that the same record is still current, which is the ABA / lifecycle boundary for stale captures.
 
-> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §4.4 fallback and failure semantics.
+> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §4.4 fallback and failure semantics.
 
 The blueprint's fallback table is:
 
@@ -167,7 +167,7 @@ Nothing in the current code corresponds to any of these rules: there is no "serv
 | Three-layer model (L1 kernel / L2 default modules / L3 replacement surface) | §2 | `CapabilityKind` / `CapabilityDescriptor` in `src/capability/descriptor.rs`; the owner and lease boundary in `src/capability/ownership.rs`. There is no "replaceable surface" split | Planned |
 | Data slot catalog | §3.1 | `CapabilityId` / `CapabilityKind` in `src/capability/descriptor.rs`; `ProviderId` / `ProviderState` in `src/capability/provider.rs`. There is no slot ID catalog | Planned |
 | Behaviour slot catalog (contracts unified onto Hook@1) | §3.2 | `Hook` / `HookDescriptor` / `validate_hook_request` in `crates/aleph-slot-api/src/slot.rs`; `src/extension/hooks/registry.rs` is the legacy hook registry | Planned (contract written, not wired) |
-| Slot resolution and `SlotPlan` | §4.2 | None | Planned |
+| Blueprint slot resolver and pure-value slot plan (neither implemented) | §4.2 | None | Planned |
 | Hot swap of tools | §4.3 | `ToolHandlerRegistry::replace` in `src/tools/registry.rs` already has atomic replacement semantics, but only internal registration paths call it | Partially landed |
 | Registering a new owner generation on application | §4.3 | the ownership tree and lease re-check in `src/capability/ownership.rs`; generation invalidation in `src/capability/provider.rs` | Partially landed |
 | The `slots` branch of configuration hot swap | §4.3 | None | Planned |
