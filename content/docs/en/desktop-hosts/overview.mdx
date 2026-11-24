@@ -19,7 +19,7 @@ The repository still contains an older desktop shell (`desktop/shell/`). It is a
 
 ## Process model
 
-NSH is a standalone process whose window hosts a WebView that loads the Panel. The Panel address comes from the connection target: `http://127.0.0.1:18790/` for the local target, or the root of the given origin for a remote one (`ConnectionTarget::panel_url` in `shared/client/src/connection_target.rs`).
+NSH is a standalone process whose window hosts a WebView that loads the Panel. The Panel address comes from the connection target: `http://127.0.0.1:18790/` for the local target, or the root of the given origin for a remote one (`ConnectionTarget::panel_url` in `shared/client/src/connection_target.rs`). That WebView path is the default; only when `ALEPH_SHELL_PANEL` is set to `tsx`, the build enables the `tsx-panel` feature, and the launch is not a QA one does the host switch to the TSX Panel host (`desktop/nsh-shell/src/main.rs`) — see the [Panel host](./panel) page for the details.
 
 ### It connects to an existing Gateway
 
@@ -56,7 +56,9 @@ The entry point is `desktop/nsh-shell/src/main.rs`. There are three argument for
 | no arguments | Connect to the local target `http://127.0.0.1:18790/` |
 | `--connect <origin>` | Connect to the given origin; use HTTPS for a remote one |
 | `--autostart-status` | Read the current app's login-item status and print it as JSON, without changing it |
-| `--desktop-ipc-status <socket>` | Read the Gateway's `health` over Unix IPC; see [Read-only IPC status query](#read-only-ipc-status-query) |
+| `--desktop-ipc-status <socket>` | Read the Gateway's `health` over Desktop IPC (a Unix domain socket on Unix); see [Read-only IPC status query](#read-only-ipc-status-query) |
+
+This table covers the host `aleph-nsh-shell` only. The flag that makes the Gateway mount a Desktop IPC listener belongs to a different program: `aleph-server`'s `--desktop-ipc <endpoint>` (`src/bin/aleph-server/cli.rs`). Do not confuse the two — see [Desktop IPC and platform support](#desktop-ipc-and-platform-support).
 
 `--connect` is validated by `HostSettings::from_launch` in `desktop/nsh-shell/src/shell_host.rs`:
 
@@ -135,26 +137,77 @@ Opening Chat is document-bound. The host first sends `Probe`, the Panel answers 
 
 On macOS it reads `SMAppService::mainAppService().status()` after an identity check: the process must run inside an `.app` bundle (otherwise `NotAppBundle`), the bundle identifier must equal `APP_ID` and the executable must sit under `Contents/MacOS` (otherwise `IdentityMismatch`), and the system must provide `SMAppService` (macOS 13 and later, otherwise `ApiUnavailable`).
 
-## Read-only IPC status query
+## Desktop IPC and platform support
 
-`--desktop-ipc-status <socket>` reads the Gateway's `health` once over a Unix domain socket. It does not open the Panel and does not fall back to WebSocket (`desktop/nsh-shell/src/ipc_status.rs`).
+Desktop IPC is the Gateway's **explicit opt-in, local, read-only entry point**. The tree contains two platform shapes: a Unix domain socket on Unix and a named pipe on Windows. Both share the same frame format, the same handshake and the same RPC loop, but the **production entry point is currently open on Unix only** — on Windows both opt-in commands are refused by the same gate. This section first separates the flags of the two programs, then gives the cross-platform matrix.
 
-- The arguments must be exactly this pair, and the socket path must be absolute; combining it with QA configuration is refused.
+### Read-only IPC status query
+
+The host-side query command is `--desktop-ipc-status <socket>`: it reads the Gateway's `health` once over Desktop IPC (a Unix domain socket on Unix). It does not open the Panel and does not fall back to WebSocket (`desktop/nsh-shell/src/ipc_status.rs`).
+
+- The arguments must be exactly this pair (the flag plus one endpoint); on Unix the endpoint must be an absolute path with a file name, on Windows it must be an explicit local named pipe; combining it with QA configuration is refused.
 - The handshake uses `ProtocolVersion { major: 1, minor: 0 }`, client name `aleph-nsh-shell`, `ui_runtime: "nsh"` and an empty feature list.
 - The `health` call times out after 5 seconds and closing the connection after 2 seconds; the response must have `status == "healthy"` and a non-empty `timestamp`, otherwise the query fails.
-- On non-Unix platforms it fails immediately with `Desktop IPC is unavailable on this platform`.
+- On non-Unix platforms it fails immediately with `Desktop IPC is unavailable on this platform`. That refusal comes from the client-side availability gate, not from missing implementation code: the Windows named-pipe endpoint validation is in the tree (`shared/client/src/local_ipc/windows.rs`), it is simply unreachable while the gate is false.
 
-The Gateway being queried must have been started beforehand with `--desktop-ipc <socket>`; see the transport matrix on the [Panel host](./panel) page.
+The Gateway being queried must have been started beforehand with the server-side `--desktop-ipc <endpoint>`; see the transport matrix on the [Panel host](./panel) page.
+
+### Server-side opt-in: `--desktop-ipc <endpoint>`
+
+The server-side switch is `aleph-server`'s `--desktop-ipc <endpoint>`. It belongs to a different program than the host's `--desktop-ipc-status` flag: the former makes the Gateway mount a local listener, the latter makes the host read the status once.
+
+- The flag is defined in `src/bin/aleph-server/cli.rs`: the value name is `ENDPOINT` (it was `SOCKET_PATH` before commit `5d89d7aff`, because on Windows it is not a socket path), the help text reads "Opt in to read-only Desktop IPC at an explicit local endpoint", and it goes on to say "Unix requires a fresh absolute socket path in a caller-owned 0700 directory. The server leaves the Unix socket entry after exit."
+- The entry check lives in `src/bin/aleph-server/main.rs`: with the flag present it first tests the client-side gate `aleph_client::local_ipc::AVAILABLE` and returns `Desktop IPC is unavailable on this platform` when that is false; it then requires the command to be `start` (or absent), otherwise it returns `--desktop-ipc is only available when starting the Gateway`; only on the Windows branch does it afterwards call `aleph_client::local_ipc::windows::validate_endpoint` for named-pipe endpoint validation.
+- The mount path lives in `run_with_desktop_ipc` in `src/gateway/server/mod.rs`: it makes the same `AVAILABLE` assumption and returns `Desktop IPC is unavailable on this platform` when it is false; when it is true it goes through `run_local_endpoint`, which calls `bind` in `src/gateway/server/connection/local_ipc.rs` — validation first, then the bind. The comment there states that binding never replaces an occupied entry, that the caller owns the directory, and that the Gateway does not mutate the directory's entries after binding.
+
+### Cross-platform implementation matrix
+
+| Dimension | Unix | Windows |
+|---|---|---|
+| Endpoint shape | Unix domain socket, absolute path | Named pipe, path prefix `\\.\pipe\` |
+| Available in production | Yes | No: both opt-in commands are refused |
+| Endpoint validation | Absolute path; the parent directory must be owned by the current uid with mode exactly `0700`; the parent must not be swapped after canonicalization | Must carry the `\\.\pipe\` prefix; the pipe name must be non-empty, must not end in `.` or a space, must keep name plus prefix within 256 UTF-16 code units, and must contain no control characters and none of `\ / :` |
+| Authentication | Same account: the peer uid must match this process | Same account: the pipe object's owner SID must equal the server's account SID, and the server then compares the impersonated client account; the client pins the server process with `GetNamedPipeServerProcessId` and re-checks that process's account and that it is still alive |
+| Listener implementation | `src/gateway/server/connection/local_ipc.rs` | `src/gateway/server/connection/local_ipc/windows.rs` |
+| Client implementation | the `unix` module in `shared/client/src/local_ipc.rs` | `shared/client/src/local_ipc/windows.rs` |
+| Host status query | `desktop/nsh-shell/src/ipc_status.rs` | the Windows branch of the same file (in the tree, but behind the gate) |
+
+The validations in the matrix are implemented on the client side, one set per platform:
+
+- Unix endpoint validation is `private_endpoint` in `shared/client/src/local_ipc.rs`: the path must be absolute (otherwise `IPC endpoint must be an absolute socket path`), the parent directory must be owned by the current uid with mode exactly `0700` (otherwise `IPC endpoint requires an owned mode-0700 parent`), the parent must not be swapped after canonicalization (otherwise `IPC parent changed`), and no ancestor directory may have an untrusted owner or be writable by others (otherwise `IPC parent has an untrusted ancestor`).
+- Unix authentication is `require_same_user` in the same file: a peer uid that differs from this process is disconnected (`IPC peer account mismatch`); the client also checks that the endpoint really is a socket owned by the current uid (`IPC endpoint is not an owned socket`).
+- Windows endpoint validation is `validate_endpoint` in `shared/client/src/local_ipc/windows.rs`; the account side has `PipeAccount::current`, `PipeAccount::create` (which builds the DACL from the account SID, grants that one account full access and sets remote clients to be rejected) and `authenticate_client`, and the client side has `connect`.
+- The Windows listener (`src/gateway/server/connection/local_ipc/windows.rs`) obtains the current account with `PipeAccount::current` in `bind` and uses it to create the first named-pipe instance (`MAX_CONNECTIONS` is the cap on allowed instances); when the pipe is busy it retries and replenishes within the `HELLO_TIMEOUT` budget — the comment there explains why it cannot give up immediately: dropping a Mio pipe cancels the overlapped I/O, but the kernel handle can stay alive until its completion is delivered.
+
+### What the two platforms share
+
+Windows is not a separate protocol. Admitted connections reuse the same RPC loop as on Unix — the file header comment of `src/gateway/server/connection/local_ipc/windows.rs` says that admitted connections use the shared RPC loop.
+
+- The limits are identical: `MAX_CONNECTIONS = 8`, `WIRE_BUDGET = 16 MiB`, `WRITE_TIMEOUT = 5s` (`src/gateway/server/connection/local_ipc.rs`).
+- The first frame must be `system.hello`; the methods after it are limited to `V1_METHODS` — `health`, `sessions.list`, `panel.capabilities.snapshot` (`src/gateway/server/connection/mod.rs`) — and Unix and Windows share that one decision.
+- A connection grants no network-origin privileges: `NO_NETWORK_ORIGIN` is 0.0.0.0 (`src/gateway/server/connection/local_ipc.rs`).
+
+### Why the Windows production entry point is still closed
+
+The Windows named-pipe implementation is complete: the client, the Gateway listener, the host CLI validation and the QA script are all in the tree (`qa/nsh_desktop_ipc_windows.py`). What is closed is the **production entry point**, and the reason is stated plainly: the independent-account authorization evidence is not complete yet. The code repository commit `5d89d7aff` says "Keep production Windows Desktop IPC disabled until its independent-account authorization evidence is complete."
+
+`docs/reference/DESKTOP_SHELL.md` records the same thing: the Windows production entry point still refuses both opt-in commands, and the named-pipe acceptance receipt keeps candidate evidence separate from the missing alternate-account gate — candidate results do not substitute for alternate-account acceptance.
+
+<Callout type="info" title="Evidence-layer receipt">
+The 2026-11-23 receipt (`docs/superpowers/runs/2026-11-23-nsh-panel-s1b-windows-named-pipe-verification.md`) records what was measured **at that time**: the refusal baseline held on both binaries, a diagnostic build with the gate temporarily flipped did connect, and the security-boundary checks were spelled out. It describes a point-in-time experiment, not the current production state.
+</Callout>
+
+The way out is to complete the authorization acceptance for an independent (alternate) account. Until then the availability gate `AVAILABLE` stays `cfg!(unix)` (`shared/client/src/local_ipc.rs`).
 
 ## Platform support status
 
-Recorded as `docs/reference/DESKTOP_SHELL.md` states it (matching code repository VERSION 26.9.1):
+As recorded in `docs/reference/DESKTOP_SHELL.md` and in the code repository (matching code repository VERSION 26.9.1):
 
 | Platform | Status |
 |---|---|
 | macOS | The resident window, tray, hotkey, `aleph://open`, notifications and window placement have local evidence (receipt `docs/superpowers/runs/2026-11-21-phase10-closeout.md`); multi-display topology is still untested |
 | Linux | Entry code exists (the Linux branch in `desktop/nsh-shell/src/platform.rs`); no acceptance conclusion yet |
-| Windows | Entry code exists; no acceptance conclusion yet; the Named Pipe variant of Desktop IPC is not done |
+| Windows | Entry code exists; no acceptance conclusion yet; the named-pipe variant of Desktop IPC is implemented in the code tree, but the production entry point stays closed on Windows until the independent-account authorization evidence is complete |
 
 This is not a general release: there is no default desktop switch, no host-side daemon-supervisor migration and no release distribution, and neither the Windows and Linux NSH acceptance nor the removal of the old shell has happened.
 

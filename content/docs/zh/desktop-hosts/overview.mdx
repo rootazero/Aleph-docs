@@ -19,7 +19,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 ## 进程模型
 
-NSH 是一个独立进程，在窗口里加载 Panel 的 WebView。Panel 的地址由连接目标决定：本地目标是 `http://127.0.0.1:18790/`，远程目标是该 origin 的根路径（`shared/client/src/connection_target.rs` 的 `ConnectionTarget::panel_url`）。
+NSH 是一个独立进程，在窗口里加载 Panel 的 WebView。Panel 的地址由连接目标决定：本地目标是 `http://127.0.0.1:18790/`，远程目标是该 origin 的根路径（`shared/client/src/connection_target.rs` 的 `ConnectionTarget::panel_url`）。默认走的就是这条 WebView 路径；只有 `ALEPH_SHELL_PANEL` 设为 `tsx`、构建打开了 `tsx-panel` feature、且不是 QA 启动时，才会切到 TSX Panel 宿主（`desktop/nsh-shell/src/main.rs`），细节交给 [Panel 宿主](./panel)。
 
 ### 只连接已存在的 Gateway
 
@@ -56,7 +56,9 @@ Use HTTPS for a remote origin. No target or credential URL is persisted.
 | 无参数 | 连接本地目标 `http://127.0.0.1:18790/` |
 | `--connect <origin>` | 连接指定 origin；远程目标应使用 HTTPS |
 | `--autostart-status` | 只读取当前应用的登录项状态并以 JSON 打印，不修改 |
-| `--desktop-ipc-status <socket>` | 经 Unix IPC 读取 Gateway 的 `health`，见 [只读 IPC 状态查询](#只读-ipc-状态查询) |
+| `--desktop-ipc-status <socket>` | 经 Desktop IPC（Unix 上是 Unix domain socket）读取 Gateway 的 `health`，见 [只读 IPC 状态查询](#只读-ipc-状态查询) |
+
+这张表只覆盖宿主 `aleph-nsh-shell`。让 Gateway 挂载 Desktop IPC 监听的是另一个程序的参数：`aleph-server` 的 `--desktop-ipc <endpoint>`（`src/bin/aleph-server/cli.rs`）。两者不要混淆，见 [Desktop IPC 与平台支持](#desktop-ipc-与平台支持)。
 
 `--connect` 的校验在 `desktop/nsh-shell/src/shell_host.rs` 的 `HostSettings::from_launch`：
 
@@ -135,26 +137,77 @@ Panel 通过桥发出 `Notify` 消息；宿主在窗口不处于「可见且聚�
 
 macOS 上读的是 `SMAppService::mainAppService().status()`，并先做身份校验：进程必须运行在 `.app` 包里（否则 `NotAppBundle`），包标识必须等于 `APP_ID` 且可执行文件落在 `Contents/MacOS` 下（否则 `IdentityMismatch`），系统需提供 `SMAppService`（macOS 13 起，否则 `ApiUnavailable`）。
 
-## 只读 IPC 状态查询
+## Desktop IPC 与平台支持
 
-`--desktop-ipc-status <socket>` 经 Unix domain socket 读取一次 Gateway 的 `health`，不打开 Panel，也不回退到 WebSocket（`desktop/nsh-shell/src/ipc_status.rs`）。
+Desktop IPC 是 Gateway 的**显式 opt-in 本地只读入口**。代码树里有两个平台形态：Unix 用 Unix domain socket，Windows 用命名管道。两个形态共用同一套帧格式、握手和 RPC 循环，但**生产入口目前只在 Unix 打开**——Windows 上两个 opt-in 命令都会被同一个总闸拒绝。下面先分清两个不同程序的参数，再给跨平台矩阵。
 
-- 参数必须只有这一组，且 socket 路径是绝对路径；与 QA 配置同时出现会被拒绝。
+### 只读 IPC 状态查询
+
+宿主侧的查询命令是 `--desktop-ipc-status <socket>`：经 Desktop IPC（Unix 上是 Unix domain socket）读取一次 Gateway 的 `health`，不打开 Panel，也不回退到 WebSocket（`desktop/nsh-shell/src/ipc_status.rs`）。
+
+- 参数必须只有这一组（`--desktop-ipc-status` 加一个端点）；Unix 上端点必须是带文件名的绝对路径，Windows 上必须是显式的本地命名管道名；与 QA 配置同时出现会被拒绝。
 - 握手使用 `ProtocolVersion { major: 1, minor: 0 }`、客户端名 `aleph-nsh-shell`、`ui_runtime: "nsh"`、空特性列表。
 - `health` 调用超时 5 秒，关闭连接超时 2 秒；响应必须是 `status == "healthy"` 且 `timestamp` 非空，否则失败。
-- 非 Unix 平台直接报 `Desktop IPC is unavailable on this platform`。
+- 非 Unix 平台直接报 `Desktop IPC is unavailable on this platform`。这句拒绝来自客户端侧的总闸，而不是缺少实现代码：Windows 的命名管道端点校验就在树里（`shared/client/src/local_ipc/windows.rs`），只是总闸为假时走不到它。
 
-被查询的 Gateway 需要用 `--desktop-ipc <socket>` 预先启动，见 [Panel 宿主](./panel) 的传输矩阵。
+被查询的 Gateway 需要用服务端侧的 `--desktop-ipc <endpoint>` 预先启动，见 [Panel 宿主](./panel) 的传输矩阵。
+
+### 服务端 opt-in：`--desktop-ipc <endpoint>`
+
+服务端侧的开关是 `aleph-server` 的 `--desktop-ipc <endpoint>`。它和宿主的 `--desktop-ipc-status` 是**两个不同程序的不同参数**：前者让 Gateway 挂载本地监听，后者让宿主读一次状态。
+
+- 参数定义在 `src/bin/aleph-server/cli.rs`：值名是 `ENDPOINT`（commit `5d89d7aff` 之前是 `SOCKET_PATH`，因为 Windows 上它不再是 socket 路径），帮助文本为「Opt in to read-only Desktop IPC at an explicit local endpoint」，并说明「Unix requires a fresh absolute socket path in a caller-owned 0700 directory. The server leaves the Unix socket entry after exit.」。
+- 入口校验在 `src/bin/aleph-server/main.rs`：带了这个参数时，先判客户端侧总闸 `aleph_client::local_ipc::AVAILABLE`，为假就返回 `Desktop IPC is unavailable on this platform`；再判命令必须是 `start`（或缺省），否则返回 `--desktop-ipc is only available when starting the Gateway`；Windows 分支随后才调 `aleph_client::local_ipc::windows::validate_endpoint` 做命名管道端点校验。
+- 挂载路径在 `src/gateway/server/mod.rs` 的 `run_with_desktop_ipc`：它同样以 `AVAILABLE` 为前提，为假时返回 `Desktop IPC is unavailable on this platform`；为真时走 `run_local_endpoint`，其中调用 `src/gateway/server/connection/local_ipc.rs` 的 `bind`——先过端点校验再绑定；注释写明绑定不会替换已占用的条目，目录由调用方提供，Gateway 绑定之后不再改动目录内容。
+
+### 跨平台实现矩阵
+
+| 维度 | Unix | Windows |
+|---|---|---|
+| 端点形态 | Unix domain socket，绝对路径 | 命名管道，路径前缀 `\\.\pipe\` |
+| 生产是否可用 | 可用 | 关闭：两个 opt-in 命令都拒绝 |
+| 端点校验 | 绝对路径；父目录属主必须是当前 uid 且权限恰为 `0700`；父目录解析后不得被替换 | 必须带 `\\.\pipe\` 前缀；管道名非空、不以 `.` 或空格结尾、连前缀共不超过 256 个 UTF-16 码元、不含控制字符与 `\ / :` |
+| 认证 | 同账号：对端 uid 必须与本进程一致 | 同账号：管道对象的属主 SID 必须等于服务端账户 SID，服务端再比对被模拟后的客户端账户；客户端用 `GetNamedPipeServerProcessId` 固定服务端进程，并复核该进程的账户与存活状态 |
+| 监听实现 | `src/gateway/server/connection/local_ipc.rs` | `src/gateway/server/connection/local_ipc/windows.rs` |
+| 客户端实现 | `shared/client/src/local_ipc.rs` 的 `unix` 模块 | `shared/client/src/local_ipc/windows.rs` |
+| 宿主状态查询 | `desktop/nsh-shell/src/ipc_status.rs` | 同一文件里的 Windows 分支（在树里，但被总闸挡住） |
+
+矩阵里的校验都实现在客户端侧，两个平台各有一套：
+
+- Unix 端点校验是 `shared/client/src/local_ipc.rs` 的 `private_endpoint`：必须是绝对路径（否则 `IPC endpoint must be an absolute socket path`），父目录必须属主为当前 uid 且权限恰为 `0700`（否则 `IPC endpoint requires an owned mode-0700 parent`），父目录规范化之后不得被替换（否则 `IPC parent changed`），祖先目录里不得有不可信属主或可被他人写入的目录（否则 `IPC parent has an untrusted ancestor`）。
+- Unix 认证是同文件的 `require_same_user`：对端 uid 与本进程不一致即断开（`IPC peer account mismatch`）；客户端连接时还会核对端点确实是当前 uid 拥有的 socket（`IPC endpoint is not an owned socket`）。
+- Windows 端点校验是 `shared/client/src/local_ipc/windows.rs` 的 `validate_endpoint`；账户侧有 `PipeAccount::current`、`PipeAccount::create`（用账户 SID 构造 DACL、只授予该账户全权，并设置拒绝远程客户端）与 `authenticate_client`，客户端侧有 `connect`。
+- Windows 监听器（`src/gateway/server/connection/local_ipc/windows.rs`）在 `bind` 时用 `PipeAccount::current` 取得当前账户，并用它创建首个命名管道实例（`MAX_CONNECTIONS` 是允许的实例上限）；管道忙时在 `HELLO_TIMEOUT` 预算内重试补实例——注释解释了不能立刻放弃的原因：丢弃 Mio 管道会取消重叠 I/O，但内核句柄可能要等完成投递才真正释放。
+
+### 两个平台共享的部分
+
+Windows 不是另一套协议。认证通过的连接复用与 Unix 相同的 RPC 循环（`src/gateway/server/connection/local_ipc/windows.rs` 的文件头注释写的是 admitted connections use the shared RPC loop）。
+
+- 限额一致：`MAX_CONNECTIONS = 8`、`WIRE_BUDGET = 16 MiB`、`WRITE_TIMEOUT = 5s`（`src/gateway/server/connection/local_ipc.rs`）。
+- 首帧必须是 `system.hello`；其后的方法只放行 `V1_METHODS`——`health`、`sessions.list`、`panel.capabilities.snapshot`（`src/gateway/server/connection/mod.rs`），Unix 与 Windows 走同一份判定。
+- 连接不授予网络来源权限：`NO_NETWORK_ORIGIN` 是 0.0.0.0（`src/gateway/server/connection/local_ipc.rs`）。
+
+### Windows 生产入口为什么仍然关闭
+
+Windows 的命名管道实现是完整的：客户端、Gateway 监听器、宿主 CLI 校验和 QA 脚本都在树里（`qa/nsh_desktop_ipc_windows.py`）。关闭的是**生产入口**，原因写得很直白：独立账户授权证据还没完成。代码仓 commit `5d89d7aff` 的说明是「Keep production Windows Desktop IPC disabled until its independent-account authorization evidence is complete.」
+
+`docs/reference/DESKTOP_SHELL.md` 记的是同一件事：Windows 生产入口仍拒绝这两个 opt-in 命令，命名管道的验收回执把候选证据与缺失的异账户关卡分开记录——候选结果不代替异账户验收。
+
+<Callout type="info" title="证据层回执">
+2026-11-23 的回执（`docs/superpowers/runs/2026-11-23-nsh-panel-s1b-windows-named-pipe-verification.md`）记录的是**当时**测到了什么：拒绝基线在两个二进制上都成立、临时改开总闸的诊断构建能连通、以及安全边界的具体检查项。它描述的是一个时点的实验结果，不是当前的生产状态。
+</Callout>
+
+解封条件是补齐独立账户（异账户）的授权验收证据。在此之前，总闸 `AVAILABLE` 保持 `cfg!(unix)`（`shared/client/src/local_ipc.rs`）。
 
 ## 平台支持现状
 
-按 `docs/reference/DESKTOP_SHELL.md` 如实记录（对应代码仓 VERSION 26.9.1）：
+按 `docs/reference/DESKTOP_SHELL.md` 与代码仓如实记录（对应代码仓 VERSION 26.9.1）：
 
 | 平台 | 现状 |
 |---|---|
 | macOS | 常驻窗口、托盘、热键、`aleph://open`、通知和窗口位置有本地证据（回执 `docs/superpowers/runs/2026-11-21-phase10-closeout.md`）；多屏拓扑仍未测试 |
 | Linux | 有入口代码（`desktop/nsh-shell/src/platform.rs` 的 Linux 分支），尚无验收结论 |
-| Windows | 有入口代码，尚无验收结论；Desktop IPC 的 Named Pipe 版本未做 |
+| Windows | 有入口代码，尚无验收结论；Desktop IPC 的命名管道版本已在代码树中实现，但生产入口在 Windows 上仍然关闭，等待独立账户授权证据 |
 
 这不是全面发布：目前没有默认桌面切换、没有宿主侧 daemon supervisor 迁移、没有发布分发，Windows 与 Linux 的 NSH 验收以及旧壳的移除都还没有发生。
 

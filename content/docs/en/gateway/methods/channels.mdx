@@ -3,193 +3,197 @@ title: "channels.*"
 description: "Communication channel management RPC methods"
 ---
 
-`channels.*` is the runtime surface over the `ChannelRegistry`. Methods are registered in two passes:
+Channel RPCs manage both runtime instances in `ChannelRegistry` and channel declarations in `Config`. `register_channel_handlers` registers the core channel and Discord Control-Plane methods (`src/bin/aleph-server/commands/start/builder/handlers/session.rs`). The pairing methods are registered separately and share a pairing store with inbound routing (`src/bin/aleph-server/commands/start/mod.rs`). The binding methods are registered in `src/bin/aleph-server/commands/start/builder/handlers/settings.rs`.
 
-- `register_channel_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/session.rs`) — the core lifecycle methods (`channels.list/status`, `channel.start/stop/pairing_data/send/create/delete/health`, `channels.set_agent`).
-- `start/mod.rs:2431-2466` — the channel-pairing methods (`channel.pairing.list/approve/reject/approved/revoke`).
-- The Discord Control-Plane panel methods (`discord.validate_token`, `discord.list_guilds`, `discord.list_channels`, `discord.audit_permissions`) are registered next to the other channel handlers.
+In `channels.list`, a channel with configuration but no runtime instance has one of two statuses: `disabled` for an explicitly disabled cold declaration, or `pending_config` for any other uninstantiated declaration (`src/gateway/handlers/channel.rs`).
 
-The same registry backs all of these. Configured-but-not-yet-instantiated channels (e.g. a Telegram channel that exists in `~/.aleph/config.toml` but is missing `bot_token`) show up as `pending_config` in `channels.list`.
+## Cold declarations
+
+### Detection and Gateway boot
+
+Only the JSON boolean `"enabled": false` (TOML `enabled = false`) in a channel's configuration makes it a cold declaration. `ChannelInstanceConfig::is_explicitly_disabled` does not treat `true`, non-boolean values, or an absent field as cold. Omitting `enabled` preserves the adapter's existing default. `ChannelInstanceConfig::declared_type` uses the string `type` if present; otherwise, it uses the channel ID if it appears in `CONFIGURABLE_CHANNEL_TYPES`. If neither yields a type, `Config::resolved_channels` logs a warning and skips the declaration (`src/config/structs.rs`, `shared/protocol/src/channels.rs`).
+
+At Gateway boot, `initialize_channels` leaves cold declarations in `Config` without hydrating vault credentials or constructing adapters, including in the iMessage/BlueBubbles branch. The inbound message coalescer also skips explicitly disabled entries when looking for Telegram `coalescing` settings, and uses the defaults if it finds none (`src/bin/aleph-server/commands/start/builder/subsystems.rs`).
+
+For cold declarations whose type can be resolved, startup calls `project_cold_declaration` to populate `ChannelPolicyProjection` without credentials. Inbound routing and system continuations read the same projection. If another malformed field prevents policy parsing, the projection logs `Cold channel requires policy repair before activation`. The fallback still preserves any parseable `tool_permissions` layer so valid denies are not lost (`src/bin/aleph-server/commands/start/builder/subsystems.rs`, `src/gateway/channel_policy.rs`).
+
+### Creation and credential persistence
+
+`channel.create` does not construct an adapter, register a runtime instance, or start the channel when creating a cold declaration. `extract_cold_channel_secrets` removes supplied credentials that are supported, nonempty top-level strings and stages them outside the config. The cold path rejects nonempty `verification_token`, `encrypt_key`, `channel_access_token`, `channel_secret`, and `token` fields. It also rejects nonempty mapped credentials that are nested or have non-string values. Here, nonempty excludes `null` and the empty string. Unsupported credentials return `INVALID_PARAMS`; there is no plaintext fallback (`src/gateway/handlers/channel.rs`).
+
+1. Add the declaration without the submitted credentials to `Config` and call `save_incremental` for `channels`. If that write fails, remove the entry from `Config` and return `INTERNAL_ERROR` with `Failed to persist channel configuration` (`src/gateway/handlers/channel.rs`).
+2. Only after the config is saved, use `store_secret_batch` to write the staged credentials to the vault together. If the vault write fails, remove the declaration and save again to roll it back. If the rollback also fails, restore the declaration in `Config`; it remains cold and contains none of the newly submitted credentials. A vault write failure returns `INTERNAL_ERROR` with `Failed to store channel credentials` and never falls back to plaintext (`src/gateway/handlers/channel.rs`, `src/gateway/security/shared_token.rs`).
+3. On success, return `id`, `type`, and `status: "disabled"` (`src/gateway/handlers/channel.rs`).
+
+### Explicit activation
+
+Only an explicit `channel.start` activates a cold declaration. When the ID is absent from the registry, `handle_start` takes the config-only path (`src/gateway/handlers/channel.rs`):
+
+1. Read one snapshot of the current shared `Config` for both transport configuration and policy. No vault read or factory call runs under the config lock. An ID missing from config returns `INTERNAL_ERROR` with `Channel <id> not found in config`. If the type cannot be resolved, the handler returns `INVALID_PARAMS` with `Missing channel type` (`src/gateway/handlers/channel.rs`).
+2. Release the config lock, inject vault credentials into a runtime copy, then parse the activation policy with `parse_channel_activation_policy`. If parsing fails, return `INVALID_PARAMS` with the policy error without constructing an adapter (`src/gateway/handlers/channel.rs`, `src/gateway/channel_policy.rs`).
+3. After constructing the adapter, check that its instance ID matches the requested ID. A mismatch returns `INTERNAL_ERROR` with `Channel factory returned a different instance ID` (`src/gateway/handlers/channel.rs`).
+4. `ChannelRegistry::register_and_start_vacant` checks under the registry lock that the ID is vacant. If the ID is occupied, it returns `ChannelError::Busy`, which the RPC reports as a start failure. Otherwise, the handler calls `set_activation` in the `before_publish` callback to publish the policy before inserting the entry and starting the adapter (`src/gateway/channel_registry.rs`, `src/gateway/handlers/channel.rs`).
+
+**Explicit activation does not set `enabled` to `true` on disk.** If the config remains explicitly disabled, the Gateway treats it as cold on its next boot (`src/gateway/handlers/channel.rs`, `src/bin/aleph-server/commands/start/builder/subsystems.rs`).
+
+### Boundaries
+
+A cold declaration is not a channel hot-reload mechanism and does not add a Zahir Gateway mount point. `channel.stop` works only on a registered instance; it does not guarantee that every resource is reclaimed or that native code is unloaded (`src/bin/aleph-server/commands/start/builder/subsystems.rs`, `src/gateway/handlers/channel.rs`, `src/gateway/channel_registry.rs`).
 
 ## Methods
 
 ### channels.list
 
-List every registered channel plus the configured-but-not-instantiated set. Also surfaces the durable outbound-delivery queue depth (R8) so an operator can spot a backlog.
+Takes no parameters. The list combines the registry and config: if an ID exists in both, the registry status wins and the ID counts once. `configured_channel_info` builds config-only entries: `disabled` for cold declarations and `pending_config` for other uninstantiated declarations. Both return `CapabilitiesResponse::default()` and advertise no runtime capabilities. `summary` counts registered instances and config-only cold declarations. `pending_config` entries appear in the list but do not count toward `total` (`src/gateway/handlers/channel.rs`, `src/gateway/channel_registry.rs`).
 
-**Request:** no params.
-
-**Response:** `{ "channels": [ ...ChannelInfoResponse... ], "summary": { "total", "connected", "connecting", "pairing", "disconnected", "error", "disabled" }, "delivery_queue" | null }`. Each `ChannelInfoResponse` carries `id`, `name`, `channel_type`, `status`, and a `capabilities` block (`attachments`, `images`, `audio`, `video`, `reactions`, `replies`, `editing`, `deletion`, `typing_indicator`, `read_receipts`, `rich_text`, `max_message_length`, `max_attachment_size`). `pending_config` channels carry empty capabilities.
+**Response:** `channels`, `summary`, and `delivery_queue`. `summary` contains `total`, `connected`, `connecting`, `pairing`, `disconnected`, `error`, and `disabled`. `delivery_queue` reports the durable outbound backlog, or is `null` if no durable queue is attached. Each `ChannelInfoResponse` contains `id`, `name`, `channel_type`, `status`, and `capabilities` (`attachments`, `images`, `audio`, `video`, `reactions`, `replies`, `editing`, `deletion`, `typing_indicator`, `read_receipts`, `rich_text`, `max_message_length`, `max_attachment_size`) (`src/gateway/handlers/channel.rs`).
 
 ### channels.status
 
-Live status of a single channel (overrides the stored status with the live `ChannelStatus`).
+Read a single channel. If an instance is registered, return its live `ChannelStatus`. With no instance, return the `disabled` entry if `Config` contains a cold declaration for the ID. Otherwise, including for a `pending_config` entry, return `INVALID_PARAMS` with `Channel not found: <id>` (`src/gateway/handlers/channel.rs`, `src/gateway/channel_registry.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel_id` | string | yes | Channel id |
+| `channel_id` | string | yes | Channel ID |
 
-**Response:** the `ChannelInfoResponse` for that channel. `INVALID_PARAMS: Channel not found: <id>` when unknown.
+**Response:** the channel's `ChannelInfoResponse` (`src/gateway/handlers/channel.rs`).
 
 ### channel.start
 
-Start a channel. Re-reads the channel's config from `~/.aleph/config.toml` (so a Panel save takes effect without a server restart) and re-injects vault-resolved secrets into the config before constructing the channel. Telegram channels have their `ToolCatalog` re-attached so slash commands are registered.
+Start a channel. The handler reads the current shared `Config`; it does not reload the file from disk. When rebuilding a Telegram adapter, it reattaches the cached `ToolCatalog` if available so the adapter can register slash commands. A config-only channel follows the explicit activation flow above (`src/gateway/handlers/channel.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel_id` | string | yes | Channel id |
+| `channel_id` | string | yes | Channel ID |
 
-**Response:** `{ "channel_id", "status": "started" }`.
+**Response:** `{ "channel_id", "status": "started" }` (`src/gateway/handlers/channel.rs`).
 
 ### channel.stop
 
-Stop a channel.
+Stop a registered channel instance. A cold declaration with no instance cannot be stopped (`src/gateway/handlers/channel.rs`, `src/gateway/channel_registry.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel_id` | string | yes | Channel id |
+| `channel_id` | string | yes | Channel ID |
 
-**Response:** `{ "channel_id", "status": "stopped" }`.
+**Response:** `{ "channel_id", "status": "stopped" }` (`src/gateway/handlers/channel.rs`).
 
 ### channel.create
 
-Create a new channel instance, persist its config (with secrets stripped to the vault), register, and auto-start. If the config is incomplete (e.g. missing `bot_token`) the request still succeeds with `status: "pending_config"` so the user can fill in the missing fields via the Panel.
+Create and persist a channel declaration. Explicitly disabled declarations follow the cold creation flow above. Otherwise, the handler attempts to construct an adapter and, if successful, registers and starts it automatically. If it cannot construct the adapter, for example because a required credential is missing, the declaration is still saved and the RPC returns `pending_config`. Supply the missing configuration and start it later (`src/gateway/handlers/channel.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `id` | string | yes | Unique channel id |
-| `type` | string | yes | `telegram` / `discord` / `slack` / `imessage` (BlueBubbles) / … |
-| `config` | object | yes | Type-specific config; secret fields (`bot_token`, `app_token`, `app_secret`, `access_token`, …) are stored in the vault (`channel:<id>:<field>`) and stripped from the persisted config |
+| `id` | string | yes | Unique channel ID |
+| `type` | string | yes | For example, `telegram`, `discord`, `slack`, or `imessage` (including BlueBubbles) |
+| `config` | object | no | Type-specific configuration; defaults to an empty object. See the credential table below. |
 
-**Response:** `{ "id", "type", "status" }` with `status: "started" | "created_but_start_failed" | "pending_config"`.
+**Response:** `id`, `type`, and `status`. The status is `disabled`, `started`, `created_but_start_failed`, or `pending_config`. A `created_but_start_failed` response additionally includes `error` (`src/gateway/handlers/channel.rs`).
 
 ### channel.delete
 
-Stop a channel (if running) and remove it from both the registry and the persisted config.
+Delete a declaration without activating it first. If an instance is registered, the handler tries to stop and unregister it. It then removes the ID from the shared `Config` and tries to save `channels`; it does not remove vault entries. A save failure is logged but still returns `deleted`. If the ID exists in neither the registry nor the config, the handler returns `INVALID_PARAMS` (`src/gateway/handlers/channel.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `id` | string | yes | Channel id |
+| `id` | string | yes | Channel ID |
 
-**Response:** `{ "id", "status": "deleted" }`. Refuses to delete a channel that exists in neither the registry nor the config.
+**Response:** `{ "id", "status": "deleted" }` (`src/gateway/handlers/channel.rs`).
 
 ### channel.send
 
-Send a message through a channel.
+Send a message through a registered channel instance. A cold declaration cannot send on its own (`src/gateway/handlers/channel.rs`, `src/gateway/channel_registry.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel_id` | string | yes | Channel id |
-| `to` | string | yes | Conversation id (channel-specific target: chat id, channel id, user id, …) |
-| `text` | string | yes | Message body (non-empty) |
+| `channel_id` | string | yes | Channel ID |
+| `to` | string | yes | Channel-specific conversation target, such as a chat ID, channel ID, or user ID |
+| `text` | string | yes | Nonempty message body |
 
-**Response:** `{ "channel_id", "message_id", "timestamp", "sent": true }`.
+**Response:** `{ "channel_id", "message_id", "timestamp", "sent": true }` (`src/gateway/handlers/channel.rs`).
 
 ### channel.pairing_data
 
-Fetch the pairing data (QR code, code, or deep link) for a channel that supports it.
+Read pairing data from a registered channel. The channel can supply a QR code or pairing code, or report that no pairing data is available (`src/gateway/handlers/channel.rs`, `crates/aleph-slot-api/src/channel.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel_id` | string | yes | Channel id |
+| `channel_id` | string | yes | Channel ID |
 
-**Response:** the channel's pairing payload (shape is channel-defined).
-
-### channel.health
-
-Read the channel-health monitor for one channel (or every channel, summarised).
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | no | Omitted ⇒ every channel's health + a fleet summary |
-
-**Response (one channel):** the `ChannelHealthResponse` for that channel (`id`, `channel_type`, `status`, `health_status` (`healthy` / `stale` / `degraded`), `last_event_at`, `failure_count`, `status_reason?`).
-
-**Response (all):** `{ "channels": [ ...ChannelHealthResponse... ], "summary": { "total", "healthy", "stale", "degraded" } }`.
+**Response:** the pairing payload supplied by the channel (`src/gateway/handlers/channel.rs`).
 
 ### channel_outbox: dead_letters
 
-This is the `channel_outbox` **builtin tool, not a Gateway RPC method**. Use `action: "dead_letters"` to inspect outbound messages retired after exhausting retries or for other safety reasons.
+This is the `channel_outbox` **builtin tool, not a Gateway RPC method**. Use `action: "dead_letters"` to inspect outbound messages retired after exhausting retries or for other safety reasons (`src/builtin_tools/channel_outbox.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `action` | string | yes | `dead_letters` |
-| `channel_id` | string | no | Restrict to a channel; omitted means all |
-| `limit` | number | no | Default 10, capped at 25 |
+| `channel_id` | string | no | Restrict to a channel; omit to include all channels |
+| `limit` | number | no | Defaults to 10, capped at 25 |
 
-**Output:** `message`, `durable_queue`, and `dead_letters`. Entries contain `channel_id`, `conversation_id`, `preview` (at most 200 characters), `attempts`, `last_error`, `reason`, `redrivable`, and `age_secs`. With no durable queue configured, `durable_queue` is `false`.
+**Output:** `message`, `durable_queue`, and `dead_letters`. Entries contain `channel_id`, `conversation_id`, `preview` (at most 200 characters), `attempts`, `last_error`, `reason`, `redrivable`, and `age_secs`. Without a durable queue, `durable_queue` is `false` (`src/builtin_tools/channel_outbox.rs`).
 
 ### channel_outbox: redrive
 
-Recovery action of the same **builtin tool, not a Gateway RPC method**. Use `action: "redrive"` to move safely replayable dead letters back into the outbound queue; not every dead letter is replayable.
+A recovery action of the same **builtin tool, not a Gateway RPC method**. Use `action: "redrive"` to move safely replayable dead letters back into the outbound queue. Not every dead letter can be replayed (`src/builtin_tools/channel_outbox.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `action` | string | yes | `redrive` |
 | `channel_id` | string | no | Restrict to a channel |
-| `confirm_redrive` | boolean | no | Only `true` performs the redrive; omitted returns a preview |
+| `confirm_redrive` | boolean | no | Only `true` performs the redrive; omit to preview |
 
-**Output:** `message`, `durable_queue`, and applicable fields such as `redriven`, `skipped_queue_full`, and `skipped_not_replay_safe`. Inspect the preview and confirm the target before replaying.
+**Output:** `message`, `durable_queue`, and fields such as `redriven`, `skipped_queue_full`, and `skipped_not_replay_safe` where applicable. Inspect the preview and confirm the target before replaying (`src/builtin_tools/channel_outbox.rs`).
 
 ### channels.set_agent
 
-Bind or unbind an agent to a channel. Delegates to the shared binding seam (`gateway::agent_binding`) — the same implementation behind the `agent_switch` tool — so both surfaces share ghost validation, no-op detection, and `Bound` / `Unbound` events. **Must specify an existing agent** (the previous lenient behaviour was removed: 26.7.15+).
+Bind or unbind an agent to a channel. This method shares binding logic with `agent_switch`, including agent validation, detection of duplicate binds, and `Bound`/`Unbound` events. If an `AgentRegistry` is available, an unknown agent returns `INVALID_PARAMS`; `agent_registry: None` skips that check (`src/gateway/handlers/workspace.rs`, `src/gateway/agent_binding.rs`, `src/builtin_tools/agent_manage/switch.rs`).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel_id` | string | yes | Channel id |
-| `agent_id` | string | no | Agent id; `null` / absent unbinds |
+| `channel_id` | string | yes | Channel ID |
+| `agent_id` | string | no | Agent ID; `null` or absent to unbind |
 
-**Response (bind):** `{ "ok", "previous_agent" | null, "no_op": false }` on a fresh bind; `{ "ok", "previous_agent", "no_op": true }` on a no-op rebind.
-
-**Response (unbind):** `{ "ok", "previous_agent" | null }`.
-
-`INVALID_PARAMS` when the `agent_id` does not exist in the live `AgentRegistry`. A minimal server with `agent_registry: None` skips the validation.
+**Response:** Binding returns `ok`, `previous_agent` (`null` if unbound before), and `no_op` (`true` for a duplicate bind). Unbinding returns only `ok` and `previous_agent` (`src/gateway/handlers/workspace.rs`).
 
 ### agents.bindings
 
-Get every channel bound to each agent, sorted by channel id. The previous one-channel-per-agent map was lossy; the current response shape is `{ "bindings": { "<agent_id>": [ "<channel>", … ] } }` and surfaces every channel bound to an agent.
-
-**Request:** no params.
-
-**Response:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`.
+Takes no parameters. Returns a `bindings` object mapping each agent ID to all the channel IDs bound to it, sorted by channel ID (`src/gateway/handlers/workspace.rs`, `src/gateway/agent_env/manager_ops.rs`).
 
 ## Channel pairing
 
-Channels that support unknown-sender approval (Telegram, iMessage BlueBubbles) keep a per-channel pairing store. The same store backs the inbound router's auto-approve and the Panel's manual UI; the RPCs below are the manual UI.
+The Panel uses these RPCs for manual pairing. They use the same pairing store as inbound routing and track requests by channel (`src/bin/aleph-server/commands/start/mod.rs`, `src/gateway/handlers/pairing.rs`).
 
 | Method | Parameters | Description |
-|--------|------------|------|
-| `channel.pairing.list` | `channel?` | `{ "requests": [ ...PairingRequest... ], "count" }`; optional `channel` filter. Each `PairingRequest` carries `channel`, `sender_id`, `code`, `created_at`. |
-| `channel.pairing.approve` | `channel` (required), `code` (required) | `{ "approved": true, "request": PairingRequest }` |
-| `channel.pairing.reject` | `channel` (required), `code` (required) | `{ "rejected": true, "channel", "code" }` |
-| `channel.pairing.approved` | `channel` (required) | `{ "channel", "approved": [ ...sender_id... ], "count" }` |
-| `channel.pairing.revoke` | `channel` (required), `sender_id` (required) | `{ "revoked": true, "channel", "sender_id" }` |
+|--------|------------|-------------|
+| `channel.pairing.list` | `channel?` | Returns `requests` and `count`, optionally filtered by `channel`. Each request includes `channel`, `sender_id`, `code`, and `created_at`. |
+| `channel.pairing.approve` | `channel` and `code` (required), `user_id` (optional) | Returns `approved: true`, `request`, and `user_id`. |
+| `channel.pairing.reject` | `channel` and `code` (required) | Returns `rejected: true`, `channel`, and `code`. |
+| `channel.pairing.approved` | `channel` (required) | Returns `channel`, `approved` (sender IDs), and `count`. |
+| `channel.pairing.revoke` | `channel` and `sender_id` (required) | Returns `revoked: true`, `channel`, and `sender_id`. |
 
 ## Discord Control-Plane panel
 
-Four methods are registered for the Discord Control-Plane panel inside the Discord modal flow:
+The following four methods are registered together. Token validation does not depend on a channel instance. The other three require the target channel to be registered and connected and read the token from `DISCORD_BOT_TOKEN` (`src/bin/aleph-server/commands/start/builder/handlers/session.rs`, `src/gateway/handlers/discord_panel.rs`).
 
 | Method | Description |
 |--------|-------------|
-| `discord.validate_token` | Validate a Discord bot token (no persistence) |
-| `discord.list_guilds` | List the guilds the bot is in |
-| `discord.list_channels` | List the channels of a guild |
-| `discord.audit_permissions` | Audit a guild's permission set against the operator's intent |
-
-These methods require a live `ChannelRegistry` and are always present; they do not depend on a connected channel state.
+| `discord.validate_token` | Validate a Discord bot token without persisting it |
+| `discord.list_guilds` | List the servers the bot has joined |
+| `discord.list_channels` | List channels in the specified server |
+| `discord.audit_permissions` | Audit the bot's permissions in the specified server |
 
 ## Channel type → secret field map
 
-`channel.create` accepts the secret fields named below. Each is stored under `channel:<id>:<field>` in the vault and **stripped from the persisted config**.
+This table shows typical uses of the fields in `CHANNEL_SECRET_FIELDS`. The vault key is `channel:<id>:<field>`. Cold creation accepts only supported top-level credentials and commits them to the vault after saving the declaration. Unsupported nested credentials are an error. Non-cold creation still uses the existing migration path, which may leave plaintext in the config if the vault write fails (`src/gateway/handlers/channel.rs`).
 
 | Channel family | Secret fields |
-|----------------|--------------|
+|----------------|---------------|
 | `telegram` | `bot_token` |
 | `discord` | `bot_token` |
 | `slack` | `bot_token`, `app_token` |
 | `feishu` | `app_secret` |
-| `msteams` | `app_password` |
 | `matrix` | `access_token` |
 | `xmpp` / `irc` / `email` | `password` |
 | `nostr` | `private_key` |
@@ -197,7 +201,13 @@ These methods require a live `ChannelRegistry` and are always present; they do n
 | `whatsapp` | `session_data` |
 | `qq` | `client_secret` |
 
-A configured field is also surfaced as `has_<field>: true` on `channels.list` (and on the Settings page) — the editable input always starts empty, and a save with an empty value means "keep the existing vault value".
+`has_<field>: true` is a vault credential presence flag in `config.get`, not in `channels.list`. Reading the config does not expose these credentials in plaintext. Saving an empty string in a mapped field does not replace an existing vault value (`src/gateway/handlers/channel.rs`, `src/gateway/handlers/config.rs`).
+
+## History: Earlier health RPC and Teams credential docs
+
+This page previously listed `channel.health` with an optional `channel_id`. It described a single-channel response with `id`, `channel_type`, `status`, `health_status` (`healthy`, `stale`, or `degraded`), `last_event_at`, `failure_count`, and an optional `status_reason`. For all channels, it described `channels` and `summary` (`total`, `healthy`, `stale`, `degraded`). This is not a current RPC contract: the method is not registered. The Gateway's internal health monitor uses registry health snapshots (`src/gateway/method_census.rs`, `src/gateway/channel_health_monitor.rs`, `src/gateway/channel_registry.rs`).
+
+The earlier table listed `app_password` for Teams (`msteams`). The field was removed from `CHANNEL_SECRET_FIELDS` in the Teams cleanup (code commit `fd7fba58d`, `src/gateway/handlers/channel.rs`).
 
 ## See Also
 

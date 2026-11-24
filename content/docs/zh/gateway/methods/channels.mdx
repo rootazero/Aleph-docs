@@ -3,204 +3,214 @@ title: "channels.*"
 description: "通信频道管理 RPC 方法"
 ---
 
-`channels.*` 是对 `ChannelRegistry` 的运行时接口。方法在两次连接中分布:
+频道 RPC 同时管理 `ChannelRegistry` 中的运行实例和 `Config` 中的频道声明。`register_channel_handlers` 注册核心频道方法和 Discord Control-Plane 方法（`src/bin/aleph-server/commands/start/builder/handlers/session.rs`）；配对方法单独注册并与入站路由共享配对存储（`src/bin/aleph-server/commands/start/mod.rs`）；绑定方法由 `src/bin/aleph-server/commands/start/builder/handlers/settings.rs` 注册。
 
-- `register_channel_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/session.rs`)——核心生命周期方法(`channels.list/status`、`channel.start/stop/pairing_data/send/create/delete/health`、`channels.set_agent`)。
-- `start/mod.rs:2431-2466`——频道配对方法(`channel.pairing.list/approve/reject/approved/revoke`)。
-- Discord Control-Plane 面板方法(`discord.validate_token`、`discord.list_guilds`、`discord.list_channels`、`discord.audit_permissions`)与其他频道处理器一起注册。
+在 `channels.list` 中，仅有配置而没有运行实例的频道分为两类：显式禁用的冷声明显示为 `disabled`，其他尚未实例化的声明显示为 `pending_config`（`src/gateway/handlers/channel.rs`）。
 
-所有这些方法共享同一注册表。已配置但尚未实例化的频道(例如 `~/.aleph/config.toml` 中存在但缺少 `bot_token` 的 Telegram 频道)在 `channels.list` 中显示为 `pending_config`。
+## 冷声明
+
+### 判定与启动
+
+只有频道配置中的 JSON 布尔值 `"enabled": false`（TOML `enabled = false`）才是冷声明。`ChannelInstanceConfig::is_explicitly_disabled` 不把 `true`、非布尔值或缺失字段当成冷声明；省略 `enabled` 保留适配器原有的默认行为。`ChannelInstanceConfig::declared_type` 优先取字符串 `type`；否则，如果频道 ID 在 `CONFIGURABLE_CHANNEL_TYPES` 中，就用 ID 作为类型。两者都不能给出类型时，`Config::resolved_channels` 记录警告并跳过该声明（`src/config/structs.rs`、`shared/protocol/src/channels.rs`）。
+
+Gateway 启动时，`initialize_channels` 将冷声明留在 `Config`，跳过 vault 凭证补齐和适配器构造，包括 iMessage／BlueBubbles 的特殊分支。为入站消息合并器查找 Telegram 的 `coalescing` 配置时，也会跳过显式禁用项；找不到可用设置则使用默认值（`src/bin/aleph-server/commands/start/builder/subsystems.rs`）。
+
+对能解析出类型的冷声明，启动接线调用 `project_cold_declaration`，将不含凭证的策略放入 `ChannelPolicyProjection`。入站路由与系统续跑读取同一份投影。如果其他字段有误导致策略解析失败，投影会记录 `Cold channel requires policy repair before activation`；降级时仍保留可解析的 `tool_permissions` 层，不丢掉有效的拒绝规则（`src/bin/aleph-server/commands/start/builder/subsystems.rs`、`src/gateway/channel_policy.rs`）。
+
+### 创建与凭证落盘
+
+`channel.create` 创建冷声明时不构造适配器、不注册运行实例、不启动频道。`extract_cold_channel_secrets` 将本次提供的、受支持的非空顶层字符串凭证从配置中取出，暂存在配置之外。冷路径拒绝非空的 `verification_token`、`encrypt_key`、`channel_access_token`、`channel_secret` 和 `token`，也拒绝非空的已映射凭证出现在嵌套结构中或使用非字符串值。这里的非空排除 `null` 和空字符串。遇到不支持的凭证，返回 `INVALID_PARAMS`，不回退到明文（`src/gateway/handlers/channel.rs`）。
+
+1. 先把不含本次凭证的声明加入 `Config`，调用 `save_incremental` 保存 `channels`。落盘失败时，从 `Config` 移除该条目并返回 `INTERNAL_ERROR`，消息为 `Failed to persist channel configuration`（`src/gateway/handlers/channel.rs`）。
+2. 落盘成功后，才用 `store_secret_batch` 将暂存的凭证一次写入 vault。写入失败时，移除声明并再次保存以回滚。如果回滚也失败，则在 `Config` 中恢复这条仍处于冷态、且不含本次所提交凭证的声明。vault 写失败均返回 `INTERNAL_ERROR`，消息为 `Failed to store channel credentials`，不回退到明文（`src/gateway/handlers/channel.rs`、`src/gateway/security/shared_token.rs`）。
+3. 成功返回 `id`、`type` 和 `status: "disabled"`（`src/gateway/handlers/channel.rs`）。
+
+### 显式激活
+
+只有显式调用 `channel.start` 才会激活冷声明。注册表中没有该 ID 时，`handle_start` 走仅配置路径（`src/gateway/handlers/channel.rs`）：
+
+1. 从当前共享的 `Config` 读取一份快照，同时用于传输配置和策略；配置锁内不读 vault，也不调用工厂。配置中没有该 ID 时返回 `INTERNAL_ERROR`，消息为 `Channel <id> not found in config`；无法确定类型时返回 `INVALID_PARAMS`，消息为 `Missing channel type`（`src/gateway/handlers/channel.rs`）。
+2. 释放配置锁后，把 vault 凭证注入运行时副本，再用 `parse_channel_activation_policy` 解析激活策略。解析失败返回 `INVALID_PARAMS` 和策略错误消息，不构造适配器（`src/gateway/handlers/channel.rs`、`src/gateway/channel_policy.rs`）。
+3. 构造适配器后，检查其 ID 是否与请求一致。不一致时返回 `INTERNAL_ERROR`，消息为 `Channel factory returned a different instance ID`（`src/gateway/handlers/channel.rs`）。
+4. `ChannelRegistry::register_and_start_vacant` 在注册表锁内检查 ID 是否空闲；若已占用，返回 `ChannelError::Busy`，RPC 将其报为启动失败。若空闲，处理器用 `before_publish` 回调调用 `set_activation`，先发布策略，再插入条目并启动适配器（`src/gateway/channel_registry.rs`、`src/gateway/handlers/channel.rs`）。
+
+**显式激活不会把磁盘上的 `enabled` 改成 `true`。** 只要配置仍显式禁用，下次 Gateway 启动就仍按冷声明处理（`src/gateway/handlers/channel.rs`、`src/bin/aleph-server/commands/start/builder/subsystems.rs`）。
+
+### 边界
+
+冷声明不是频道热重载，也不新增 Zahir Gateway 挂载点。`channel.stop` 只针对已注册的实例；它不保证回收每个资源，也不保证卸载原生代码（`src/bin/aleph-server/commands/start/builder/subsystems.rs`、`src/gateway/handlers/channel.rs`、`src/gateway/channel_registry.rs`）。
 
 ## 方法
 
 ### channels.list
 
-列出每个已注册频道以及已配置但未实例化的集合。也展示持久出站投递队列的深度(R8),让算子能发现积压。
+无需参数。合并注册表和配置：同一 ID 两处都有时，以注册表状态为准，只计一次。仅有配置的条目由 `configured_channel_info` 生成，冷声明为 `disabled`，其他未实例化的声明为 `pending_config`；两者都返回 `CapabilitiesResponse::default()`，不声明运行能力。`summary` 计入注册实例和仅有配置的冷声明；`pending_config` 条目只列出，不计入 `total`（`src/gateway/handlers/channel.rs`、`src/gateway/channel_registry.rs`）。
 
-**请求:** 无参数。
-
-**响应:** `{ "channels": [ ...ChannelInfoResponse... ], "summary": { "total", "connected", "connecting", "pairing", "disconnected", "error", "disabled" }, "delivery_queue" | null }`。每个 `ChannelInfoResponse` 包含 `id`、`name`、`channel_type`、`status` 和 `capabilities` 块(`attachments`、`images`、`audio`、`video`、`reactions`、`replies`、`editing`、`deletion`、`typing_indicator`、`read_receipts`、`rich_text`、`max_message_length`、`max_attachment_size`)。`pending_config` 频道携带空 capabilities。
+**响应：** `channels`、`summary` 和 `delivery_queue`。`summary` 包含 `total`、`connected`、`connecting`、`pairing`、`disconnected`、`error`、`disabled`。`delivery_queue` 提供持久出站投递队列的积压统计，未接入持久队列时为 `null`。每个 `ChannelInfoResponse` 包含 `id`、`name`、`channel_type`、`status` 和 `capabilities`（`attachments`、`images`、`audio`、`video`、`reactions`、`replies`、`editing`、`deletion`、`typing_indicator`、`read_receipts`、`rich_text`、`max_message_length`、`max_attachment_size`）（`src/gateway/handlers/channel.rs`）。
 
 ### channels.status
 
-单个频道的实时状态(用 live `ChannelStatus` 覆盖存储的状态)。
+读取单个频道。优先返回注册实例的实时 `ChannelStatus`；如果没有实例，但 `Config` 有同 ID 的冷声明，则返回 `disabled` 条目。其他情况（包括只有 `pending_config` 条目）返回 `INVALID_PARAMS`，消息为 `Channel not found: <id>`（`src/gateway/handlers/channel.rs`、`src/gateway/channel_registry.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel_id` | string | 是 | 频道 id |
+| `channel_id` | string | 是 | 频道 ID |
 
-**响应:** 该频道的 `ChannelInfoResponse`。未知时返回 `INVALID_PARAMS: Channel not found: <id>`。
+**响应：** 该频道的 `ChannelInfoResponse`（`src/gateway/handlers/channel.rs`）。
 
 ### channel.start
 
-启动频道。从 `~/.aleph/config.toml` 重新读取频道配置(使 Panel 保存无需重启守护进程即生效),在构造频道前将 vault 解析的密钥重新注入配置。Telegram 频道的 `ToolCatalog` 会被重新挂载,以便斜杠命令被注册。
+启动频道。它读取当前共享的 `Config`，而不是在 RPC 内重新读取磁盘文件。Telegram 适配器重建时，如果有缓存的 `ToolCatalog`，会重新挂载它以注册斜杠命令。仅有配置的频道走上文的显式激活流程（`src/gateway/handlers/channel.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel_id` | string | 是 | 频道 id |
+| `channel_id` | string | 是 | 频道 ID |
 
-**响应:** `{ "channel_id", "status": "started" }`。
+**响应：** `{ "channel_id", "status": "started" }`（`src/gateway/handlers/channel.rs`）。
 
 ### channel.stop
 
-停止频道。
+停止已注册的频道实例；只有冷声明而没有实例时不能停止（`src/gateway/handlers/channel.rs`、`src/gateway/channel_registry.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel_id` | string | 是 | 频道 id |
+| `channel_id` | string | 是 | 频道 ID |
 
-**响应:** `{ "channel_id", "status": "stopped" }`。
+**响应：** `{ "channel_id", "status": "stopped" }`（`src/gateway/handlers/channel.rs`）。
 
 ### channel.create
 
-创建新的频道实例,持久化其配置(密钥剥到 vault),注册,自动启动。如果配置不完整(如缺少 `bot_token`),请求仍然以 `status: "pending_config"` 成功,以便用户能通过 Panel 补全缺失字段。
+创建并持久化频道声明。显式禁用时走上文的冷声明保存流程；否则尝试构造适配器，成功后注册并自动启动。无法构造时（例如缺少必填凭证），声明仍会保存，返回 `pending_config`，可以补全后再启动（`src/gateway/handlers/channel.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `id` | string | 是 | 唯一频道 id |
-| `type` | string | 是 | `telegram` / `discord` / `slack` / `imessage`(BlueBubbles)/ … |
-| `config` | object | 是 | 类型相关配置;密钥字段(`bot_token`、`app_token`、`app_secret`、`access_token` …)存入 vault(`channel:<id>:<field>`)并从持久化配置中剔除 |
+| `id` | string | 是 | 唯一频道 ID |
+| `type` | string | 是 | 如 `telegram`、`discord`、`slack`、`imessage`（含 BlueBubbles） |
+| `config` | object | 否 | 类型相关配置，省略时使用空对象；凭证处理见下表 |
 
-**响应:** `{ "id", "type", "status" }`,其中 `status: "started" | "created_but_start_failed" | "pending_config"`。
+**响应：** 包含 `id`、`type` 和 `status`。`status` 为 `disabled`、`started`、`created_but_start_failed` 或 `pending_config`；`created_but_start_failed` 还带有 `error`（`src/gateway/handlers/channel.rs`）。
 
 ### channel.delete
 
-停止频道(如在运行中)并从注册表和持久化配置中移除。
+删除频道声明，无需先激活冷声明。如果注册表中已有实例，则尝试停止并注销；随后从共享的 `Config` 删除该 ID 并尝试保存 `channels`，不清理 vault 条目。保存失败只记录日志，仍返回 `deleted`；如果注册表和配置都没有该 ID，则返回 `INVALID_PARAMS`（`src/gateway/handlers/channel.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `id` | string | 是 | 频道 id |
+| `id` | string | 是 | 频道 ID |
 
-**响应:** `{ "id", "status": "deleted" }`。若频道既不在注册表中也不在配置中,返回错误。
+**响应：** `{ "id", "status": "deleted" }`（`src/gateway/handlers/channel.rs`）。
 
 ### channel.send
 
-通过频道发送消息。
+通过已注册的频道实例发送消息；冷声明本身不能发送（`src/gateway/handlers/channel.rs`、`src/gateway/channel_registry.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel_id` | string | 是 | 频道 id |
-| `to` | string | 是 | 会话 id(频道特定目标:聊天 id、频道 id、用户 id 等) |
-| `text` | string | 是 | 消息正文(非空) |
+| `channel_id` | string | 是 | 频道 ID |
+| `to` | string | 是 | 频道特定的会话目标，如聊天 ID、频道 ID 或用户 ID |
+| `text` | string | 是 | 非空消息正文 |
 
-**响应:** `{ "channel_id", "message_id", "timestamp", "sent": true }`。
+**响应：** `{ "channel_id", "message_id", "timestamp", "sent": true }`（`src/gateway/handlers/channel.rs`）。
 
 ### channel.pairing_data
 
-获取支持配对的频道的配对数据(QR 码、code 或 deep link)。
+读取已注册频道的配对数据，如二维码或配对码；也可能没有可用的配对数据（`src/gateway/handlers/channel.rs`、`crates/aleph-slot-api/src/channel.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel_id` | string | 是 | 频道 id |
+| `channel_id` | string | 是 | 频道 ID |
 
-**响应:** 频道的配对载荷(形态由频道定义)。
-
-### channel.health
-
-读取一个频道(或每个频道,汇总)的频道健康监控。
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `channel_id` | string | 否 | 省略 ⇒ 每个频道的健康 + 集群摘要 |
-
-**响应(单个频道):** 该频道的 `ChannelHealthResponse`(`id`、`channel_type`、`status`、`health_status`(`healthy` / `stale` / `degraded`)、`last_event_at`、`failure_count`、`status_reason?`)。
-
-**响应(所有):** `{ "channels": [ ...ChannelHealthResponse... ], "summary": { "total", "healthy", "stale", "degraded" } }`。
+**响应：** 频道提供的配对载荷（`src/gateway/handlers/channel.rs`）。
 
 ### channel_outbox: dead_letters
 
-这是内建工具 `channel_outbox`,**不是 Gateway RPC 方法**。使用 `action: "dead_letters"` 查看耗尽重试预算或因其他安全原因停止投递的出站消息。
+这是内建工具 `channel_outbox`，**不是 Gateway RPC 方法**。使用 `action: "dead_letters"` 查看耗尽重试预算或因其他安全原因停止投递的出站消息（`src/builtin_tools/channel_outbox.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `action` | string | 是 | `dead_letters` |
-| `channel_id` | string | 否 | 限定通道,省略为全部 |
-| `limit` | number | 否 | 默认 10,上限 25 |
+| `channel_id` | string | 否 | 限定频道，省略为全部 |
+| `limit` | number | 否 | 默认 10，上限 25 |
 
-**输出:** `message`、`durable_queue`、`dead_letters`。条目含 `channel_id`、`conversation_id`、`preview`(最多 200 字符)、`attempts`、`last_error`、`reason`、`redrivable`、`age_secs`。未配置持久队列时 `durable_queue` 为 `false`。
+**输出：** `message`、`durable_queue`、`dead_letters`。条目含 `channel_id`、`conversation_id`、`preview`（最多 200 字符）、`attempts`、`last_error`、`reason`、`redrivable`、`age_secs`。未配置持久队列时，`durable_queue` 为 `false`（`src/builtin_tools/channel_outbox.rs`）。
 
 ### channel_outbox: redrive
 
-同一内建工具的恢复操作,**不是 Gateway RPC 方法**。使用 `action: "redrive"` 把可安全重放的死信移回出站队列;并非所有死信都能重放。
+同一内建工具的恢复操作，**不是 Gateway RPC 方法**。使用 `action: "redrive"` 把可安全重放的死信移回出站队列；并非所有死信都能重放（`src/builtin_tools/channel_outbox.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `action` | string | 是 | `redrive` |
-| `channel_id` | string | 否 | 限定通道 |
-| `confirm_redrive` | boolean | 否 | 只有 `true` 才真正重放;省略仅预览 |
+| `channel_id` | string | 否 | 限定频道 |
+| `confirm_redrive` | boolean | 否 | 只有 `true` 才真正重放；省略仅预览 |
 
-**输出:** `message`、`durable_queue` 及适用的 `redriven`、`skipped_queue_full`、`skipped_not_replay_safe` 等字段。先检查预览,确认目标后再重放。
+**输出：** `message`、`durable_queue` 及适用的 `redriven`、`skipped_queue_full`、`skipped_not_replay_safe` 等字段。先检查预览，确认目标后再重放（`src/builtin_tools/channel_outbox.rs`）。
 
 ### channels.set_agent
 
-将 agent 绑定到频道或解绑。委派到共享的绑定接缝(`gateway::agent_binding`)——与 `agent_switch` 工具相同的实现——所以两个面共享 ghost 验证、无操作检测和 `Bound` / `Unbound` 事件。**必须指定一个真实存在的 agent**(之前的宽松行为已被移除:26.7.15+)。
+将 agent 绑定到频道或解绑。它与 `agent_switch` 工具共用绑定逻辑，包括校验 agent、识别重复绑定以及发布 `Bound`／`Unbound` 事件。如果提供了 `AgentRegistry`，指定的 agent 不存在时返回 `INVALID_PARAMS`；`agent_registry: None` 时跳过该校验（`src/gateway/handlers/workspace.rs`、`src/gateway/agent_binding.rs`、`src/builtin_tools/agent_manage/switch.rs`）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel_id` | string | 是 | 频道 id |
-| `agent_id` | string | 否 | agent id;`null` / 缺失则解绑 |
+| `channel_id` | string | 是 | 频道 ID |
+| `agent_id` | string | 否 | agent ID；`null` 或缺失则解绑 |
 
-**响应(绑定):** 新绑定时 `{ "ok", "previous_agent" | null, "no_op": false }`;无操作重绑定时 `{ "ok", "previous_agent", "no_op": true }`。
-
-**响应(解绑):** `{ "ok", "previous_agent" | null }`。
-
-当 `agent_id` 在 live `AgentRegistry` 中不存在时返回 `INVALID_PARAMS`。`agent_registry: None` 的最小化服务器跳过验证。
+**响应：** 绑定返回 `ok`、`previous_agent`（没有旧绑定时为 `null`）和 `no_op`（重复绑定为 `true`）；解绑只返回 `ok` 和 `previous_agent`（`src/gateway/handlers/workspace.rs`）。
 
 ### agents.bindings
 
-获取每个 agent 绑定的所有频道,按频道 id 排序。响应形态是 `{ "bindings": { "<agent_id>": [ "<channel>", … ] } }`,并展示绑定到 agent 的所有频道。
-
-**请求:** 无参数。
-
-**响应:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`。
+无需参数。返回 `bindings` 对象：每个 agent ID 对应所有绑定到它的频道 ID，列表按频道 ID 排序（`src/gateway/handlers/workspace.rs`、`src/gateway/agent_env/manager_ops.rs`）。
 
 ## 频道配对
 
-支持未知发送者审批的频道(Telegram、iMessage BlueBubbles)维护每频道的配对存储。入站路由器的自动批准和 Panel 的手动 UI 共享同一存储;下方的 RPC 是手动 UI。
+以下 RPC 供 Panel 手动处理配对；它们使用与入站路由相同的配对存储，并按频道区分请求（`src/bin/aleph-server/commands/start/mod.rs`、`src/gateway/handlers/pairing.rs`）。
 
 | 方法 | 参数 | 说明 |
 |------|------|------|
-| `channel.pairing.list` | `channel?` | `{ "requests": [ ...PairingRequest... ], "count" }`;可选 `channel` 过滤。每个 `PairingRequest` 包含 `channel`、`sender_id`、`code`、`created_at`。 |
-| `channel.pairing.approve` | `channel`(必填),`code`(必填) | `{ "approved": true, "request": PairingRequest }` |
-| `channel.pairing.reject` | `channel`(必填),`code`(必填) | `{ "rejected": true, "channel", "code" }` |
-| `channel.pairing.approved` | `channel`(必填) | `{ "channel", "approved": [ ...sender_id... ], "count" }` |
-| `channel.pairing.revoke` | `channel`(必填),`sender_id`(必填) | `{ "revoked": true, "channel", "sender_id" }` |
+| `channel.pairing.list` | `channel?` | 返回 `requests` 和 `count`；可按 `channel` 过滤。每条请求包含 `channel`、`sender_id`、`code`、`created_at`。 |
+| `channel.pairing.approve` | `channel`、`code`（必填），`user_id`（可选） | 返回 `approved: true`、`request` 和 `user_id`。 |
+| `channel.pairing.reject` | `channel`、`code`（必填） | 返回 `rejected: true`、`channel` 和 `code`。 |
+| `channel.pairing.approved` | `channel`（必填） | 返回 `channel`、`approved`（发送者 ID 列表）和 `count`。 |
+| `channel.pairing.revoke` | `channel`、`sender_id`（必填） | 返回 `revoked: true`、`channel` 和 `sender_id`。 |
 
 ## Discord Control-Plane 面板
 
-四个方法在 Discord modal 流的 Discord Control-Plane 面板中注册:
+以下四个方法一起注册。令牌校验不依赖频道实例；其余三个方法要求目标频道在注册表中且已连接，并从 `DISCORD_BOT_TOKEN` 读取令牌（`src/bin/aleph-server/commands/start/builder/handlers/session.rs`、`src/gateway/handlers/discord_panel.rs`）。
 
 | 方法 | 说明 |
 |------|------|
-| `discord.validate_token` | 验证 Discord bot token(不持久化) |
-| `discord.list_guilds` | 列出 bot 加入的 guilds |
-| `discord.list_channels` | 列出 guild 的 channels |
-| `discord.audit_permissions` | 审计 guild 的权限集与算子的意图 |
-
-这些方法需要 live `ChannelRegistry`,始终存在;它们不依赖于已连接的频道状态。
+| `discord.validate_token` | 验证 Discord bot token，不持久化 |
+| `discord.list_guilds` | 列出 bot 加入的服务器 |
+| `discord.list_channels` | 列出指定服务器中的频道 |
+| `discord.audit_permissions` | 审计 bot 在指定服务器中的权限 |
 
 ## 频道类型 → 密钥字段映射
 
-`channel.create` 接受下列命名的密钥字段。每个字段都存到 `channel:<id>:<field>`,并**从持久化配置中剔除**。
+下表是 `CHANNEL_SECRET_FIELDS` 所列字段的典型用途。vault 键为 `channel:<id>:<field>`。冷声明创建只接受受支持的顶层凭证，保存声明后才提交 vault，不支持的嵌套凭证会报错；非冷创建仍走原有迁移路径，vault 写失败时可能保留明文配置（`src/gateway/handlers/channel.rs`）。
 
 | 频道族 | 密钥字段 |
 |--------|----------|
 | `telegram` | `bot_token` |
 | `discord` | `bot_token` |
-| `slack` | `bot_token`,`app_token` |
+| `slack` | `bot_token`、`app_token` |
 | `feishu` | `app_secret` |
-| `msteams` | `app_password` |
 | `matrix` | `access_token` |
-| `xmpp` / `irc` / `email` | `password` |
+| `xmpp`／`irc`／`email` | `password` |
 | `nostr` | `private_key` |
 | `webhook` | `secret` |
 | `whatsapp` | `session_data` |
 | `qq` | `client_secret` |
 
-已配置的字段也会在 `channels.list` 上以 `has_<field>: true` 暴露(以及在设置页上)——可编辑输入始终从空开始,保存时空值表示"保留现有 vault 值"。
+`has_<field>: true` 是 `config.get` 对 vault 凭证的存在性提示，不是 `channels.list` 的字段。配置读取不会返回这些凭证的明文；保存时，映射字段中的空字符串不替换已有的 vault 值（`src/gateway/handlers/channel.rs`、`src/gateway/handlers/config.rs`）。
+
+## 历史：旧版健康 RPC 与 Teams 凭证
+
+旧版方法页曾记录 `channel.health`：可选 `channel_id`；单频道响应记录了 `id`、`channel_type`、`status`、`health_status`（`healthy`、`stale`、`degraded`）、`last_event_at`、`failure_count` 和可选 `status_reason`；全量响应记录了 `channels` 和 `summary`（`total`、`healthy`、`stale`、`degraded`）。这不是当前的 RPC 契约：该方法未注册，Gateway 的内部健康监控使用注册表的健康快照（`src/gateway/method_census.rs`、`src/gateway/channel_health_monitor.rs`、`src/gateway/channel_registry.rs`）。
+
+旧版表格中的 Teams（`msteams`）对应 `app_password`；该字段已随 Teams 清理从 `CHANNEL_SECRET_FIELDS` 移除（代码提交 `fd7fba58d`，`src/gateway/handlers/channel.rs`）。
 
 ## 另请参阅
 
-- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
-- [频道路由](/docs/zh/gateway/channels)——入站路由 + 访问策略
-- [总线错误和投递队列](/docs/zh/gateway/delivery)——持久出站队列
+- [方法参考](/docs/zh/gateway/methods) -- 所有已注册的命名空间
+- [频道路由](/docs/zh/gateway/channels) -- 入站路由与访问策略
+- [总线错误与投递队列](/docs/zh/gateway/delivery) -- 持久出站队列
