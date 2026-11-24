@@ -36,7 +36,7 @@ Create a new provider. The API key, when supplied, is written to the vault (`ai:
 | `name` | string | yes | Provider id (must be unique) |
 | `config` | object | yes | `ProviderConfigJson` — see [Config Fields](#config-fields) |
 
-**Response:** `{ "ok": true }` on success. `INVALID_PARAMS` if the provider already exists. With a live `MultiProviderRegistry` (`provider_hot`), the new provider is hot-registered so it is immediately usable as the default and as an auto-derived failover fallback.
+**Response:** `{ "ok": true }` on success. `INVALID_PARAMS` if the provider already exists. With a live `MultiProviderRegistry`, the new provider is hot-registered through `MultiProviderRegistry::register`, so it is immediately usable as the default and as an auto-derived failover fallback.
 
 ### providers.update
 

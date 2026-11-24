@@ -1,17 +1,17 @@
 ---
 title: "A2A Protocol"
-description: "A2A protocol adapter: AgentCard / Task / Message domain, port traits, A2AService sub-agent delegation, CardRegistry / SmartRouter / LlmMatcher."
+description: "A2A protocol adapter: AgentCard / Task / Message domain, port traits, A2AService sub-agent delegation, CardRegistry / SmartRouter."
 ---
 
 The `a2a` module is the [Agent-to-Agent (A2A)](https://github.com/anthropics/a2a) protocol adapter. It both lets Aleph talk to external A2A agents and routes internal sub-agent delegations to external implementations.
 
-> The historical "domain / port / service / adapter" five-bucket split still applies, but `service/` is no longer home to `sub_agent` alone: it now also carries `card_builder` / `card_refresh` / `card_registry` / `llm_matcher` / `notification` / `smart_router`. The sub-agent delegation lives at the crate root in `src/a2a/sub_agent.rs`.
+> The historical "domain / port / service / adapter" five-bucket split still applies, but `service/` is no longer home to `sub_agent` alone: it now also carries `card_builder` / `card_refresh` / `card_registry` / `notification` / `smart_router`. The sub-agent delegation lives at the crate root in `src/a2a/sub_agent.rs`.
 
 ## Overview
 
 A2A enables:
 - **Agent Card discovery** — `card_registry` caches `AgentCard`s; `card_refresh` runs periodic refresh + health monitoring
-- **LLM smart routing** — `llm_matcher` + `smart_router` map natural-language task descriptions to the best-matching A2A agent
+- **Explicit routing** — `SmartRouter` matches a quoted name or alias against registered A2A agents.
 - **Sub-agent delegation** — `A2ASubAgent` (`src/a2a/sub_agent.rs`) re-attaches A2A sub-agents to Aleph's memory / runtime
 - **A2A protocol messages** — `domain/message.rs::A2AMessage` (text / file / data Parts), `A2ATask` (multi-turn task with state machine), `TaskState` transitions
 - **Client / server** — `adapter/client/` and `adapter/server/` are A2A JSON-RPC endpoints
@@ -44,9 +44,8 @@ src/a2a/
 │   ├── card_builder.rs        # AgentCard construction
 │   ├── card_refresh.rs        # periodic refresh + spawn_card_refresh / spawn_health_monitor / refresh_all_cards
 │   ├── card_registry.rs       # CardRegistry: cache + lookup
-│   ├── llm_matcher.rs         # SemanticLlmMatcher: LLM-based semantic matching
 │   ├── notification.rs        # NotificationService / PushNotificationConfig
-│   └── smart_router.rs        # SmartRouter / LlmMatcher / RoutingDecision / RoutingMethod
+│   └── smart_router.rs        # SmartRouter / RoutingDecision / RoutingMethod
 └── adapter/            # protocol implementations
     ├── mod.rs
     ├── auth/           # A2A auth adapters
@@ -102,16 +101,11 @@ Each trait is implemented by `adapter::client` (remote A2A agents) and `adapter:
 pub use card_builder::CardBuilder;
 pub use card_refresh::{refresh_all_cards, spawn_card_refresh, spawn_health_monitor};
 pub use card_registry::CardRegistry;
-pub use llm_matcher::SemanticLlmMatcher;
 pub use notification::{NotificationService, PushNotificationConfig};
-pub use smart_router::{LlmMatcher, RoutingDecision, RoutingMethod, SmartRouter};
+pub use smart_router::{RoutingDecision, RoutingMethod, SmartRouter};
 ```
 
-`SmartRouter` aggregates `LlmMatcher` and `CardRegistry`, mapping a user's natural-language task to the best A2A agent:
-
-- **`LlmMatcher::route(task_description)` → `RoutingDecision`** — LLM-scored
-- **`CardRegistry::lookup(decision)`** — resolve to an `AgentCard` + endpoint
-- **`SmartRouter::route_and_invoke`** — end-to-end: score → pick card → delegate
+`SmartRouter::route` asks its `AgentResolver` for registered agents, filters out unreachable entries, and returns a `RoutingDecision` only for a quoted name or alias match. `A2ASubAgent::execute_delegation` selects an explicitly supplied agent by ID or name, or calls the router when no agent is supplied, then sends the task to the resolved endpoint. Commit `54e757c88` removed LLM-based matching; there is no semantic fallback.
 
 `spawn_card_refresh` + `spawn_health_monitor` keep `CardRegistry` fresh in the background; `refresh_all_cards` is the one-shot full refresh.
 

@@ -563,9 +563,9 @@ impl ToolService for CoreDispatch {
 
 `src/tools/concurrency.rs` 资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）—— Act 阶段按声明分桶并行。
 
-### `defer_mcp_tools`（`[tools]` 配置键） / `enable_tool_search`
+### 延迟发现 MCP 工具
 
-26.7.7+ 渐进式工具披露——非核心工具 schema 折叠为 name + description；`tool_search` 元工具按需加载。
+工具配置键 `defer_mcp_tools` 使延迟加载的 MCP 工具不出现在初始 schema 列表中。`tool_search` 搜索这些工具，再按需公开匹配工具的 schema（`src/tools/scoped/deferred.rs`、`src/tools/tool_search.rs`）。
 
 ### Action-aware Approval Gate
 
@@ -581,7 +581,7 @@ impl ToolService for CoreDispatch {
 
 ### 失败关闭
 
-`permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
+按动作区分的审批策略在文件不存在时使用内置默认表。策略文件不可读、超出大小限制或格式错误时不会静默放行：所有动作都需要审批（`src/approval/config.rs` 中的 `ConfigApprovalPolicy::load_from`）。
 
 ### 跨批次去重 / 备忘
 

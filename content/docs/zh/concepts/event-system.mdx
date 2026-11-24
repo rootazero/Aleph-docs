@@ -101,14 +101,17 @@ pub struct EventFilter {
 构造方式：
 
 ```rust
-let filter = EventFilter::new(vec![EventType::ToolCallStarted, EventType::ToolCallCompleted])
+let filter = EventFilter::new(vec![EventType::SubAgentTreeUpdate, EventType::ProcessCompleted])
     .with_session("session-123")
     .with_agent("agent-1");
-// 或
-let filter = EventFilter::all();   // 等价于 EventFilter::new(vec![EventType::All])
 ```
 
-**示例：** Panel 的 WebSocket 订阅走 `EventFilter::new(vec![EventType::ToolCallStarted, ...]).with_session(...)`，把与该会话相关的工具事件流给客户端。
+`EventFilter::new` 的 `event_types` 为空表示不匹配任何事件。`EventFilter` 没有
+「全匹配」构造（不存在 `EventType::All`），要订阅全部变体只能逐个列出。
+
+**示例：** gateway 的子代理树中继（`src/gateway/subagent_tree_relay.rs`）用
+`EventFilter::new(vec![EventType::SubAgentTreeUpdate])` 订阅全局总线，再把
+子代理树的实时更新转发给 panel。
 
 ---
 
@@ -118,20 +121,19 @@ let filter = EventFilter::all();   // 等价于 EventFilter::new(vec![EventType:
 
 | 分类 | 变体 | 说明 |
 |---|---|---|
-| Input | `InputReceived(InputEvent { text, session_id, context, timestamp })` | 用户输入 |
-| Tool | `ToolCallRequested(ToolCallRequest { tool, parameters })` | 工具调用请求 |
-| Tool | `ToolCallStarted(ToolCallStarted { call_id, tool, input, timestamp, session_id? })` | 工具调用开始 |
-| Tool | `ToolCallCompleted(ToolCallResult { call_id, tool, input, output, started_at, completed_at, token_usage, session_id? })` | 工具调用完成 |
-| Tool | `ToolCallFailed(ToolCallError { call_id, tool, input, error, error_kind, is_retryable, attempts, session_id? })` | 工具调用失败 |
-| Tool | `ToolCallRetrying(ToolCallRetry { call_id, attempt, delay_ms, reason? })` | 工具调用重试中 |
-| Loop | `LoopContinue(LoopState)` / `LoopStop(StopReason)` | 循环推进 / 停止 |
-| Session | `SessionCreated(SessionInfo)` / `SessionUpdated(SessionDiff)` / `SessionResumed(SessionInfo)` / `SessionCompacted(CompactionInfo)` | 会话生命周期 |
-| Sub-agent | `SubAgentCompleted(SubAgentCompletionEvent)` / `SubAgentTreeUpdate(...)` | 子代理终结 / 树更新 |
-| AI | `AiResponseGenerated(AiResponse { content, reasoning?, is_final, timestamp })` | 模型响应 |
-| Part | `PartAdded/Updated/Removed(crate::components::PartUpdateData)` | UI 消息流渲染 |
-| Team | `TeamCreated { team_id, name, member_ids }` / `TeamMemberAdded` / `TeamMemberRemoved` / `TeamTaskAssigned` / `TeamTaskUpdated` / `TeamTaskCompleted` / `TeamTaskFailed` / `TeamDisbanded` | 多智能体团队 |
+| Sub-agent | `SubAgentCompleted(SubAgentCompletionEvent)` | 子代理终结 |
+| Sub-agent | `SubAgentTreeUpdate(aleph_protocol::subagent_tree::SubagentTreeEvent)` | 子代理树实时更新 |
+| Process | `ProcessCompleted(ProcessCompletionEvent)` | 后台 `bash` 作业自然结束 |
+| Team | `TeamCreated { team_id, name }` | 团队创建 |
+| Team | `TeamMemberAdded { team_id, member_id, role }` / `TeamMemberRemoved { team_id, member_id }` | 成员增删 |
+| Team | `TeamTaskAssigned { team_id, task_id, assignee_id }` / `TeamTaskUpdated { team_id, task_id, status, previous_status }` | 任务分配与更新 |
+| Team | `TeamTaskCompleted { team_id, task_id, result_summary }` / `TeamTaskFailed { team_id, task_id, error }` | 任务终态 |
+| Team | `TeamDisbanded { team_id }` | 团队解散 |
 
-`EventType`（`src/event/types.rs`）是订阅过滤的 discriminant，**不含** `MemoryUpdated` 或 `ConfigReloaded`（后者是 `McpManagerEvent` 私有的，不挂在全局总线上）。
+`EventType`（`src/event/types.rs`）是订阅过滤用的 discriminant，与
+`AlephEvent` 的变体一一对应：子代理 2 个、后台进程 1 个、团队 8 个，合计
+11 个。2026-08 的 severed-wire 审计把一批没有生产者的变体从这两个枚举里删掉，
+当时还有哪些变体见下方「历史」小节。
 
 ### 事件排序与时间戳
 
@@ -163,15 +165,15 @@ struct MemoryLogger;
 impl EventHandler for MemoryLogger {
     fn name(&self) -> &'static str { "MemoryLogger" }
     fn subscriptions(&self) -> Vec<EventType> {
-        vec![EventType::ToolCallCompleted]
+        vec![EventType::ProcessCompleted]
     }
     async fn handle(
         &self,
         event: &AlephEvent,
         _ctx: &EventContext,
     ) -> Result<Vec<AlephEvent>, HandlerError> {
-        if let AlephEvent::ToolCallCompleted(t) = event {
-            tracing::info!(call_id = %t.call_id, tool = %t.tool, "tool finished");
+        if let AlephEvent::ProcessCompleted(p) = event {
+            tracing::info!(process_id = %p.process_id, command = %p.command, "background job finished");
         }
         Ok(vec![])
     }
@@ -193,6 +195,33 @@ GlobalBus::global()
     })
     .await;
 ```
+
+---
+
+## 历史：2026-08 severed-wire 审计删除的事件变体
+
+2026-08-16 的 severed-wire 审计（提交 `68e103c6f`，"event: severed-wire audit
+fixes"）从 `AlephEvent` 与 `EventType` 里删掉了一批既无生产者也无订阅者的变体。
+审计前的枚举长这样：
+
+| 分类 | 已删除的变体 |
+|---|---|
+| Input | `InputReceived(InputEvent { text, session_id, context, timestamp })` |
+| Tool | `ToolCallRequested(ToolCallRequest { tool, parameters })` |
+| Tool | `ToolCallStarted(ToolCallStarted { call_id, tool, input, timestamp, session_id? })` |
+| Tool | `ToolCallCompleted(ToolCallResult { call_id, tool, input, output, started_at, completed_at, token_usage, session_id? })` |
+| Tool | `ToolCallFailed(ToolCallError { call_id, tool, input, error, error_kind, is_retryable, attempts, session_id? })` |
+| Tool | `ToolCallRetrying(ToolCallRetry { call_id, attempt, delay_ms, reason? })` |
+| Loop | `LoopContinue(LoopState)` / `LoopStop(StopReason)` |
+| Session | `SessionCreated(SessionInfo)` / `SessionUpdated(SessionDiff)` / `SessionResumed(SessionInfo)` / `SessionCompacted(CompactionInfo)` |
+| AI | `AiResponseGenerated(AiResponse { content, reasoning?, is_final, timestamp })` |
+| Part | `PartAdded/Updated/Removed(crate::components::PartUpdateData)` |
+
+至于 `MemoryUpdated`，代码仓历史里从头到尾没有这个标识符——旧文档那句「不含」
+写的是一个不存在的名字。`ConfigReloaded` 则真的是 `McpManagerEvent` 的私有
+变体，2026-08-02 的提交 `21ac20b6a`（"mcp: cut dead manager config knobs and
+transport leftovers"）连同 `src/mcp/manager/types.rs` 里的一批死配置一起删掉；
+`McpManagerEvent` 今天只剩 server 生命周期与 tools-changed 事件。
 
 ---
 

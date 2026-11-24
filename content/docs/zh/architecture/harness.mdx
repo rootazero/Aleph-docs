@@ -85,7 +85,7 @@ pub enum HarnessError {
 }
 ```
 
-多态缝是 `SessionDriver` 与 `Arc<dyn HarnessRunner>`（位于编排器）——这里**没有** `Harness` trait。旧 trait 及其默认 `run()` 因为零消费者已被删除。
+编排器通过 `Arc<dyn HarnessRunner>` 多态分发工具链运行。旧的工具链 trait 及其默认 `run()` 循环没有消费者；独立且未使用的会话驱动 trait 已在 `01ba2bd2f` 中移除。
 
 外层循环 `AgentHarness::run` 反复调用 `run_turn_internal`，直到它返回 `TurnState::Done` 或 `CancellationToken` 触发。
 

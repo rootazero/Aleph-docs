@@ -61,16 +61,16 @@ them writes the granular `TerminateReason`):
 |--------------------------------|-------------------------------------|-----------------------------|
 | Model says `Done`              | `Completed`                         | normal                      |
 | `cancel` token fires           | `Cancelled`                         | cooperative abort           |
-| `max_iterations` exceeded      | `MaxIterations`                     | `hit_limit = true`          |
-| `consecutive_failure_cap`      | `ConsecutiveFailures`               | `hit_limit = true`          |
+| `max_iterations` exceeded      | `HitMaxIterations`                  | `hit_limit = true`          |
+| `consecutive_failure_cap`      | `ConsecutiveFailureCap`             | `hit_limit = true`          |
 | `turn_timeout` on Think        | `TurnTimeout { phase: "Think" }`    | `hit_limit = true`          |
 | `StallTracker::is_stalled`     | `StallTimeout { elapsed_ms }`       | `hit_limit = true`          |
 | Verifier chain `Veto`          | `VerifierVeto { ... }`              | one extra Continue          |
 | `SplitSession` succeeded       | `Completed`                         | rebinds to child session    |
 
 `hit_limit` is set under the precision complement `terminate_reason` so callers
-that only look at the boolean keep working. After any cap, a `grace_turn`
-(`fire_boundary_grace_turn` with `GRACE_TIMEOUT_BUDGET = 30s`) lets the model
+that only look at the boolean keep working. After any cap, a
+`fire_boundary_grace_turn` (budget `GRACE_TIMEOUT_BUDGET = 30s`) lets the model
 produce a clean terminal summary before exit; the grace turn is fire-and-forget
 on its own budget so a hung provider can never block shutdown.
 
@@ -120,7 +120,8 @@ The top-level agent spawns sub-agents via `SubagentTool`
 (`src/agents/subagent_tool/`). Sub-agent execution is the same `AgentHarness`
 the gateway chat path uses — only the wiring differs:
 
-- `SubagentTool::spawn` calls into `agent_runtime::execute_via_harness`, which
+- `SubagentTool::spawn` calls into `AgentRuntime::execute_via_harness`
+  (`src/agents/runtime.rs`), which
   constructs an `AgentHarness` per child with `HarnessDeps` descended from the
   parent's via `chain.child()`.
 - The child's session key is the parent's `SessionKey::Main` wrapped in

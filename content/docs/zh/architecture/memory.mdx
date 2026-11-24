@@ -80,11 +80,12 @@ description: "两层数据模型（L0 原始 / L1 笔记）、四个存储 trait
 | `notes_vec_map` | 把 `(path, agent_id)` 链接到数字 rowid |
 | `notes_vec_{dim}` | sqlite-vec 虚拟表（768/1024/1536 维） |
 | `memory_events` | 不可变事件日志（事件源突变） |
-| `context_anchors` | 用于出处的会话到事实链接 |
 | `dream_status` | 每个 run 的跟踪 |
 | `dream_reports` | 每 cycle 的活动计数器 + 序列化的 `EvolutionOutcome`（SkillOpt 裁决） |
 | `daily_insights` | Dream 守护进程输出缓存 |
 | `recall_signals` | 每条笔记的访问计数，驱动 `reinforcement` |
+
+原始捕获记录通过 `RawMemory`（`src/memory/store/raw_memory.rs`）保留来源以及可用的会话 ID。这是原始记录自身的出处信息，不是独立的事实到会话关联表。
 
 ### sqlite-vec 虚拟表
 
@@ -247,25 +248,7 @@ pub struct AssemblyBudget {
 
 ## 精选热记忆（`remember`）
 
-`src/memory/curated/`——一份手动策划的、冻结的关键事实快照，绕过正常检索：
-
-```rust
-pub struct CuratedHotMemory {
-    pub facts: Vec<CuratedFact>,
-    pub frozen_at: i64,
-}
-
-pub struct CuratedFact {
-    pub content: String,
-    pub priority: u8,        // 1-10，越高 = 越重要
-    pub source: String,
-}
-```
-
-- 唯一写入者：`remember` 内置工具（`add` / `replace` / `remove`，外加一个原子的 `batch` 动作；字符预算仅在**最终**状态下校验）
-- 存储在 `~/.aleph/memory/curated/{agent_id}.json`
-- 由 `CuratedMemoryLayer` 的 Stable 前缀无条件注入每个提示（达到 token 预算为止）
-- **冻结快照**——变更需要显式重新策划
+`CuratedMemoryStore`（`src/memory/curated/store.rs`）维护每个代理的、大小受限的人工精选 `MEMORY.md`。它绕过常规检索，由 `CuratedMemoryLayer` 送入提示组装。`remember` 工具支持 `add`、`replace`、`remove` 及原子的 `batch` 编辑；批量编辑只对最终状态检查字符限制。
 
 ---
 
@@ -285,28 +268,7 @@ pub struct CuratedFact {
 
 ## 记忆反射器
 
-```rust
-pub struct MemoryReflector {
-    assembler: Arc<dyn WorkingMemoryAssembler>,
-    llm: Arc<dyn LlmBackend>,
-}
-
-impl MemoryReflector {
-    pub async fn reflect(
-        &self,
-        query: &str,
-        agent_id: &str,
-    ) -> Result<ReflectionResult, AlephError>;
-}
-
-pub struct ReflectionResult {
-    pub answer: String,
-    pub sources: Vec<MemorySource>,
-    pub confidence: f32,
-}
-```
-
-通过 `memory_reflect` 内置工具公开。返回带引用来源的连贯 LLM 综合答案。
+`MemoryReflector::reflect` 接收查询和 `ReflectOpts`，返回包含回答文本和引用条目 `NoteRef` 的 `Synthesis`。内置工具 `memory_reflect` 对外提供这一读取能力。见 `src/memory/reflector/fs_reflector.rs` 和 `src/memory/reflector/types.rs`。
 
 ---
 
@@ -359,9 +321,9 @@ pub struct ReflectionResult {
 |---|---|
 | `src/memory/mod.rs` | 模块入口、重新导出 |
 | `src/memory/assembler/` | `WorkingMemoryAssembler` trait、`HybridAssembler` 实现、信封插槽 |
-| `src/memory/curated/` | `CuratedHotMemory`、`remember` 工具集成 |
-| `src/memory/extensions/` | `MemoryExtension` trait、`ExtensionRegistry`、MCP 适配器 |
-| `src/memory/reflector/mod.rs` | `MemoryReflector`、`ReflectionResult` |
+| `src/memory/curated/` | `CuratedMemoryStore`、`remember` 工具集成 |
+| `src/memory/extensions/` | `MemoryExtension` trait、`MemoryExtensionRegistry`、MCP 适配器 |
+| `src/memory/reflector/mod.rs` | `MemoryReflector`、`Synthesis` |
 | `src/memory/note_retrieval/` | `NoteFactRetrieval` trait、混合搜索实现 |
 | `src/memory/notes/` | `KnowledgeNote`、`NoteStore`、`NoteIndexer` |
 | `src/memory/store/` | `RawMemoryStore`、`DreamStore`、`CompressionStore` trait + `SqliteMemoryBackend` |

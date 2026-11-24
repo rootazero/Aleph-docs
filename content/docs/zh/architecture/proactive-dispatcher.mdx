@@ -3,8 +3,6 @@ title: "主动任务调度"
 description: "守护后台任务：cron / heartbeat 实化服务；runtimes 能力 ledger；wake queue 与防风暴守卫；不再有独立的 daemon 模块。"
 ---
 
-> 文档历史版本中的 `daemon::dispatcher` 模块、顶层 `daemon` 目录、`ProposedAction` / `PolicyEngine` / `DispatcherMode` 枚举**已全部移除**。本页描述当前 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 中的真实代码，附 `src/tasks/shared/`、`src/runtimes/` 协作。
-
 主动后台任务现在由两条正交的服务组成：
 - **Cron**（`src/tasks/cron/`）—— 计划任务，按 cron 表达式 / 间隔 / 一次性触发
 - **Heartbeat**（`src/tasks/heartbeat/`）—— 周期探针 + L1 probe + L2 LLM 判官
@@ -20,7 +18,7 @@ description: "守护后台任务：cron / heartbeat 实化服务；runtimes 能�
 - **Heartbeat 探针** —— 周期性 L1 探针 + 主动 wake，由 LLM 判官决定
 - **Runtimes 能力 ledger** —— `src/runtimes/` 通过 Probe → Bootstrap → Register 三阶段管理外部工具（python / node / uv / ffmpeg / yt-dlp ...），持久化到 `~/.aleph/runtimes/ledger.json`
 - **失败告警 / 投递管道** —— `DeliveryEngine` 把执行结果推送到 webhook / 通知
-- **事件总线广播** —— `CronTaskChanged` / `HeartbeatTaskChanged` 推送面板（取代轮询）
+- **事件总线广播** —— `CronJobChanged` / `HeartbeatTaskChanged` 推送面板（取代轮询）
 
 ---
 
@@ -175,7 +173,9 @@ pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
 
 ---
 
-## 与历史"daemon::dispatcher"的差异
+## 历史：守护进程分发器
+
+提交 `32a6157f1` 移除了未接入生产的守护进程子系统，包括其分发器和执行器。当前设计与旧设计的差异如下：
 
 - **没有 `ProposedAction` / `PolicyEngine` / `DispatcherMode`**——风险评估、策略执行由执行引擎的 `PermissionLayer` + `ContextRuleLayer` + `SmartFilter` 统一处理
 - **没有顶层 `daemon` 目录**——cron / heartbeat 直接位于 `src/tasks/`
@@ -188,4 +188,4 @@ pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
 - [Cron 作业](/docs/zh/automation/cron-jobs) —— Cron 完整配置
 - [Heartbeat](/docs/zh/automation/heartbeat) —— Heartbeat 完整配置
 - [Runtimes](/docs/zh/architecture/runtimes) —— 能力 ledger 与 bootstrap
-- [事件总线](/docs/zh/architecture/event-bus) —— `CronTaskChanged` / `HeartbeatTaskChanged` 推送
+- [事件总线](/docs/zh/architecture/event-bus) —— `CronJobChanged` / `HeartbeatTaskChanged` 推送

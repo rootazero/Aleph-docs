@@ -9,13 +9,15 @@ Aleph is built on an event-driven architecture. Every significant action — a t
 
 ## Architecture
 
-Events flow through two internal buses:
+Events flow through one internal bus:
 
-1. **Core Event Bus** — Handles agent lifecycle events (`AlephEvent`). Built on `tokio::sync::broadcast` channels for low-latency in-process delivery. Every component of the agent loop publishes here: tool calls, session state changes, planning events, sub-agent activity.
+1. **Core Event Bus** — Handles agent lifecycle events (`AlephEvent`). Built on `tokio::sync::broadcast` channels for low-latency in-process delivery. Every component of the agent loop publishes here: sub-agent completions and sub-agent tree updates, team events, background process completions.
 
-2. **Daemon Event Bus** — Handles system-level events (`DaemonEvent`). The perception daemon watches the environment — filesystem changes, process activity, system state, time triggers — and publishes observations here.
+The core event bus feeds into the Gateway's event subscription system, which exposes it as a unified stream to external clients over WebSocket.
 
-Both buses feed into the Gateway's event subscription system, which exposes them as a unified stream to external clients over WebSocket.
+<Callout type="info">
+There used to be a second "Daemon Event Bus" carrying environment observations — filesystem changes, process activity, system state, time triggers. It was deleted along with the whole src/daemon/ subsystem in commit `32a6157f1`: none of that code had a production consumer. The old event hierarchy and the automation patterns it enabled are kept at the end of this page under "History: the Daemon Event Bus".
+</Callout>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -23,7 +25,7 @@ Both buses feed into the Gateway's event subscription system, which exposes them
 │                                                               │
 │  Agent Loop ──▶ Core Event Bus ──┐                           │
 │                                   ├──▶ Gateway Event Router  │
-│  Daemon    ──▶ Daemon Event Bus ──┘         │                │
+│                                              │                │
 │                                              │                │
 │                                     ┌────────┴────────┐      │
 │                                     │  Pattern Matcher │      │
@@ -97,7 +99,7 @@ Changes to the scheduled job **definition** itself.
 |-------|-------------|------------|
 | `cron.job.changed` | Job created, updated, deleted, or only its runtime state changed | `job_id`, `change` |
 
-`change` is one of `created`, `updated`, `deleted`, `state_changed`.
+`change` comes from the `ChangeKind` enum, with four variants: `Created`, `Updated`, `Deleted`, `StateChanged` (serialized on the wire in lowercase snake case).
 
 Job **execution results** are not on the event stream: use `cron.runs` for a job's run records (`status` is one of `ok`, `error`, `skipped`, `timeout`) and `cron.status` for the overall picture (`running`, `last_tick_at_ms`, `job_count`, `enabled_count`).
 
@@ -126,27 +128,9 @@ Command execution approval flow.
 
 Approval events use the `approval.*` topics; `exec.*` is the **method** namespace for listing pending approvals and deciding them: `exec.approvals.pending`, `exec.approval.resolve`, `exec.grants.list`, `exec.grant.revoke`.
 
-### Daemon Events
+### Environment Observation Events (removed)
 
-The daemon emits its own event hierarchy for environmental awareness:
-
-**Raw events** — direct observations from watchers:
-- `TimeEvent` — cron schedule matches, interval ticks, absolute time triggers
-- `ProcessEvent` — process started, stopped, CPU/memory threshold exceeded
-- `FsEvent` — file created, modified, deleted, renamed
-- `SystemStateEvent` — battery level, network status, display sleep, user activity, system load
-
-**Derived events** — inferred from patterns in raw events:
-- `ActivityChanged` — user activity type changed (coding, browsing, meeting, etc.)
-- `ProgrammingSessionStarted` / `ProgrammingSessionEnded` — detected coding sessions
-- `ResourcePressureChanged` — system resource pressure level transitions
-- `MeetingStateChanged` — detected meeting start/end
-- `IdleStateChanged` — user went idle or returned
-
-**System events** — daemon self-management:
-- `WatcherStarted` / `WatcherStopped` — watcher lifecycle
-- `ConfigReloaded` — daemon configuration changes
-- `Error` — daemon-level errors
+The daemon used to emit a full event hierarchy of its own for environmental awareness — raw events, derived events, system events. It was deleted along with the whole src/daemon/ subsystem in commit `32a6157f1`: the event bus had no producers, so the dispatcher loop would have blocked forever. The design archive is kept at the end of this page under "History: the Daemon Event Bus".
 
 ## Subscribing to Events
 
@@ -278,17 +262,19 @@ function readEvent(frame) {
 
 ### Core Event Types (Internal)
 
-Internally, Aleph uses a typed event system with sequence numbers for ordering:
+Internally, Aleph uses a typed event system with sequence numbers for ordering. The global bus wraps every event in a `GlobalEvent` (`src/event/global_bus.rs`):
 
 ```rust
-pub struct TimestampedEvent {
+pub struct GlobalEvent {
+    pub source_agent_id: String,
+    pub source_session_id: String,
     pub event: AlephEvent,
-    pub timestamp: i64,      // millisecond precision
+    pub timestamp: i64,      // epoch milliseconds
     pub sequence: u64,       // monotonically increasing
 }
 ```
 
-The `AlephEvent` enum covers all core event types: `InputReceived`, `ToolCallStarted`, `ToolCallCompleted`, `ToolCallFailed`, `SessionCreated`, `SubAgentStarted`, `AiResponseGenerated`, and more. The gateway maps these to the topic-based format for external consumption.
+The `AlephEvent` enum (`src/event/types.rs`) has 11 variants today: `SubAgentCompleted`, `SubAgentTreeUpdate`, `ProcessCompleted`, `TeamCreated`, `TeamMemberAdded`, `TeamMemberRemoved`, `TeamTaskAssigned`, `TeamTaskUpdated`, `TeamTaskCompleted`, `TeamTaskFailed`, `TeamDisbanded`. The gateway maps these to the topic-based format for external consumption.
 
 ## Building Reactive Integrations
 
@@ -409,26 +395,7 @@ ws.onmessage = (msg) => {
 
 ## Daemon Event-Driven Automation
 
-The daemon's event system enables environment-aware automation. The daemon watches the world and emits events that can trigger agent actions:
-
-### Context-Aware Responses
-
-The daemon detects when you start a programming session and can proactively offer help:
-
-- **`ProgrammingSessionStarted`** — Detected IDE launch + file changes in a project directory
-- **`ActivityChanged`** — Transitions between coding, browsing, meetings, etc.
-- **`IdleStateChanged`** — User went idle (opportunity for background tasks)
-- **`ResourcePressureChanged`** — System running low on memory or battery
-
-### Time-Based Triggers
-
-The daemon evaluates cron expressions and interval timers, emitting `TimeEvent` events:
-
-- `Cron { expression }` — Matched a cron schedule
-- `Interval { seconds }` — Interval timer tick
-- `Absolute { time }` — Reached a specific timestamp
-
-These time events are what drive the cron job system internally — the daemon fires the trigger, and the cron scheduler picks it up for execution.
+The daemon's event system used to enable environment-aware automation: the daemon watched the world and emitted events that could trigger agent actions. The subsystem was deleted in commit `32a6157f1`; the design archive is kept at the end of this page under "History: the Daemon Event Bus".
 
 ## Design Principles
 
@@ -461,8 +428,8 @@ These time events are what drive the cron job system internally — the daemon f
 
 26.7.x Hooks hardening:
 
-- `context_injection_limit_bytes` — bound injected context (avoid unbounded growth)
-- `require_consent` — consent gate
+- Bounded injection — `HOOK_CONTEXT_TOKEN_LIMIT` (`src/extension/hooks/output_budget.rs`) caps every injected context block at a token budget; oversized text is spilled to a file under `~/.aleph/data/hook_outputs/`, and the injected block keeps only a head/tail preview plus that path
+- Consent gate — `ShellHookConsent` (`src/extension/hooks/consent.rs`) records operator approval for shell hooks; the `consent` field of `HookExecutor::inventory()` reports each hook's consent state
 - Runtime inventory — list registered hooks
 
 ### Guardian Judge
@@ -475,8 +442,61 @@ These time events are what drive the cron job system internally — the daemon f
 
 ### Day-Boundary Log Rotation
 
-26.7.24+: the daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
+26.7.24+: the aleph-server process daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
 
 ### Full RPC
 
 See [Gateway Methods Reference](/docs/en/gateway/methods) for cron / heartbeat / hooks.
+
+---
+
+## History: the Daemon Event Bus
+
+Commit `32a6157f1` (`refactor: remove orphaned daemon subsystem`, 2026-05-19) deleted the entire src/daemon/ subsystem — 43 files, 4830 lines. The `DaemonEvent` hierarchy had no production consumers, its event bus had no event producers, and the dispatcher run loop would have blocked forever. What follows is the design as it stood at the time, kept for cross-referencing older docs and logs.
+
+### Event Hierarchy
+
+**Raw events** — direct observations from watchers:
+- `TimeEvent` — cron schedule matches, interval ticks, absolute time triggers
+- `ProcessEvent` — process started, stopped, CPU/memory threshold exceeded
+- `FsEvent` — file created, modified, deleted, renamed
+- `SystemStateEvent` — battery level, network status, display sleep, user activity, system load
+
+**Derived events** — inferred from patterns in raw events:
+- `ActivityChanged` — user activity type changed (coding, browsing, meeting, etc.)
+- `ProgrammingSessionStarted` / `ProgrammingSessionEnded` — detected coding sessions
+- `ResourcePressureChanged` — system resource pressure level transitions
+- `MeetingStateChanged` — detected meeting start/end
+- `IdleStateChanged` — user went idle or returned
+
+**System events** — daemon self-management:
+- `WatcherStarted` / `WatcherStopped` — watcher lifecycle
+- `ConfigReloaded` — daemon configuration changes
+- `Error` — daemon-level errors
+
+### Daemon Event-Driven Automation
+
+The daemon's event system enabled environment-aware automation. The daemon watched the world and emitted events that could trigger agent actions:
+
+#### Context-Aware Responses
+
+The daemon detects when you start a programming session and can proactively offer help:
+
+- **`ProgrammingSessionStarted`** — Detected IDE launch + file changes in a project directory
+- **`ActivityChanged`** — Transitions between coding, browsing, meetings, etc.
+- **`IdleStateChanged`** — User went idle (opportunity for background tasks)
+- **`ResourcePressureChanged`** — System running low on memory or battery
+
+#### Time-Based Triggers
+
+The daemon evaluates cron expressions and interval timers, emitting `TimeEvent` events:
+
+- `Cron { expression }` — Matched a cron schedule
+- `Interval { seconds }` — Interval timer tick
+- `Absolute { time }` — Reached a specific timestamp
+
+These time events are what drive the cron job system internally — the daemon fires the trigger, and the cron scheduler picks it up for execution.
+
+### Removed Session and Tool-Call Events
+
+The session and tool-call events in `AlephEvent` were cleaned up by later audits: `InputReceived`, `ToolCallStarted`, `ToolCallCompleted`, `ToolCallFailed`, `SessionCreated` and `AiResponseGenerated` were removed by `68e103c6f` (`event: severed-wire audit fixes`, 2026-08-16), and `SubAgentStarted` by `e7f0c3cec` (`multiagent: integrate teams/agents/loop_graph/workflow round`, 2026-07-24). The former had no publishers; the latter was superseded by `SubAgentCompleted` and `SubAgentTreeUpdate`.

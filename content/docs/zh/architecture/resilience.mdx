@@ -19,12 +19,11 @@ description: "SQLite 持久化核心、StateDatabase、骨架/脉冲事件模型
 ```
 src/resilience/
 ├── mod.rs        # 入口；仅导出 database 与 types
-├── types.rs      # AgentTask / TaskTrace / AgentEvent / Lane / RiskLevel / TaskStatus
+├── types.rs      # AgentTask / TaskTrace / Lane / RiskLevel / TaskStatus
 └── database/
     ├── mod.rs                 # 模块入口；DEFAULT_EMBEDDING_DIM 等常量
     ├── state_database/        # StateDatabase 实现 + schema 迁移
     ├── channel_offsets.rs     # 通道偏移持久化
-    ├── events.rs              # AgentEvent 持久化
     ├── group_chat.rs          # 群聊历史持久化
     ├── memory_events.rs       # memory 系统事件持久化
     ├── migration.rs           # schema 迁移
@@ -41,7 +40,6 @@ src/resilience/
 
 | 表 / 实体 | 用途 | 关键字段 |
 |---|---|---|
-| **AgentEvent** | 分层事件持久化（骨架 + 脉冲） | `task_id`, `seq`, `event_type`, `is_structural` |
 | **AgentTask** | 任务状态与恢复元数据 | `id`, `status`, `risk_level`, `lane`, `checkpoint_snapshot_path` |
 | **TaskTrace** | Shadow Replay 的执行追踪 | `task_id`, `step_index`, `event`, `timestamp` |
 | **group_chat** | 群聊历史 | per-team 持久化 |
@@ -49,31 +47,11 @@ src/resilience/
 | **paired_users** | 配对用户记录 | pairing |
 | **channel_offsets** | 通道读取偏移 | 用于 webhook / event source resync |
 
-`memory_stats` 与 `agent_usage_total` 由 `AgentUsageTotal` / `MemoryStats` 导出，被 `src/memory/` 中的 recall 与 experience-store 子模块复用。
+`aggregate_usage_by_agents` 将持久化追踪中的用量汇总成 `AgentUsageTotal` 行（`src/resilience/database/traces.rs`）。团队快照用它汇总成员代理的用量。
 
-### 事件层级：骨架和脉冲
+### 事件持久性
 
-事件遵循两层持久化模型：
-
-```rust
-impl AgentEvent {
-    // 结构化事件（Skeleton）—— 立即持久化
-    pub const TYPE_TASK_STARTED:      &str = "task_started";
-    pub const TYPE_TOOL_CALL_STARTED:  &str = "tool_call_started";
-    pub const TYPE_TOOL_CALL_COMPLETED:&str = "tool_call_completed";
-    pub const TYPE_ARTIFACT_CREATED:   &str = "artifact_created";
-    pub const TYPE_TASK_COMPLETED:     &str = "task_completed";
-    pub const TYPE_TASK_FAILED:        &str = "task_failed";
-
-    // 流式事件（Pulse）—— 持久化前批量处理
-    pub const TYPE_AI_STREAMING:       &str = "ai_streaming";
-
-    pub fn structural(task_id, seq, etype, payload) -> Self { /* is_structural = true */ }
-    pub fn pulse(task_id, seq, etype, payload)      -> Self { /* is_structural = false */ }
-}
-```
-
-**骨架事件**代表必须在崩溃后存活的状态转换。它们同步写入并用于恢复。**脉冲事件**是高频流式数据（逐 token 输出），可批量处理并可在不影响正确性的情况下丢弃。
+当前会话事件由 `src/session/events.rs` 中的 `durability_of` 选择写入方式。记忆事件则通过 `src/resilience/database/memory_events.rs` 单独写入。
 
 ---
 
@@ -236,7 +214,7 @@ task_traces 表（INSERT 见 src/resilience/database/traces.rs:133，
 
 ## 失败关闭
 
-26.7.21 hardening：策略文件缺失、不可读或解析失败时，**授权被拒绝**（不静默通过）。`src/harness/tests/budget.rs` 中 `DiminishingReturnsDetector` 已被移除——它是 R10 禁止的循环内确定性 completion 判断；硬停止改由 `max_iterations`、工具循环验证和模型自停负责。
+对于按动作区分的审批策略，文件缺失时使用内置默认表；文件不可读、超出大小限制或格式错误时，每个动作都需要审批（`src/approval/config.rs` 中的 `ConfigApprovalPolicy::load_from`）。因不符合 R10，确定性完成判断已移除；硬性停止边界由 `max_iterations`、工具循环验证器和模型自身的停止信号决定。
 
 ---
 
@@ -251,12 +229,11 @@ task_traces 表（INSERT 见 src/resilience/database/traces.rs:133，
 ```
 src/resilience/
 ├── mod.rs                       # 仅导出 database 与 types
-├── types.rs                     # AgentTask / TaskTrace / AgentEvent / Lane / RiskLevel / TaskStatus
+├── types.rs                     # AgentTask / TaskTrace / Lane / RiskLevel / TaskStatus
 └── database/
     ├── mod.rs                   # 模块入口
     ├── state_database/          # StateDatabase + schema 迁移
     ├── channel_offsets.rs
-    ├── events.rs                # AgentEvent 持久化
     ├── group_chat.rs
     ├── memory_events.rs
     ├── migration.rs
@@ -268,6 +245,10 @@ src/resilience/
 > 历史 stub RPC（`heartbeat.*_stub` / `cron.*_stub`）已被实化；完整 RPC 由 [守护进程](/docs/zh/concepts/daemon) 驱动，参见 `src/tasks/cron/`、`src/tasks/heartbeat/` 与 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_cron_handlers / register_heartbeat_handlers`。
 
 ---
+
+## 历史：弹性事件分层
+
+旧的 `AgentEvent` 表通过 `is_structural` 区分立即写入的状态转换记录和可批量写入的流式脉冲。提交 `75345d2ae` 移除了这套未使用的代理事件 schema；会话事件与记忆事件的持久化不受影响。
 
 ## 另请参阅
 

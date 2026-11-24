@@ -10,7 +10,7 @@ description: "Runtime configuration RPC methods"
 | Method | Description |
 |--------|-------------|
 | [`config.schema`](#configschema) | Return the full JSON Schema (no params) |
-| [`config.get`](#configget) | Read the currently active configuration |
+| [`config.get`](#configget) | Read the currently active configuration (secret fields report presence only) |
 | [`config.patch`](#configpatch) | Partial override (JSON Merge Patch / RFC 7386-style) |
 | [`config.reload`](#configreload) | Reload the configuration from disk |
 
@@ -63,15 +63,14 @@ Read the active configuration as seen by `ConfigWatcher`.
   "result": {
     "config": {
       "general": { "default_provider": "openai", "fallback_providers": [] },
-      "execution": { "default_timeout_secs": 600, "max_runs_global": 16 }
-    },
-    "source": "/home/user/.aleph/config.json",
-    "loaded_at": 1706400000000
+      "execution": { "default_timeout_secs": 600, "max_runs_global": 16 },
+      "channels": { "telegram": { "enabled": true, "has_bot_token": true } }
+    }
   }
 }
 ```
 
-Sensitive fields (API keys, tokens) are redacted in the response. `source` and `loaded_at` identify where the active configuration was loaded from.
+The result carries a single `config` member (or just the requested section when a `section` param is given). Secrets are never echoed back: a channel's secret fields are stripped and replaced by a presence flag such as `has_bot_token` (see `report_channel_secret_presence`); provider keys are exposed the same way as `has_api_key`. The configuration file path comes from `config.path`.
 
 ### config.patch
 
@@ -98,9 +97,16 @@ Apply a partial override using JSON Merge Patch (RFC 7386-style). Only the field
   "jsonrpc": "2.0",
   "id": 2,
   "result": {
-    "applied": true,
-    "changed_keys": ["execution.max_runs_global", "general.fallback_providers"],
-    "restart_required": false
+    "success": true,
+    "applied_sections": ["execution", "general"],
+    "diff": [
+      { "path": "execution.max_runs_global", "old_value": 16, "new_value": 32 },
+      { "path": "general.fallback_providers", "old_value": [], "new_value": ["anthropic", "openai"] }
+    ],
+    "health_check": null,
+    "warnings": [],
+    "live_applied": ["execution"],
+    "reload_impact": { "kind": "live", "hint": "此改动将即时生效（下一轮对话），无需重启。" }
   }
 }
 ```
@@ -111,7 +117,7 @@ Apply a partial override using JSON Merge Patch (RFC 7386-style). Only the field
 |-----------|------|----------|-------------|
 | `patch` | object | Yes | Merge Patch object. Set a field to `null` to clear it |
 
-When `restart_required` is `true`, an interface or service must be restarted for the change to take effect; the affected components are listed under `restart_components`.
+`reload_impact` states how the change takes effect: `kind` is `live` when the change was hot-applied (`live_applied` lists the sections that were actually pushed onto the running runtime), `restart` when it was written but needs an `aleph-server` restart to become effective, and `inert` when the section has no runtime consumer left. `hint` is the human-readable guidance; the RPC always fills the Chinese variant (`user_hint_zh`). A no-op patch carries no `reload_impact` — nothing was persisted, so no reload semantics apply.
 
 ### config.reload
 
@@ -128,13 +134,15 @@ Reload the configuration from the config file on disk. Use this after manually e
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "reloaded": true,
-    "source": "/home/user/.aleph/config.json",
-    "changed_keys": ["general.default_provider"],
-    "restart_required": false
+    "ok": true,
+    "reloaded": ["app_config", "live:execution", "providers"],
+    "failed": [],
+    "config": { "agents": ["main"], "bindings_count": 2 }
   }
 }
 ```
+
+`reloaded` lists the subsystems that were reloaded, with hot-applied sections prefixed by `live:`; each entry of `failed` names a subsystem and the reason it failed.
 
 ## Hot Reload & Reloadable Fields
 

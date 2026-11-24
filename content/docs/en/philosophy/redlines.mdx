@@ -33,7 +33,7 @@ If the core imports `AppKit` to capture a screenshot, it becomes a macOS applica
 
 ### Allowed
 
-- Defining traits like `ScreenCapture`, `WindowManager`, `InputSimulator` in the core
+- Defining traits like `ScreenCapture` or capability interfaces for window management and input simulation (the latter two describe responsibilities, not current trait names) in the core
 - Native bridges implement those traits against platform-native APIs
 - The core invokes capabilities over IPC (UDS JSON-RPC) through the trait interface
 

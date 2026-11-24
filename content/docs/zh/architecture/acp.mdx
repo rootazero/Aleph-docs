@@ -105,7 +105,7 @@ pub enum AcpSessionEvent {
 pub type PersistenceHook = Arc<dyn Fn(AcpSessionEvent) + Send + Sync>;
 ```
 
-`session_name` 为 `None` 表示默认未命名 session；`Some(name)` 表示同一 `(harness, cwd)` 下的并行命名 session（仿 acpx 的 `-s backend` / `-s frontend`）。`PersistenceHook` 用于磁盘持久化；独立于 live-broadcast 的 `AcpSessionsChangedNotifier`（用于 `acp.sessions.changed` 推送）。
+`session_name` 为 `None` 时表示默认未命名会话；`Some(name)` 区分同一 `(harness, cwd)` 下的并行命名会话。`PersistenceHook` 负责磁盘持久化；独立的 `GatewayChangeHook` 通知网关会话池变化，网关发布 `AcpSessionsChanged`，让客户端刷新列表。
 
 ## 运行模式
 
@@ -127,7 +127,7 @@ User ──> Aleph ──> AcpAdapterManager ──> External CLI
               (完整读/写)
 ```
 
-## RPC 接口（启动期 `register_acp_handlers` 注册）
+## RPC 接口（启动时注册）
 
 | 分组 | 方法 |
 |-------|---------|
@@ -135,7 +135,7 @@ User ──> Aleph ──> AcpAdapterManager ──> External CLI
 | Adapter 预设 | `acp.presets`、`acp.presets_meta`、`acp.test`、`acp.set_enabled` |
 | 会话 | `acp.sessions.list`、`acp.sessions.cancel`、`acp.sessions.shutdown` |
 
-完整注册位于 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_acp_handlers`（同一文件里的 `register_cron_handlers` / `register_heartbeat_handlers` 同源）。
+启动时通过 `src/bin/aleph-server/commands/start/builder/handlers/settings.rs` 中的 `register_config_handlers` 注册这些方法。
 
 ## 配置
 

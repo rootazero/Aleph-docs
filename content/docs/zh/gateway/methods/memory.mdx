@@ -17,7 +17,7 @@ description: "记忆流水线 RPC 方法"
 
 ### memory.search
 
-搜索原始记忆(第 1 层)。`content` 的子串匹配;空 `query` 按时间倒序返回最近行。**这是唯一的原始记忆入口**——之前基于笔记搜索的分支被删除,因为它重复了 `graph.search`,并导致 Panel 中 `delete_raw_memory` 用了错误的笔记路径。
+搜索原始记忆(第 1 层)。`content` 的子串匹配;空 `query` 按时间倒序返回最近行。**这是唯一的原始记忆入口**——之前基于笔记搜索的分支被删除,因为它重复了 `graph.search`,并导致 Panel 中 `memory.delete` 用了错误的笔记路径。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -175,7 +175,7 @@ Panel 的"Memory"标签和 LLM 通过**内建聊天工具**访问平行面——
 | `session_search` | 跨会话记录搜索 |
 | `remember` | 将事实固定到精选热记忆 |
 | `forget` | 从记忆中移除事实 |
-| `memory_status` | 记忆系统健康 + 统计 |
+| `memory_runtime_status` | 记忆系统健康 + 统计（`MemoryStatus`） |
 
 ## 另请参阅
 

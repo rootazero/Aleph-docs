@@ -5,7 +5,7 @@ description: "Team management: SQLite persistence, CoordTask DAG dispatch, leade
 
 The `teams` module provides team management for multi-agent collaboration, supporting structured teamwork with lifecycle management, Coord-Task DAG dispatch, plan approval (Team Strata), and task tracking.
 
-> The historical standalone modules/enums that earlier docs referenced — `TeamLifecycle`, `TeamPlan`, `ApprovalState`, plus `teams/lifecycle.rs`, `teams/plans.rs`, `teams/sessions.rs`, `teams/artifacts.rs`, `teams/messages.rs` — no longer exist as separate constructs. This page describes the code as it lives in `src/teams/` today.
+> `TeamStatus` in `src/teams/types.rs` represents team lifecycle state. Plan submission and review run through `PlanManager` in `src/teams/plans.rs`.
 
 ## Overview
 

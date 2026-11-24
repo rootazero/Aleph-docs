@@ -3,7 +3,7 @@ title: "loop_graph 治理拓扑"
 description: "叠加在核心之上的治理拓扑层（loop_graph），以及与 graph_topology 提示层的关系。"
 ---
 
-> **本页替代旧的「世界模型」章节**。源码中并不存在 `daemon::worldmodel` 模块或 `WorldModel` / `CoreState` / `EnhancedContext` / `PendingAction` / `ActivityType` 等类型——这些概念在 26.7.x 治理拓扑重构后已被替换为下面描述的 `loop_graph` 层与 `graph_topology` 提示层。
+> 治理拓扑当前由 `src/loop_graph/` 提供，并通过 `GraphTopologyLayer` 进入提示。这一层存储拓扑，不复刻全局主机活动模型。
 
 ## 概览
 
@@ -67,7 +67,7 @@ impl PromptLayer for GraphTopologyLayer {
 │   ▼                                                              │
 │   loop_graph/  (src/loop_graph/)                                 │
 │      ├── store.rs       LoopGraphStore (SQLite)                  │
-│      ├── service.rs     GraphService                             │
+│      ├── service.rs     lifecycle helpers                             │
 │      ├── templates.rs   模板提示                                │
 │      └── types.rs       NodeKind / EdgeKind / Origin            │
 └───────────────────────────────────────────────────────────────┘
@@ -95,9 +95,13 @@ graph 是**进程内全局**（`OnceCell<Arc<LoopGraphStore>>`），不在 TOML 
 
 - `src/loop_graph/mod.rs` —— `LoopGraphStore` + `NodeKind` / `EdgeKind` / `Origin` 重导出 + `init_global` / `global`。
 - `src/loop_graph/store.rs` —— SQLite 持久化层（节点 / 边 / origin=human 强制）。
-- `src/loop_graph/service.rs` —— `GraphService`（写入 / lint）。
+- `src/loop_graph/service.rs` —— 生命周期钩子与拓扑渲染。
 - `src/loop_graph/templates.rs` —— 模板提示（给 LLM turn 用）。
 - `src/thinker/layers/graph_topology.rs` —— 把拓扑注入系统提示的 `GraphTopologyLayer`。
+
+## 历史：世界模型
+
+旧的 `worldmodel` 模块跟踪主机活动，并提供守护进程级上下文。提交 `342a194ce` 移除感知管线，把 `WorldModel` 缩减为状态容器。剩余实现保存 `CoreState` 和 `EnhancedContext`，包括 `PendingAction` 与 `ActivityType`；提交 `32a6157f1` 随未接入生产的守护进程子系统一并删除了它。上文的治理拓扑负责循环监督，不是旧主机状态接口的替代实现。
 
 ## 另请参阅
 

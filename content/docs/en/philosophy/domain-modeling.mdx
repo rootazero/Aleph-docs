@@ -77,46 +77,7 @@ pub trait AggregateRoot: Entity {}
 
 **Example**:
 
-```rust
-pub struct TaskGraph {
-    id: String,
-    tasks: Vec<Task>,
-    edges: Vec<(String, String)>,
-}
-
-impl Entity for TaskGraph {
-    type Id = String;
-    fn id(&self) -> &Self::Id { &self.id }
-}
-
-impl AggregateRoot for TaskGraph {}
-```
-
-A `TaskGraph` is an aggregate root because it manages a collection of `Task` entities and their dependency edges. Adding a task, removing a task, or modifying dependencies must go through the `TaskGraph` to ensure the graph remains valid (no cycles, no dangling references, proper ordering).
-
-> **Note**: the `TaskGraph` / `Task` snippet above is a teaching example. **No `TaskGraph` type exists in the current Aleph source** — the actual domain aggregate root in the codebase is `MemoryFact` (`src/memory/context/fact.rs`), which implements `pub trait AggregateRoot`.
-
-External code should never modify a `Task` directly — it should call methods on `TaskGraph` that maintain invariants:
-
-```rust
-impl TaskGraph {
-    pub fn add_task(&mut self, task: Task) -> Result<(), GraphError> {
-        // Validate no duplicate IDs
-        // Validate dependencies exist
-        // Maintain topological order
-        self.tasks.push(task);
-        Ok(())
-    }
-
-    pub fn update_status(&mut self, task_id: &str, status: TaskStatus) -> Result<(), GraphError> {
-        // Validate task exists
-        // Validate state transition is legal
-        // Propagate status changes to dependents
-        // ...
-        Ok(())
-    }
-}
-```
+For current persisted memory records, see `MemoryFact` (`src/memory/context/fact.rs`); the former task-graph teaching example is retained in the history section below.
 
 ### ValueObject
 
@@ -158,7 +119,7 @@ Aleph's domain is partitioned into bounded contexts — cohesive areas of the do
 
 The teams/dispatcher context handles the execution side of the agent — `TeamDispatcher` decomposes complex requests into sub-tasks, while `handoff.rs` / `runner.rs` / `schedule/{select,settle,reclaim,failure}.rs` manage dependencies, timeouts, and failure recovery. The Act stage partitions work via `src/tools/concurrency.rs::ConcurrencyClaim` resource declarations (intra-bucket concurrent, inter-bucket serial), with no middleware doing intent judgment (R7/R10).
 
-> **Important**: `src/dispatcher/agent_types/{graph,task,status}.rs` **does not exist**; no `TaskGraph` type exists in the source tree. The table below lists the real types and locations most relevant to concurrent / task-recovery work.
+> **Important**: `src/dispatcher/agent_types/{graph,task,status}.rs` **does not exist**; the source tree does not provide that task-graph type. The table below lists the real types and locations most relevant to concurrent / task-recovery work.
 
 | Type | DDD Role | Location |
 |------|----------|----------|
@@ -192,7 +153,7 @@ The `MemoryFact` aggregate root ensures that:
 
 ### Intent Context (does not exist)
 
-> **No standalone "intent detection" bounded context exists in the Aleph source**: the source tree has no intent module directory, and `AggregatedIntent` / `IntentSignal` return zero matches across the source tree. R7 explicitly lists "intent-detection rule engines" as usurping the LLM — intent classification is covered naturally by a single LLM inference call (R7 + R9). The only related runtime-config shell, `IntentDetectionConfig`, was removed from the source tree on 2026-08-01 together with its smart_flow config-type file; today `src/config/dead_keys.rs` reports the config keys that parse but reach no consumer, while `INERT_SECTIONS` in `src/config/reload_impact.rs` has been empty since 2026-08-16.
+There is no separate intent-detection context today; `src/config/dead_keys.rs` reports configuration keys with no consumers. The former config shell is documented in the history section below.
 
 ### POE Context (Retired)
 
@@ -327,3 +288,54 @@ Rust's ownership model, trait system, and type-level programming align naturally
 - [Agent Thinking Model](./agent-thinking) — Thinker / PromptLayer and the Harness Think→Act loop
 - [Five Layers of Emergence](./five-layers) — How bounded contexts map to the L1-L5 model
 - [Architecture](/docs/en/architecture) — Technical system architecture
+
+## 历史：任务图教学示例
+
+This is a conceptual example, not a current API. `3491b7551` removed task-graph references from executor types; this is not a currently importable type.
+
+```rust
+pub struct TaskGraph {
+    id: String,
+    tasks: Vec<Task>,
+    edges: Vec<(String, String)>,
+}
+
+impl Entity for TaskGraph {
+    type Id = String;
+    fn id(&self) -> &Self::Id { &self.id }
+}
+
+impl AggregateRoot for TaskGraph {}
+```
+
+A `TaskGraph` is an aggregate root because it manages a collection of `Task` entities and their dependency edges. Adding a task, removing a task, or modifying dependencies must go through the `TaskGraph` to ensure the graph remains valid (no cycles, no dangling references, proper ordering).
+
+
+External code should never modify a `Task` directly — it should call methods on `TaskGraph` that maintain invariants:
+
+```rust
+impl TaskGraph {
+    pub fn add_task(&mut self, task: Task) -> Result<(), GraphError> {
+        // Validate no duplicate IDs
+        // Validate dependencies exist
+        // Maintain topological order
+        self.tasks.push(task);
+        Ok(())
+    }
+
+    pub fn update_status(&mut self, task_id: &str, status: TaskStatus) -> Result<(), GraphError> {
+        // Validate task exists
+        // Validate state transition is legal
+        // Propagate status changes to dependents
+        // ...
+        Ok(())
+    }
+}
+```
+
+
+## 历史：意图配置壳
+
+Removal commit: `54a12d89b`.
+
+> **No standalone "intent detection" bounded context exists in the Aleph source**: the source tree has no intent module directory, and `AggregatedIntent` / `IntentSignal` return zero matches across the source tree. R7 explicitly lists "intent-detection rule engines" as usurping the LLM — intent classification is covered naturally by a single LLM inference call (R7 + R9). The only related runtime-config shell, `IntentDetectionConfig`, was removed from the source tree on 2026-08-01 together with its smart_flow config-type file; today `src/config/dead_keys.rs` reports the config keys that parse but reach no consumer, while `INERT_SECTIONS` in `src/config/reload_impact.rs` has been empty since 2026-08-16.

@@ -135,7 +135,7 @@ Panel 由 Gateway 的 ControlPlane 提供，不是独立的 WebChat channel HTTP
 
 ### 静态文件目录
 
-Panel 资源在构建时从 `interfaces/webchat/dist/` 通过 `rust_embed` 嵌入二进制，运行时不读取可配置的磁盘目录（`src/gateway/control_plane/assets.rs`）。无扩展名的未知路径回退到嵌入的 `index.html`，不依赖 `fallback_file` 配置（`src/gateway/control_plane/server.rs`）。
+Panel 资源在构建时从 `interfaces/webchat/dist/` 通过 `rust_embed` 嵌入二进制，运行时不读取可配置的磁盘目录（`src/gateway/control_plane/assets.rs`）。无扩展名的未知路径回退到嵌入的 `index.html`，不需要额外的配置项（`src/gateway/control_plane/server.rs`）。
 
 ## WebSocket 协议
 

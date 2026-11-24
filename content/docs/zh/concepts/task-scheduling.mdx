@@ -209,7 +209,7 @@ impl HeartbeatService {
 
 **Cron：**
 - `src/tasks/cron/mod.rs` —— `CronService` facade
-- `src/tasks/cron/config.rs` —— `CronConfig`、`CronJob`、`ScheduleKind`、`RunStatus`、`ErrorReason`、`SessionTarget`、`TriggerSource`、`FailureAlertConfig`、`JobStateV2`、`JobRun`
+- `src/tasks/cron/config.rs` —— `CronConfig`、`CronJob`、`ScheduleKind`、`RunStatus`、`ErrorReason`、`SessionTarget`、`TriggerSource`、`FailureAlertConfig`、`JobStateV2`
 - `src/tasks/cron/store.rs` —— `CronStore`（SQLite + 内存缓存）
 - `src/tasks/cron/service/` —— `ServiceState`、`ops`（CRUD）、`timer`（next-due 循环）、`concurrency`、`catchup`
 - `src/tasks/cron/executor.rs` —— 作业执行
@@ -249,3 +249,6 @@ impl HeartbeatService {
 ## 另请参阅
 
 - [守护进程](./daemon) —— 持有计时循环、Day-boundary 日志轮转、`ALEPH-BOOT` marker、睡眠抑制器静默，以及驱动 cron 与 heartbeat 的 `Guardian Judge` 主动唤醒决策。
+## 历史：运行记录
+
+`JobRun` 已于 `0bf0e9bba` 删除；运行状态保留在 `JobStateV2`，不再维护独立的运行记录模型。

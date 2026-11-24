@@ -155,7 +155,7 @@ Embedded    ~5,000 B
 
 ## UnifiedMessage 与 ProviderDelta
 
-`UnifiedMessage` 是 LLM 无关的中间消息表示；`ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallDelta`）。单一 `MessageAssembler` reducer 拥有组装中的消息并实时剥离内联 `<think>` 块。工具链桥接（`src/harness/agent/think.rs`）把借用的 `HarnessCallback` 包成 `DeltaSink`，让实时 token 增量在提供商流式输出时进入网关回调。
+`UnifiedMessage` 是 LLM 无关的中间消息表示；`ProviderDelta` 是流式输出（`TextDelta` / `ThinkingDelta` / `ToolCallArgDelta`）。单一 `MessageAssembler` reducer 拥有组装中的消息并实时剥离内联 `<think>` 块。工具链桥接（`src/harness/agent/think.rs`）把借用的 `HarnessCallback` 包成 `DeltaSink`，让实时 token 增量在提供商流式输出时进入网关回调。
 
 ---
 
@@ -206,7 +206,7 @@ LLM 响应流
 │   • 流式块 → ProviderDelta               │
 │   • TextDelta  → 实时预览                │
 │   • ThinkingDelta → 推理通道             │
-│   • ToolCallDelta → 由汇编器折叠         │
+│   • ToolCallArgDelta → 由汇编器折叠         │
 └────────────────────┬────────────────────┘
                      │
                      ▼

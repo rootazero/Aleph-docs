@@ -11,7 +11,7 @@ Aleph 在不同边界用三种相关但不同的消息表示：
 
 1. **`UnifiedMessage`**（`src/providers/message.rs`）—— LLM 无关的中间表示；协议适配器把它转成 OpenAI / Anthropic / Gemini / Ollama 的原生形态。三变体：`User { content }`、`Assistant { content }`、`ToolResult { tool_call_id, tool_name, content, is_error }`。
 2. **`MessageContent`**（`src/session/events.rs`）—— `session_events` 日志里一条消息的内容；`text` + 可选 `blocks: Vec<serde_json::Value>` + 可选 `thinking` / `thinking_signature`。
-3. **`AlephEvent`**（`src/event/types.rs`）—— 系统级事件总线载荷，覆盖 `InputReceived` / `ToolCallRequested` / `ToolCallStarted` / `ToolCallCompleted` / `ToolCallFailed` / `ToolCallRetrying` / `LoopContinue` / `LoopStop` / `SessionCreated` / `SessionUpdated` / `SessionResumed` / `SessionCompacted` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `AiResponseGenerated` / `PartAdded|Updated|Removed` / `Team*`。
+3. **`AlephEvent`** (`src/event/types.rs`) — 事件总线承载 `SubAgentCompleted`、`SubAgentTreeUpdate`、`ProcessCompleted` 及团队生命周期/任务事件。会话持久化与回合流使用各自的事件类型。
 
 ### 内容块（`UnifiedMessage`）
 
@@ -193,7 +193,7 @@ pub enum DmScope {
 | `SafetyBlock { reason }` | 安全门阻断本轮 |
 | `Complete(FlowOutcome)` | 终态事件，必为最后一个 |
 
-底层 `AlephEvent` 总线还携带 `InputReceived` / `ToolCallRequested` / `ToolCallRetrying` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `Team*` 等，供监视器与跨智能体路由使用。
+底层 `AlephEvent` 总线向监控与跨 agent 路由提供子 agent、进程和团队事件，不是回合流协议。
 
 ## 安全上下文
 
@@ -310,3 +310,7 @@ pub struct IdentityContext {
 - [网关协议](/docs/zh/gateway/protocol) — JSON-RPC 与事件总线
 - [会话模式](/docs/zh/architecture/overview#第三双生子会话模式) — `mode` 字段
 - [思考器](/docs/zh/concepts/thinker) — UnifiedMessage → ProviderDelta 的实际位置
+
+## 历史：已移除的总线变体
+
+断线审计 `68e103c6f` 删除了未使用的 `ToolCallFailed`、`ToolCallRetrying`、`LoopContinue`、`LoopStop`、`SessionCreated`、`SessionResumed`、`SessionCompacted` 变体及旧输入/工具/响应总线事件。回合进度使用 `FlowStreamEvent`，会话日志使用 `SessionEvent`；不是逐项改名。

@@ -74,14 +74,12 @@ bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 ### 完整配置参考
 
 ```toml
-[[channels]]
-id = "telegram"
-channel_type = "telegram"
+[channels.telegram]
+type = "telegram"
 enabled = true
 
-[channels.config]
-# 来自 @BotFather 的机器人令牌（必需）；支持 ${ENV_VAR} 扩展
-bot_token = "${TELEGRAM_BOT_TOKEN}"
+# 来自 @BotFather 的机器人令牌（必需）
+bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 
 # 不带 @ 的机器人用户名（连接时自动检测）
 bot_username = "my_aleph_bot"
@@ -92,20 +90,17 @@ dm_policy = "pairing"
 # 群组消息策略：open | allowlist | disabled
 group_policy = "open"
 
-# DM 的电话号码 / 用户 id 白名单
-allow_from = [123456789, 987654321]
+# DM 的用户 id 白名单——空表示不限制
+allowed_users = [123456789, 987654321]
 
-# 群组白名单
+# 群组白名单——空表示不限制
 allowed_groups = [-1001234567890]
 
-# 群组聊天中需要 @mention（默认：true）
-require_mention = true
+# 是否处理 DM（默认：true；false 等价于 dm_policy = "disabled"）
+dm_allowed = true
 
-# 群组中提及检测的机器人名称
-bot_name = "Aleph"
-
-# 轮询间隔（默认：1）
-polling_interval_secs = 1
+# 是否处理群组消息（默认：true；false 等价于 group_policy = "disabled"）
+groups_allowed = true
 
 # 处理时发送输入中指示器（默认：true）
 send_typing = true
@@ -115,16 +110,32 @@ max_retries = 3
 ```
 
 <Callout type="warn">
-切勿将机器人令牌提交到版本控制。使用环境变量（`${TELEGRAM_BOT_TOKEN}`）或密钥管理器。
+切勿将机器人令牌提交到版本控制。频道配置段没有环境变量插值：`bot_token` 会在启动时被搬进凭据保险库（键 `channel:telegram:bot_token`）并从配置文件里抹掉。改配置需要重启 Gateway。
 </Callout>
 
-### 环境变量模式
+### 多账号配置
 
-最简单的设置使用单个环境变量：
+平铺的写法是历史格式：加载时按 v2 解析失败就回退到 v1，再把 v1 升级成 v2 的单账号形态（账号 ID 固定为 `default`）。需要多账号时直接写 v2 的 `accounts` 列表——账号级才有的 `require_mention`、`bot_username`、`default_agent`、`proxy_url`、`error_policy` 等键都放在账号里：
 
-```bash
-export TELEGRAM_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+```toml
+[channels.telegram]
+type = "telegram"
+enabled = true
+
+[[channels.telegram.accounts]]
+id = "main"
+bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+bot_username = "my_aleph_bot"
+dm_policy = "pairing"
+group_policy = "open"
+allowed_users = [123456789]
+allowed_groups = [-1001234567890]
+require_mention = true
 ```
+
+<Callout type="info">
+凭据保险库只覆盖频道块的**顶层**字段。v2 的 `bot_token` 写在账号里，属于嵌套字段，不会被搬进保险库——它会留在 `config.toml` 里。
+</Callout>
 
 ## 适配器结构
 
@@ -160,13 +171,9 @@ Telegram 接口被拆分为 `src/gateway/interfaces/telegram/` 下一组职责�
 
 不再有每频道的配对数据库：26.7.21 移除了频道本地配对存储。配对状态由 Gateway 的 `PairingStore`（SQLite）持久化，操作员在 Panel 中通过 `channel.pairing.approve` / `reject` 处理新配对请求。`TelegramConfigV2 → ChannelConfig` 桥接把所有 DM/群组/白名单规则送进路由，因此在 `config.toml` 中改一处就是路由强制的一处。
 
-## 长轮询 vs Webhook
+## 接收更新：只有长轮询
 
-Aleph 支持两种从 Telegram 接收更新的模式：
-
-### 长轮询（默认）
-
-机器人定期向 Telegram 的服务器请求新更新。这是默认设置，开箱即用，无需额外基础设施。
+Aleph 的 Telegram 适配器只用长轮询接收更新：机器人定期向 Telegram 的服务器请求新更新，开箱即用，无需公共 URL 或 SSL 证书，在 NAT 和防火墙后也能工作。
 
 **优点：**
 
@@ -174,24 +181,14 @@ Aleph 支持两种从 Telegram 接收更新的模式：
 - 在 NAT 和防火墙后工作
 - 设置简单
 
-**缺点：**
+**代价：**
 
-- 稍高的延迟（可通过 `polling_interval_secs` 配置）
+- 稍高的延迟（受轮询往返与退避策略影响）
 - 保持与 Telegram 服务器的持久连接
 
-### Webhook 模式
-
-Telegram 通过 HTTPS POST 请求将更新推送到你的服务器。在频道配置中通过 `webhook` 段启用。
-
-**优点：**
-
-- 更低的延迟（即时交付）
-- 对高流量机器人更高效
-
-**缺点：**
-
-- 需要公共 HTTPS 端点
-- 需要有效的 SSL 证书（或带 `certificate` 字段的自签名证书）
+<Callout type="info">
+Telegram 的 webhook 模式在这个适配器里没有实现——启动时会先调用 `delete_webhook` 清掉既有 webhook（长轮询与 webhook 互斥，`getUpdates` 在 webhook 存在时会静默返回空结果）。要收 webhook，需要自己另外部署接收端。
+</Callout>
 
 ## 用户和群组白名单
 
@@ -205,21 +202,21 @@ Telegram 用户 ID 是数字。要查找用户的 ID：
 ### 白名单行为
 
 ```toml
-# 空列表 = 允许所有人（受 dm_policy 约束）
-allow_from = []
+# 空列表 = 不限制（受 dm_policy 约束）
+allowed_users = []
 
 # 仅允许特定用户
-allow_from = [123456789, 987654321]
+allowed_users = [123456789, 987654321]
 ```
 
-当 `dm_policy = "allowlist"` 且发送者不在 `allow_from` 中时，消息被静默丢弃。当 `dm_policy = "pairing"` 且发送者尚未被批准时，路由签发配对码。
+当 `dm_policy = "allowlist"` 且发送者不在 `allowed_users` 中时，消息被静默丢弃。当 `dm_policy = "pairing"` 且发送者尚未被批准时，路由签发配对码。
 
 ### 群聊行为
 
 当 Aleph 在群组中收到消息时：
 
 1. 检查组 ID 是否在 `allowed_groups` 中（或列表为空）
-2. 检查发送者是否在 `allow_from` 中（或列表为空）
+2. 检查发送者是否在 `allowed_users` 中（或列表为空）
 3. 如果两者都通过，将消息路由到 Agent
 
 <Callout type="info">
@@ -277,7 +274,7 @@ Aleph wants to execute: shell_exec("ls -la")
 |---------|------------|
 | 与用户 12345 的 DM | `agent:main:dm:12345` 或 `agent:main:telegram:dm:12345` |
 | 群组 -100123 | `agent:main:telegram:group:-100123` |
-| Forum topic | `agent:main:telegram:topic:{thread_id}` |
+| 论坛话题 | `agent:main:telegram:group:-100123:topic:42` |
 
 确切的格式取决于你的 `dm_scope` 设置（参见[接口概览](/docs/interfaces/overview)）。
 
@@ -305,7 +302,7 @@ Telegram 接口处理常见的失败场景：
 |-------|----------|
 | **无效的机器人令牌** | 启动时通过 `getMe` API 调用检测；频道进入 `Error` 状态 |
 | **速率限制** | 遵守 Telegram 速率限制；ChannelRegistry 在 `RateLimited` 上重试（`SendRetryPolicy`，默认 2 次重试，绑定 `retry_after` 上限） |
-| **网络故障** | 长轮询自动重新连接；Webhook 模式依赖 Telegram 的重试 |
+| **网络故障** | 长轮询自动重连，指数退避（基准 2s、因子 1.8、上限 30s，带 ±25% 抖动） |
 | **用户不在白名单中** | 静默丢弃；若 `dm_policy = pairing`，路由签发配对码 |
 | **空消息** | 跳过（无文本且无附件） |
 | **服务消息** | 忽略（加入/离开通知、置顶消息等） |
@@ -326,7 +323,7 @@ Telegram 接口处理常见的失败场景：
 |---------|----------|
 | 机器人不响应 | 检查 `config.toml` 中频道是否启用，并确认路由收到了消息（在配对存储里查看发送者 id） |
 | 机器人忽略群组消息 | 通过 BotFather 禁用隐私模式（`/setprivacy`）或确保机器人被提及 |
-| 日志中 "User not in allowlist" | 将用户的数字 Telegram ID 添加到 `allow_from`，或在 Panel 中批准待处理的配对码 |
+| 日志中 "User not in allowlist" | 将用户的数字 Telegram ID 添加到 `allowed_users`，或在 Panel 中批准待处理的配对码 |
 | "Failed to verify bot token" | 使用 `curl https://api.telegram.org/bot<TOKEN>/getMe` 验证你的令牌 |
-| 消息延迟 | 减少 `polling_interval_secs` 或切换到 Webhook 模式 |
+| 消息延迟 | 检查是否被长轮询的退避策略拖慢（重启后前几次失败会退避，最长 30s） |
 | 格式显示损坏 | Aleph 使用 MarkdownV2；检查特殊字符是否被双转义 |

@@ -309,8 +309,8 @@ The `aleph cron status` command shows a dashboard view of all jobs including las
 
 26.7.x Hooks hardening:
 
-- `context_injection_limit_bytes` — bound injected context (avoid unbounded growth)
-- `require_consent` — consent gate
+- Bounded injection — `HOOK_CONTEXT_TOKEN_LIMIT` (`src/extension/hooks/output_budget.rs`) caps every injected context block at a token budget; oversized text is spilled to a file under `~/.aleph/data/hook_outputs/`, and the injected block keeps only a head/tail preview plus that path
+- Consent gate — `ShellHookConsent` (`src/extension/hooks/consent.rs`) records operator approval for shell hooks; the `consent` field of `HookExecutor::inventory()` reports each hook's consent state
 - Runtime inventory — list registered hooks
 
 ### Guardian Judge
@@ -323,7 +323,7 @@ The `aleph cron status` command shows a dashboard view of all jobs including las
 
 ### Day-Boundary Log Rotation
 
-26.7.24+: the daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
+26.7.24+: the aleph-server process daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
 
 ### Full RPC
 

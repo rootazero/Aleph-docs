@@ -5,11 +5,11 @@ description: "Evaluation and benchmarking RPC methods"
 
 The `arena.*` namespace is **not registered** on any current `aleph-server` build. The source tree has no `arena` handler module, no `registry.register("arena.*", ...)` calls, and no `arena` module — the runtime returns `Method not found` (code `-32601`) for every `arena.*` method.
 
-The 26.7.x changelog has no entries for this namespace, and the original evaluation-arena concept (arena benchmark tasks, arena leaderboard) is not in the current build.
+The 26.7.x changelog has no entries for this namespace. A Rust-side src/arena/ module did exist earlier (evaluation orchestration, stage top-sorting, arena queries), but it never registered RPC handlers and was deleted wholesale by commit `e7f0c3cec` (`multiagent: integrate teams/agents/loop_graph/workflow round`, 2026-07-24). The original evaluation-arena concept (arena benchmark tasks, arena leaderboard) is not in the current build.
 
-## Methods
+## Historical: the arena.* namespace (an unregistered design archive)
 
-The methods below are **never** reachable on a running `aleph-server`. They are retained here only to document the previous design.
+The methods below are **never** reachable on a running `aleph-server`. They are retained here only to document the previous design — including parameter names such as `benchmark_id` that never appeared in the source tree. The matching src/arena/ module was deleted in commit `e7f0c3cec` (2026-07-24), and it never registered RPC handlers with the gateway.
 
 ### arena.list
 

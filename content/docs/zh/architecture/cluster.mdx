@@ -37,7 +37,7 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
         ▼               ▼                   ▼
    ┌─────────┐     ┌─────────┐        ┌──────────┐
    │ 节点 B   │    │ 节点 C   │        │  local   │
-   │NodeClient│    │NodeClient│        │ （本机也是│
+   │ Node CLI │    │ Node CLI │        │ （本机也是│
    │ 拨出 →   │    │ 拨出 →   │        │  一个环境）│
    │  中心    │    │  中心    │        └──────────┘
    │ 声明命令 │    │ 声明命令 │
@@ -88,7 +88,7 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
 
 1. **入伙（enroll）。** 在节点 B 上，operator 用自然语言说「把这台机器加入 `<中心 URL>`」。B 的 `aleph-server node` 执行臂拨出到中心，走**交互式配对**流程：中心签发 6 位码，B 打印到 stdout，中心 operator 在 **Panel** 批准（与冷浏览器配对同一审批面）。批准后中心铸造 `DeviceRole::Node` token，B 持久化到 `~/.aleph/node/<name>.json`（权限 `0600`）。
 2. **声明（declare）。** 连上后，B 上报**它愿意暴露的命令目录**（名字 + JSON Schema），来源是 B 本地的工具/skill。**默认 deny，显式白名单** —— 中心只能调被 B 批准的。
-3. **调用（invoke）。** 中心 LLM 调 `node_invoke("node:B", "bash", { ... })` → `node_invoke` 工具 → `NodeRegistry` 查到 B 的 session → 经常开 WS 以反向 RPC `tool.call` 帧下发 → B 的 `NodeClient` 派给**本地**工具 → 结果按 id 回中心 → pending 表唤醒 → 回到 LLM。长任务经事件通道流式回推。
+3. **调用（invoke）。** 中心 LLM 调 `node_invoke("node:B", "bash", { ... })` → `node_invoke` 工具 → `NodeRegistry` 查到 B 的 session → 经常开 WS 以反向 RPC `tool.call` 帧下发 → B 上的节点 CLI 通过 `CommandTable` 派给**本地**工具 → 结果按 id 回中心 → pending 表唤醒 → 回到 LLM。长任务经事件通道流式回推。
 4. **感知（perceive）。** B 的 daemon 事件和子代理进度经同一条 WS 回推。中心按 topic 路由给订阅者 —— Panel 渲染，以及中心 LLM 主动反应。
 
 ---
@@ -98,7 +98,7 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
 一条普通的网关连接是 client→server 请求/响应，加 server→client 单向通知（事件总线）。集群需要那块缺失的拼图：**服务端（中心）能向已连接的节点下发一个带 id 关联的请求并等待其响应。**
 
 ```
-中心                                      节点 B (NodeClient)
+中心                                      节点 B (node CLI)
   │  node_invoke("node:B","bash",{…})        │
   │                                          │
   ├─ pending.insert((conn,id), tx) ──────────┤
@@ -198,9 +198,9 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
 
 26.7.20+：`normalize_node_key` 按 Unicode 归一化，CJK 节点名正确工作。
 
-### `cluster.deregister` / `enroll` / `environments_list`
+### 注销、注册与环境列表
 
-26.7.x 完整 RPC。
+网关通过 `src/gateway/handlers/cluster.rs` 中的 `handle_environments_list` 提供环境列表 RPC。
 
 ### 节点配置
 

@@ -116,7 +116,7 @@ let configs = manager.find_config_files("config.toml")?;
 | `mcp_list_resource_templates` | 列出 URI 模板（处理「只暴露模板、concrete count = 0」的 server） |
 | `mcp_list_prompts` | 列出可调用的 prompt 名 |
 
-每个 `mcp_list_*` 都伴随 reader（`mcp_read_resource` / `mcp_get_prompt`），且当且仅当至少有一个连接的 server 实际声明该能力时才注册到工具注册表 —— 模型永远看不到一个「调一次必失败」的工具。`mcp_tool_bridge` 是 MCP 管理器 actor 与工具注册表之间的唯一通道。
+每个 `mcp_list_*` 都伴随 reader（`mcp_read_resource` / `mcp_get_prompt`），且当且仅当至少有一个连接的 server 实际声明该能力时才注册到工具注册表 —— 模型永远看不到一个「调一次必失败」的工具。`spawn_tool_bridge` 是 MCP 管理器 actor 与工具注册表之间的唯一通道。
 
 **工具 / `tool_search`**：非核心工具 schema 被延迟折叠 —— 模型只看到 `name + description`，完整 schema 通过 `get_tool_schema` 拉取。`tool_search` 是自包含的 BM25 检索 meta-tool（无新依赖），覆盖延迟层（`deferred` tier）的所有工具：模型按能力查询，得到 top 匹配 + 完整 schema，直接调用。`[tools] defer_mcp_tools` 可把 MCP 工具一并压入延迟层。MCP 限定名（`{server}__{tool}`）豁免内置折叠表。
 

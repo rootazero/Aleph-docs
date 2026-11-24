@@ -1,210 +1,88 @@
 ---
 title: "Thinker (Prompt Engine)"
-description: "Thinker is Aleph's prompt construction engine: ~28 fine-grained PromptLayers with priority + the stable_summary / live_status dual-track cache discipline, plus the prompt_contract reachability / ratchet checks."
+description: "Prompt construction through composable layers, resolved context, and stable/dynamic cache partitions."
 ---
-
-The `thinker` module is Aleph's prompt construction engine. It assembles the SYSTEM prompt at every turn and maintains the runtime memory (`recall_context`) and transient tail (`transient_recall`) in parallel. After Round 9 it uses **~28 fine-grained PromptLayers** instead of the old 6-layer mental model; each layer has a priority and a short contract, assembled by `prompt_pipeline`.
+The `thinker` module constructs system prompts from composable layers. Stable curated memory enters the system prompt; automatically recalled memory is delivered separately as a transient tail message through `HarnessDeps::recall_context`.
 
 ## Design Philosophy
 
-1. **Fine-grained layers** — ~28 independent PromptLayers each own one concern (`agent_role` / `environment` / `mcp_instructions` / `extra_files` / `guidelines` / `security` / `voice_mode` / `graph_topology` / `curated_memory` / `recall_context` / ...). R10 ("intelligence lives in the prompt") demands each layer is independently reviewable.
-2. **Priority ordering** — every layer exposes a `priority()` integer; the pipeline renders in ascending order so cache-friendly (unchanging) content sits earlier and dynamic (timestamped / counted) content sits later.
-3. **Stable / live dual track** — the SYSTEM-prompt portion (`stable_summary`) is the cache prefix and **never** carries countdowns; live countdowns (deadline / next-wake) ride the transient tail message, so the cache READ 0.1× / WRITE 1.25× asymmetry is not triggered by countdown byte changes.
-4. **Provider-specific rendering** — the same content is rendered differently for OpenAI / Anthropic / Ollama; `thinker::prompt_pipeline` reads the provider name and picks the matching `RenderStyle` (XML / fenced / inline) to assemble.
-5. **Contract guards** — `prompt_contract::reachable_layers` guarantees every layer either appears when enabled or carries a reason onto the whitelist; `scaffold_bytes_ratchet` only ever shrinks the byte count (any upward move requires an explicit commit-time justification); `aleph-server prompt-size` reports the live byte count.
-
----
+1. Each `PromptLayer` owns a concern and an ordering priority.
+2. `LayerStability` separates stable prefix content from dynamic suffix content.
+3. `AssemblyPath` selects the basic or cached entry point.
+4. Layers wrap their own output; XML helpers live in `src/thinker/xml_util.rs`.
+5. `prompt_contract` tests guard reachability, scaffold growth, and repeated sentences.
 
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────┐
-│                  Thinker                     │
-├─────────────────────────────────────────────┤
-│                                             │
-│  Priority 0–800:   static identity / config / knowledge
-│  Priority 800–1500: static / cache-friendly
-│  Priority 1500–1720: static / slow-changing
-│  Priority 1720:     RuntimeContextLayer (dynamic
-│                    — token / counter / session name)
-│  Priority >1720:   transient recall (transient
-│                    tail only)
-└─────────────────────────────────────────────┘
+TurnEnvelope + EnvironmentContract
+    → ContextAggregator → ResolvedContext
+    → LayerInput → PromptPipeline
+    → stable prefix + dynamic suffix (cached path)
+Recalled memory → separate transient message
 ```
-
-`PromptPipeline::assemble(provider, input)` renders every enabled layer in priority order into a `String` injected as SYSTEM prompt; the `transient_recall` portion takes a separate path through `HarnessDeps::recall_context` and never enters SYSTEM.
-
----
 
 ## Core Components
 
+
+
 ### PromptLayer Trait
 
-```rust
-#[async_trait]
-pub trait PromptLayer: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn priority(&self) -> i32;
-    async fn render(&self, input: &ThinkerContext) -> Result<String>;
-    /// Default inferred by contract.rs; when a layer shouldn't appear
-    /// it returns false and goes on the "reason whitelist" path.
-    fn is_reachable(&self, input: &ThinkerContext) -> bool { true }
-}
-```
-
-Each layer owns:
-- `priority()`: assembly order; within the same priority the order is stable / deterministic
-- `render(&ctx)`: pure function / IO-free (no LLM calls allowed); failure degrades to "this layer is omitted" with a warn
-- `is_reachable(&ctx)`: default `true`; a layer whose config disables it or that is not on the whitelist returns `false` and a reason is recorded on `prompt_contract::reachable_layers` whitelist
-
-### Built-in Layer Inventory (after Round 9, ~28 layers)
-
-Ascending by priority:
-
-| Layer | Priority | Role |
-|-------|----------|------|
-| `agent_role` | 0 | agent identity / behavior contract (R8 source) |
-| `profile` | 30 | current agent profile |
-| `soul` | 60 | soul.md injection |
-| `identity_files` | 90 | identity files (CLAUDE.md / soul.md / ...) |
-| `mcp_instructions` | 120 | MCP integration instructions |
-| `environment` | 150 | runtime env summary (OS / cwd / model) |
-| `runtime_capabilities` | 180 | current provider's capabilities |
-| `runtime_context` | 1720 | **the only dynamic SYSTEM layer**: token count / terminate reason / session name |
-| `curated_memory` | 800 | stable segment of `MemoryEnvelope` |
-| `recall_context` | transient tail | `transient_recall` message (NOT in SYSTEM) |
-| `graph_topology` | 750 | governance graph render (governed sessions only) |
-| `voice_mode` | 1710 | voice-mode prompt (voice turns only) |
-| `multi_step_conduct` | 300 | multi-step behavior rules |
-| `operational_guidelines` | 350 | operational guardrails |
-| `guidelines` | 400 | general rules |
-| `security` | 450 | redlines / safety policies |
-| `mcp_protocol` | 200 | MCP protocol instructions |
-| `provider_guidance` | 500 | provider-specific render hints |
-| `skill_instructions` | 550 | skill `SKILL.md` injection |
-| `tool_runtime_state` | 600 | tool runtime state |
-| `protocol_tokens` | 650 | protocol tokens |
-| `citation_standards` | 700 | citation standards |
-| `standing_goal` | 720 | current standing goal (if any) |
-| `memory_protocol` | 730 | memory protocol instructions |
-| `plan_prompt` | 880 | current welded Strategy render |
-| `extra_files` | 920 | current session's extra files |
-| `execution_plan` | 950 | current scratchpad execution list |
-| `doctor_repair_hint` | 1100 | `/doctor` repair hint (conditional) |
-| `session_context_guide` | 780 | session-level guidance |
-
-> `RuntimeContextLayer` is the **only** layer in SYSTEM carrying per-turn digits (`current_total_tokens` / `terminate_reason` / `session_key`) — every turn changes them, so it must be the **last** layer in SYSTEM to minimize cache-rewriting cost; all other 27 layers are cache-friendly content and sit strictly before 1720.
-
-### ThinkerContext
+The trait in `src/thinker/prompt_layer.rs` is synchronous. Its core methods are:
 
 ```rust
-pub struct ThinkerContext {
-    pub session_key: SessionKey,
-    pub agent_id: AgentId,
-    pub voice: Option<VoiceContext>,         // voice turn context
-    pub running: RunningStats,              // runtime stats (turns / tokens / time)
-    pub profile: Option<ProfileView>,
-    pub skills: Vec<SkillView>,
-    pub goals: Vec<GoalView>,
-    pub strategies: Vec<StrategyView>,
-    pub diagnostics: Vec<DiagnosticView>,   // from doctor
-    pub memory: Option<MemoryEnvelope>,     // already-recalled envelope
-    pub session_recent: Vec<ChatMessageView>, // current session recent
-    pub plan: Option<PlanView>,             // current welded Strategy render
-    pub vault: Option<VaultView>,           // vault secrets (encrypted)
-    pub mcp: Option<McpView>,               // current session's active MCP servers
-    pub todo: Option<TodoView>,             // current execution list
-    pub runtime: RuntimeView,                // OS / cwd / model / counters
-    pub scratchpad: ScratchpadView,         // execution list + objective
-}
+fn name(&self) -> &'static str;
+fn priority(&self) -> u32;
+fn inject(&self, output: &mut String, input: &LayerInput);
 ```
 
-`render(&ctx)` reads this context, renders what it cares about, and **never** does IO. `VoiceContext` is injected by `voice_mode::get(session_key)`; `MemoryEnvelope` is assembled by `MemoryContextProvider::build_envelope`; `PlanView` is pulled by `StrategyLayer`; `TodoView` is pulled by `ScratchpadLayer`.
+Layers also declare assembly paths, prompt modes, and stability. They append to the supplied buffer rather than returning an asynchronous result.
+
+### Built-in Layer Inventory
+
+Representative layers registered by `default_layers` in `src/thinker/prompt_pipeline.rs` (ascending priority):
+
+| Layer | Priority |
+|---|---|
+| `soul` | 50 |
+| `agent_role` | 55 |
+| `curated_memory` | 60 |
+| `strategy` | 70 |
+| `profile` | 75 |
+| `environment` | 300 |
+| `runtime_capabilities` | 400 |
+| `security` | 600 |
+| `skill_instructions` | 1050 |
+| `memory_protocol` | 1105 |
+| `tool_runtime_state` | 1703 |
+| `mcp_instructions` | 1705 |
+| `voice_mode` | 1710 |
+| `runtime_context` | 1720 |
+| `session_context_guide` | 1750 |
+| `graph_topology` | 1754 |
+| `standing_goal` | 1755 |
+| `execution_plan` | 1756 |
+
+
+### ResolvedContext and LayerInput
+
+`src/thinker/context.rs` defines `EnvironmentContract`, `VoiceContext`, `TurnEnvelope`, `EnvelopeParent`, `ResolvedContext`, and `ContextAggregator`. Resolution produces the context consumed by layers; `LayerInput` adds prompt configuration and assembly-specific inputs.
+
+`ResolvedContext` includes optional runtime context, sandbox summary, rendered execution plan, standing goal, graph topology, strategy, and voice state. `execution_plan` is already-rendered scratchpad progress, consumed by `ExecutionPlanLayer`; it is not a separate todo-view object. The harness bridge obtains recalled memory through `build_memory_user_message`, while `build_curated_message` supplies the stable curated envelope.
 
 ### PromptPipeline Assembly
 
-`PromptPipeline::assemble(provider, input)` iterates layers in priority-ascending order, calls each `layer.render(&input)`, and joins the result with newlines into a single string. Failed layers log a warn but don't abort (`fail-soft`); `prompt_contract` validates that every enabled layer either appears or is on the "reason whitelist".
-
-```rust
-pub struct PromptPipeline {
-    layers: Vec<Arc<dyn PromptLayer>>,
-}
-```
-
-Construction lives in `bin/aleph-server/commands/start/builder/constructor/mod.rs::build_thinker_pipeline`:
-
-```rust
-PromptPipeline::new(vec![
-    Box::new(AgentRoleLayer),         // priority 0
-    Box::new(ProfileLayer),           // priority 30
-    Box::new(SoulLayer),              // priority 60
-    Box::new(IdentityFilesLayer),     // priority 90
-    Box::new(McpInstructionsLayer),   // priority 120
-    Box::new(EnvironmentLayer),       // priority 150
-    Box::new(McpProtocolLayer),       // priority 200
-    Box::new(RuntimeCapabilitiesLayer), // priority 180
-    Box::new(MultiStepConductLayer),  // priority 300
-    Box::new(OperationalGuidelinesLayer), // priority 350
-    Box::new(GuidelinesLayer),        // priority 400
-    Box::new(SecurityLayer),          // priority 450
-    Box::new(ProviderGuidanceLayer),  // priority 500
-    Box::new(SkillInstructionsLayer),  // priority 550
-    Box::new(ToolRuntimeStateLayer),  // priority 600
-    Box::new(ProtocolTokensLayer),    // priority 650
-    Box::new(CitationStandardsLayer), // priority 700
-    Box::new(StandingGoalLayer),      // priority 720
-    Box::new(MemoryProtocolLayer),    // priority 730
-    Box::new(GraphTopologyLayer),     // priority 750
-    Box::new(CuratedMemoryLayer),     // priority 800
-    Box::new(PlanLayer),              // priority 880
-    Box::new(ExtraFilesLayer),        // priority 920
-    Box::new(ExecutionPlanLayer),     // priority 950
-    Box::new(DoctorRepairHintLayer),  // priority 1100
-    Box::new(VoiceModeLayer),         // priority 1710
-    Box::new(RuntimeContextLayer),    // priority 1720
-])
-```
-
-`Priority 1720` is **last on purpose** — `RuntimeContextLayer` is the **only** dynamic SYSTEM layer (per-turn digits), every other 27 layer is cache-friendly content and sits strictly before 1720. Anthropic's prompt cache is prefix-keyed, so a single byte change forces the entire conversation prefix to be re-WRITTEN at 1.25× cost instead of READ at 0.1×.
-
----
+`PromptPipeline` owns `Vec<Box<dyn PromptLayer>>`. `new` sorts by priority. `execute` renders an assembly path into a string; cached assembly uses `execute_stable_with_mode` and `execute_dynamic_with_mode` to split content by stability. There is no provider-specific rendering-style selector.
 
 ## The Two Rulers (`src/thinker/prompt_contract.rs`)
 
-R10's "intelligence in the prompt, not in the loop" gets two explicit metric rulers:
+`reachable_layers` tests that production-shaped input wakes registered layers or that their conditional silence is explained in `CONDITIONALLY_SILENT`. This is a test inventory, not a runtime whitelist API.
 
-```rust
-pub const fn reachable_layers(pipeline: &PromptPipeline) -> Vec<(&str, bool, Option<String>)>;
-pub fn scaffold_bytes_ratchet(input: &ThinkerContext) -> Result<usize, ContractError>;
-```
+`scaffold_bytes_ratchet` limits scaffold growth; dynamic-tail and sentence-duplication checks add separate guards. `aleph-server prompt-size` reports measured layer sizes. These are tests and CLI measurements, not prompt-assembly function signatures.
 
-- **`reachable_layers`** — list every enabled layer; a layer with `is_reachable == false` must carry a reason onto the whitelist (`whitelist_disabled(name, reason)`), otherwise the test fails.
-- **`scaffold_bytes_ratchet`** — compute the current `ThinkerContext`'s SYSTEM-prompt **scaffold-only** byte count (excluding `RuntimeContext` / `recall_context` / `transient_recall`), compare to the last recorded value, **only allow shrinking**; any increase must be explicitly whitelisted.
-- `prompt-size` CLI subcommand (`aleph-server prompt-size`): reports the current scaffold byte count + per-layer byte distribution + remaining headroom to the R10 redline CEILING.
+## `prompt_pipeline`
 
-> `prompt-size` is also used by the loop / goal continuation prompt path (continuation calls `build_system_prompt` which runs the same contract); the R10 redline CEILING is **one shared byte budget** for both harness lines and SYSTEM prompt.
-
----
-
-## `prompt_pipeline` (introduced in Round 9)
-
-`PromptPipeline` replaces the old `Thinker::build_prompt`, unifying the ~28 layers:
-
-```rust
-pub struct PromptPipeline {
-    layers: Vec<Box<dyn PromptLayer>>,
-}
-
-impl PromptPipeline {
-    pub fn new(layers: Vec<Box<dyn PromptLayer>>) -> Self;
-    pub fn assemble(&self, input: &ThinkerContext) -> Result<String>;
-    pub fn with_layers(self, layers: Vec<Box<dyn PromptLayer>>) -> Self;
-}
-```
-
-Each layer self-renders into the shared output buffer through `PromptLayer::inject(&mut String, &LayerInput)`; there is no separate per-provider wrapping chokepoint. XML escaping / wrapping helpers live in `src/thinker/xml_util.rs` (`escape_xml` / `escape_xml_attr` / `push_text_element` / `push_block_with_attrs`).
-
----
+The default layer list is defined in `src/thinker/prompt_pipeline.rs`. `PromptBuilder` supplies the production entry points; each layer injects into the shared output buffer with `LayerInput`. Shared XML escaping helpers include `escape_xml` and `escape_xml_attr`.
 
 ## History: Streaming state machine
 
@@ -218,55 +96,44 @@ The early `ProviderRenderStyle` enum (`Xml` / `Fenced` / `Inline`) picked per-la
 
 ---
 
+
 ## Key Source Files
 
-- `src/thinker/mod.rs` — module entry, re-exports `PromptPipeline` / `ThinkerContext` / `PromptLayer`
-- `src/thinker/prompt_pipeline.rs` — `PromptPipeline` and layer assembly
-- `src/thinker/prompt_contract.rs` — `reachable_layers` / `scaffold_bytes_ratchet` / `whitelist_disabled`
-- `src/thinker/prompt_layer.rs` — `PromptLayer` trait + `Box<dyn PromptLayer>` wrapping
-- `src/thinker/soul.rs` — soul.md parsing
-- `src/thinker/identity_files.rs` — identity files injection
-- `src/thinker/context.rs` — `ThinkerContext` field definitions
-- `src/thinker/runtime_context.rs` — `RuntimeContextLayer` (priority 1720, the only dynamic SYSTEM layer)
-- `src/thinker/nudges.rs` — 9 model-facing prompt strings (`MAX_STEPS_HINT` / `MAX_OUTPUT_TOKENS_RESUME_NUDGE` / `INTERRUPTION_NOTE` etc.), centralized after the harness purged them
-- `src/thinker/security_context.rs` — `SecurityLayer`
-- `src/thinker/layers/curated_memory.rs` — `CuratedMemoryLayer` (assembles the stable segment of `MemoryEnvelope`)
-- `src/orchestrator/harness_bridge/prompt_build.rs` — transient-tail / recall-context assembly (carried by `HarnessDeps::recall_context`, `src/harness/deps.rs`)
-- `src/thinker/project_instructions.rs` — various layer helpers
-- `src/thinker/xml_util.rs` — XML escaping / wrapping
-- `src/thinker/interaction.rs` — `InteractionManifest` channel-capability awareness
-- `src/thinker/prompt_budget.rs` — `PromptBudget` (cap layer count per provider)
-- `src/thinker/layers/{mod,voice_mode,graph_topology,curated_memory,doctor_repair_hint,multi_step_conduct,operational_guidelines,security,runtime_capabilities,protocol_tokens,citation_standards,plan,standing_goal,plan_prompt,execution_plan,extra_files,profile,provider_guidance,guidelines,environment,tool_runtime_state,security_session,supervisor_verification,tool_layer}.rs` — 20+ concrete layers
-
----
+- `src/thinker/mod.rs`
+- `src/thinker/context.rs`
+- `src/thinker/prompt_layer.rs`
+- `src/thinker/prompt_pipeline.rs`
+- `src/thinker/prompt_builder/mod.rs`
+- `src/thinker/prompt_contract.rs`
+- `src/thinker/runtime_context.rs`
+- `src/thinker/layers/execution_plan.rs`
+- `src/thinker/layers/strategy.rs`
+- `src/thinker/layers/curated_memory.rs`
+- `src/orchestrator/harness_bridge/prompt_build.rs`
+- `src/thinker/xml_util.rs`
 
 ## 26.7.x Addendum
 
-### Round 9 Layer Reorganization
 
-26.7.x split the old 6-layer mental model (Identity / Skills / Memory / Tools / Rules / Conversation) into ~28 fine-grained PromptLayers, each independently reviewable, individually disable-able, and whitelist-able. R10 ("intelligence in the prompt, not in the loop") requires every layer to have its own contract and priority.
 
-### Two Rulers (R10 Redline)
+### Layer Reorganization
 
-`prompt_contract::reachable_layers` + `scaffold_bytes_ratchet` turn the R10 redline from "hand-calculated" into code-measurable. `aleph-server prompt-size` reports live bytes + per-layer distribution, putting R10 within reach. The CEILING ratchet is shared between harness and thinker: the SYSTEM-prompt byte ceiling and `the_harness_line_budget_does_not_grow`'s `CEILING` are **the same ruler** (R10's single byte budget for two subsets).
+Layers remain independently reviewable. Use `default_layers` and `layer_info` for the registered inventory rather than assuming an old fixed layer count.
 
 ### Voice Mode Layer
 
-26.7.x `VoiceModeLayer` (priority 1710) injects voice-turn prompt rules — including "fix ASR-transcribed homophones" and "preserve spoken filler as user pragmatic signal". The `VoiceContext` field is injected by `voice_mode::get()` (active-only; the `transcribed` flag is set by `inbound_router`).
+`VoiceModeLayer` reads the resolved `VoiceContext` and injects voice-turn instructions.
 
-### `transient_recall` & Cache Friendliness
+### Recalled Memory and Cache Friendliness
 
-26.7.1+: dual-track design — stable `MemoryEnvelope` goes into the SYSTEM prompt (cache-friendly), live countdowns (deadline / next-wake) go into the transient tail message (past the cache breakpoint, byte changes only cost themselves). **Mirrors `looping::LoopState`'s `stable_summary` vs `live_status`** — the same design, thinker and looping share the R10 cache discipline.
+Stable curated memory is injected by `CuratedMemoryLayer`. Live recalled memory stays in the transient message path, outside the system prompt. The name of that transport field is `recall_context`.
 
 ### Prompt Cache Discipline
 
-`RuntimeContextLayer` is deliberately last (priority 1720) — the **only** SYSTEM-prompt layer that carries per-turn digits (token count / terminate reason / session_key). All other ~27 layers are cache-friendly content (identity / profile / soul / environment / security / plan etc.) and sit strictly before 1720. Anthropic's prompt cache is prefix-keyed, so a single byte change forces the entire conversation prefix to be re-WRITTEN at 1.25× cost instead of READ at 0.1× — **a single countdown byte change** would wipe the cache benefit for the whole conversation.
+The cache split follows `LayerStability`, not a rule that priority 1720 must be last. `RuntimeContextLayer` is dynamic, but execution-plan and governance layers can follow it. Its runtime data describes the environment (for example `current_model` and `current_time` in `src/thinker/runtime_context.rs`), not an aggregate token-counter field. Stable-prefix byte changes invalidate prefix caching; dynamic content belongs in the dynamic suffix or transient messages. Skill prompt budgeting is separate: `SkillPromptBudget` lives in `src/skill/prompt.rs`, not in a thinker-wide layer-count budget.
 
 ### See Also
 
-- [R10 Thin Harness Redline](/docs/en/philosophy/redlines#r10-thin-harness-dumb-loop) — the five "Don'ts"
-- [Memory System](/docs/en/concepts/memory) — `curated_memory` / `recall_context` dual-track source
-- [Skill System](/docs/en/concepts/skill-system) — `skill_instructions` layer source
-- [Architecture: Harness section](/docs/en/architecture/harness) — layer assembly location
-- [Thinker source](https://github.com/rootazero/Aleph/blob/main/src/thinker) — full layer list
-- [R10 byte-budget test](https://github.com/rootazero/Aleph/blob/main/src/harness/tests/budget.rs) — shared `CEILING = 5535` ruler
+- [Memory System](/docs/en/concepts/memory)
+- [Skill System](/docs/en/concepts/skill-system)
+- [Harness](/docs/en/architecture/harness)

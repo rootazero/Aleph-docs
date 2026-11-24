@@ -142,13 +142,10 @@ Writes are synchronous; SQLite runs in WAL mode; the `(session_id, seq)` primary
 
 | Variant | Purpose |
 |---------|---------|
-| `SessionCreated { identity, at }` | First event on the log; freezes `SessionIdentityMeta` |
 | `SessionWoken { at, prior_head }` | Crash-recovery checkpoint after `wake()` |
-| `SessionDetached { at }` | Actor was stopped; events remain on disk |
 | `RunStarted { run_id, at, project_root }` | A harness run began; `project_root` is stamped so a crash-resume lands back in the same folder |
 | `RunFinished { run_id, outcome, at }` | Harness run reached a terminal state |
 | `TurnStarted { turn_id, trigger, at }` | A Think→Act turn began; `trigger` distinguishes user / synthetic / verifier-veto / grace |
-| `TurnEnded { turn_id, outcome, at }` | Turn reached its terminal outcome |
 | `UserMessage { turn_id, content, at, synthetic }` | User input (or verifier-veto nudge / grace hint when `synthetic = true`) |
 | `AssistantMessage { turn_id, content, usage, at }` | Per-call LLM output; `usage` is the **per-call** token breakdown (calls and assistant rows are 1:1) |
 | `AssistantRunMeta { turn_id, run_id, context_tokens, context_window, total_tokens, input_tokens, output_tokens, … }` | One authoritative billing report per run; the session-level counters ride here and **nowhere else** |
@@ -157,12 +154,11 @@ Writes are synchronous; SQLite runs in WAL mode; the `(session_id, seq)` primary
 | `ToolCallApproved { call_id, source, approver, at }` / `ToolCallDenied { call_id, reason, at }` | Approval-card verdict |
 | `ToolResult { call_id, output, at }` / `ToolError { call_id, error, at }` | Act outcome (paired by `call_id`) |
 | `SubagentSpawned { subagent_id, parent_turn_id, at }` / `SubagentReturned { subagent_id, result, at }` | Subagent lifecycle |
-| `BudgetUpdated { kind, value, at }` | Context-budget directive escalation |
 | `CompactionPerformed { kind, before_tokens, after_tokens, at }` | Compaction pipeline output |
 | `SessionForked { child_session_id, parent_turn_id, at }` | A turn forked into a child session (e.g. `SplitSession` directive) |
 | `Error { kind, message, at }` | Domain error event |
 
-The read-side helper `src/session/projection.rs::project_messages` turns an event range into `Vec<ProjectedMessage>` for consumers that want a classic message-history view rather than raw events.
+`project_row` in `src/session/projection.rs` converts one supported `SessionEvent` to a `ProjectedRow`; other events can return no row. The gateway projector (`src/gateway/session_projector.rs`) consumes these rows to materialize the transcript rather than exposing raw events to the UI.
 
 ---
 
@@ -172,9 +168,9 @@ The read-side helper `src/session/projection.rs::project_messages` turns an even
 
 ---
 
-## History: Presence Opt-In (removed)
+## Historical: host presence reporting (removed)
 
-Earlier revisions of this page documented a `presence` reporter under `src/tasks/` that broadcast a Slack-style host presence snapshot (`PresenceSnapshot`: hostname, username, platform, idle seconds) on the Gateway event bus as `host.presence.update`, opt-in via `PresenceConfig::enabled` (default `false`). It was removed on 2026-08-09 together with the sibling `mic_level` reporter: neither topic ever had a subscriber (no renderer, RPC, or channel consumed them), and the broadcast leaked the host's hostname and OS username for no reader. See the comment block in `src/tasks/mod.rs`.
+Earlier revisions of this page documented a `presence` reporter under `src/tasks/` that broadcast a Slack-style host presence snapshot (`PresenceSnapshot`: hostname, username, platform, idle seconds) on the Gateway event bus as `host.presence.update`, opt-in via `PresenceConfig::enabled` (default `false`). It was removed in commit `aeb94f613` on 2026-08-09 together with the sibling `mic_level` reporter: neither topic ever had a subscriber (no renderer, RPC, or channel consumed them), and the broadcast leaked the host's hostname and OS username for no reader. See the comment block in `src/tasks/mod.rs`.
 
 The capability itself is not lost: `system_tool`'s `user_idle_time` action answers "is a human at this keyboard" on demand, and cluster node liveness is tracked by the cluster's own ping and idle watchdog. The `host.` arm in `src/gateway/event_visibility.rs` deliberately outlives the reporter as a fail-closed default: any future `host.*` topic is `OperatorOnly` rather than falling through to a global broadcast.
 

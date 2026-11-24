@@ -558,7 +558,7 @@ bin/aleph_server/commands/
 
 ### 失败关闭
 
-26.7.21 强化：策略文件缺失或 `permissive_default` 与 `Default::default()` 不一致时**拒绝授权**。
+26.7.21 强化：策略文件缺失、无法读取、超过 1 MiB 上限或解析失败时**拒绝授权**——退回安全默认（`safe_default()`），每种动作都落到 `Ask`，由人来裁决；只有 allowlist 编译失败时例外（fail-open）。
 
 ### 进程隔离内核
 

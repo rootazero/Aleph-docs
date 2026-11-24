@@ -457,7 +457,11 @@ Any abstraction with zero consumers is deleted immediately. ~5,200 lines of dead
 
 ### Fail-Closed
 
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+26.7.21 hardening: when a policy file is missing, unreadable, larger than the
+1 MiB limit, or unparseable, **authorization is refused** — the loader falls
+back to the safe default (`safe_default()`), which turns every action type into
+`Ask` and leaves the decision to a human. Only an allowlist that fails to
+compile is the exception (fail-open).
 
 ### Process-Isolation Kernel
 

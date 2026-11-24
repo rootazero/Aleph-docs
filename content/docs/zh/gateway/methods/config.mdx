@@ -10,7 +10,7 @@ description: "运行时配置 RPC 方法"
 | 方法 | 说明 |
 |--------|-------------|
 | [`config.schema`](#configschema) | 返回完整 JSON Schema（无需参数） |
-| [`config.get`](#configget) | 读取当前生效配置（含源文件路径与 mtime） |
+| [`config.get`](#configget) | 读取当前生效配置（密钥字段只回显存在性） |
 | [`config.patch`](#configpatch) | 局部覆盖（JSON Merge Patch / RFC 7386 风格） |
 | [`config.reload`](#configreload) | 从磁盘重新加载配置 |
 
@@ -63,15 +63,14 @@ description: "运行时配置 RPC 方法"
   "result": {
     "config": {
       "general": { "default_provider": "openai", "fallback_providers": [] },
-      "execution": { "default_timeout_secs": 600, "max_runs_global": 16 }
-    },
-    "source": "/home/user/.aleph/config.json",
-    "loaded_at": 1706400000000
+      "execution": { "default_timeout_secs": 600, "max_runs_global": 16 },
+      "channels": { "telegram": { "enabled": true, "has_bot_token": true } }
+    }
   }
 }
 ```
 
-敏感字段（API 密钥、令牌）在响应中经过编辑。`source` 与 `loaded_at` 标识当前生效配置的来源与加载时间。
+响应体只有 `config` 一项（带 `section` 参数时只返回该段）。敏感字段不回显：channel 的密钥字段会被移除，并改为给出 `has_bot_token` 这类存在性布尔标记（见 `report_channel_secret_presence`），provider 侧同理只暴露 `has_api_key`。配置文件路径由 `config.path` 提供。
 
 ### config.patch
 
@@ -98,9 +97,16 @@ description: "运行时配置 RPC 方法"
   "jsonrpc": "2.0",
   "id": 2,
   "result": {
-    "applied": true,
-    "changed_keys": ["execution.max_runs_global", "general.fallback_providers"],
-    "restart_required": false
+    "success": true,
+    "applied_sections": ["execution", "general"],
+    "diff": [
+      { "path": "execution.max_runs_global", "old_value": 16, "new_value": 32 },
+      { "path": "general.fallback_providers", "old_value": [], "new_value": ["anthropic", "openai"] }
+    ],
+    "health_check": null,
+    "warnings": [],
+    "live_applied": ["execution"],
+    "reload_impact": { "kind": "live", "hint": "此改动将即时生效（下一轮对话），无需重启。" }
   }
 }
 ```
@@ -111,7 +117,7 @@ description: "运行时配置 RPC 方法"
 |-----------|------|----------|-------------|
 | `patch` | object | 是 | Merge Patch 对象。将字段设为 `null` 可清除它 |
 
-`restart_required` 为 `true` 时表示需要重启某接口或服务才会真正生效，并在 `restart_components` 中列出受影响组件。
+`reload_impact` 说明这次改动的生效方式：`kind` 为 `live` 表示已经热应用（`live_applied` 列出实际热应用的配置段），`restart` 表示写入成功但需要重启 `aleph-server` 才生效，`inert` 表示该配置段已无运行时消费者。`hint` 是给用户看的中文提示（`user_hint_zh`）。空补丁不会带 `reload_impact`——没有写入，就没有重载语义。
 
 ### config.reload
 
@@ -128,13 +134,15 @@ description: "运行时配置 RPC 方法"
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "reloaded": true,
-    "source": "/home/user/.aleph/config.json",
-    "changed_keys": ["general.default_provider"],
-    "restart_required": false
+    "ok": true,
+    "reloaded": ["app_config", "live:execution", "providers"],
+    "failed": [],
+    "config": { "agents": ["main"], "bindings_count": 2 }
   }
 }
 ```
+
+`reloaded` 列出被重新加载的子系统，热应用的配置段带 `live:` 前缀；`failed` 里每一项给出失败的子系统名与原因。
 
 ## 热重载与可调字段
 

@@ -101,14 +101,18 @@ pub struct EventFilter {
 Construction:
 
 ```rust
-let filter = EventFilter::new(vec![EventType::ToolCallStarted, EventType::ToolCallCompleted])
+let filter = EventFilter::new(vec![EventType::SubAgentTreeUpdate, EventType::ProcessCompleted])
     .with_session("session-123")
     .with_agent("agent-1");
-// or
-let filter = EventFilter::all();   // equivalent to EventFilter::new(vec![EventType::All])
 ```
 
-**Example:** The Panel's WebSocket subscription uses `EventFilter::new(vec![EventType::ToolCallStarted, ...]).with_session(...)` to stream the relevant tool events for that session to the client.
+An empty `event_types` list in `EventFilter::new` matches nothing. There is no
+catch-all constructor (`EventType::All` does not exist) — subscribing to every
+variant means listing them one by one.
+
+**Example:** the gateway's sub-agent tree relay (`src/gateway/subagent_tree_relay.rs`)
+subscribes with `EventFilter::new(vec![EventType::SubAgentTreeUpdate])` and
+forwards live tree updates to the panel.
 
 ---
 
@@ -118,20 +122,20 @@ let filter = EventFilter::all();   // equivalent to EventFilter::new(vec![EventT
 
 | Group | Variants | Notes |
 |---|---|---|
-| Input | `InputReceived(InputEvent { text, session_id, context, timestamp })` | User input |
-| Tool | `ToolCallRequested(ToolCallRequest { tool, parameters })` | Tool-call request |
-| Tool | `ToolCallStarted(ToolCallStarted { call_id, tool, input, timestamp, session_id? })` | Tool call started |
-| Tool | `ToolCallCompleted(ToolCallResult { call_id, tool, input, output, started_at, completed_at, token_usage, session_id? })` | Tool call finished |
-| Tool | `ToolCallFailed(ToolCallError { call_id, tool, input, error, error_kind, is_retryable, attempts, session_id? })` | Tool call failed |
-| Tool | `ToolCallRetrying(ToolCallRetry { call_id, attempt, delay_ms, reason? })` | Tool call retrying |
-| Loop | `LoopContinue(LoopState)` / `LoopStop(StopReason)` | Loop advance / stop |
-| Session | `SessionCreated(SessionInfo)` / `SessionUpdated(SessionDiff)` / `SessionResumed(SessionInfo)` / `SessionCompacted(CompactionInfo)` | Session lifecycle |
-| Sub-agent | `SubAgentCompleted(SubAgentCompletionEvent)` / `SubAgentTreeUpdate(...)` | Sub-agent finish / tree update |
-| AI | `AiResponseGenerated(AiResponse { content, reasoning?, is_final, timestamp })` | Model response |
-| Part | `PartAdded/Updated/Removed(crate::components::PartUpdateData)` | UI message-flow rendering |
-| Team | `TeamCreated { team_id, name, member_ids }` / `TeamMemberAdded` / `TeamMemberRemoved` / `TeamTaskAssigned` / `TeamTaskUpdated` / `TeamTaskCompleted` / `TeamTaskFailed` / `TeamDisbanded` | Multi-agent team |
+| Sub-agent | `SubAgentCompleted(SubAgentCompletionEvent)` | Sub-agent finished |
+| Sub-agent | `SubAgentTreeUpdate(aleph_protocol::subagent_tree::SubagentTreeEvent)` | Live sub-agent tree update |
+| Process | `ProcessCompleted(ProcessCompletionEvent)` | A background `bash` job reached a natural end |
+| Team | `TeamCreated { team_id, name }` | Team created |
+| Team | `TeamMemberAdded { team_id, member_id, role }` / `TeamMemberRemoved { team_id, member_id }` | Member joins and leaves |
+| Team | `TeamTaskAssigned { team_id, task_id, assignee_id }` / `TeamTaskUpdated { team_id, task_id, status, previous_status }` | Task assignment and updates |
+| Team | `TeamTaskCompleted { team_id, task_id, result_summary }` / `TeamTaskFailed { team_id, task_id, error }` | Task terminal states |
+| Team | `TeamDisbanded { team_id }` | Team disbanded |
 
-`EventType` is the subscription-filter discriminant. There is **no** `MemoryUpdated` or `ConfigReloaded` on this bus -- the latter is private to `McpManagerEvent` and is not bridged into the global stream.
+`EventType` (`src/event/types.rs`) is the discriminant used for subscription
+filtering and mirrors the `AlephEvent` variants one-to-one: two sub-agent
+variants, one background-process variant and eight team variants — 11 in total.
+A 2026-08 severed-wire audit removed a batch of variants that had neither
+producer nor subscriber; the pre-audit list is in the history section below.
 
 ### Event Ordering and Timestamps
 
@@ -163,15 +167,15 @@ struct MemoryLogger;
 impl EventHandler for MemoryLogger {
     fn name(&self) -> &'static str { "MemoryLogger" }
     fn subscriptions(&self) -> Vec<EventType> {
-        vec![EventType::ToolCallCompleted]
+        vec![EventType::ProcessCompleted]
     }
     async fn handle(
         &self,
         event: &AlephEvent,
         _ctx: &EventContext,
     ) -> Result<Vec<AlephEvent>, HandlerError> {
-        if let AlephEvent::ToolCallCompleted(t) = event {
-            tracing::info!(call_id = %t.call_id, tool = %t.tool, "tool finished");
+        if let AlephEvent::ProcessCompleted(p) = event {
+            tracing::info!(process_id = %p.process_id, command = %p.command, "background job finished");
         }
         Ok(vec![])
     }
@@ -193,6 +197,35 @@ GlobalBus::global()
     })
     .await;
 ```
+
+---
+
+## History: Event variants removed by the 2026-08 severed-wire audit
+
+The 2026-08-16 severed-wire audit (commit `68e103c6f`, "event: severed-wire audit
+fixes") removed a batch of variants from `AlephEvent` and `EventType` that had
+neither a producer nor a subscriber. Before the audit the enums looked like this:
+
+| Group | Removed variants |
+|---|---|
+| Input | `InputReceived(InputEvent { text, session_id, context, timestamp })` |
+| Tool | `ToolCallRequested(ToolCallRequest { tool, parameters })` |
+| Tool | `ToolCallStarted(ToolCallStarted { call_id, tool, input, timestamp, session_id? })` |
+| Tool | `ToolCallCompleted(ToolCallResult { call_id, tool, input, output, started_at, completed_at, token_usage, session_id? })` |
+| Tool | `ToolCallFailed(ToolCallError { call_id, tool, input, error, error_kind, is_retryable, attempts, session_id? })` |
+| Tool | `ToolCallRetrying(ToolCallRetry { call_id, attempt, delay_ms, reason? })` |
+| Loop | `LoopContinue(LoopState)` / `LoopStop(StopReason)` |
+| Session | `SessionCreated(SessionInfo)` / `SessionUpdated(SessionDiff)` / `SessionResumed(SessionInfo)` / `SessionCompacted(CompactionInfo)` |
+| AI | `AiResponseGenerated(AiResponse { content, reasoning?, is_final, timestamp })` |
+| Part | `PartAdded/Updated/Removed(crate::components::PartUpdateData)` |
+
+`MemoryUpdated` never existed as an identifier anywhere in the code repo — the
+old "there is no `MemoryUpdated`" sentence named a thing that was not there.
+`ConfigReloaded`, on the other hand, really was a private variant of
+`McpManagerEvent`; the 2026-08-02 commit `21ac20b6a` ("mcp: cut dead manager
+config knobs and transport leftovers") deleted it together with a batch of dead
+manager configuration in `src/mcp/manager/types.rs`. `McpManagerEvent` today
+carries only server-lifecycle and tools-changed events.
 
 ---
 

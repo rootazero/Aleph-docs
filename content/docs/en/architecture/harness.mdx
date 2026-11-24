@@ -85,7 +85,7 @@ pub enum HarnessError {
 }
 ```
 
-The polymorphic seams are `SessionDriver` and `Arc<dyn HarnessRunner>` (in the orchestrator) — there is **no** `Harness` trait. The earlier trait and its default `run()` were deleted as zero-consumer abstractions.
+The orchestrator uses `Arc<dyn HarnessRunner>` for polymorphic harness dispatch. The former harness trait and its default `run()` loop had no consumers; the separate unused session-driver trait was removed in `01ba2bd2f`.
 
 The outer loop in `AgentHarness::run` repeatedly calls `run_turn_internal` until it returns `TurnState::Done` or the `CancellationToken` fires.
 

@@ -7,7 +7,7 @@ description: Intent is handled by the LLM under R7; the Harness does not run a s
 
 Under R7 (LLM sovereignty), Aleph no longer runs regexes, keyword rules, confidence thresholds, or a separate intent classifier before a message reaches the model. The LLM understands the user's message during its normal reasoning call. The Harness connects model requests to tools, permissions, and the execution loop; it does not pre-classify message intent.
 
-Therefore `KeywordPolicy`, `KeywordIndex`, `AiIntentDetector`, `ExecutionIntentDecider`, `IntentCache`, `TaskCategory`, and message-intent-based tool relevance scoring are not part of the current R7 configuration or runtime path. They must not be added to `config.toml` or used as implementation guidance.
+Therefore there is no intent-detection layer in the code repository at all: no intent rule engine, no keyword policy, no cache, and no message-intent-based tool relevance scoring. The types that existed before R7 were deleted in the 2026-03 and 2026-05 cleanups (see the history section below); they must not be added to `config.toml` or used as implementation guidance.
 
 ## Tool presentation and permissions
 
@@ -27,3 +27,9 @@ Explicit protocol operations such as registered slash commands, Gateway RPCs, an
 ## Related configuration
 
 There is no intent-specific configuration section. Models and failover are configured through `[providers.*]` and provider references in `[general]`; tool presentation and approval policy are configured under `[policies]`. See [Configuration](/docs/en/concepts/configuration) and [Architectural Redlines](/docs/en/philosophy/redlines#r7-llm-sovereignty).
+
+## History: the pre-R7 intent detection layer
+
+The 2026-03-08 commit `d71aad8dd` ("intent: delete legacy decision layer, classifier, ai_detector, presets") removed the intent decision layer: the decision aggregator and `ExecutionIntentDecider` (then under `core/src/intent/decision/`), the classifier and `AiIntentDetector` (then under `core/src/intent/detection/`), the keyword policy `KeywordPolicy` with its `KeywordIndex`, and the `IntentCache` cache. The 2026-05-21 commit `b31bf206e` ("intent: remove dead intent types module") then removed what was left of `core/src/intent/types/` — `TaskCategory` and `IntentResult` lived there.
+
+The whole legacy intent directory (then `core/src/intent/`) is gone today, and `src/lib.rs` no longer exports it. The layering described here (L0-L2 regex / keyword / AI classifiers plus a single decision point) and the names above describe only that period.

@@ -181,7 +181,7 @@ pub fn matches_glob(value: &str, pattern: &str) -> bool;
 - **风险等级 `low` 且 `allow == true`** —— 自动批准，跳过人类
 - **其他一切** —— 升级到人类请求器
 
-`GuardianJudge` 永不自主否决，也不会扩展人类原本会被问询的范围。代码解析 + provider 故障 + 30 秒超时 + 提供方断路器（连续 3 次失败后 5 分钟冷却）一律升级到人类。它消费 `src/exec/masker.rs::SecretMasker`，对 `summary` 与命令段 `raw` 做密钥遮蔽，所以密钥不会随判断 payload 一并序列化到日志或回灌到上游审计。
+`GuardianApprovalRequester` 永不自主否决，也不会扩展人类原本会被问询的范围。代码解析 + provider 故障 + 30 秒超时 + 提供方断路器（连续 3 次失败后 5 分钟冷却）一律升级到人类。它消费 `src/exec/masker.rs::SecretMasker`，对 `summary` 与命令段 `raw` 做密钥遮蔽，所以密钥不会随判断 payload 一并序列化到日志或回灌到上游审计。
 
 判决 payload 通过稳定的 `GUARDIAN_SYSTEM` 规则 + `cache: true` 的 `SystemPromptPart` 发送，支持 Anthropic 兼容 provider 跨次调用复用 prompt cache（每动作 payload 是唯一动态尾）。
 

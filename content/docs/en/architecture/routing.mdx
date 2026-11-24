@@ -1,6 +1,6 @@
 ---
 title: "Routing System"
-description: "Aleph's real routing layer: session-key resolution (SessionKey), DmScope isolation, hierarchical RouteBinding matching, two-stage command/keyword routing rules, runtime overlay, and the provider failover chain."
+description: "Aleph's real routing layer: session-key resolution (SessionKey), DmScope isolation, hierarchical RouteBinding matching, custom slash-command rules, runtime overlay, and the provider failover chain."
 ---
 
 > **This page describes Aleph's real routing layer (`src/routing/` + `src/config/types/routing.rs`)**, not a generic web routing framework.
@@ -12,7 +12,7 @@ The Aleph routing system has four layers:
 3. **Route-binding resolution** (`src/routing/resolve.rs` + `config.rs`) — maps `channel / peer / guild / team / account / default` to a `ResolvedRoute` via conjunctive scope matching
 4. **Runtime overlay** (`src/routing/overlay.rs`) — applies `agent_switch` bindings + ghost-binding detection so the `gateway_route` tool reports the truth
 
-The two-stage command/keyword AI routing rules live in `src/config/types/routing.rs`; the `[[rules]]` middleware delivery lives in `src/config/methods.rs`.
+Custom slash-command rules are defined by `RoutingRuleConfig` in `src/config/types/routing.rs`.
 
 ---
 
@@ -215,75 +215,30 @@ pub struct OverlaidRoute {
 
 ## 5. `RoutingRuleConfig` (`src/config/types/routing.rs`)
 
-```rust
-pub struct RoutingRuleConfig {
-    pub rule_type: Option<String>,         // "command" | "keyword" | auto-detected by regex
-    pub is_builtin: bool,                  // true: read-only in Settings UI
-    pub regex: String,
-    pub provider: Option<String>,          // required for command rules
-    pub system_prompt: Option<String>,     // required for keyword rules; optional for command
-    pub strip_prefix: Option<bool>,        // default true for command; ignored for keyword
-    pub intent_type: Option<String>,       // "translation" / "research" / "code_generation" / "skills:build-macos-apps"
-    pub preferred_model: Option<String>,   // overrides automatic model selection
-    pub icon: Option<String>,              // SF Symbol icon (command-mode display)
-}
-```
+`get_rule_type` reports the configured type or infers it from the `^/` prefix. Only custom slash-command rules are registered: `register_custom_commands` uses `regex`, `system_prompt`, and `is_builtin`. A command rule must name a configured `provider` to pass validation, but registration does not use it to route requests. `strip_prefix`, `preferred_model`, `intent_type`, and `icon` still parse for compatibility but do not affect registration.
 
-`get_rule_type()` auto-detects from the `^/` prefix; `should_strip_prefix()` returns `false` for keyword rules and the configured value (defaulting to `true`) for command rules.
-
-### Configuration examples
+### Configuration example
 
 ```toml
 [[rules]]
-rule_type = "command"
 regex = "^/draw\\s+"
-provider = "gemini"
-system_prompt = "Draw a picture based on the prompt"
-intent_type = "image_generation"
-preferred_model = "gemini-2.5-pro-image"
-icon = "paintbrush.fill"
-
-[[rules]]
-rule_type = "keyword"
-regex = "translate to English"
-system_prompt = "Translate the target language to English"
-intent_type = "translation"
-
-# Bypass: the regex already strips (e.g. /^/echo\s+(.+)/ → only \1 reaches the AI)
-[[rules]]
-rule_type = "command"
-regex = "^/echo\\s+(.+)"
 provider = "default"
-strip_prefix = false   # AI side does not strip again
+system_prompt = "Draw a picture based on the prompt"
 ```
 
 ---
 
-## 6. Two-stage matching (command + keyword)
+## 6. Slash-command matching
 
-The matching pipeline runs two ordered phases per input:
-
-```
-process_clipboard / inbound message
-    │
-    ├─ Phase 1: command rules (first-match-stops)
-    │     ├─ regex starts with ^/ → exactly one match → stop
-    │     └─ on hit → use its provider + optional strip_prefix
-    │
-    └─ Phase 2: keyword rules (all-match)
-          ├─ regex does not start with / → accumulate all matches
-          └─ on hits → concatenate system_prompts with \n\n, use default_provider
-```
-
-`strip_prefix` is applied to slash commands (e.g. `/loop`, `/goal`, `/mode`) so the AI never sees the command name as literal text. The `command.executor` dispatches via `RegistryToolRegistry::resolve`; the fast path lives in `gateway::execution_engine::slash_command::try_resolve_slash_command` (L0 direct) and falls back to `execute_slash_command_fast_path`.
+`CommandParser` separates `/name` from its arguments; the legacy `strip_prefix` field does not control parsing. The gateway uses `try_resolve_slash_command` in `src/gateway/execution_engine/slash_command.rs` to turn a parsed command into execution metadata. When that metadata selects a direct tool call, `execute_slash_command_fast_path` dispatches it without running the full agent loop. Keyword rules are retired.
 
 ---
 
-## 7. History: context-aware inference (`[smart_matching]`, removed)
+## Historical: 7. Context-aware inference (`[smart_matching]`, removed)
 
-Earlier revisions of this page documented a four-layer semantic matcher configured by a `[smart_matching]` section (`SmartMatchingConfig`: command fast path, weighted keywords, context rules, AI fallback, with `[[smart_matching.context_rules]]` / `[[smart_matching.keyword_rules]]` tables). That section was deprecated and inert, and was cut from the config schema in commit `54a12d89b` ("config: cut deprecated inert sections (smart_flow, smart_matching, dispatcher, subagent, evolution, media)"). A `[smart_matching]` block in a config file is no longer parsed.
+Earlier revisions of this page documented a four-layer semantic matcher configured by a `[smart_matching]` section (`SmartMatchingConfig`: command fast path, weighted keywords, context rules, AI fallback, plus context-rule and keyword-rule tables). That section was deprecated and inert, and was cut from the config schema in commit `54a12d89b` ("config: cut deprecated inert sections (smart_flow, smart_matching, dispatcher, subagent, evolution, media)"). A `[smart_matching]` block in a config file is no longer parsed.
 
-What actually runs today is the two-stage command + keyword matching in section 6, driven by `RoutingRuleConfig` (section 5). There is no separate context-inference layer; contextual decisions are made by the model inside the harness loop.
+There is no separate context-inference layer today; contextual decisions are made by the model inside the harness loop.
 
 ---
 

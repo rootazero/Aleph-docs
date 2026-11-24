@@ -127,7 +127,7 @@ operator 闸门是面向自身管理操作的另一道边界：`hub_install_run`
 ~/.aleph/runtimes/ledger.json
 ```
 
-`CapabilityLedger`（`src/runtimes/ledger.rs`）是「Aleph 当前能否使用某个运行时可执行文件」的唯一持久化来源。它不下载也不安装任何东西；探测与引导（`src/runtimes/ensure.rs`）负责这些动作，然后更新账本。条目记录能力名、可执行路径、检测到的版本、上次成功探测时间、来源（`system` 或 `aleph_managed`）与状态（`missing` / `probing` / `bootstrapping` / `ready` / `stale`）。
+`CapabilityLedger`（`src/runtimes/ledger.rs`）是「Aleph 当前能否使用某个运行时可执行文件」的唯一持久化来源。它不下载也不安装任何东西；探测与引导（`src/runtimes/ensure.rs`）负责这些动作，然后更新账本。条目记录能力名、可执行路径、检测到的版本、上次成功探测时间、来源（`system` 或 `CapabilitySource::AlephManaged`）与状态（`missing` / `probing` / `bootstrapping` / `ready` / `stale`）。
 
 RPC：`runtimes.list` 读取账本与运行时规格，`runtimes.refresh` 探测已知能力，`runtimes.install` 接受能力名、异步执行并发布进度事件，终态持久化在同一份 `ledger.json`（`src/gateway/handlers/runtimes.rs`）。缺失或损坏的账本会被重建而不是被信任。
 

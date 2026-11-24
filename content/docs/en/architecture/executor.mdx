@@ -144,7 +144,7 @@ pub struct UnifiedTool {
 
 ## Public surface (`src/executor/mod.rs`)
 
-The executor module exports the registry and its trait; there is no separate result/context type layer (the old `ExecutionResult` / `ToolCallRecord` / `ExecutionContext` / `ExecutorError` family no longer exists — tool results are `serde_json::Value`, errors are `AlephError`).
+The executor module exports the registry and its trait. Tool invocations return `serde_json::Value` or `AlephError`; the unused executor-local result and context types were removed in `3491b7551`.
 
 ```rust
 pub use builtin_registry::{

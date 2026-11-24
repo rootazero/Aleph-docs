@@ -32,11 +32,11 @@ MCP 是三种扩展类型（`Skill`、`Plugin`、`Mcp`）之一。本页介绍�
    包装成 `LoopTool`，并在共享 `LoopToolRegistry` 里以 `<server>__<tool>`
    注册。
 
-第四个组件 —— **`McpToolBridge`**（`src/mcp/tool_bridge.rs`）—— 订阅
-manager 的事件广播，把工具增量同步进注册表。它**也是**注册 capability-gated
-内置工具的唯一场所（`mcp_read_resource` / `mcp_list_resources` /
-`mcp_list_resource_templates` / `mcp_get_prompt` / `mcp_list_prompts` /
-`mcp_login`）。
+第四个组件 —— **工具桥**（`src/mcp/tool_bridge.rs`，入口
+`spawn_tool_bridge`）—— 订阅 manager 的事件广播，把工具增量同步进注册表。
+它**也是**注册 capability-gated 内置工具的唯一场所（`mcp_read_resource` /
+`mcp_list_resources` / `mcp_list_resource_templates` / `mcp_get_prompt` /
+`mcp_list_prompts` / `mcp_login`）。
 
 ```
 Aleph Core
@@ -45,7 +45,7 @@ Aleph Core
 │   ├── 健康监控 + 熔断器
 │   └── 自动重启
 │
-├── McpToolBridge
+├── 工具桥（spawn_tool_bridge）
 │   ├── ToolsChanged event → register / unregister McpHandler
 │   └── capability 聚合 → reconcile_capability_tools()
 │
@@ -246,12 +246,18 @@ handle.shutdown().await?;
 |------|------|
 | `AddServer` | 注册新服务器配置 |
 | `RemoveServer` | 按 ID 移除服务器 |
+| `AddTransientServer` / `RemoveTransientServer` | 注册 / 移除**临时**服务器（只活在本次进程里，不写盘） |
 | `StartServer` / `StopServer` / `RestartServer` | 生命周期控制 |
-| `ListServers` | 列出服务器及状态 |
+| `ListServers` / `ListServerConfigs` | 列出服务器与服务器配置 |
 | `GetStatus` | 获取服务器详细状态 |
-| `AggregateTools` / `AggregateResources` / `AggregatePrompts` | 跨服务器聚合 |
-| `ReloadConfig` | 从磁盘重新加载配置 |
+| `GetClient` | 取某个服务器的客户端句柄 |
+| `AggregateInstructions` | 跨服务器聚合 instructions |
+| `SetSamplingCallback` | 设置采样回调 |
+| `ServerListChanged` | 服务器列表变化通知 |
 | `Shutdown` | 优雅关闭所有服务器 |
+
+临时服务器服务于插件自带的 MCP 服务器：生命周期由插件系统掌管，
+不写进用户的 MCP 配置，也不会动盘上的配置。
 
 ### 事件
 
@@ -307,8 +313,10 @@ Healthy → Degraded (2+ failures) → Unhealthy (5+ failures)
 transport 不是 stdio 时出现）走浏览器 OAuth 流程并把 token 持久化到
 `mcp/auth/`。
 
-远程服务器的 URL 必须通过 SSRF 校验（`mcp/transport/http.rs` 使用
-`ssrf::validate_url`）—— 私网 / 链接本地 / DNS rebinding 都会拒。
+远程服务器的 URL 必须通过 SSRF 校验（`src/mcp/transport/http.rs` 用
+`safe_fetch` + `SsrfPolicy`）—— 私网 / 链接本地 / DNS rebinding 都会拒。
+SSE 与 OAuth 预检走的是同一条策略的另一个入口
+（`src/security/ssrf` 的 `validate_url_with_pinned`）。
 
 ## 运行时检查
 

@@ -81,15 +81,14 @@ Return the mandatory pre-install disclosure payload for a catalog entry. The Pan
 
 **Response:** `{ "disclosure": { ...DisclosurePayload... }, "injection_findings": [ ...InjectionFinding... ], "post_install": { ...post-install verification payload... } }`.
 
-`DisclosurePayload` carries the exact `command` / `args`, declared `secrets` and their purpose, `network` / `filesystem` reach, `version`, `sha256`, `risk_class` (`mcp-remote` / `mcp-stdio` / `plugin-…` / `skill`), `trust_tier`, `ack_required`, and `requires_ack` (true on community/LLM-derived MCP entries).
+`DisclosurePayload` carries `tier` (the trust tier, `TrustTier`), `risk` (the risk class, `RiskClass`), `one_line` (a one-sentence summary), `command_display` (the rendered command line, MCP stdio only), `secrets` (declared secret names with their purpose and sensitivity), `version`, `sha256` and `ack_required`.
 
-`risk_class`:
-- `mcp-stdio` — runs commands, highest risk
-- `mcp-remote` — softer (network only)
-- `plugin-*` — can instruct the agent
-- `skill-*` — can instruct the agent
+`risk` is one of the three `RiskClass` variants (serialized as snake_case on the wire):
+- `RunsCommands` — runs commands, highest risk (MCP stdio, OCI image)
+- `InstructsAgent` — can instruct the agent (skill / plugin, prompt-injection surface)
+- `RemoteEndpoint` — softer (network only)
 
-Community or LLM-derived MCP entries set `ack_required: true` and `requires_ack: true`, demanding an explicit "I understand the risk" acknowledgement at install time.
+`ack_required` in the payload is `true` when `risk` is `RunsCommands` or `InstructsAgent` and `tier` is `Community` or `Unverified`: the install then has to carry `acknowledge_risk: true`, otherwise it stops at `needs_ack` and demands an explicit "I understand the risk" acknowledgement.
 
 ### extensions.configure
 

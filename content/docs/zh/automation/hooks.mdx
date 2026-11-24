@@ -380,26 +380,25 @@ actions = [
 
 26.7.22+ 把 hooks 从"任意上下文注入"加固为**有界、有同意、可审计**的子系统：
 
-- **`context_injection_limit_bytes`** —— 注入上下文字节限额（默认 16 KB；超限拒绝）
-- **`require_consent`** —— 同意门；首次触发需用户在 Panel 内点击"我了解此风险"才能继续
+- **`HOOK_CONTEXT_TOKEN_LIMIT`** —— 注入上下文的 token 限额（`src/extension/hooks/output_budget.rs`）；超限文本落盘到 `~/.aleph/data/hook_outputs/` 下的文件，注入体只保留首尾预览与该路径
+- **`ShellHookConsent`** —— 同意门（`src/extension/hooks/consent.rs`）；需要人确认的 hook 先记为待批准，同意状态由 `HookExecutor::inventory()` 的 `consent` 字段给出
 - **`runtime inventory`** —— `HookExecutor::inventory()` 暴露所有已注册 hook 及其匹配器；`hooks.registry` RPC 拉取
-- **超时泄漏修复**（26.7.22+）：`HookExecutor` 的 timeout 现在是 per-call 而非共享——之前是共享 future，泄漏导致后续 hook 都拒绝
-- **token 桶限流**（26.7.22+）：每个 hook 源有自己的 token 桶；高频触发自动降级到丢弃而非反压
+- **超时隔离**（26.7.22+）：每次 hook 调用有自己的 timeout；`hooks.json` 里一条注册项的 timeout 只属于那一个 action，不会外溢到同组的其他 action
+- **声明形态**：hook 声明按事件名分组写在 `hooks.json` 里，每组一个 matcher 加一组 action
 
-```toml
-[[hook]]
-name = "audit-shell-commands"
-event = "pre_tool_execute"
-match = { tool = "bash_exec" }
-context_injection_limit_bytes = 16384
-require_consent = true
-action = "observe"
-
-[[hook]]
-name = "budget-watchdog"
-event = "post_turn"
-match = { agent_id = "main" }
-rate_limit = { tokens_per_second = 1, burst = 5 }
+```json
+{
+  "hooks": {
+    "before_tool_call": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          { "type": "command", "command": "./audit-shell-commands.sh", "timeout": 60 }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ### `hooks_manage` 工具
@@ -426,7 +425,7 @@ hooks_manage(action: "stats")                        // 命中率 / 超时 / 同
 
 ### Day-boundary 日志轮转
 
-26.7.24+：守护进程支持 day-boundary 日志轮转；`ALEPH-BOOT` marker。
+26.7.24+：aleph-server 的进程守护支持 day-boundary 日志轮转；`ALEPH-BOOT` marker。
 
 ### 完整 RPC
 

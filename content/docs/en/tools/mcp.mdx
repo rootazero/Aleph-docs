@@ -35,12 +35,12 @@ Three layers:
    tool as a `LoopTool`, registered in the shared `LoopToolRegistry` under
    `<server>__<tool>`.
 
-A fourth component — **`McpToolBridge`** (`src/mcp/tool_bridge.rs`) —
-subscribes to the manager's event broadcast and incrementally syncs tools
-into the registry. It is also the **only** place that registers the
-capability-gated builtins (`mcp_read_resource` / `mcp_list_resources` /
-`mcp_list_resource_templates` / `mcp_get_prompt` / `mcp_list_prompts` /
-`mcp_login`).
+A fourth component — the **tool bridge** (`src/mcp/tool_bridge.rs`, entry
+point `spawn_tool_bridge`) — subscribes to the manager's event broadcast and
+incrementally syncs tools into the registry. It is also the **only** place
+that registers the capability-gated builtins (`mcp_read_resource` /
+`mcp_list_resources` / `mcp_list_resource_templates` / `mcp_get_prompt` /
+`mcp_list_prompts` / `mcp_login`).
 
 ```
 Aleph Core
@@ -49,7 +49,7 @@ Aleph Core
 │   ├── health monitoring + circuit breaker
 │   └── auto-restart
 │
-├── McpToolBridge
+├── tool bridge (spawn_tool_bridge)
 │   ├── ToolsChanged event → register / unregister McpHandler
 │   └── capability aggregation → reconcile_capability_tools()
 │
@@ -263,12 +263,19 @@ handle.shutdown().await?;
 |---------|-------------|
 | `AddServer` | Register a new server config |
 | `RemoveServer` | Remove a server by ID |
+| `AddTransientServer` / `RemoveTransientServer` | Register / remove a **transient** server (lives only in this process, never written to disk) |
 | `StartServer` / `StopServer` / `RestartServer` | Lifecycle control |
-| `ListServers` | List servers with status |
+| `ListServers` / `ListServerConfigs` | List servers and server configs |
 | `GetStatus` | Detailed status for one server |
-| `AggregateTools` / `AggregateResources` / `AggregatePrompts` | Cross-server aggregation |
-| `ReloadConfig` | Reload config from disk |
+| `GetClient` | Take the client handle of one server |
+| `AggregateInstructions` | Aggregate instructions across servers |
+| `SetSamplingCallback` | Install the sampling callback |
+| `ServerListChanged` | Notification that the server list changed |
 | `Shutdown` | Gracefully shut down all servers |
+
+Transient servers back MCP servers that ship with a plugin: their
+lifecycle is governed by the plugin system, they are never written into the
+user's MCP config, and removing them never touches the on-disk config.
 
 ### Events
 
@@ -328,9 +335,11 @@ Remote MCP servers use OAuth. The `mcp_login` builtin tool (present only
 when at least one server's transport is non-stdio) drives the browser
 OAuth flow and persists tokens under `mcp/auth/`.
 
-Remote server URLs must pass SSRF validation (`mcp/transport/http.rs` uses
-`ssrf::validate_url`) — private network, link-local, and DNS-rebinding
-targets are rejected.
+Remote server URLs must pass SSRF validation (`src/mcp/transport/http.rs`
+uses `safe_fetch` with an `SsrfPolicy`) — private network, link-local, and
+DNS-rebinding targets are rejected. SSE and the OAuth preflight reach the
+same policy through its other entry point (`validate_url_with_pinned` in
+`src/security/ssrf`).
 
 ## Runtime checks
 

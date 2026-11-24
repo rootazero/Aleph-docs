@@ -10,7 +10,7 @@ description: "基于会话的多步配置向导框架，通过 gateway RPC 驱�
 1. **基于会话的状态机** —— 通过 `session_id` 在多次 `wizard.next` / `wizard.answer` 调用之间保持进度
 2. **RpcPrompter 抽象** —— flow 实现拿到 `RpcPrompter`，向客户端推 `WizardStep`，等 `wizard.answer` 把值送回
 3. **Panel / 桌面 / 任何 RPC 客户端**都能驱动，无需终端
-4. **终端状态 sticky** —— 完成后 `cancel()` 不会再覆盖 `Done` / 取消其 `finish_data` 载荷
+4. **终态 sticky** —— 完成后 `cancel()` 不会再覆盖 `Done` 终态
 
 ---
 
@@ -50,7 +50,6 @@ pub struct WizardSession {
     step_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<WizardStep>>>,
     answers: Arc<RwLock<HashMap<String, PendingAnswer>>>,
     error: Arc<RwLock<Option<String>>>,
-    finish_data: Arc<RwLock<Option<serde_json::Value>>>,
     cancel_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
 }
 ```
@@ -58,7 +57,7 @@ pub struct WizardSession {
 要点：
 
 - `step_tx` 仅由 `RpcPrompter` 持有；flow task 退出时 prompter 被 drop、channel 关闭、`next()` 收到 `None` 后正确返回终态。
-- 终态 `Done` / `Cancelled` / `Error` 是 sticky —— `settle()` 只接受从 `Running` 的迁移；客户端断开清理时晚到的 `cancel()` 不会覆盖已完成的 `Done`（避免丢掉 `finish_data`）。
+- 终态 `Done` / `Cancelled` / `Error` 是 sticky —— `settle()` 只接受从 `Running` 的迁移；客户端断开清理时晚到的 `cancel()` 不会覆盖已完成的 `Done`。
 
 ### `WizardFlow` trait
 
@@ -72,7 +71,7 @@ pub trait WizardFlow: Send + Sync {
 
 ### `RpcPrompter`
 
-唯一的内置 prompter 实现。`prompter.prompt(step)` 把 `WizardStep` 推给客户端并阻塞等待对应 `wizard.answer`；`finish(data)` 把终值写进 `finish_data`，下一次 `wizard.next` 在 `Done` 状态把它作为 `WizardNextResult.data` 一并返回。
+唯一的内置 prompter 实现。`prompter.prompt(step)` 把 `WizardStep` 推给客户端并阻塞等待对应 `wizard.answer`；`RpcPrompter` 没有终值写入方法 —— 终态由 flow 的返回值决定。
 
 支持的 step 类型：
 
@@ -81,10 +80,8 @@ pub trait WizardFlow: Send + Sync {
 | `Note` | 仅展示 |
 | `Select` | 单选 |
 | `MultiSelect` | 多选 |
-| `Text` | 自由文本（支持 `sensitive` / `validation`） |
+| `Text` | 自由文本（支持 `sensitive`） |
 | `Confirm` | 是/否（可设默认值） |
-| `Progress` | 后台进度（`StepExecutor::Gateway`，客户端只渲染） |
-| `Action` | 后台执行 |
 
 ---
 
@@ -93,8 +90,8 @@ pub trait WizardFlow: Send + Sync {
 | Flow | `wizard_type` | 用途 |
 |---|---|---|
 | `OnboardingFlow` | `onboarding` | 首次启动：provider × 2、模型、thinking、消息通道、复核（6 步） |
-| `QuickSetupFlow` | `quick-setup` | 仅问一个 API key，跳过其它（适合二次安装 / 重装） |
-| `ProviderSetupFlow` | `provider-setup` | 单个 provider 的添加 / 重配 |
+
+目前代码里只接线了这一个 flow：服务器启动时注册的 flow factory 只认 `onboarding`，其它 `wizard_type` 会得到 `Unknown wizard type`。
 
 `OnboardingFlow::run` 的步骤序列：
 
@@ -121,7 +118,7 @@ pub trait WizardFlow: Send + Sync {
 | `wizard.cancel` | `{ session_id }` | `{ cancelled }` |
 | `wizard.status` | `{ session_id }` | `{ status, error?, current_step? }` |
 
-`WizardNextResult` 终态可携带 `data`，由 `RpcPrompter::finish(data)` 写入；典型用法是 onboarding 完成后返回已签发的 token / 已落盘的配置摘要。
+`WizardNextResult` 终态只有 `done` / `status` / `error` 三个字段（没有额外的终值载荷）。
 
 ---
 
@@ -131,7 +128,7 @@ pub trait WizardFlow: Send + Sync {
 - **`unwrap_or_else(|e| e.into_inner())`** 锁恢复（Poisoned-lock 安全）
 - **显式 step 验证** —— `answer` 校验 `step_id` 与当前 step 匹配；`wizard.next` 携带 `answer` 被拒绝（`wizard.answer` 才接受）
 - **通道泄漏防护** —— `RpcPrompter::prompt` 失败时同步从 `answers` map 移除未消费的 pending sender，避免会话生命周期内的内存泄漏
-- **没有进程内 `CliPrompter`** —— 终端 UI 走 RPC 让 Panel 处理；CLI 不直接驱动 wizard
+- **没有进程内 CLI prompter** —— 终端 UI 走 RPC 让 Panel 处理；CLI 不直接驱动 wizard
 
 ---
 
@@ -139,10 +136,20 @@ pub trait WizardFlow: Send + Sync {
 
 - `src/wizard/mod.rs` —— 模块入口
 - `src/wizard/session.rs` —— `WizardSession` 与 sticky 终态 / channel 生命周期
-- `src/wizard/prompter.rs` —— `RpcPrompter`、`PendingAnswer`、`ProgressHandle`
-- `src/wizard/types.rs` —— `WizardStep` / `WizardOption` / `WizardStatus` / `StepType` / `WizardNextResult` / `WizardAnswer`
-- `src/wizard/flows/onboarding.rs` —— `OnboardingFlow` / `QuickSetupFlow` / `ProviderSetupFlow`
+- `src/wizard/prompter.rs` —— `RpcPrompter`、`PendingAnswer`
+- `src/wizard/types.rs` —— `WizardStep` / `WizardOption` / `WizardStatus` / `StepType` / `WizardNextResult`
+- `src/wizard/flows/onboarding.rs` —— `OnboardingFlow`
 - `src/gateway/handlers/wizard.rs` —— `wizard.*` RPC handler + `WizardSessionManager` + `install_wizard_handlers`
+
+## 历史：被裁掉的 wizard flow 与死线
+
+下面这些类型曾经存在、现已删除。列在这里是为了让读旧代码、旧 issue 的人知道它们去了哪里，而不是说它们今天还在。
+
+- `QuickSetupFlow`（`quick-setup`）与 `ProviderSetupFlow`（`provider-setup`）—— 只有结构体、没有接线。2026-08-03 的提交 `e3f2bc32f`（"wizard: cut dead wires"）删除。
+- `WizardAnswer`、以及 `finish_data` / `RpcPrompter::finish` 这条终值载荷链路 —— 同一提交删除，`WizardNextResult` 的 `data` 字段随之消失。
+- `ProgressHandle`（实现名 `RpcProgressHandle`）—— 同一提交删除；后台进度类 step 从未接线。
+- `StepType::Action` —— 同一提交删除。
+- `StepType::Progress` 与 `StepExecutor::Gateway` —— 2026-08-16 的提交 `e31398639`（"wizard: cut dead StepType::Progress / StepExecutor::Gateway / with_validation / AlreadyDone"）删除。今天的 step 类型只有 `Note` / `Select` / `MultiSelect` / `Text` / `Confirm`，执行者只有 `Client`。
 
 ## 相关页面
 

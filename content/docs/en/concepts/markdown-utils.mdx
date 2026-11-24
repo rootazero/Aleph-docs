@@ -42,7 +42,7 @@ API:
 - **Closing fence longer than opening**: ````js` ... ````...` ` is a valid closure; the `equals` count is not the test.
 - **Backticks inside text bodies**: a literal `` ` `` inside a string body does **not** open a new fence; only the line start (0–3 spaces + fence marker) counts.
 - **Indent matching**: the closing fence's indent must be **no greater** than the opener's; deeper indent = invalid closure.
-- **Half-character rejection**: a partial multi-byte character in CJK paths will not be padded with a space (uses the same `char_indices` truncation as `utils/text_format::truncate_text`).
+- **No half-character splits**: fence parsing scans whole lines, and truncation takes character boundaries via `char_indices` in `utils/text_format::truncate_text`, so a multi-byte character is never cut in the middle.
 - **Empty string and empty fence**: returns `[]`, never errors.
 
 ### Practical hints for streaming boundaries
@@ -176,10 +176,16 @@ Both follow the "write to `*.tmp.<rand>` → fsync → rename" three-step patter
 
 ```rust
 #[must_use]
-pub fn is_pid_alive(pid: u32) -> bool;
+pub fn is_process_alive(pid: i32) -> bool;
+#[must_use]
+pub fn process_start_time(pid: i32) -> Option<u64>;
+#[must_use]
+pub fn process_matches(pid: i32, expected_start: Option<u64>) -> bool;
 ```
 
-A POSIX `kill(pid, 0)` wrapper (Windows uses `OpenProcess`). The instance-lock guard uses it like this: after acquiring the `flock`, write your pid to the `aleph.lock` sidecar; on release, clear it. Another process reading the sidecar sees "lock held by pid X" and calls `is_pid_alive(X)` to tell whether X is still running — a crashed process's `flock` is released by the OS, so the sidecar's pid is stale; `kill 0` against a dead pid returns `ESRCH`, distinguishing a real holder from a stale entry.
+On Unix this is `kill(pid, 0)` (Windows uses `sysinfo` on top of the Win32 process API); `EPERM` counts as "the process exists but is not ours". `process_start_time` returns the process's start time in seconds since the epoch, and `process_matches` uses it against PID reuse: same PID but a different start time means a different process.
+
+The instance-lock guard builds on these: after `try_acquire` takes the `fs2` exclusive lock, it records its own PID (plus start time) in an **unlocked** sidecar, `aleph.lock.pid` (the lock file itself is `aleph.lock`). The sidecar is separate because Windows `LockFileEx` blocks reads of the lock file from other handles. A contender reads the holder's PID from the sidecar and calls `process_matches` to tell a live holder from a PID that was reused, separating "really held right now" from a stale holder record. `try_acquire` returns an `AcquireOutcome`: `Acquired` / `HeldByLive` / `HeldByOrphaned` / `HeldByUnknown`. There is deliberately no "the lock file expired, delete it" arm. The OS releases the lock when the holder exits (normal exit, panic, or SIGKILL); the sidecar is removed on `Drop`, with `remove_held_holder_records_before_exit` covering forced-exit paths.
 
 ---
 
@@ -227,8 +233,8 @@ Pure lexical, no IO (does not call `canonicalize`, avoiding symlink TOCTOU). Aft
 - `src/utils/sqlite_open.rs` — `open_sqlite_safe` / `open_sqlite_readonly`
 - `src/utils/atomic_io.rs` — `write_atomic` + `with_file_lock` (fs2 exclusive lock)
 - `src/utils/atomic_write.rs` — `atomic_write_file` (async, mode-bit-preserving)
-- `src/utils/process_alive.rs` — `is_pid_alive` + instance lock
-- `src/utils/instance_lock.rs` — `acquire_instance_lock` / `release_instance_lock` + stale detection
+- `src/utils/process_alive.rs` — `is_process_alive` / `process_start_time` / `process_matches` (the single source of truth for process liveness)
+- `src/utils/instance_lock.rs` — `try_acquire` / `AcquireOutcome` / `is_lock_held` / `diagnose_holder` / `remove_holder_record_if_lock_free` / `remove_held_holder_records_before_exit`
 - `src/utils/no_window.rs` — `no_window` (Windows CREATE_NO_WINDOW / Unix setsid)
 - `src/utils/path_within.rs` — `is_path_within` (allow-list, lexical)
 - `src/utils/vault_io.rs` — `VaultIo::new` / `read` / `write` (atomic + locked)

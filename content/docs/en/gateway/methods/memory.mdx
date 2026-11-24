@@ -17,7 +17,7 @@ Twelve methods are wired in `register_memory_handlers` (`src/bin/aleph-server/co
 
 ### memory.search
 
-Search raw memories (Layer 1). Substring match against `content`; empty `query` returns recent rows in reverse-chronological order. **This is the only raw-memory entry point** — the previous note-search branch was removed because it duplicated `graph.search` and led to wrong `delete_raw_memory` targets in the Panel.
+Search raw memories (Layer 1). Substring match against `content`; empty `query` returns recent rows in reverse-chronological order. **This is the only raw-memory entry point** — the previous note-search branch was removed because it duplicated `graph.search` and led to wrong `memory.delete` targets in the Panel.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -175,7 +175,7 @@ The Panel's "Memory" tab and the LLM reach a parallel surface through **builtin 
 | `session_search` | Search across session transcripts |
 | `remember` | Pin a fact to curated hot memory |
 | `forget` | Remove a fact from memory |
-| `memory_status` | Health + statistics for the memory system |
+| `memory_runtime_status` | Health + statistics for the memory system (`MemoryStatus`) |
 
 ## See Also
 

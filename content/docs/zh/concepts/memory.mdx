@@ -206,7 +206,7 @@ SkillOpt 移植（arXiv 2605.23904）的「textual learning rate」：**`EditBud
 5. Return ScoredFact<MemoryFact> with provenance
 ```
 
-`SessionManager::recall_recent_messages`（独立路径）召回当前 session 最近的 N 条消息，按 `recency_boost` 加权。两条路径在 `HybridAssembler::assemble`（`src/memory/assembler/`）合并为 `MemoryEnvelope`：
+当前 session 的近期上下文走**独立路径**：assembler 从 raw store 按前缀 `aleph://session/{sid}/raw/` 取回本 session 的原始片段（上限 5 条），标成 `SlotKind::SessionRecent`；上一 session 的快照（`SessionSnapshot`，只存摘要）由 `SnapshotReader` 读入，同样进 `SessionRecent` 槽。槽位归类由 `rerank.rs` 的 LLM 重排给出，不是按某个分数线性加权。这些路径与笔记检索结果在 `HybridAssembler::assemble`（`src/memory/assembler/`）合并为 `MemoryEnvelope`：
 
 ```text
 MemoryEnvelope {
@@ -319,7 +319,7 @@ ScoredFact<MemoryFact>[]（带 provenance 链）
 
 ## 全局事件溯源（可选）
 
-26.7.x 之前，每个 `NoteConsolidate` / `NoteUpdate` 都写 `MemoryEvent`（skeleton / pulse 二态）。**默认 L0 全部 compress 后事件不重放**（重放是 P3 候选能力；当前未启用）。`MemoryCommandHandler` 仍在接受事件，但事件的 `is_processed` 标志决定是否在 retrieval 中体现 —— 复用了 L0 的同款消费机制。
+26.7.x 之前，每个 `NoteConsolidate`（写 `NoteConsolidated` 事件）/ 笔记更新（写 `NoteContentUpdated` 或 `NoteMetadataUpdated` 事件）都记 `MemoryEvent`（skeleton / pulse 二态）。**默认 L0 全部 compress 后事件不重放**（重放是 P3 候选能力；当前未启用）。`MemoryCommandHandler` 仍在接受事件，但事件的 `is_processed` 标志决定是否在 retrieval 中体现 —— 复用了 L0 的同款消费机制。
 
 ---
 
@@ -387,9 +387,9 @@ ScoredFact<MemoryFact>[]（带 provenance 链）
 
 26.7.x：列出纠正 → 蒸馏生命周期的纠正记录（梦境的 FeedbackDistillStage 消费）。
 
-### `memory.appList`
+### 历史：`memory.appList` RPC（2026-08-01 删除）
 
-列出与该应用相关的记忆条目（按 app_key 过滤）。
+`memory.appList` 曾按窗口列出与该窗口关联的记忆条目（每条含 `window_title` 与 `memory_count`），但它恒返空数组：window-anchored memory 是 notes 之前的概念，笔记模型没有「按窗口分组」这回事，而且没有任何客户端调用它。2026-08-01 的提交 `f529db2fa`（"bin: cut orphaned RPC handlers (no client callers)"）删掉了它的注册、handler 与遗留的 `WindowMemoryInfo` 结构体。今天按会话 / 命名空间查记忆走 `memory.search` 与 `memory.list_corrections`。
 
 ### 真实成本与 token 核算
 

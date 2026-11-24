@@ -3,7 +3,7 @@ title: "浏览器自动化"
 description: "通过 Playwright CLI 或 Chrome DevTools MCP 进行文本优先的浏览器自动化，并明确两种后端的能力边界。"
 ---
 
-`src/browser/` 为浏览器工具提供统一的 `BrowserBackend`，当前由 `BrowserManager` 按 profile 选择两个后端：托管浏览器使用 `PlaywrightCliBackend`，已有 Chrome 会话使用 `ChromeMcpBackend`。浏览器自动化通过内置的 `browser_*` 工具暴露；它不是 Panel Canvas 或 Browser inspector 的 API。
+`src/browser/` 为浏览器工具提供统一的 `BrowserBackend`，当前由 `ProfileManager` 按 profile 选择后端：托管浏览器使用 `PlaywrightCliBackend`，已有 Chrome 会话使用 `ChromeMcpBackend`，CDP 配置使用 `CdpBackend`。浏览器自动化通过内置的 `browser_*` 工具暴露；它不是 Panel Canvas 或 Browser inspector 的 API。
 
 ## 统一后端接口
 

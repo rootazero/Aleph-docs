@@ -155,7 +155,7 @@ The byte budget is measured by `aleph-server prompt-size --path cached --paradig
 
 ## UnifiedMessage and ProviderDelta
 
-`UnifiedMessage` is the LLM-agnostic intermediate message representation; `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallDelta`). A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live. The harness bridge (`src/harness/agent/think.rs`) wraps a borrowed `HarnessCallback` into a `DeltaSink` so live token deltas reach the gateway callback as the provider streams them.
+`UnifiedMessage` is the LLM-agnostic intermediate message representation; `ProviderDelta` is the streaming output (`TextDelta` / `ThinkingDelta` / `ToolCallArgDelta`). A single `MessageAssembler` reducer owns the assembled message and strips inline `<think>` blocks live. The harness bridge (`src/harness/agent/think.rs`) wraps a borrowed `HarnessCallback` into a `DeltaSink` so live token deltas reach the gateway callback as the provider streams them.
 
 ---
 
@@ -206,7 +206,7 @@ LLM Response Stream
 │   • Stream chunks → ProviderDelta       │
 │   • TextDelta  → live preview           │
 │   • ThinkingDelta → reasoning channel   │
-│   • ToolCallDelta → fold in assembler   │
+│   • ToolCallArgDelta → fold in assembler   │
 └────────────────────┬────────────────────┘
                      │
                      ▼

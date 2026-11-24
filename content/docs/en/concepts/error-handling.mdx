@@ -13,7 +13,7 @@ Safe truncation must respect UTF-8 character boundaries rather than cutting mult
 
 ## Gateway single source of error
 
-The Gateway returns a single-source user-readable error receipt (`ErrorReceipt`) to clients. The raw error chain remains on the server's diagnostic path and is never exposed to the Panel or other clients. Clients should handle the receipt and must not parse internal error text or construct a second error protocol.
+The Gateway returns a single-source user-readable error receipt (`JsonRpcResponse`) to clients. The raw error chain remains on the server's diagnostic path and is never exposed to the Panel or other clients. Clients should handle the receipt and must not parse internal error text or construct a second error protocol.
 
 This boundary covers configuration, session, tool, provider, WebSocket/HTTP, and storage errors. The Gateway may log the complete source chain server-side, but logs and receipts are separate output surfaces.
 

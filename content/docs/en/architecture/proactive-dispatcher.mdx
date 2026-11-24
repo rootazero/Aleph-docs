@@ -3,8 +3,6 @@ title: "Proactive Task Scheduling"
 description: "Daemon background tasks: cron / heartbeat services; runtimes capability ledger; wake queue and storm-prevention guards; no standalone daemon module."
 ---
 
-> The historical `daemon::dispatcher` module, the top-level `daemon` directory, and the `ProposedAction` / `PolicyEngine` / `DispatcherMode` enums have all been removed. This page describes the real code in `src/tasks/cron/` and `src/tasks/heartbeat/`, with collaboration from `src/tasks/shared/` and `src/runtimes/`.
-
 Proactive background task execution is now served by two orthogonal services:
 - **Cron** (`src/tasks/cron/`) — scheduled tasks triggered by cron expressions / intervals / one-shots
 - **Heartbeat** (`src/tasks/heartbeat/`) — periodic probes + L1 probe + L2 LLM judge
@@ -20,7 +18,7 @@ Proactive scheduling enables:
 - **Heartbeat probes** — periodic L1 probes + proactive wake, decided by the LLM judge
 - **Runtimes capability ledger** — `src/runtimes/` manages external tool capabilities (python / node / uv / ffmpeg / yt-dlp …) via a three-phase Probe → Bootstrap → Register flow, persisted to `~/.aleph/runtimes/ledger.json`
 - **Failure alert / delivery pipeline** — `DeliveryEngine` routes execution results to webhooks / notifications
-- **Event-bus push** — `CronTaskChanged` / `HeartbeatTaskChanged` events replace panel polling
+- **Event-bus push** — `CronJobChanged` / `HeartbeatTaskChanged` events replace panel polling
 
 ---
 
@@ -158,7 +156,7 @@ Three-phase flow:
 
 ---
 
-## History: the removed `components` module
+## Historical: the removed `components` module
 
 Earlier revisions of this page documented a thin top-level `components` module (`mod.rs` + `types/`) that held the shared domain types of the legacy `EventHandler` chain (`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`). The chain was removed during the Harness migration and the leftover shell was then cut entirely as dead scaffolding (commit `682e49adc`, "components: cut entire module"). Nothing in cron / heartbeat depends on it; the event system lives in `src/event/`.
 
@@ -175,7 +173,9 @@ Earlier revisions of this page documented a thin top-level `components` module (
 
 ---
 
-## Divergence from historical `daemon::dispatcher`
+## Historical: the daemon dispatcher
+
+Commit `32a6157f1` removed the orphaned daemon subsystem, including its dispatcher and executor. The differences from that design are:
 
 - **No `ProposedAction` / `PolicyEngine` / `DispatcherMode`** — risk evaluation, policy enforcement live in the execution engine's `PermissionLayer` + `ContextRuleLayer` + `SmartFilter`
 - **No top-level `daemon` directory** — cron / heartbeat live directly under `src/tasks/`
@@ -188,4 +188,4 @@ Earlier revisions of this page documented a thin top-level `components` module (
 - [Cron Jobs](/docs/en/automation/cron-jobs) — full cron configuration
 - [Heartbeat](/docs/en/automation/heartbeat) — full heartbeat configuration
 - [Runtimes](/docs/en/architecture/runtimes) — capability ledger and bootstrap
-- [Event bus](/docs/en/architecture/event-bus) — `CronTaskChanged` / `HeartbeatTaskChanged` push
+- [Event bus](/docs/en/architecture/event-bus) — `CronJobChanged` / `HeartbeatTaskChanged` push

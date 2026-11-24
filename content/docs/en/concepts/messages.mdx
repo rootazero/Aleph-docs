@@ -11,7 +11,7 @@ Aleph uses three related but distinct message representations at different bound
 
 1. **`UnifiedMessage`** (`src/providers/message.rs`) — the LLM-agnostic intermediate representation; protocol adapters convert it to OpenAI / Anthropic / Gemini / Ollama native shapes. Three variants: `User { content }`, `Assistant { content }`, `ToolResult { tool_call_id, tool_name, content, is_error }`.
 2. **`MessageContent`** (`src/session/events.rs`) — a message's body inside the `session_events` log; `text` plus optional `blocks: Vec<serde_json::Value>` plus optional `thinking` / `thinking_signature`.
-3. **`AlephEvent`** (`src/event/types.rs`) — the system-wide event-bus payload, covering `InputReceived` / `ToolCallRequested` / `ToolCallStarted` / `ToolCallCompleted` / `ToolCallFailed` / `ToolCallRetrying` / `LoopContinue` / `LoopStop` / `SessionCreated` / `SessionUpdated` / `SessionResumed` / `SessionCompacted` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `AiResponseGenerated` / `PartAdded|Updated|Removed` / `Team*`.
+3. **`AlephEvent`** (`src/event/types.rs`) — the event bus carries `SubAgentCompleted`, `SubAgentTreeUpdate`, `ProcessCompleted`, and team lifecycle/task events. Session persistence and turn streaming use separate event types.
 
 ### Content Blocks (`UnifiedMessage`)
 
@@ -193,7 +193,7 @@ As the agent processes a message, it emits `FlowStreamEvent` (`src/orchestrator/
 | `SafetyBlock { reason }` | Safety gate blocked the turn |
 | `Complete(FlowOutcome)` | Terminal event, always last |
 
-The underlying `AlephEvent` bus also carries `InputReceived` / `ToolCallRequested` / `ToolCallRetrying` / `SubAgentCompleted` / `SubAgentTreeUpdate` / `Team*` for monitors and cross-agent routing.
+The underlying `AlephEvent` bus carries sub-agent, process, and team events for monitors and cross-agent routing; it is not the turn-stream protocol.
 
 ## Security Context
 
@@ -310,3 +310,7 @@ Field notes: `stream` defaults to `true`; `thinking` / `mode` / `exec_tier` are 
 - [Gateway Protocol](/docs/en/gateway/protocol) — JSON-RPC and the event bus
 - [Session Mode](/docs/en/architecture/overview#the-third-twin-session-mode) — the `mode` field
 - [Thinker](/docs/en/concepts/thinker) — where `UnifiedMessage` → `ProviderDelta` actually lives
+
+## History: Retired event-bus variants
+
+The severed-wire audit `68e103c6f` removed the unused `ToolCallFailed`, `ToolCallRetrying`, `LoopContinue`, `LoopStop`, `SessionCreated`, `SessionResumed`, and `SessionCompacted` variants (along with the old input/tool/response bus events). Use `FlowStreamEvent` for turn progress and `SessionEvent` for the persisted session log; these are not one-to-one renames.

@@ -46,7 +46,7 @@ pub trait AggregateRoot: Entity {}
 
 The AggregateRoot is the only object that outside code can reference directly. All other objects in the aggregate are accessed through it. **Note: the actual trait does not carry a `version()` method** — version numbers are provided by individual aggregate implementations when needed; the trait itself does not require one.
 
-**Examples:** `TaskGraph` (contains Tasks and Dependencies), `MemoryFact` (contains ContextAnchors)
+**Examples:** a graph of tasks and dependencies is a conceptual aggregate example; the current persisted memory record is `MemoryFact` (`src/memory/context/fact.rs`).
 
 ### ValueObject
 

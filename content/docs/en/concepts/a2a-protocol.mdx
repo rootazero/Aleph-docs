@@ -140,9 +140,9 @@ When A2A is fronted by a same-host reverse proxy, every proxied peer presents as
 
 ## Capability Discovery
 
-Remote agents advertise their capabilities via the **Agent Card** (`AgentCard` in `src/a2a/domain/agent_card.rs`). Aleph fetches the card at the well-known `/.well-known/agent-card.json` URL on a per-remote basis, caches it locally via `CardRegistry`, and refreshes it on demand through `CardRefresh`. Resolution of a card by id, name, or URL is exposed through the `AgentResolver` port.
+Remote agents advertise their capabilities via the **Agent Card** (`AgentCard` in `src/a2a/domain/agent_card.rs`). Aleph fetches the card at the well-known `/.well-known/agent-card.json` URL on a per-remote basis, caches it locally via `CardRegistry`, and refreshes placeholder cards at startup through `refresh_all_cards`. Resolution of a card by id, name, or URL is exposed through the `AgentResolver` port.
 
-Discovery is centralised through `SmartRouter` (`src/a2a/service/smart_router.rs`): given a prompt, it picks the best-matching registered agent via the `LlmMatcher` (semantic) or a fallback heuristic. The chosen agent is then handed to the `A2AClientPool` for an actual `message/send` or `message/stream` call.
+Discovery uses `SmartRouter` (`src/a2a/service/smart_router.rs`) to resolve explicitly named agents or aliases, not LLM semantic matching or heuristic selection. The resolved agent is passed to `A2AClientPool` for `message/send` or `message/stream`.
 
 ---
 

@@ -137,7 +137,7 @@ Response: `{ ok: true, skills: bool, plugins: bool }`. An `Err` returns the fine
 
 - `src/bundled/mod.rs` — module entry, `BUNDLED_SKILLS` / `BUNDLED_PLUGINS` / `BUNDLED_VERSION` / `OFFICIAL_*_REPO` constants; re-exports `extract_bundled_content` / `sync_official_now` / `SyncKind` / `SyncReport`
 - `src/bundled/extractor.rs` — embedded + disk paths: disk goes through `extract_skill_tree_from_dir` (from git checkout), embedded through `extract_skills` / `extract_plugins`; `swap_dir_into_place` does the atomic replace
-- `src/bundled/sync.rs` — `clone_or_update`, libgit2 clone + hard-reset to `main`; `update_existing` calls `git fetch + reset --hard`
+- `src/bundled/sync.rs` — `clone_or_update`, libgit2 clone + hard-reset to `main`; `update_existing_repo` calls `git fetch + reset --hard`
 - `src/bundled/manifest.rs` — `InstallRegistry` / `SkillEntry` / `SkillOrigin::{Official, Local, Github}`; `reconcile` reverse-syncs disk with manifest
 
 ---

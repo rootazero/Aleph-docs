@@ -17,7 +17,9 @@ ClawHub 集成原本让 Aleph 能够：
 - **安装技能** —— 从注册表下载并安装
 - **同步元数据** —— 保持技能元数据最新
 
-## 历史架构（已删除）
+## 历史：独立 ClawHub 客户端
+
+专用 RPC 处理器由提交 `950f78ba0` 移除；独立客户端模块由 `b4d395fca` 移除。
 
 ```
 ClawHubClient  （src/clawhub/client.rs——已删除）
@@ -26,7 +28,7 @@ ClawHubClient  （src/clawhub/client.rs——已删除）
   └── 认证 (API token)
 ```
 
-### 历史 `ClawHubClient`（已删除）
+### 客户端接口
 
 ```rust
 pub struct ClawHubClient {

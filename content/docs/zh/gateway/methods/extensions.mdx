@@ -81,15 +81,14 @@ description: "统一扩展门面 RPC 方法(扩展商店)"
 
 **响应:** `{ "disclosure": { ...DisclosurePayload... }, "injection_findings": [ ...InjectionFinding... ], "post_install": { ...安装后验证载荷... } }`。
 
-`DisclosurePayload` 包含精确的 `command` / `args`、声明的 `secrets` 及其用途、`network` / `filesystem` 触达范围、`version`、`sha256`、`risk_class`(`mcp-remote` / `mcp-stdio` / `plugin-…` / `skill-*`)、`trust_tier`、`ack_required`、`requires_ack`(社区或 LLM 派生的 MCP 条目为 `true`)。
+`DisclosurePayload` 包含 `tier`（信任层，`TrustTier` 枚举）、`risk`（风险分类，`RiskClass` 枚举）、`one_line`（一句话说明）、`command_display`（渲染后的命令行，仅 MCP stdio 有）、`secrets`（声明的密钥名、用途与敏感性）、`version`、`sha256`、`ack_required`。
 
-`risk_class`:
-- `mcp-stdio`——运行命令,风险最高
-- `mcp-remote`——较温和(仅网络)
-- `plugin-*`——可指导 agent
-- `skill-*`——可指导 agent
+`risk` 取 `RiskClass` 的三个变体（线上序列化为小写下划线）：
+- `RunsCommands`——运行命令,风险最高（MCP stdio、OCI 镜像）
+- `InstructsAgent`——可指导 agent（skill / plugin,提示注入面）
+- `RemoteEndpoint`——较温和(仅网络)
 
-社区或 LLM 派生的 MCP 条目设置 `ack_required: true` 和 `requires_ack: true`,要求在安装时显式确认"我了解此风险"。
+当 `risk` 是 `RunsCommands` 或 `InstructsAgent`，且 `tier` 是 `Community` 或 `Unverified` 时，载荷里的 `ack_required` 为 `true`：安装必须带 `acknowledge_risk: true`，否则安装停在 `needs_ack`，要求用户显式确认"我了解此风险"。
 
 ### extensions.configure
 

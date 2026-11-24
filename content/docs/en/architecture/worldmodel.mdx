@@ -3,7 +3,7 @@ title: "loop_graph Governance Topology"
 description: "The loop_graph governance topology layered over the core, and its relationship with the graph_topology prompt layer."
 ---
 
-> **This page replaces the older "World Model" section.** The source tree does **not** contain a `daemon::worldmodel` module, nor types named `WorldModel` / `CoreState` / `EnhancedContext` / `PendingAction` / `ActivityType`. Those concepts were retired by the 26.7.x governance-topology refactor and replaced by the `loop_graph` layer and `graph_topology` prompt layer described below.
+> Governance topology now lives in `src/loop_graph/` and reaches the prompt through `GraphTopologyLayer`. This layer stores topology rather than reconstructing a global model of host activity.
 
 ## Overview
 
@@ -68,7 +68,7 @@ Cache discipline: the rendered content comes from graph rows **only** -- no cloc
 │   ▼                                                               │
 │   loop_graph/  (src/loop_graph/)                                  │
 │      ├── store.rs       LoopGraphStore (SQLite)                   │
-│      ├── service.rs     GraphService                              │
+│      ├── service.rs     lifecycle helpers                              │
 │      ├── templates.rs   Template prompts                          │
 │      └── types.rs       NodeKind / EdgeKind / Origin             │
 └─────────────────────────────────────────────────────────────────┘
@@ -96,9 +96,13 @@ The graph is a **process-global** singleton (`OnceCell<Arc<LoopGraphStore>>`) an
 
 - `src/loop_graph/mod.rs` -- `LoopGraphStore` + `NodeKind` / `EdgeKind` / `Origin` re-exports + `init_global` / `global`.
 - `src/loop_graph/store.rs` -- SQLite persistence (nodes / edges / `origin=human` enforcement).
-- `src/loop_graph/service.rs` -- `GraphService` (writes / lint).
+- `src/loop_graph/service.rs` -- lifecycle hooks and topology rendering.
 - `src/loop_graph/templates.rs` -- template prompts (for the LLM turn).
 - `src/thinker/layers/graph_topology.rs` -- `GraphTopologyLayer` injecting the topology into the system prompt.
+
+## Historical: World Model
+
+The old `worldmodel` module tracked host activity and provided daemon-wide context. Commit `342a194ce` removed perception and shrank `WorldModel` to a state holder. The remaining stub kept `CoreState` and `EnhancedContext`, including `PendingAction` and `ActivityType`; commit `32a6157f1` removed it with the orphaned daemon subsystem. The governance topology above addresses loop supervision, not the retired host-state API.
 
 ## See Also
 

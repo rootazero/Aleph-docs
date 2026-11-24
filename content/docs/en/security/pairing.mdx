@@ -193,8 +193,13 @@ fn generate_code() -> String {
 `0` = never expire). Codes are automatically rejected once expired;
 periodic cleanup removes expired requests from the database.
 
-The pending-request count is capped at `MAX_PENDING_REQUESTS = 10` —
-beyond that, new requests are refused with `TooManyPending`.
+The pairing store places no cap on the number of pending requests: a repeated
+request for the same user reuses the still-valid code, and a new code is only
+issued once the old one expires (`src/gateway/pairing_store.rs`). Bot loops
+are handled by a separate module — the pair-loop guard
+(`src/gateway/pair_loop_guard.rs`) — which counts events per pairing inside a
+sliding window and applies a cooldown instead of limiting how many codes may
+be outstanding.
 
 ### RPC management
 

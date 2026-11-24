@@ -137,7 +137,7 @@ if !ft.is_symlink() {                                   // 显式排除 symlink
 
 - `src/bundled/mod.rs` — 模块入口，`BUNDLED_SKILLS` / `BUNDLED_PLUGINS` / `BUNDLED_VERSION` / `OFFICIAL_*_REPO` 常量；re-export `extract_bundled_content` / `sync_official_now` / `SyncKind` / `SyncReport`
 - `src/bundled/extractor.rs` — 嵌入 + 磁盘两路：磁盘路径走 `extract_skill_tree_from_dir`（来自 git checkout），嵌入路径走 `extract_skills` / `extract_plugins`；`swap_dir_into_place` 原子替换
-- `src/bundled/sync.rs` — `clone_or_update`，libgit2 拉 / 硬重置 `main`；`update_existing` 调 `git fetch + reset --hard`
+- `src/bundled/sync.rs` — `clone_or_update`，libgit2 拉 / 硬重置 `main`；`update_existing_repo` 调 `git fetch + reset --hard`
 - `src/bundled/manifest.rs` — `InstallRegistry` / `SkillEntry` / `SkillOrigin::{Official, Local, Github}`；`reconcile` 反向同步磁盘与 manifest
 
 ---

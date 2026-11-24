@@ -364,18 +364,7 @@ Cooldown uses exponential backoff: base 30s, doubles each failure, capped at 5 m
 
 ### Metrics
 
-Each provider tracks real-time metrics via atomic counters:
-
-```rust
-pub struct ProviderMetrics {
-    pub total_requests: AtomicU64,
-    pub success_count: AtomicU64,
-    pub failure_count: AtomicU64,
-    pub total_latency_ms: AtomicU64,
-}
-```
-
-Query via `get_metrics()` for success rate and average latency per provider.
+`FailoverHealth::snapshot` returns circuit state, consecutive failure count, the last error, and remaining cooldown for each tracked provider (`src/providers/failover/health.rs`). This is a health view, not a success-rate or average-latency report.
 
 ### Example Failover Configuration
 

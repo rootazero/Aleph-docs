@@ -80,11 +80,12 @@ All four are implemented by `SqliteMemoryBackend`, wrapped as `MemoryBackend = A
 | `notes_vec_map` | Links `(path, agent_id)` to numeric rowids |
 | `notes_vec_{dim}` | sqlite-vec virtual tables (768/1024/1536 dims) |
 | `memory_events` | Immutable event log (event-sourced mutations) |
-| `context_anchors` | Fact-to-session linkage for provenance |
 | `dream_status` | Per-run tracking |
 | `dream_reports` | Per-cycle activity counters + serialized `EvolutionOutcome` (SkillOpt verdict) |
 | `daily_insights` | Dream daemon output cache |
 | `recall_signals` | Per-note access counters driving `reinforcement` |
+
+Raw capture records their source and, when available, a session ID in `RawMemory` (`src/memory/store/raw_memory.rs`). This is attribution on the captured record, not a separate fact-to-session linkage table.
 
 ### sqlite-vec Virtual Tables
 
@@ -247,25 +248,7 @@ pub struct AssemblyBudget {
 
 ## Curated Hot Memory (`remember`)
 
-`src/memory/curated/` — a manually-curated, frozen snapshot of critical facts that bypasses normal retrieval:
-
-```rust
-pub struct CuratedHotMemory {
-    pub facts: Vec<CuratedFact>,
-    pub frozen_at: i64,
-}
-
-pub struct CuratedFact {
-    pub content: String,
-    pub priority: u8,        // 1-10, higher = more important
-    pub source: String,
-}
-```
-
-- Sole writer: the `remember` builtin tool (`add` / `replace` / `remove`, plus an atomic `batch` action; char budget validated on the **final** state only)
-- Stored in `~/.aleph/memory/curated/{agent_id}.json`
-- Injected into every prompt unconditionally (up to token budget) as the `CuratedMemoryLayer` Stable prefix
-- **Frozen snapshot** — changes require explicit re-curation
+`CuratedMemoryStore` (`src/memory/curated/store.rs`) manages a bounded, manually curated `MEMORY.md` for each agent. It bypasses normal retrieval and is provided to prompt assembly by `CuratedMemoryLayer`. The `remember` tool supports `add`, `replace`, `remove`, and atomic `batch` edits; batch validation applies the character limit to the final state.
 
 ---
 
@@ -285,28 +268,7 @@ First-party extensions implement `MemoryExtension` directly in Rust; third-party
 
 ## Memory Reflector
 
-```rust
-pub struct MemoryReflector {
-    assembler: Arc<dyn WorkingMemoryAssembler>,
-    llm: Arc<dyn LlmBackend>,
-}
-
-impl MemoryReflector {
-    pub async fn reflect(
-        &self,
-        query: &str,
-        agent_id: &str,
-    ) -> Result<ReflectionResult, AlephError>;
-}
-
-pub struct ReflectionResult {
-    pub answer: String,
-    pub sources: Vec<MemorySource>,
-    pub confidence: f32,
-}
-```
-
-Exposed via the `memory_reflect` builtin tool. Returns a coherent LLM-synthesised answer with cited sources.
+`MemoryReflector::reflect` takes a query and `ReflectOpts`, and returns `Synthesis` with a text answer and cited `NoteRef` entries. The `memory_reflect` builtin exposes this read-side behavior. See `src/memory/reflector/fs_reflector.rs` and `src/memory/reflector/types.rs`.
 
 ---
 
@@ -359,9 +321,9 @@ Update-over-create is preferred throughout.
 |---|---|
 | `src/memory/mod.rs` | Module entry, re-exports |
 | `src/memory/assembler/` | `WorkingMemoryAssembler` trait, `HybridAssembler` impl, envelope slots |
-| `src/memory/curated/` | `CuratedHotMemory`, `remember` tool integration |
-| `src/memory/extensions/` | `MemoryExtension` trait, `ExtensionRegistry`, MCP adapter |
-| `src/memory/reflector/mod.rs` | `MemoryReflector`, `ReflectionResult` |
+| `src/memory/curated/` | `CuratedMemoryStore`, `remember` tool integration |
+| `src/memory/extensions/` | `MemoryExtension` trait, `MemoryExtensionRegistry`, MCP adapter |
+| `src/memory/reflector/mod.rs` | `MemoryReflector`, `Synthesis` |
 | `src/memory/note_retrieval/` | `NoteFactRetrieval` trait, hybrid search impl |
 | `src/memory/notes/` | `KnowledgeNote`, `NoteStore`, `NoteIndexer` |
 | `src/memory/store/` | `RawMemoryStore`, `DreamStore`, `CompressionStore` traits + `SqliteMemoryBackend` |

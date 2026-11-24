@@ -24,7 +24,7 @@ The Discord interface connects Aleph to Discord using the [serenity](https://git
 | Typing indicator | Supported |
 | Embeds | Supported (outbound) |
 | Slash commands | Configurable |
-| Interactive approval buttons | Supported (via `DiscordPanel` / `TelegramChannelApprovalCapability` flow) |
+| Interactive approval buttons | Supported (Discord renders an inline keyboard in `src/gateway/interfaces/discord/mod.rs`; Telegram uses `TelegramChannelApprovalCapability`) |
 | Stream protocol | `EditBased` |
 | Max message length | 2,000 characters |
 | Max attachment size | 25 MB (100 MB with Nitro) |
@@ -85,32 +85,21 @@ Navigate to **OAuth2 > URL Generator**:
 ### Minimal Configuration
 
 ```toml
-[[channels]]
-id = "discord"
-channel_type = "discord"
+[channels.discord]
+type = "discord"
 enabled = true
-
-[channels.config]
 bot_token = "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.ABcDeF.1234567890abcdefghijklmnop"
 ```
 
 ### Full Configuration Reference
 
 ```toml
-[[channels]]
-id = "discord"
-channel_type = "discord"
+[channels.discord]
+type = "discord"
 enabled = true
 
-[channels.config]
-# Bot token from Discord Developer Portal (required); supports ${ENV_VAR} expansion
-bot_token = "${DISCORD_BOT_TOKEN}"
-
-# Application ID for slash commands registration (optional)
-application_id = 123456789012345678
-
-# DM policy for incoming messages: open | allowlist | pairing | disabled
-dm_policy = "open"
+# Bot token from Discord Developer Portal (required)
+bot_token = "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.ABcDeF.1234567890abcdefghijklmnop"
 
 # Guild (server) allowlist — empty means allow all guilds
 allowed_guilds = [123456789012345678]
@@ -118,11 +107,8 @@ allowed_guilds = [123456789012345678]
 # Channel allowlist within guilds — empty means allow all channels
 allowed_channels = [987654321098765432]
 
-# Group message policy: open | allowlist | disabled
-group_policy = "open"
-
-# Allowlist of user ids for DMs
-allow_from = [123456789012345678]
+# Whether direct messages are handled (default: true)
+dm_allowed = true
 
 # Prefix for text commands (default: "!")
 command_prefix = "!"
@@ -130,30 +116,28 @@ command_prefix = "!"
 # Respond only when mentioned in guilds (default: true)
 respond_to_mentions = true
 
-# Register and use slash commands (default: true)
+# Whether slash commands are dispatched (default: true)
 slash_commands_enabled = true
 
 # Send typing indicator while processing (default: true)
 send_typing = true
 
 # Gateway intents configuration
-[channels.config.intents]
+[channels.discord.intents]
 guild_messages = true      # Receive guild messages (default: true)
 direct_messages = true     # Receive DMs (default: true)
 message_content = true     # Read message content (default: true, privileged)
 guild_members = false      # Track guild member events (default: false, privileged)
+guild_threads = false      # Track thread creation events (default: false)
 ```
 
 <Callout type="warn">
-Discord bot tokens are long Base64-encoded strings (typically 59+ characters). Aleph validates the token length at config load time.
+Discord bot tokens are long Base64-encoded strings (typically 59+ characters). Aleph validates the token length at config load time and rejects tokens shorter than 50 characters.
 </Callout>
 
-### Environment Variable Mode
-
-```bash
-export DISCORD_BOT_TOKEN="MTIzNDU2..."
-export DISCORD_APPLICATION_ID="123456789012345678"  # Optional
-```
+<Callout type="info">
+Channel sections have no environment-variable interpolation: a `bot_token` written into `config.toml` is moved into the credential vault at startup (key `channel:discord:bot_token`) and then stripped from the file, and a configuration change needs a Gateway restart. A channel section also only recognises `type` and the keys above — unknown keys are silently ignored rather than rejected.
+</Callout>
 
 ## Adapter Structure
 
@@ -226,7 +210,7 @@ The mention text is automatically stripped from the message before routing to th
 
 ### Direct Messages
 
-DMs are processed whenever `dm_policy` permits. No prefix or mention is required — DM text is forwarded to the agent subject to the router's access check.
+DMs are processed whenever `dm_allowed` permits it. No prefix or mention is required — DM text is forwarded to the agent subject to the router's access check. With `dm_allowed` set to `false`, the adapter drops DMs and slash commands outright.
 
 ### Conversation IDs
 
@@ -285,14 +269,10 @@ This creates the visual reply indicator in Discord's UI. Threads (`thread_id`) a
 
 ## Slash Commands
 
-When `slash_commands_enabled` is `true` and `application_id` is set, Aleph can register slash commands with Discord. These appear in the command picker when users type `/`:
-
-- `/ask` — Send a message to Aleph
-- `/status` — Check Aleph's status
-- `/help` — Show available commands
+When `slash_commands_enabled` is `true` (default), the adapter accepts the slash-command interactions Discord delivers and rewrites each one into an ordinary inbound message for the router: the command name becomes the text prefix and every option is appended as `name=value` (`/status mode=full`), after which it goes through the same session key and permission checks as a plain message.
 
 <Callout type="info">
-Slash command registration requires Discord's slash-commands OAuth2 scope (named applications.commands in the Developer Portal). Global commands may take up to an hour to propagate; guild-specific commands are instant.
+Aleph never registers slash commands with Discord — there is no registration call anywhere in this process. For `/commands` to appear in Discord's command picker you have to register them yourself in the Developer Portal or through the Discord API (scope `applications.commands`). `slash_commands_enabled` only decides whether a delivered command is dispatched. Global commands can take up to an hour to propagate; guild-scoped commands are immediate.
 </Callout>
 
 ## Interactive Approval Buttons

@@ -118,34 +118,24 @@ Plus two supporting indexes (`idx_session_events_session_turn`, `idx_session_eve
 
 | Category | Variants |
 |----------|----------|
-| Lifecycle | `SessionCreated`, `SessionWoken`, `SessionDetached`, `SessionForked` |
+| Lifecycle | `SessionWoken`, `SessionForked` |
 | Run boundaries | `RunStarted`, `RunFinished` |
-| Turn boundaries | `TurnStarted`, `TurnEnded` |
+| Turn boundaries | `TurnStarted` |
 | Messages | `UserMessage`, `AssistantMessage`, `AssistantRunMeta`, `SystemMessage` |
 | Tool calls | `ToolCallRequested`, `ToolCallApproved`, `ToolCallDenied`, `ToolResult`, `ToolError` |
 | Subagent delegation | `SubagentSpawned`, `SubagentReturned` |
-| Budget / compaction | `BudgetUpdated`, `CompactionPerformed` |
+| Compaction | `CompactionPerformed` |
 | Errors | `Error` |
 
 **Location**: `src/session/events.rs`
 
-Helper types: `EventSeq`, `TurnId`, `MessageContent`, `ToolOutput`, `RunOutcome`, `TurnTrigger`, `TurnOutcome`, `ApprovalSource`, `ErrorKind`, `Timestamp`.
+Helper types: `EventSeq`, `TurnId`, `MessageContent`, `ToolOutput`, `RunOutcome`, `TurnTrigger`, `ApprovalSource`, `ErrorKind`, `Timestamp`.
 
 ---
 
 ## Projection
 
-Not all consumers want raw events. The `project_messages` helper turns an event range into a classic message-history view:
-
-```rust
-pub fn project_messages(
-    events: &[SessionEventRecord],
-) -> Vec<ProjectedMessage>;
-```
-
-**Location**: `src/session/projection.rs`
-
-This collapses `RunStarted`, `TurnStarted`, `UserMessage`, `AssistantMessage`, `ToolCallRequested`, `ToolResult`, `TurnEnded`, and `RunFinished` into a linear `Vec<ProjectedMessage>` that looks like the old `messages` table — useful for LLM context windows and UI rendering.
+`project_row` in `src/session/projection.rs` converts one supported `SessionEvent` to a `ProjectedRow`; other events can return no row. The gateway projector (`src/gateway/session_projector.rs`) consumes these rows to materialize the transcript rather than exposing raw events to the UI.
 
 ---
 
@@ -159,7 +149,7 @@ This collapses `RunStarted`, `TurnStarted`, `UserMessage`, `AssistantMessage`, `
 4. **Emit `SessionWoken { prior_head }`** marker into the log.
 5. **Return new `SessionHandle`**.
 
-A Harness that crashed mid-turn will surface as a `TurnStarted` with no matching `TurnEnded` — the replacement Harness decides whether to retry, abandon, or close the turn with an `Error` event.
+The log does not have a separate turn-end event. `RunFinished` records the run outcome.
 
 | Parameter | Value |
 |-----------|-------|
@@ -204,10 +194,14 @@ Gateway RPC (session.append, session.get, …) ──► SessionManager ◄─�
 | `src/session/reduction.rs` | Pure reduction of the event log (`RunDisposition`, `RunProgress`, dangling-call detection) |
 | `src/session/events.rs` | `SessionEvent` enum and helper types |
 | `src/session/store.rs` | SQLite schema and `SessionEventStore` trait |
-| `src/session/projection.rs` | `project_messages` and other read-side projections |
+| `src/session/projection.rs` | `project_row` and other read-side projections |
 | `src/session/in_process.rs` (`#[cfg(test)]`) | `wake()` / crash-recovery tests |
 
 ---
+
+## Historical: unused session events and projection
+
+Commit `01ba2bd2f` removed `SessionCreated`, `SessionDetached`, and `BudgetUpdated`: creation, actor detachment, and budget adjustment did not produce those log events. It also removed the unused bulk history helper `project_messages`. The current projection is event-to-row, and `SessionService::detach` still exists as an operation, not an event.
 
 ## Related Pages
 

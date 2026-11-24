@@ -27,7 +27,7 @@ pub struct NodeRegistry { /* … */ }
 impl NodeRegistry {
     pub fn maybe_register_node(/* … */) -> NodeMatch { /* … */ }
     pub fn match_id(/* … */) -> Option<&NodeSession> { /* … */ }
-    pub fn environments_list(/* … */) -> Vec<Environment> { /* … */ }
+    pub fn list_environments(/* … */) -> Vec<Environment> { /* … */ }
 }
 ```
 
@@ -37,7 +37,7 @@ impl NodeRegistry {
 
 `NodeAdmission` 是注册入口；`enroll_node_device` 是操作员预注册（幂等）；`deregister_node` 把节点从 `environments.list` 与 `node_invoke` / `node_file` 寻址中移除。`DeregisterError` / `DeregisterOutcome` 显式表达粘住注销的语义。
 
-**确定性：** `environments_list()` 返回排序的 `Environment` 向量；节点键在归一化前先走 `normalize_node_key`（Unicode 归一化，CJK 节点名正确）。
+**确定性：** `list_environments()` 返回排序的 `Environment` 向量；节点键在归一化前先走 `normalize_node_key`（Unicode 归一化，CJK 节点名正确）。
 
 ### CommandTable
 

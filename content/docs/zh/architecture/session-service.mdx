@@ -118,34 +118,24 @@ CREATE TABLE session_events (
 
 | 类别 | 变体 |
 |----------|----------|
-| 生命周期 | `SessionCreated`, `SessionWoken`, `SessionDetached`, `SessionForked` |
+| 生命周期 | `SessionWoken`、`SessionForked` |
 | 运行边界 | `RunStarted`, `RunFinished` |
-| 回合边界 | `TurnStarted`, `TurnEnded` |
+| 回合边界 | `TurnStarted` |
 | 消息 | `UserMessage`, `AssistantMessage`, `AssistantRunMeta`, `SystemMessage` |
 | 工具调用 | `ToolCallRequested`, `ToolCallApproved`, `ToolCallDenied`, `ToolResult`, `ToolError` |
 | 子代理委派 | `SubagentSpawned`, `SubagentReturned` |
-| 预算 / 压缩 | `BudgetUpdated`, `CompactionPerformed` |
+| 压缩 | `CompactionPerformed` |
 | 错误 | `Error` |
 
 **位置**：`src/session/events.rs`
 
-辅助类型：`EventSeq`、`TurnId`、`MessageContent`、`ToolOutput`、`RunOutcome`、`TurnTrigger`、`TurnOutcome`、`ApprovalSource`、`ErrorKind`、`Timestamp`。
+辅助类型：`EventSeq`、`TurnId`、`MessageContent`、`ToolOutput`、`RunOutcome`、`TurnTrigger`、`ApprovalSource`、`ErrorKind`、`Timestamp`。
 
 ---
 
 ## 投影
 
-不是所有消费者都想要原始事件。`project_messages` 辅助函数把事件区间折叠为经典的消息历史视图：
-
-```rust
-pub fn project_messages(
-    events: &[SessionEventRecord],
-) -> Vec<ProjectedMessage>;
-```
-
-**位置**：`src/session/projection.rs`
-
-它把 `RunStarted`、`TurnStarted`、`UserMessage`、`AssistantMessage`、`ToolCallRequested`、`ToolResult`、`TurnEnded`、`RunFinished` 折叠成一个线性的 `Vec<ProjectedMessage>`，看起来就像旧的 `messages` 表 —— 对 LLM 上下文窗口和 UI 渲染很有用。
+`src/session/projection.rs` 中的 `project_row` 将一条支持的 `SessionEvent` 转为 `ProjectedRow`；其他事件可以不产生行。网关投影器（`src/gateway/session_projector.rs`）使用这些行生成转录视图，而不是把原始事件直接交给界面。
 
 ---
 
@@ -159,7 +149,7 @@ pub fn project_messages(
 4. **发出 `SessionWoken { prior_head }`** 标记写入日志。
 5. **返回新的 `SessionHandle`**。
 
-中途崩溃的 Harness 会表现为一条没有匹配 `TurnEnded` 的 `TurnStarted` —— 替换上来的 Harness 自己决定是重试、放弃还是用 `Error` 事件关闭回合。
+日志没有独立的回合结束事件；`RunFinished` 记录整次运行的结果。
 
 | 参数 | 值 |
 |-----------|-------|
@@ -204,10 +194,14 @@ agent_loop / AgentHarness ──► SessionService ──► session_events 表
 | `src/session/reduction.rs` | 事件日志的纯归约（`RunDisposition`、`RunProgress`、悬空调用检测） |
 | `src/session/events.rs` | `SessionEvent` 枚举与辅助类型 |
 | `src/session/store.rs` | SQLite schema 与 `SessionEventStore` trait |
-| `src/session/projection.rs` | `project_messages` 等读侧投影 |
+| `src/session/projection.rs` | `project_row` 等读侧投影 |
 | `src/session/in_process.rs`（`#[cfg(test)]`） | `wake()` / 崩溃恢复测试 |
 
 ---
+
+## 历史：未使用的会话事件与投影
+
+提交 `01ba2bd2f` 移除了 `SessionCreated`、`SessionDetached` 和 `BudgetUpdated`：创建、分离 actor 和调整预算都不会产生这些日志事件。同一提交还移除了未使用的批量历史辅助函数 `project_messages`。当前投影逐事件生成行；`SessionService::detach` 仍是一个操作，不是事件。
 
 ## 相关页面
 

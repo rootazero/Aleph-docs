@@ -3,7 +3,7 @@ title: "Browser Automation"
 description: "Text-first browser automation through Playwright CLI or Chrome DevTools MCP, with explicit backend capability boundaries."
 ---
 
-`src/browser/` provides a unified `BrowserBackend` for browser tools. `BrowserManager` selects between two current backends by profile: managed browsers use `PlaywrightCliBackend`, while existing Chrome sessions use `ChromeMcpBackend`. Browser automation is exposed through built-in `browser_*` tools; it is not a Panel Canvas or Browser inspector API.
+`src/browser/` provides a unified `BrowserBackend` for browser tools. `ProfileManager` selects the backend by profile: managed browsers use `PlaywrightCliBackend`, existing Chrome sessions use `ChromeMcpBackend`, and CDP profiles use `CdpBackend`. Browser automation is exposed through built-in `browser_*` tools; it is not a Panel Canvas or Browser inspector API.
 
 ## Unified Backend Contract
 

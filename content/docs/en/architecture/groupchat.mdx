@@ -121,7 +121,8 @@ The group-chat window is a **three-panel** layout:
 | `session.rs` | `GroupChatSession`: single-session state machine |
 | `executor.rs` | `GroupChatExecutor`: turn execution, LLM invocation |
 | `persona.rs` | `PersonaRegistry`: persona metadata |
-| `channel.rs` | `GroupChatCommandParser` / `GroupChatRenderer`: command parsing + rendering |
+| `channel.rs` | `DefaultGroupChatCommandParser`: parses group-chat commands |
+| `src/gateway/inbound_router/group_chat_handler.rs` | Formats channel replies; the unused renderer trait was removed in `8ee77389b` |
 | `protocol.rs` | Protocol message types |
 | `coordinator.rs` | Multi-persona coordination |
 

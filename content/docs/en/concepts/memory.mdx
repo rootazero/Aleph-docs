@@ -206,7 +206,7 @@ A port of SkillOpt's "textual learning rate" (arXiv 2605.23904): **`EditBudget`*
 5. Return ScoredFact<MemoryFact> with provenance
 ```
 
-`SessionManager::recall_recent_messages` (separate path) recalls the N most recent messages of the current session, weighted by `recency_boost`. Both paths merge in `HybridAssembler::assemble` (`src/memory/assembler/`) into a `MemoryEnvelope`:
+The current session's recent context takes a **separate path**: the assembler reads this session's raw fragments back from the raw store by the path prefix `aleph://session/{sid}/raw/` (up to 5 of them) and slots them as `SlotKind::SessionRecent`; the previous session's snapshot (`SessionSnapshot`, summary only) is loaded by `SnapshotReader` and lands in the same `SessionRecent` slot. Slot assignment comes from the LLM re-rank in `rerank.rs`, not from a linear score boost. These paths and the note-retrieval results merge in `HybridAssembler::assemble` (`src/memory/assembler/`) into a `MemoryEnvelope`:
 
 ```text
 MemoryEnvelope {
@@ -319,7 +319,7 @@ ScoredFact<MemoryFact>[] (with provenance chain)
 
 ## Global Event Sourcing (Optional)
 
-Before 26.7.x, every `NoteConsolidate` / `NoteUpdate` wrote a `MemoryEvent` (skeleton / pulse). **By default, after L0 is fully compressed, events are not replayed** (replay is a P3 candidate; not currently enabled). `MemoryCommandHandler` still accepts events, but the event's `is_processed` flag determines whether the retrieval reflects it — reusing the same consumption mechanism as L0.
+Before 26.7.x, every `NoteConsolidate` (writing a `NoteConsolidated` event) and every note update (writing a `NoteContentUpdated` or `NoteMetadataUpdated` event) recorded a `MemoryEvent` (skeleton / pulse). **By default, after L0 is fully compressed, events are not replayed** (replay is a P3 candidate; not currently enabled). `MemoryCommandHandler` still accepts events, but the event's `is_processed` flag determines whether the retrieval reflects it — reusing the same consumption mechanism as L0.
 
 ---
 
@@ -387,9 +387,9 @@ Before 26.7.x, every `NoteConsolidate` / `NoteUpdate` wrote a `MemoryEvent` (ske
 
 26.7.x: list the correction records of the correction → distillation lifecycle (consumed by the dream's `FeedbackDistillStage`).
 
-### `memory.appList`
+### History: the removed `memory.appList` RPC (2026-08-01)
 
-List memory entries associated with an app (filtered by `app_key`).
+`memory.appList` used to list the memory entries attached to a window (each with a `window_title` and a `memory_count`), but it always returned an empty array: window-anchored memory was a pre-notes concept, the notes model has no per-window grouping, and no client ever called it. The 2026-08-01 commit `f529db2fa` ("bin: cut orphaned RPC handlers (no client callers)") removed its registration, its handler, and the leftover `WindowMemoryInfo` struct. To query memory by session or namespace today, use `memory.search` and `memory.list_corrections`.
 
 ### Real Cost & Token Accounting
 

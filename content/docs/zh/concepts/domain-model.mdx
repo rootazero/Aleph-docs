@@ -46,7 +46,7 @@ pub trait AggregateRoot: Entity {}
 
 AggregateRoot 是外部代码可以直接引用的唯一对象。聚合中的所有其他对象都通过它访问。**注意：实际 trait 不带 `version()` 方法** —— 版本号由各聚合实现按需提供，不是 trait 的一部分。
 
-**示例：** `TaskGraph`（包含 Tasks 和 Dependencies）、`MemoryFact`（包含 ContextAnchors）
+**示例：** 任务与依赖组成的图是聚合的概念示例；当前源码的持久记忆记录为 `MemoryFact`（`src/memory/context/fact.rs`）。
 
 ### ValueObject
 

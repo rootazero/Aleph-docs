@@ -209,7 +209,7 @@ The `tasks::shared` module provides cross-cutting infrastructure consumed by bot
 
 **Cron:**
 - `src/tasks/cron/mod.rs` — `CronService` facade
-- `src/tasks/cron/config.rs` — `CronConfig`, `CronJob`, `ScheduleKind`, `RunStatus`, `ErrorReason`, `SessionTarget`, `TriggerSource`, `FailureAlertConfig`, `JobStateV2`, `JobRun`
+- `src/tasks/cron/config.rs` — `CronConfig`, `CronJob`, `ScheduleKind`, `RunStatus`, `ErrorReason`, `SessionTarget`, `TriggerSource`, `FailureAlertConfig`, `JobStateV2`
 - `src/tasks/cron/store.rs` — `CronStore` (SQLite + in-memory cache)
 - `src/tasks/cron/service/` — `ServiceState`, `ops` (CRUD), `timer` (next-due loop), `concurrency`, `catchup`
 - `src/tasks/cron/executor.rs` — Job execution
@@ -249,3 +249,6 @@ The `tasks::shared` module provides cross-cutting infrastructure consumed by bot
 ## See Also
 
 - [Daemon](./daemon) — Owns the timer loops, day-boundary log rotation, `ALEPH-BOOT` marker, sleep inhibitor, and the `Guardian Judge` proactive-wake decisions that drive cron and heartbeat in practice.
+## 历史：运行记录
+
+`JobRun` was removed in `0bf0e9bba`; run state remains in `JobStateV2`, without a separate run-record model.

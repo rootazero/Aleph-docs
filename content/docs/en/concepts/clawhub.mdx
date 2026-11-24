@@ -3,7 +3,7 @@ title: "ClawHub"
 description: "Historical reference for ClawHub (clawhub.ai), the OpenClaw skill registry whose HTTP client has since been retired from Aleph."
 ---
 
-> **Status (2026-07): ClawHub is no longer reachable as a first-class source.** The dedicated src/clawhub/ module has been retired; the Settings tab that pointed at it was removed and folded into Settings → Advanced. Browsing, searching, and installing ClawHub content now happens through the unified [Extensions Store](./extensions-store), which fronts the **aleph-hub** catalog (`https://hub.heyaleph.com/catalog.json`) plus the Claude / Aleph plugin marketplaces, the Official MCP Registry, and the Docker MCP Catalog. The only place `clawhub` appears in current source is as a `via` provenance label on a `HubCatalog` entry (when an artifact traces back to its original OpenClaw upstream) and as the OpenClaw `ClawHub` SKILL.md metadata namespace that the markdown-skill loader still recognises for backward-compatible installs. This page is kept as historical reference only.
+> **Status (2026-07): ClawHub is no longer reachable as a first-class source.** The dedicated src/clawhub/ module has been retired; the Settings tab that pointed at it was removed and folded into Settings → Advanced. Browsing, searching, and installing ClawHub content now happens through the unified [Extensions Store](./extensions-store), which fronts the **aleph-hub** catalog (`https://hub.heyaleph.com/catalog.json`) plus the Claude / Aleph plugin marketplaces, the Official MCP Registry, and the Docker MCP Catalog. The only place `clawhub` appears in current source is as a `via` provenance label on a `HubCatalogEntry` entry (when an artifact traces back to its original OpenClaw upstream) and as the OpenClaw `ClawHub` SKILL.md metadata namespace that the markdown-skill loader still recognises for backward-compatible installs. This page is kept as historical reference only.
 
 ## Design Philosophy (historical)
 
@@ -131,7 +131,7 @@ The client used `reqwest` for HTTP and returned `Result<T, ClawHubError>` from a
 
 | Location | Role |
 |---|---|
-| `src/hub/catalog_client.rs` | `"via": "clawhub"` provenance label on `HubCatalog` entries whose upstream traces back to OpenClaw; the label is purely informational and never triggers a network fetch. |
+| `src/hub/catalog_client.rs` | `"via": "clawhub"` provenance label on `HubCatalogEntry` entries whose upstream traces back to OpenClaw; the label is purely informational and never triggers a network fetch. |
 | `src/hub/types.rs` | `via` field on `ExtensionEntry`; same informational role. |
 | `src/tools/markdown_skill/spec.rs` | The `OpenClaw` metadata namespace (`ClawHub` SKILL.md compatibility) — the loader still parses legacy `ClawHub`-style SKILL.md frontmatter so existing skills keep installing. |
 | `src/skill/guard.rs` | Skips `.clawhub.json` sidecars when scanning skill directories. |

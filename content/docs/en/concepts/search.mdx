@@ -64,11 +64,11 @@ pub trait SearchProvider: Send + Sync {
     fn name(&self) -> &str;
     fn is_available(&self) -> bool;
 
-    async fn get_quota(&self) -> Result<QuotaInfo> {
-        Ok(QuotaInfo::unlimited())
-    }
+    fn capabilities(&self, options: &SearchOptions) -> SearchCapabilities;
 }
 ```
+
+The trait now lives in `crates/aleph-slot-api/src/search.rs` (after the P0 modularization, `src/search/provider.rs` is only a compatibility re-export). There is no quota API: an exhausted quota arrives as `AlephError::RateLimitError` and the error classification turns it into `SearchErrorKind::Quota`. `SearchCapabilities` has three bits — `domain_filter` / `recency` / `full_content` — all `false` by default, because a capability is derived per request rather than declared once.
 
 ---
 
@@ -81,8 +81,9 @@ pub struct SearchRegistry {
     providers: HashMap<String, Arc<dyn SearchProvider>>,
     default_provider: String,
     fallback_providers: Vec<String>,
-    test_cache: Arc<Mutex<HashMap<String, (ProviderTestResult, Instant)>>>,
+    config_defaults: Option<SearchOptions>,
     web_fetch_fallback: Option<Arc<WebFetchSerpFallback>>,
+    health: ProviderHealth,
 }
 
 impl SearchRegistry {
@@ -99,7 +100,7 @@ impl SearchRegistry {
 }
 ```
 
-**Error classification:** `classify_search_error()` collapses `AlephError` into `auth` / `rate-limit` / `timeout` / `network` / `cancelled` / `config` / `provider` / `other` so ops can grep the log by kind.
+**Error classification:** `SearchErrorKind::of` collapses `AlephError` into eight kinds — `transient` / `quota` / `auth` / `config` / `invalid-response` / `request-rejected` / `cancelled` / `other` — and `SearchErrorKind::as_str` supplies the label ops grep for. The kind is *derived* from the error variant, not carried along with the error.
 
 **Aggregated error trail:** when every configured provider fails (including the last-resort WebFetch branch), the final error string is prefixed with `All search providers failed:` and lists each step's `kind` + message — so the operator can see the fallback was actually attempted.
 
@@ -121,24 +122,22 @@ impl SearchRegistry {
 | **DuckDuckGo** | ✅ | — | HTML scrape, no key required |
 | **Firecrawl** | — | ✅ | Search + full-content scraping; shares config with fetch |
 
-The `SearchProviderType` enum is the single source of truth; `from_config` uses the `ProviderFactoryRegistry` to instantiate each configured backend, skipping unknown / missing-credential entries with a WARN.
+A provider's identity is its `provider_type` string (`tavily`, `searxng`, …); there is no provider-type enum in the code. The single source of truth for the supported set is `ProviderFactoryRegistry::known_provider_types()`. `from_config` uses the `ProviderFactoryRegistry` to instantiate each configured backend, skipping unknown / missing-credential entries with a WARN.
 
 ---
 
 ## Provider Testing
 
-Test configuration without saving credentials:
+Test configuration without saving credentials: the `search.test` RPC resolves the API key from the vault, builds the provider through the `ProviderFactoryRegistry`, and runs a live search that takes a single result.
 
 ```rust
-pub struct SearchProviderTestConfig {
-    pub provider_type: SearchProviderType,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,      // Required for SearXNG
-    pub engine_id: Option<String>,     // Required for Google CSE
+pub struct SearchTestResult {
+    pub success: bool,
+    pub message: String,
 }
 ```
 
-Returns `ProviderTestResult` with latency, error type, and success status; results are cached for 5 minutes, with failed results never cached.
+On success the backend's `verified` flag is set to true and persisted; on failure only a message comes back. **Results are not cached** — every click performs a real probe.
 
 ---
 
@@ -164,23 +163,26 @@ for result in results {
 
 ## Safety Properties
 
-- **Aggregated errors carry a stable kind label** — `classify_search_error` collapses `AlephError` into a stable kind string so logs can be grepped by kind without parsing free-form messages (never includes the user query text)
+- **Aggregated errors carry a stable kind label** — `SearchErrorKind::of` collapses `AlephError` into a stable kind string so logs can be grepped by kind without parsing free-form messages (never includes the user query text)
 - **Safe truncation** — `latency_ms = elapsed.min(u32::MAX as u128) as u32` saturates latency to `u32`
 - **No lock poisoning** — every `lock()` call uses `unwrap_or_else(|e| e.into_inner())`
-- **max_results cap** — `validated_max_results()` clamps `max_results` to `[1, 50]`
+- **max_results cap** — `validated_max_results()` clamps `max_results` to `[1, MAX_SEARCH_RESULTS]` (100)
 - **timeout validation** — `validated_timeout()` floors `timeout_seconds` at 1
-- **Test cache only stores successes** — failed results are not cached and are retried on the next call
+- **No test cache** — `search.test` probes live every time and caches nothing
 
 ---
 
 ## Code Location
 
 - `src/search/mod.rs` — Module entry point and re-exports
-- `src/search/provider.rs` — `SearchProvider` trait
+- `src/search/provider.rs` — Compatibility re-export of the `SearchProvider` trait (defined in `crates/aleph-slot-api/src/search.rs`)
+- `src/search/options.rs` — Compatibility re-export of `SearchOptions` / `Recency`
+- `src/search/error.rs` — `SearchErrorKind` (error kind classification)
+- `src/search/factory.rs` — `ProviderFactory` / `ProviderFactoryRegistry`
 - `src/search/registry.rs` — `SearchRegistry` with failover
-- `src/search/options.rs` — `SearchOptions` and `QuotaInfo`
 - `src/search/result.rs` — `SearchResult` type
 - `src/search/providers/` — Provider implementations
+- `src/gateway/handlers/search_config/test.rs` — the `search.test` handler
 
 ## See Also
 

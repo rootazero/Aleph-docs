@@ -136,7 +136,7 @@ The Panel is served by the Gateway ControlPlane, not a separate WebChat channel 
 
 ### Static File Directory
 
-Panel assets are embedded from `interfaces/webchat/dist/` at build time using `rust_embed`; runtime serving does not read a configurable disk directory (`src/gateway/control_plane/assets.rs`). Unknown extensionless paths fall back to the embedded `index.html`, without a `fallback_file` setting (`src/gateway/control_plane/server.rs`).
+Panel assets are embedded from `interfaces/webchat/dist/` at build time using `rust_embed`; runtime serving does not read a configurable disk directory (`src/gateway/control_plane/assets.rs`). Unknown extensionless paths fall back to the embedded `index.html`, without any extra setting (`src/gateway/control_plane/server.rs`).
 
 ## WebSocket Protocol
 

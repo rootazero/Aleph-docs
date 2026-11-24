@@ -36,7 +36,7 @@ description: "AI 模型提供商配置 RPC 方法"
 | `name` | string | 是 | 提供商 id(必须唯一) |
 | `config` | object | 是 | `ProviderConfigJson`——见 [Config 字段](#config-字段) |
 
-**响应:** 成功时 `{ "ok": true }`。提供商已存在时返回 `INVALID_PARAMS`。若存在 live `MultiProviderRegistry`(`provider_hot`),新提供商会被热注册,立即可用作默认和自动派生的故障转移回退。
+**响应:** 成功时 `{ "ok": true }`。提供商已存在时返回 `INVALID_PARAMS`。若存在 live `MultiProviderRegistry`，新提供商会通过 `MultiProviderRegistry::register` 热注册，立即可用作默认和自动派生的故障转移回退。
 
 ### providers.update
 

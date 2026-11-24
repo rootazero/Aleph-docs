@@ -117,7 +117,7 @@ let configs = manager.find_config_files("config.toml")?;
 | `mcp_list_resource_templates` | List URI templates (covers servers whose `resource_count == 0` and only expose templates) |
 | `mcp_list_prompts` | List prompt names available for `mcp_get_prompt` |
 
-Each `mcp_list_*` ships alongside its reader (`mcp_read_resource` / `mcp_get_prompt`) and is only registered in the tool registry while at least one connected server advertises that capability — the model never sees a tool that every call would reject. `mcp_tool_bridge` is the single channel that translates MCP manager events into registry mutations.
+Each `mcp_list_*` ships alongside its reader (`mcp_read_resource` / `mcp_get_prompt`) and is only registered in the tool registry while at least one connected server advertises that capability — the model never sees a tool that every call would reject. `spawn_tool_bridge` is the single channel that translates MCP manager events into registry mutations.
 
 **Tools / `tool_search`**: non-core tool schemas are *collapsed* — the model sees only `name + description`, and pulls the full schema back on demand via `get_tool_schema`. `tool_search` is a self-contained BM25 meta-tool (no new dependencies) covering every deferred tool: the model queries by capability, gets the top matches with full schemas, and calls them directly. `[tools] defer_mcp_tools` pushes MCP tools into the deferred tier as well. MCP-qualified names (`{server}__{tool}`) are exempt from the builtin collapse tables.
 

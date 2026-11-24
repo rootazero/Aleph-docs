@@ -163,7 +163,7 @@ ARIA `ref_id` 与坐标同时是稳定且通用的方式。
 browser_open → browser_snapshot → browser_click / browser_fill_form
                                   → browser_screenshot (可选验证)
                                   → browser_evaluate (可选数据提取)
-                                  → browser_close_tab (或 browser_session 结束)
+                                  → browser_tabs (action="close") (或 browser_session 结束)
 ```
 
 每个工具都接受 `profile` 字段（默认 `"default"`）以及后端特定的额外字段。
@@ -202,11 +202,42 @@ browser_open → browser_snapshot → browser_click / browser_fill_form
 所有 `browser_*` 工具接受一个用户定义的 `ApprovalPolicy`
 （`src/approval/`），对敏感动作进行门控：
 
-| 动作类别 | 审批门 |
-|---------|--------|
-| `browser_open`, `browser_profile`, `browser_session`, `browser_close_tab` | 否（生命周期） |
-| `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_cookies` | 否（只读） |
-| `browser_navigate`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_scroll`, `browser_select`, `browser_drag`, `browser_upload`, `browser_evaluate`, `browser_dialog`, `browser_emulate`, `browser_resize`, `browser_pdf` | 是（导航 / 变更 / 输入） |
+门控的粒度是**动作类别**而不是工具名：`src/approval/types.rs` 用
+`declare_action_types!` 声明 `ActionType`（`#[non_exhaustive]`），每个
+`browser_*` 工具在执行前把自己的动作类别交给
+`check_browser_approval`（`src/builtin_tools/browser_tools/mod.rs`）。
+
+| 动作类别 | 覆盖的工具 | 默认决策 |
+|---------|-----------|---------|
+| `BrowserNavigate` | `browser_navigate`、`browser_exec` 的 navigate | Allow |
+| `BrowserClick` | `browser_click`、`browser_exec` 的 click / dblclick | Allow |
+| `BrowserType` | `browser_type`、`browser_exec` 的 type | Allow |
+| `BrowserFill` | `browser_fill_form`、`browser_exec` 的 fill | Allow |
+| `BrowserPressKey` | `browser_press_key`、`browser_exec` 的 press_key | Allow |
+| `BrowserScroll` | `browser_scroll`、`browser_exec` 的 scroll | Allow |
+| `BrowserHover` | `browser_hover`、`browser_exec` 的 hover | Allow |
+| `BrowserEvaluate` | `browser_evaluate`、`browser_exec` 的 evaluate | Ask |
+| `BrowserOpen` | `browser_open` | Ask |
+| `BrowserSwitchEngine` | `browser_session` 的引擎切换 | Ask |
+| `BrowserSessionState` | `browser_session` 的保存 / 加载 | Ask |
+| `BrowserSelect` | `browser_select`、`browser_exec` 的 select | Ask |
+| `BrowserDialog` | `browser_dialog`、`browser_exec` 的 dialog | Ask |
+| `BrowserDrag` | `browser_drag` | Ask |
+| `BrowserUpload` | `browser_upload` | Ask |
+| `BrowserCookiesWrite` | `browser_cookies` 的写操作 | Ask |
+| `BrowserIdentityOverride` | `browser_emulate` | Ask |
+| `BrowserNetworkMock` | `browser_network` 的 mock 路由 | Ask |
+| `BrowserRecord` | `browser_record` 的 start | Ask |
+
+默认决策来自 `src/approval/config.rs` 的策展默认值：读页与导航类动作
+放行，会改页面状态或读页面外数据的动作（脚本执行、开新实例、换引擎、
+存会话、选选项、点对话框、拖拽、上传、写 cookie、改身份、装网络 mock、
+开始录制）一律 `Ask`，由人来裁决。
+
+不进策略面的工具：`browser_profile`、`browser_tabs`（含关闭标签页）、
+`browser_snapshot`、`browser_screenshot`、`browser_console`、`browser_resize`、
+`browser_wait_for`、`browser_pdf`、`browser_qa`。其中 `browser_network` 的
+**读取**请求记录也不走闸，只有 mock 路由走 `BrowserNetworkMock`。
 
 策略拒绝时调用返回 `success: false` 加拒绝原因；策略要求确认时返回
 `success: false` 加 `Approval required: …` 提示；agent 据此转交用户。

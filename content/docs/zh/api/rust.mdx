@@ -3,12 +3,14 @@ title: "Rust API"
 description: "用于将 Aleph 嵌入为库的核心 crate 参考"
 ---
 
-`alephcore` crate 是为每个 Aleph 组件提供支持的 Rust 库——Gateway 守护进程、CLI、桌面应用和消息接口。你也可以直接将其用作库，将 Aleph 的 AI Agent 能力嵌入到你自己的 Rust 应用程序中。
+`alephcore` crate 是为每个 Aleph 组件提供支持的 Rust 库——Gateway 守护进程、CLI、桌面应用和消息接口。你也可以直接把它当作库，把 Aleph 的 AI Agent 能力嵌入自己的 Rust 应用。
+
+crate 定义在仓库根目录（历史上还有一个 `core/` 子 crate，已于 2026-04 并入根 `Cargo.toml`）：
 
 ```toml
 # Cargo.toml
 [dependencies]
-alephcore = { path = "../Aleph/core" }
+alephcore = { path = "../Aleph" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -17,85 +19,91 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | 字段 | 值 |
 |-------|-------|
 | Crate 名称 | `alephcore` |
+| 位置 | 仓库根目录的 `Cargo.toml` |
 | Edition | 2021 |
-| 最低 Rust 版本 | 1.92 |
-| Crate 类型 | `rlib`、`cdylib` |
+| 最低 Rust 版本 | 1.99 |
+| Crate 类型 | `rlib` |
 | 异步运行时 | Tokio（多线程） |
+| 同一 crate 的二进制 | `aleph-server`、`aleph-migrate`、`aleph-panel-native-qa-gateway` |
+
+crate 只产出 `rlib`：`cdylib` 那一半在 2026-04 的仓库合并后已无消费者（`alephcore` 不导出任何 `extern "C"` 符号），随发布的是 Panel 自己的 WASM 产物。
+
+`aleph-server` 是 Gateway 守护进程，`aleph-migrate` 做配置迁移，`aleph-panel-native-qa-gateway` 需要 `native-qa` 特性，只用于原生 QA。
 
 ## 模块层次结构
 
-该 crate 按领域特定模块组织。所有公共模块从 `lib.rs` 重新导出。
+`src/lib.rs` 公开 **70** 个模块。`config` 与 `event_handler` 是 crate 私有模块，但它们的类型在 crate 根重新导出。
 
 ```text
 alephcore
-  ├── a2a              # Agent-to-agent 协议（adapter / domain / port / service / sub_agent）
-  ├── acp              # Agent Communication Protocol（manager / adapters / transport / session / protocol）
+  ├── a2a              # Agent-to-agent 协议
+  ├── acp              # Agent Communication Protocol
   ├── agents           # Agent 定义、子 Agent、swarm
-  ├── approval         # 用户审批工作流 + callback sink
+  ├── approval         # 用户审批工作流
   ├── artifacts        # 工件存储
-  ├── browser          # CDP / Playwright / Chrome MCP 浏览器自动化
+  ├── browser          # 浏览器自动化
   ├── builtin_tools    # 内置工具实现
   ├── bundled          # bundled content 同步
-  ├── canvas_io        # Canvas I/O 面板
-  ├── clarification    # `ask_user` HITL 澄清
-  ├── cli              # CLI 助手（inquire 提示、command parser）
-  ├── clipboard        # 剪贴板集成
+  ├── canvas           # 画布领域模型
+  ├── capability       # 能力契约（描述符 / 生命周期 / 策略）
+  ├── clarification    # ask_user HITL 澄清
+  ├── cli              # CLI 助手
   ├── cluster          # 多节点集群
   ├── command          # 命令定义 + 解析器
-  ├── components       # 共享域类型（`types/`）
-  ├── context          # 上下文预算 / 反应式压缩 / rescue
+  ├── context          # 上下文预算 / 压缩 / 检索
   ├── diagnostics      # 诊断面板
   ├── discovery        # 服务发现
   ├── domain           # 领域建模类型
-  ├── error            # 统一 `AlephError` 枚举（始终 public）
+  ├── error            # 统一 AlephError 枚举（转发自 aleph-slot-api）
   ├── event            # 事件类型 + bus
-  ├── event_handler    # event-handler 链路（保留以兼容）
-  ├── exec             # 命令执行和安全内核
-  ├── executor         # 任务执行器
+  ├── exec             # 命令执行与安全内核
+  ├── executor         # 任务执行器与工具注册表
   ├── export           # 会话 / 工件导出
   ├── extension        # 插件 / 扩展系统
   ├── fetch            # HTTP fetch + extract
   ├── generation       # 内容生成
-  ├── goal             # 目标子系统（pursuit、store、types）
+  ├── goal             # 目标子系统
   ├── group_chat       # 多智能体群聊编排
   ├── guardrails       # 输入 / 输出 guardrails
-  ├── harness          # Think→Act 执行引擎（`AgentHarness`）
+  ├── harness          # Think→Act 执行引擎
   ├── hub              # Aleph Hub 目录 / install / verify / trust
   ├── identity         # 身份 / soul / signer
-  ├── logging          # 带 PII 清理的结构化日志
-  ├── loop_graph       # 治理拓扑（team / audit ring / victory-claim watchers）
-  ├── looping          # 循环暂停/恢复
+  ├── json_canvas_io   # 画布 I/O 面板
+  ├── logging          # 结构化日志
+  ├── loop_graph       # 治理拓扑
+  ├── looping          # 循环暂停 / 恢复
   ├── markdown         # Markdown 处理
   ├── mcp              # Model Context Protocol 集成
   ├── media            # 媒体处理
   ├── memory           # 记忆存储和检索
   ├── metrics          # 性能遥测
-  ├── orchestrator     # orchestrator 层
+  ├── orchestrator     # 编排层（FlowSpec / HarnessRunner）
   ├── pii              # PII 检测和清理
   ├── pricing          # 核心价格表
   ├── projects         # 项目存储
   ├── providers        # AI 提供商抽象
   ├── resilience       # 弹性任务执行 + state DB
   ├── routing          # 会话密钥路由 + route bindings
-  ├── runtimes         # 能力探测 / 分类账（检测和引导外部工具）
+  ├── runtimes         # 能力探测 / 分类账
   ├── sandbox          # sandbox 抽象
+  ├── scope            # 作用域与授权
   ├── search           # 搜索提供商
   ├── secrets          # 密钥管理
   ├── security         # 安全原语 + vault
   ├── session          # 会话管理 + events
-  ├── skill            # 技能系统（单个技能类型 + 注册表）
+  ├── skill            # 技能系统
+  ├── spend            # 额度与花费策略
   ├── strategy         # 策略 planner + store
-  ├── sync_primitives  # 共享 `Arc` / `Mutex` 别名
-  ├── tasks            # 任务图谱子系统
+  ├── sync_primitives  # 共享 Arc / Mutex 别名
+  ├── tasks            # 任务子系统
   ├── teams            # 多智能体团队
   ├── thinker          # LLM 决策层
   ├── tool_metadata    # 工具目录 + 统一工具面板
-  ├── tool_output      # 工具输出格式化
   ├── tools            # 工具 trait 系统 + dispatcher
   ├── utils            # 共享工具
   ├── verification     # 工具循环验证器
   ├── vision           # 视觉 / 图像处理
-  ├── wizard           # 会话制配置向导（`wizard.*` RPC，Panel 驱动；CLI 无对应子命令）
+  ├── wizard           # 会话制配置向导
   └── workflow         # workflow 模板
 ```
 
@@ -103,84 +111,109 @@ alephcore
 
 ### 配置
 
-| 类型 | 模块 | 描述 |
-|------|--------|-------------|
-| `Config` | `config` | 主配置结构体（从 `config.toml` 解析） |
-| `FullConfig` | `config` | 包含所有部分的完整配置 |
-| `ProviderConfig` | `config` | 每个提供商的设置（模型、API 密钥、基础 URL） |
-| `MemoryConfig` | `config` | 记忆系统设置 |
-| `BehaviorConfig` | `config` | Agent 行为调整 |
-| `RoutingRuleConfig` | `config` | 意图路由规则 |
-| `GeneralConfig` | `config` | 一般应用程序设置 |
+`config` 模块本身是私有的，下表类型全部在 crate 根重新导出，用 `alephcore::Config` 这样的路径取用。
+
+| 类型 | 描述 |
+|------|-------------|
+| `Config` | 主配置结构体（从 `config.toml` 解析） |
+| `ProviderConfig` | 单个提供商的设置（模型、API 密钥、基础 URL） |
+| `MemoryConfig` | 记忆系统设置 |
+| `BehaviorConfig` | Agent 行为调整 |
+| `RoutingRuleConfig` | 意图路由规则 |
+| `GeneralConfig` | 一般应用程序设置 |
+| `ChannelInstanceConfig` | 单个频道实例的声明（`type` / `enabled` / 平台键） |
+| `PluginMarketplaceEntry` | 插件市场条目 |
+| `EmbeddingProviderConfig` | 嵌入提供商设置 |
+| `GenerationProviderConfig` | 生成提供商设置 |
+| `MemoryInjectionMode` | 记忆注入模式 |
+| `AssemblerConfig` | 上下文装配参数 |
 
 ### Harness（Think→Act）
 
-Harness 是拥有 Agent 循环的 Think→Act driver。它受 R10 约束（"harness 是 scaffolding，不是 cognition"），并由 `src/harness/tests/budget.rs` 通过棘轮强制：恰好 **12 文件**，行数总和压低于 `CEILING = 5,535`（`src/harness/tests/budget.rs:795`）。
+Harness 是拥有 Agent 循环的 Think→Act driver。它受 R10 约束（"harness 是 scaffolding，不是 cognition"），并由 `src/harness/tests/budget.rs` 通过棘轮强制：恰好 **12 文件**，行数总和压低于 `CEILING = 5,535`。
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AgentHarness` | `harness::AgentHarness` | 核心 Think→Act 执行引擎 |
-| `AgentHarness::new` | `harness::AgentHarness` | 用 `HarnessDeps` 构造 |
-| `AgentHarness::run` | `harness::AgentHarness` | 驱动一次完整的 Agent 运行 |
-| `AgentHarness::terminate_reason` | `harness::AgentHarness` | 运行停止原因 |
-| `AgentHarness::token_breakdown` | `harness::AgentHarness` | 按类别统计 token |
-| `AgentHarness::last_turn_context_tokens` | `harness::AgentHarness` | 上一轮的上下文 token 数 |
-| `AgentHarness::tool_timeline` | `harness::AgentHarness` | 工具调用时间线 |
-| `AgentHarness::duration_ms` | `harness::AgentHarness` | 实际耗时 |
-| `HarnessDeps` | `harness::deps` | 注入的依赖（session、tool、provider、callback、sink） |
-| `HarnessRunner` | `harness::agent` | 多态 seam（替代旧 `Harness` trait） |
-| `HarnessCallback` | `harness::callback` | 实时事件回调（`on_delta` / `on_reasoning` / `on_tool_call_start` / `on_tool_call_done` / `on_complete_with_outcome`） |
+| `AgentHarness` | `harness` | 核心 Think→Act 执行引擎 |
+| `AgentHarness::new` | `harness` | 用 `HarnessDeps` 构造 |
+| `AgentHarness::run` | `harness` | 驱动一次完整运行（会话 ID + 回调 + 取消令牌） |
+| `AgentHarness::terminate_reason` | `harness` | 运行停止原因 |
+| `AgentHarness::token_breakdown` | `harness` | 按类别统计 token |
+| `AgentHarness::last_turn_context_tokens` | `harness` | 上一轮的上下文 token 数 |
+| `AgentHarness::tool_timeline` | `harness` | 工具调用时间线 |
+| `AgentHarness::duration_ms` | `harness` | 实际耗时 |
+| `AgentHarness::total_tokens` | `harness` | 本次运行消耗的 token 总数 |
+| `AgentHarness::hit_limit` | `harness` | 是否因为迭代上限 / 上下文压力而收尾 |
+| `HarnessDeps` | `harness::deps` | 注入的依赖：27 个字段的结构体字面量，没有 `Default`、没有构造函数 |
+| `HarnessRunner` | `orchestrator::dispatch` | 多态执行 seam：带 `FlowSpec` 跑一条编排流 |
+| `HarnessCallback` | `harness::callback` | 实时事件回调 |
+| `NoopHarnessCallback` | `harness::callback` | 忽略全部事件的默认回调 |
 | `HarnessError` | `harness::trait_def` | Harness 错误 |
 | `TurnState` | `harness::trait_def` | Turn 状态 |
-| `TurnStep` | `harness::trait_def` | step 状态 |
+| `TurnStep` | `harness::trait_def` | 轮次控制信号（必须被消费，丢弃即丢失该轮的推进指令） |
 | `ChainContext` | `harness::chain_context` | 每轮执行上下文 |
 | `TraceSink` / `NoopTraceSink` | `harness::trace_sink` | Trace sink trait + 默认实现 |
-| `StallConfig` / `StallTracker` | `harness::deps` | 连续失败 watchdog |
+| `StallConfig` | `harness::deps` | 连续失败 watchdog 配置 |
+| `ModelRobustnessProfile` | `verification` | 按模型解析的健壮性档案 |
 
-> `TurnPhase` 枚举在 batch 5（2026-07-15）中被删除——当时 Act 阶段的 wall clock 下沉到 tool 层；harness 不再自己做完成度判断（R10）。
+`HarnessCallback` 的钩子是 `on_delta` / `on_reasoning` / `on_tool_call_start` / `on_tool_call_done` / `on_context_usage` / `on_safety_block` / `on_complete_with_outcome`。
 
 ### Thinker（LLM 层）
 
+Thinker 是决策层，没有单一的 `Thinker` 结构体——它由「提供商注册表 + 提示词构建 + 上下文聚合」几块拼起来。
+
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `Thinker<P>` | `thinker` | 参数化 `ProviderRegistry` 的通用 LLM 决策引擎 |
-| `ThinkerConfig` | `thinker` | 提示词、过滤、路由和压缩设置 |
-| `ProviderRegistry` | `thinker` | 提供商查找和选择的 trait |
+| `ProviderRegistry` | `thinker` | 提供商查找和选择的 trait（`get` / `default_provider` / `list_providers`；不携带健康状态） |
 | `SingleProviderRegistry` | `thinker` | 包装单个 `AiProvider` 的简单注册表 |
-| `PromptBuilder` | `thinker::prompt_builder` | 从上下文构建系统 + 用户提示词 |
-| `ThinkerModelSelector` | `thinker::model_router` | 基于规则将请求路由到模型 |
+| `SwappableProviderRegistry` | `thinker` | 可热替换当前提供商的注册表 |
+| `MultiProviderRegistry` | `thinker` | 多提供商注册表 |
+| `PromptBuilder` / `PromptConfig` | `thinker::prompt_builder` | 从上下文构建系统 + 用户提示词 |
+| `TokenBudget` | `thinker::prompt_budget` | 提示词预算 |
+| `ContextAggregator` / `TurnEnvelope` | `thinker::context` | 上下文聚合与轮次信封 |
+| `PromptLayer` / `LayerInput` | `thinker::prompt_layer` | 可叠加的提示词层 |
+| `SoulManifest` / `SoulVoice` | `thinker::soul` | 灵魂设定（manifest + 语气） |
+| `MemoryContextProvider` | `thinker::memory_context_provider` | 记忆上下文提供者 |
 
 ### 工具系统
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AlephTool` | `tools` | 静态分发 trait——编译时类型化工具 |
+| `AlephTool` | `tools` | 静态分发 trait——编译期类型化工具 |
 | `AlephToolDyn` | `tools` | 动态分发 trait——运行时加载的工具（MCP、插件） |
 | `AlephToolServer` | `tools` | 支持热重载的工具服务器 |
-| `AlephToolServerHandle` | `tools` | 运行中工具服务器的线程安全句柄 |
-| `ToolRegistry` | `tool_metadata` | 聚合所有工具来源的统一注册表 |
+| `ToolRegistry` | `executor::tool_registry` | 执行期工具注册表（`get_tool` / `execute_tool`） |
+| `ToolCatalog` | `tool_metadata` | 工具目录 |
 | `ToolDefinition` | `tool_metadata` | 工具元数据（名称、描述、JSON Schema、类别） |
-| `UnifiedTool` / `UnifiedToolInfo` | `tool_metadata` | 统一原生、MCP、技能和插件工具的包装器 |
-| `ToolResult` | `tool_metadata` | 任何工具的执行结果 |
+| `UnifiedTool` | `tool_metadata` | 统一原生、MCP、技能和插件工具的包装器 |
+| `ToolResult` | `tools::runtime` | 工具执行结果（成功值或错误 + 可重试标记） |
+| `ToolSource` / `ToolSourceType` | `tool_metadata` | 工具来源标记 |
+| `ToolCategory` | `tool_metadata` | 工具类别 |
 
 ### 提供商
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AiProvider` | `providers` | AI 后端的核心 trait（`process` / `process_with_tools` / `stream`） |
+| `AiProvider` | `providers` | AI 后端的核心 trait（单个 `process` 方法） |
+| `create_provider` | `providers` | 按名称与配置构造提供商 |
 | `HttpProvider` | `providers::http_provider` | 协议无关的 HTTP 提供商 |
 | `OllamaProvider` | `providers::ollama` | 原生 Ollama 集成 |
 | `FailoverProvider` | `providers::failover` | 自动提供商故障转移 |
-| `AuthProfileManager` | `providers::profile_manager` | 多配置文件凭据轮换 |
+| `DefaultProviderHandle` / `StaticDefault` | `providers::default_handle` | 默认提供商的持有与替换 |
+| `ProviderRegistry` | `providers::registry` | 名称 → 提供商的并发注册表（与 thinker 的同名 trait 不是一回事） |
+
+Aleph 提供 OpenAI 兼容、Anthropic、Gemini 和 Ollama 协议的适配器。通过实现 `AiProvider` 或注册 YAML 定义的协议适配器来添加新的提供商。
 
 ### 错误处理
 
 | 类型 | 模块 | 描述 |
 |------|--------|-------------|
-| `AlephError` | `error` | 统一错误枚举（含多 variant） |
+| `AlephError` | `error` | 统一错误枚举（转发自 `aleph-slot-api`） |
+| `AlephException` | `error` | 异常类型 |
+| `ErrorClass` | `error` | 错误分类 |
 | `Result<T>` | `error` | `std::result::Result<T, AlephError>` 的类型别名 |
 
-每个 `AlephError` 变体都携带一个可选的 `suggestion` 字段，包含用户友好的修复建议。调用 `.suggestion()` 获取它，或 `.user_friendly_message()` 获取格式化的显示字符串。
+每个 `AlephError` 变体都携带一个可选的 `suggestion` 字段，包含用户友好的修复建议。调用 `.suggestion()` 获取它，或 `.user_friendly_message()` 获取格式化的显示字符串；`.class()` 与 `.is_transient()` 用于分类与重试判断。
 
 ## 核心 Trait
 
@@ -191,17 +224,25 @@ Harness 是拥有 Agent 循环的 Think→Act driver。它受 R10 约束（"harn
 pub trait AlephTool: Clone + Send + Sync + 'static {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
+    const MAX_RESULT_TOKENS: Option<usize> = None;
+
+    fn services() -> Vec<aleph_slot_api::capability::Service> {
+        Vec::new()
+    }
 
     type Args: Serialize + DeserializeOwned + JsonSchema + Send;
     type Output: Serialize + Send;
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output>;
-
     // 提供的方法
     fn category(&self) -> ToolCategory { ToolCategory::Builtin }
     fn requires_confirmation(&self) -> bool { false }
-    fn examples(&self) -> Option<Vec<String>> { None }
+    fn mutates_file_content(&self) -> bool { false }
+    fn strict_schema(&self) -> bool { true }
     fn definition(&self) -> ToolDefinition { /* 自动生成 JSON Schema */ }
+    fn format_validation_error(&self, err: &serde_json::Error) -> String { err.to_string() }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output>;
+    async fn call_json(&self, args: serde_json::Value) -> Result<serde_json::Value> { /* 默认实现 */ }
 }
 ```
 
@@ -218,110 +259,128 @@ let tools: Vec<Box<dyn AlephToolDyn>> = vec![
 
 ```rust
 pub trait AiProvider: Send + Sync {
-    fn process(&self, input: &str, system_prompt: Option<&str>)
-        -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
-
-    fn process_with_tools(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>, ...)
-        -> Pin<Box<dyn Future<Output = Result<LlmResponse>> + Send + '_>>;
+    fn process<'a>(
+        &'a self,
+        payload: adapter::RequestPayload<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>>;
 
     fn name(&self) -> &str;
     fn color(&self) -> &str;
-    fn model_id(&self) -> &str;
+    fn supports_native_tools(&self) -> bool { false }
+    fn protocol(&self) -> Cow<'_, str> { Cow::Borrowed("unknown") }
+
+    // 提示型方法：模型行为覆盖、行为提示、实际服务的模型 / 提供商
+    fn model_behavior_override(&self) -> Option<Cow<'_, str>> { None }
+    fn behavior_hint(&self) -> Option<Cow<'_, str>> { None }
+    fn serving_model_hint(&self) -> Option<Cow<'_, str>> { None }
+    fn serving_provider_hint(&self) -> Option<Cow<'_, str>> { None }
 }
 ```
 
-Aleph 提供 OpenAI 兼容、Anthropic、Gemini 和 Ollama 协议的适配器。通过实现此 trait 或注册 YAML 定义的协议适配器来添加新的提供商。
+核心方法只有一个 `process`：它接收带结构化 `UnifiedMessage` 历史的 `RequestPayload`，由协议适配器翻译成各家原生格式。流式输出由提供商实现自己的 delta 通道完成，不在 trait 表面。
 
-### `LoopCallback` — Agent 循环事件
+### `HarnessCallback` — Agent 循环事件
 
 ```rust
-pub trait LoopCallback: Send + Sync {
-    fn on_event(&self, event: LoopEvent);
+pub trait HarnessCallback: Send {
+    fn on_delta(&mut self, text: &str) {}
+    fn on_reasoning(&mut self, text: &str) {}
+    fn on_tool_call_start(&mut self, id: &str, name: &str, args: &serde_json::Value) {}
+    fn on_tool_call_done(
+        &mut self,
+        id: &str,
+        result: Option<&ToolOutput>,
+        error: Option<&str>,
+        duration_ms: u64,
+    ) {}
+    fn on_context_usage(&mut self, context_tokens: u32, total_tokens: u64) {}
+    fn on_safety_block(&mut self, reason: &str) {}
+    fn on_complete_with_outcome(&mut self, outcome: &FlowOutcome) {}
 }
 ```
 
-实现此 trait 以在 Agent 执行期间接收实时事件：迭代开始/结束、工具调用、思考步骤、错误和最终结果。内置实现包括 `LoggingCallback`、`CollectingCallback` 和 `NoOpLoopCallback`。
+实现这个 trait 就能在 Agent 执行期间接收实时事件。内置实现是 `NoopHarnessCallback`（丢弃全部事件）和 Gateway 侧的 `BroadcastCallback`（把事件广播到 Gateway 的流）。
 
 ## 功能标志
 
-| 功能 | 描述 | 依赖 |
-|---------|-------------|--------------|
-| `gateway`（默认） | WebSocket JSON-RPC 服务器 | tokio-tungstenite、axum、clap |
-| `telegram` | Telegram 机器人接口 | teloxide |
-| `discord` | Discord 机器人接口 | serenity |
-| `whatsapp` | WhatsApp 接口 | (gateway) |
-| `all-channels` | 所有消息通道 | telegram + discord + whatsapp |
-| `cron` | Cron 作业调度器 | cron、chrono-tz |
-| `cli` | 交互式 CLI 提示 | inquire |
-| `control-plane` | 嵌入式 Web UI | rust-embed |
-| `plugin-wasm` | WebAssembly 插件运行时 | extism |
-| `plugin-nodejs` | Node.js 插件运行时 | (占位符) |
-| `plugin-all` | 所有插件运行时 | plugin-wasm + plugin-nodejs |
-| `test-helpers` | 测试工具 | -- |
+| 特性 | 描述 |
+|------|------|
+| （默认） | `default = []`——不打开任何特性 |
+| `loom` | 并发模型检查（替换标准同步原语） |
+| `test-helpers` | 集成测试辅助 |
+| `native-qa` | 原生 QA 面板网关（`aleph-panel-native-qa-gateway` 二进制） |
+| `control-plane` | 嵌入式控制平面（Panel 资产） |
+| `disabled-tests` | 等待重写的被禁用测试模块 |
+| `plugin-wasm` | WASM 插件运行时（目前是预留占位） |
 
-使用功能组合控制二进制大小：
+使用特性组合控制构建体积：
 
 ```toml
 # 最小库使用（无服务器、无通道）
-alephcore = { path = "...", default-features = false }
+alephcore = { path = "../Aleph", default-features = false }
 
-# 仅 Gateway + Telegram
-alephcore = { path = "...", features = ["gateway", "telegram"] }
-
-# 全部
-alephcore = { path = "...", features = ["gateway", "all-channels", "cron", "plugin-all"] }
+# 仅控制平面
+alephcore = { path = "../Aleph", features = ["control-plane"] }
 ```
 
 ## 使用示例
 
 ### 运行 Agent 循环
 
+`HarnessDeps` 没有 `Default` 也没有构造函数，所有字段都要显式写出来；用不到的接缝一律填 `None`。
+
 ```rust
-use alephcore::{
-    AgentHarness, HarnessDeps, HarnessRunner, HarnessCallback,
-    Thinker, ThinkerConfig, SingleProviderRegistry,
-    ContextCompressor,
-};
-use alephcore::harness::callback::BroadcastCallback;
-use alephcore::providers::{create_provider, ProviderConfig, UnifiedMessage, ProviderDelta};
+use alephcore::harness::{AgentHarness, HarnessDeps, NoopHarnessCallback};
+use alephcore::memory::tool_signal_sink::NoopToolSignalSink;
+use alephcore::providers::{create_provider, ProviderConfig};
+use alephcore::verification::ModelRobustnessProfile;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> alephcore::Result<()> {
-    // 1. 初始化日志
-    alephcore::init_logging();
+    // 1. 创建一个提供商。harness 只看见一个 AiProvider——故障转移
+    //    由 providers::FailoverProvider 在这一层内部叠加。
+    let provider = create_provider(
+        "anthropic",
+        ProviderConfig::test_config("claude-sonnet-4-20250514"),
+    )?;
 
-    // 2. 创建 AI 提供商
-    let config = ProviderConfig::test_config("claude-sonnet-4-20250514");
-    let provider = create_provider("anthropic", config)?;
+    // 2. 装配依赖
+    let deps = HarnessDeps {
+        session: session_service,          // Arc<dyn SessionService>
+        tools: tool_service,               // Arc<dyn ToolService>
+        llm: provider,
+        robustness_profile: ModelRobustnessProfile::conservative(),
+        tool_descriptor_lookup: None,
+        verifier_chain: None,
+        context_budget: None,
+        context_compactor: None,
+        context_fabric: None,
+        trace_sink: None,
+        system_prompt: Some("你是 Aleph。".to_string()),
+        system_prompt_parts: None,
+        recall_context: None,
+        guardrails: None,
+        max_iterations: Some(20),
+        power: None,
+        stall_config: None,
+        consecutive_failure_cap: Some(8),
+        turn_timeout: None,
+        turn_budget: None,
+        result_store: None,
+        session_epoch_registrar: None,
+        tool_signal_sink: Arc::new(NoopToolSignalSink),
+        in_flight_tool_calls: None,
+        parallel_tool_concurrency: Some(8),
+    };
 
-    // 3. 构建 Thinker（LLM 层）
-    let registry = SingleProviderRegistry::new(provider);
-    let thinker = Thinker::new(
-        Arc::new(registry),
-        ThinkerConfig::default(),
-    );
-
-    // 4. 创建工具链
-    let deps = HarnessDeps::new(
-        session_service,
-        tool_service,
-        sandbox,
-        ai_provider,
-    );
-    let callback = Arc::new(BroadcastCallback::new(event_bus));
+    // 3. 构造并运行
     let harness = AgentHarness::new(deps);
-    let runner: Arc<dyn HarnessRunner> = Arc::new(harness);
+    let outcome = harness
+        .run(&session_id, &mut NoopHarnessCallback, &cancel)
+        .await?;
 
-    // 5. 运行
-    let result = runner.run(
-        "东京的天气怎么样？".to_string(),
-        RequestContext::empty(),
-        vec![], // 工具
-        NoOpLoopCallback,
-    ).await;
-
-    println!("结果: {:?}", result);
+    println!("停止原因: {:?}", harness.terminate_reason());
     Ok(())
 }
 ```
@@ -369,19 +428,12 @@ impl AlephTool for WeatherTool {
             city: args.city,
         })
     }
-
-    fn examples(&self) -> Option<Vec<String>> {
-        Some(vec![
-            "weather(city='东京')".into(),
-            "weather(city='伦敦', unit='celsius')".into(),
-        ])
-    }
 }
 ```
 
 ## 错误处理
 
-`AlephError` 是基于 `thiserror` 的枚举。每个变体都包含结构化上下文：
+`AlephError` 是基于 `thiserror` 的枚举，定义在 `aleph-slot-api` crate 里，由 `alephcore::error` 转发。每个变体都包含结构化上下文：
 
 ```rust
 match result {
@@ -419,4 +471,3 @@ Aleph 使用带 `rt-multi-thread` 功能的 Tokio。所有公共异步 API 返�
 - [JSON-RPC API](/docs/zh/api/jsonrpc) — WebSocket RPC 方法参考
 - [架构](/docs/zh/architecture/overview) — 系统架构概览
 - [工具系统](/docs/zh/tools/overview) — 工具设计和内置工具
-- [Gateway](/docs/zh/gateway/overview) — Gateway 服务器文档

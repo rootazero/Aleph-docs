@@ -8,7 +8,7 @@ description: "用于外部 CLI 工具的基于 PTY 的进程控制，以及代�
 ## 设计理念
 
 1. **PTY 嵌入** — `gateway/pty/` 用 `portable-pty` 包装本地 shell / `cmd.exe`，输出经 WebSocket `pty.screen` / `pty.exit` topic 推送（不走第二个端口）。
-2. **Turn 级验证** — `verification::VerfierChain` 在 Think→Act 之间跑，链上挂着 `StopHookVerifier`（shell 钩子）、`ToolLoopVerifier`（死循环看门狗）、`ExtensionStopHookVerifier`（`HookEvent::Stop` 钩子）、`ScratchpadGoalVerifier`（执行列表未完成就阻停）、`MutationEvidenceVerifier`（写入未取证柔阻一次）。
+2. **Turn 级验证** — `verification::VerifierChain` 在 Think→Act 之间跑，链上挂着 `StopHookVerifier`（shell 钩子）、`ToolLoopVerifier`（死循环看门狗）、`ExtensionStopHookVerifier`（`HookEvent::Stop` 钩子）、`ScratchpadGoalVerifier`（执行列表未完成就阻停）、`MutationEvidenceVerifier`（写入未取证柔阻一次）。
 3. **只读式 shell 钩子** — `ShellStopHook` 跑外部命令，exit 0/2/3 = 通过/阻停/退出循环；exit 其它、超时、信号、shell 元字符全部走 `Error`，由调用方决定 fail-open 还是 fail-closed。
 
 ---

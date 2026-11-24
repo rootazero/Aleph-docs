@@ -5,7 +5,7 @@ description: "Orchestrator-level flow dispatch — FlowSpec resolution, sandbox 
 
 # Dispatcher
 
-The Dispatcher is the `Orchestrator` — the seam between the Gateway's chat ingress and the harness that drives each run. It does **not** model multi-step DAG plans: that earlier `TaskGraph` concept was retired with the Phase 6/7 harness migration. Today's orchestrator's job is to take a `FlowRequest` from any channel, resolve the right `FlowSpec` + sandbox + harness, and spawn the `HarnessRunner` task that produces a `FlowOutcome`.
+The Dispatcher is the `Orchestrator` — the seam between the Gateway's chat ingress and the harness that drives each run. It does **not** model multi-step DAG plans. Today's orchestrator's job is to take a `FlowRequest` from any channel, resolve the right `FlowSpec` + sandbox + harness, and spawn the `HarnessRunner` task that produces a `FlowOutcome`.
 
 **Location**: `src/orchestrator/dispatch.rs`
 
@@ -154,6 +154,10 @@ Serial mode only falls back on single call, parallelism disabled, duplicate call
 Cross-batch dedup: a duplicate `(name, args)` within or across batches reuses the first result.
 
 ---
+
+## Historical: DAG dispatch
+
+The earlier `TaskGraph` design modeled a plan as multiple tasks. Commit `d475c15f1` removed the dispatcher graph implementation, and `3491b7551` removed the unused executor result layer that still referred to it; the current orchestrator dispatches one harness run per request.
 
 ## See Also
 

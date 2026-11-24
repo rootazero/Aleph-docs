@@ -165,7 +165,7 @@ ARIA `ref_id` and coordinates are both stable and universal.
 browser_open → browser_snapshot → browser_click / browser_fill_form
                                   → browser_screenshot (optional verify)
                                   → browser_evaluate (optional extraction)
-                                  → browser_close_tab (or end browser_session)
+                                  → browser_tabs (action="close") (or end browser_session)
 ```
 
 Every tool takes a `profile` field (default `"default"`) plus
@@ -204,13 +204,47 @@ reassigns them.
 ## Approval policy
 
 All `browser_*` tools accept a user-defined `ApprovalPolicy`
-(`src/approval/`) that gates sensitive actions:
+(`src/approval/`) that gates sensitive actions. The gate works on **action
+categories**, not tool names: `src/approval/types.rs` declares
+`ActionType` through `declare_action_types!` (`#[non_exhaustive]`), and
+each tool hands its category to `check_browser_approval`
+(`src/builtin_tools/browser_tools/mod.rs`) before doing any work.
 
-| Action category | Gated |
-|-----------------|-------|
-| `browser_open`, `browser_profile`, `browser_session`, `browser_close_tab` | No (lifecycle) |
-| `browser_snapshot`, `browser_screenshot`, `browser_console`, `browser_network`, `browser_cookies` | No (read-only) |
-| `browser_navigate`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`, `browser_scroll`, `browser_select`, `browser_drag`, `browser_upload`, `browser_evaluate`, `browser_dialog`, `browser_emulate`, `browser_resize`, `browser_pdf` | Yes (navigation / mutation / input) |
+| Action category | Covered tools | Default decision |
+|-----------------|---------------|------------------|
+| `BrowserNavigate` | `browser_navigate`, `browser_exec` navigate | Allow |
+| `BrowserClick` | `browser_click`, `browser_exec` click / dblclick | Allow |
+| `BrowserType` | `browser_type`, `browser_exec` type | Allow |
+| `BrowserFill` | `browser_fill_form`, `browser_exec` fill | Allow |
+| `BrowserPressKey` | `browser_press_key`, `browser_exec` press_key | Allow |
+| `BrowserScroll` | `browser_scroll`, `browser_exec` scroll | Allow |
+| `BrowserHover` | `browser_hover`, `browser_exec` hover | Allow |
+| `BrowserEvaluate` | `browser_evaluate`, `browser_exec` evaluate | Ask |
+| `BrowserOpen` | `browser_open` | Ask |
+| `BrowserSwitchEngine` | `browser_session` engine switch | Ask |
+| `BrowserSessionState` | `browser_session` save / load | Ask |
+| `BrowserSelect` | `browser_select`, `browser_exec` select | Ask |
+| `BrowserDialog` | `browser_dialog`, `browser_exec` dialog | Ask |
+| `BrowserDrag` | `browser_drag` | Ask |
+| `BrowserUpload` | `browser_upload` | Ask |
+| `BrowserCookiesWrite` | write operations of `browser_cookies` | Ask |
+| `BrowserIdentityOverride` | `browser_emulate` | Ask |
+| `BrowserNetworkMock` | mock routes of `browser_network` | Ask |
+| `BrowserRecord` | `browser_record` start | Ask |
+
+The defaults come from the curated set in `src/approval/config.rs`: reading
+and navigation are allowed, while actions that change page state or read
+data outside the page (script evaluation, opening a new instance, switching
+engines, saving a session, picking an option, accepting a dialog, dragging,
+uploading, writing cookies, overriding identity, installing network mocks,
+starting a recording) all become `Ask` and are left to a human.
+
+Tools that never enter the policy surface: `browser_profile`,
+`browser_tabs` (closing a tab included), `browser_snapshot`,
+`browser_screenshot`, `browser_console`, `browser_resize`,
+`browser_wait_for`, `browser_pdf`, `browser_qa`. Reading recorded requests
+in `browser_network` is ungated as well — only mock routes reach
+`BrowserNetworkMock`.
 
 When the policy denies, the call returns `success: false` with the reason;
 when it requires confirmation, it returns `success: false` with

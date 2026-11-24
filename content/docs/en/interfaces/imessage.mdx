@@ -152,12 +152,10 @@ Make sure Aleph can reach the BlueBubbles server (HTTPS) and that the BlueBubble
 ### Local Transport
 
 ```toml
-[[channels]]
-id = "imessage-local"
-channel_type = "imessage"
+[channels.imessage-local]
+type = "imessage"
 enabled = true
 
-[channels.config]
 # Path to the Messages database (default: ~/Library/Messages/chat.db)
 db_path = "~/Library/Messages/chat.db"
 
@@ -195,29 +193,42 @@ inbound_debounce_ms = 500
 ### BlueBubbles Transport
 
 ```toml
-[[channels]]
-id = "imessage-bb"
-channel_type = "imessage.bluebubbles"
+[channels.imessage-bb]
+type = "imessage"
+transport = "bluebubbles"
 enabled = true
-
-[channels.config]
-# BlueBubbles server URL (HTTPS)
-server_url = "https://bluebubbles.local:1234"
-
-# BlueBubbles account password
-password = "${BLUEBUBBLES_PASSWORD}"
-
-# Optional webhook URL (set on the BlueBubbles server side)
-webhook_url = "https://aleph.example.com/webhooks/imessage"
-
-# Poll interval in milliseconds for the fallback poll loop
-poll_interval_ms = 1000
 
 # Same DM / group / allowlist policy as the local transport
 dm_policy = "pairing"
 group_policy = "open"
 allow_from = ["+15551234567"]
+
+[channels.imessage-bb.bluebubbles]
+# BlueBubbles server URL (HTTPS)
+server_url = "https://bluebubbles.local:1234"
+
+# BlueBubbles account password
+password = "your-bluebubbles-password"
+
+# Address and path the inbound webhook listener binds to (the BlueBubbles
+# server has to point at it)
+webhook_host = "0.0.0.0"
+webhook_port = 8645
+webhook_path = "/bluebubbles-webhook"
+
+# Catch-up reconciliation poll interval in seconds (default: 30; real-time
+# delivery is webhook-driven)
+poll_interval_secs = 30
+
+# Whether to send read receipts for inbound messages (default: true)
+send_read_receipts = true
 ```
+
+<Callout type="info">
+`type` only accepts a platform name: `imessage`. The transport is chosen with `transport` (`local` or `bluebubbles`); when a `[channels.<id>.bluebubbles]` block is present and `transport` is unset, Aleph promotes the transport to `bluebubbles` at startup (`IMessageConfig::effective_transport`).
+
+The channel credential vault uses keys of the form `channel:<instance id>:<field>`, but it only covers **top-level** credential fields (`bot_token`, `password`, and friends). The BlueBubbles password sits inside `[channels.<id>.bluebubbles]`, so it still has to live in the configuration file; cold-creating a channel with a nested credential through `channel.create` is rejected with `Channel contains a credential this vault layout cannot store`.
+</Callout>
 
 ## DM and Group Policy
 
@@ -259,7 +270,7 @@ The polling loop runs in a background Tokio task:
 
 ### BlueBubbles Transport (`BlueBubblesChannel`)
 
-`BlueBubblesChannel` registers a webhook with the BlueBubbles server for push delivery and falls back to a poll loop (`poll_interval_ms`) for catch-up. The shared `OffsetTracker` makes both transports resume after restart from the last persisted GUID/ROWID instead of jumping straight to the newest message.
+`BlueBubblesChannel` registers a webhook with the BlueBubbles server for push delivery (the callback URL is built from `webhook_host`/`webhook_port`/`webhook_path`) and falls back to a poll loop (`poll_interval_secs`, in seconds) for catch-up. The shared `OffsetTracker` makes both transports resume after restart from the last persisted GUID/ROWID instead of jumping straight to the newest message.
 
 ### Apple Timestamps
 
@@ -398,4 +409,4 @@ Aleph reads from three primary tables in the Messages database:
 | Slow response time | Decrease `poll_interval_ms` (e.g., to 500); note this increases SQLite read frequency |
 | "Invalid target" error | Ensure the recipient is a valid phone number (with country code) or email address |
 | Group messages ignored | Check `group_policy` and `group_allow_from`; verify `require_mention` settings |
-| BlueBubbles: webhook not received | Verify `webhook_url` is reachable from the BlueBubbles host; check the Aleph gateway HTTP port |
+| BlueBubbles: webhook not received | Make sure the Aleph-side `webhook_host`/`webhook_port` is reachable and that the BlueBubbles server points at the same address; check `webhook_path` and the password |

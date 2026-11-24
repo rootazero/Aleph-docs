@@ -264,7 +264,7 @@ pub struct WhisperTranscriber {
 
 ### 多模态附件架构
 
-26.7.x：`MediaAttachment` 体系带 `encoding` 字段（`base64` / `utf8`）。`image_read` 工具是 `file_read` 的图片特例。
+当前 `MediaInput`（`src/media/types.rs`）用带标签的枚举区分文件路径、带显式媒体类型的 Base64 数据与远程 URL，而不是统一的 encoding 字段。图片读取通过 `image_read` 暴露。
 
 ### 视觉
 

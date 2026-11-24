@@ -177,8 +177,10 @@ fn generate_code() -> String {
 `[routing] pairing_code_expiry_secs` 控制过期（默认 **24 h**，`0` = 永不
 过期）。代码在过期后自动被拒；清理周期定期从数据库中删除过期请求。
 
-待处理配对请求数受 `MAX_PENDING_REQUESTS = 10` 限制 —— 超过则新请求被拒
-并返回 `TooManyPending`。
+配对库没有待处理请求数上限：同一用户重复申请会复用尚未过期的旧码，只有旧码
+过期后才会换发新码（`src/gateway/pairing_store.rs`）。防止机器人互答风暴的是
+另一个模块 —— 配对循环守卫（`src/gateway/pair_loop_guard.rs`），它按滑动窗口
+统计每个配对的事件数并施加冷却，而不是限制待处理码的数量。
 
 ### RPC 管理
 

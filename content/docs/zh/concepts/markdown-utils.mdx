@@ -42,7 +42,7 @@ API 表：
 - **闭口围栏长于开口**：`````js` ... ````...` ` ` ` ` ` ` 等多 1 个字符合法；`equals` 不算数。
 - **围栏内的反引号**：` 字符串里的 \` 字符**不会**开新围栏；只有行首 0–3 空格 + 围栏标记才算。
 - **缩进匹配**：闭口围栏的缩进必须**不超过**开口的缩进，超过的视为无效闭口。
-- **半字符拒绝**：`push_needs_space` 之外的半个多字节字符在 CJK 路径上不会插空格（与 `utils/text_format::truncate_text` 共用同一套 `char_indices` 截断）。
+- **不切半个多字节字符**：围栏解析按整行扫描，截断时由 `utils/text_format::truncate_text` 用 `char_indices` 取字符边界，不会把一个多字节字符从中间切开。
 - **空字符串与空 fence**：返回 `[]`，不抛错。
 
 ### 流式边界的实用提示
@@ -176,10 +176,16 @@ pub async fn atomic_write_file(path: &Path, content: &str) -> Result<(), AlephEr
 
 ```rust
 #[must_use]
-pub fn is_pid_alive(pid: u32) -> bool;
+pub fn is_process_alive(pid: i32) -> bool;
+#[must_use]
+pub fn process_start_time(pid: i32) -> Option<u64>;
+#[must_use]
+pub fn process_matches(pid: i32, expected_start: Option<u64>) -> bool;
 ```
 
-POSIX `kill(pid, 0)` 实现（Windows 用 `OpenProcess`）。Instance-lock 守护用：`acquire_instance_lock` 拿到锁后写入自己的 pid 到 `aleph.lock` sidecar，`release_instance_lock` 时清；其他进程读 sidecar 看到「锁持有者 pid 是 X」就调 `is_pid_alive(X)` 判 X 是否还在（崩溃进程 OS 自动释放 flock，sidecar 的 pid 仍在但 `kill 0` 返 ESRCH），从而区分「真的锁持有中」与「stale lock file」。
+Unix 用 `kill(pid, 0)` 实现（Windows 用 `sysinfo` 走 Win32 进程 API），`EPERM` 视为「进程还在、只是不属于我们」。`process_start_time` 给出进程的秒级启动时间，`process_matches` 用它防 PID 复用：PID 相同但启动时间对不上，就是另一个进程。
+
+Instance-lock 守护用这套接口：`try_acquire` 拿到 `fs2` 独占锁后，把自己的 PID（及启动时间）写进**不加锁**的 sidecar `aleph.lock.pid`（锁文件是 `aleph.lock`）；sidecar 单独放是因为 Windows 的 `LockFileEx` 会让其他句柄连读锁文件都读不到。竞争者从 sidecar 读出持有者 PID，用 `process_matches` 判断它是活的、还是 PID 已被复用，从而区分「真的锁持有中」与「stale 持有者记录」。`try_acquire` 返回 `AcquireOutcome`：`Acquired` / `HeldByLive` / `HeldByOrphaned` / `HeldByUnknown` 四种可能，没有「锁文件过期、删掉它」这一档。锁本身由 OS 在进程退出时释放（正常退出、panic、SIGKILL 都一样），sidecar 则在 `Drop` 时删除，强退路径由 `remove_held_holder_records_before_exit` 兜底。
 
 ---
 
@@ -227,8 +233,8 @@ pub fn is_path_within(base: &Path, target: &Path) -> bool;
 - `src/utils/sqlite_open.rs` — `open_sqlite_safe` / `open_sqlite_readonly`
 - `src/utils/atomic_io.rs` — `write_atomic` + `with_file_lock`（fs2 exclusive lock）
 - `src/utils/atomic_write.rs` — `atomic_write_file`（async 版，含权限保留）
-- `src/utils/process_alive.rs` — `is_pid_alive` + 实例锁
-- `src/utils/instance_lock.rs` — `acquire_instance_lock` / `release_instance_lock` / 死锁 stale 检测
+- `src/utils/process_alive.rs` — `is_process_alive` / `process_start_time` / `process_matches`（进程活性的唯一来源）
+- `src/utils/instance_lock.rs` — `try_acquire` / `AcquireOutcome` / `is_lock_held` / `diagnose_holder` / `remove_holder_record_if_lock_free` / `remove_held_holder_records_before_exit`
 - `src/utils/no_window.rs` — `no_window`（Windows CREATE_NO_WINDOW / Unix setsid）
 - `src/utils/path_within.rs` — `is_path_within`（白名单、纯字面量）
 - `src/utils/vault_io.rs` — `VaultIo::new` / `read` / `write`（atomic + locked）

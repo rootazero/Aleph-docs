@@ -152,12 +152,10 @@ Aleph 需要**自动化**权限通过 AppleScript 控制 Messages.app：
 ### Local 传输
 
 ```toml
-[[channels]]
-id = "imessage-local"
-channel_type = "imessage"
+[channels.imessage-local]
+type = "imessage"
 enabled = true
 
-[channels.config]
 # Messages 数据库路径（默认：~/Library/Messages/chat.db）
 db_path = "~/Library/Messages/chat.db"
 
@@ -195,29 +193,40 @@ inbound_debounce_ms = 500
 ### BlueBubbles 传输
 
 ```toml
-[[channels]]
-id = "imessage-bb"
-channel_type = "imessage.bluebubbles"
+[channels.imessage-bb]
+type = "imessage"
+transport = "bluebubbles"
 enabled = true
-
-[channels.config]
-# BlueBubbles 服务器 URL（HTTPS）
-server_url = "https://bluebubbles.local:1234"
-
-# BlueBubbles 账户密码
-password = "${BLUEBUBBLES_PASSWORD}"
-
-# 可选 webhook URL（在 BlueBubbles 服务器侧设置）
-webhook_url = "https://aleph.example.com/webhooks/imessage"
-
-# 回退轮询循环的间隔（毫秒）
-poll_interval_ms = 1000
 
 # 与 local 传输相同的 DM / 群组 / 白名单策略
 dm_policy = "pairing"
 group_policy = "open"
 allow_from = ["+15551234567"]
+
+[channels.imessage-bb.bluebubbles]
+# BlueBubbles 服务器 URL（HTTPS）
+server_url = "https://bluebubbles.local:1234"
+
+# BlueBubbles 账户密码
+password = "your-bluebubbles-password"
+
+# Aleph 侧入站 webhook 监听地址与路径（BlueBubbles 服务器侧要指向它）
+webhook_host = "0.0.0.0"
+webhook_port = 8645
+webhook_path = "/bluebubbles-webhook"
+
+# catch-up 补偿轮询间隔（秒，默认：30；实时推送由 webhook 驱动）
+poll_interval_secs = 30
+
+# 是否为入站消息发送已读回执（默认：true）
+send_read_receipts = true
 ```
+
+<Callout type="info">
+`type` 只接受平台名：`imessage`。传输方式由 `transport` 决定（`local` 或 `bluebubbles`）；若存在 `[channels.<id>.bluebubbles]` 子块而 `transport` 未设置，Aleph 会在启动时自动切到 `bluebubbles`（`IMessageConfig::effective_transport`）。
+
+频道凭据保险库的键是 `channel:<实例 ID>:<字段名>`，但它只覆盖**顶层**的凭据字段（`bot_token`、`password` 等）。BlueBubbles 的密码嵌在 `[channels.<id>.bluebubbles]` 里，因此仍需写在配置文件中；用 `channel.create` 冷创建带嵌套密码的频道会被拒绝，报 `Channel contains a credential this vault layout cannot store`。
+</Callout>
 
 ## DM 与群组策略
 
@@ -259,7 +268,7 @@ allow_from = ["+15551234567"]
 
 ### BlueBubbles 传输（`BlueBubblesChannel`）
 
-`BlueBubblesChannel` 在 BlueBubbles 服务器上注册 webhook 接收推送，并以 `poll_interval_ms` 的轮询循环作为 catch-up 回退。共享的 `OffsetTracker` 让两条传输都能在重启后从最后持久化的 GUID/ROWID 恢复，而不是直接跳到最新消息。
+`BlueBubblesChannel` 在 BlueBubbles 服务器上注册 webhook 接收推送（回调地址由 `webhook_host`/`webhook_port`/`webhook_path` 拼出），并以 `poll_interval_secs` 的秒级轮询循环作为 catch-up 回退。共享的 `OffsetTracker` 让两条传输都能在重启后从最后持久化的 GUID/ROWID 恢复，而不是直接跳到最新消息。
 
 ### Apple 时间戳
 
@@ -398,4 +407,4 @@ Aleph 从 Messages 数据库中的三个主要表读取：
 | 响应时间慢 | 减少 `poll_interval_ms`（例如到 500）；注意这会增加 SQLite 读取频率 |
 | "Invalid target" 错误 | 确保收件人是有效的电话号码（带国家代码）或电子邮件地址 |
 | 群组消息被忽略 | 检查 `group_policy` 和 `group_allow_from`；验证 `require_mention` 设置 |
-| BlueBubbles：收不到 webhook | 验证 `webhook_url` 从 BlueBubbles 宿主可达；检查 Aleph Gateway HTTP 端口 |
+| BlueBubbles：收不到 webhook | 确认 Aleph 侧 `webhook_host`/`webhook_port` 可达，并在 BlueBubbles 服务器侧指向同一地址；检查 `webhook_path` 与密码 |

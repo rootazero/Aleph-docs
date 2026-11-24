@@ -64,11 +64,11 @@ pub trait SearchProvider: Send + Sync {
     fn name(&self) -> &str;
     fn is_available(&self) -> bool;
 
-    async fn get_quota(&self) -> Result<QuotaInfo> {
-        Ok(QuotaInfo::unlimited())
-    }
+    fn capabilities(&self, options: &SearchOptions) -> SearchCapabilities;
 }
 ```
+
+trait 现在住在 `crates/aleph-slot-api/src/search.rs`（P0 模块化后 `src/search/provider.rs` 只是同义 re-export）。没有配额 API：配额耗尽表现为 `AlephError::RateLimitError`，由错误分类落成 `SearchErrorKind::Quota`。`SearchCapabilities` 有 `domain_filter` / `recency` / `full_content` 三个位，默认全 false（能力声明按请求推导，不是恒真）。
 
 ---
 
@@ -81,8 +81,9 @@ pub struct SearchRegistry {
     providers: HashMap<String, Arc<dyn SearchProvider>>,
     default_provider: String,
     fallback_providers: Vec<String>,
-    test_cache: Arc<Mutex<HashMap<String, (ProviderTestResult, Instant)>>>,
+    config_defaults: Option<SearchOptions>,
     web_fetch_fallback: Option<Arc<WebFetchSerpFallback>>,
+    health: ProviderHealth,
 }
 
 impl SearchRegistry {
@@ -99,7 +100,7 @@ impl SearchRegistry {
 }
 ```
 
-**错误分类：** `classify_search_error()` 把 `AlephError` 折叠成 `auth` / `rate-limit` / `timeout` / `network` / `cancelled` / `config` / `provider` / `other`，便于按 kind grep 日志。
+**错误分类：** `SearchErrorKind::of` 把 `AlephError` 折叠成八种 kind —— `transient` / `quota` / `auth` / `config` / `invalid-response` / `request-rejected` / `cancelled` / `other`，标签由 `SearchErrorKind::as_str` 给出，便于按 kind grep 日志。kind 是从错误变体**推导**出来的，不是随错误携带的字段。
 
 **聚合错误：** 所有提供商都失败时（包括最后的 WebFetch 回退），最终错误串以 `All search providers failed:` 为前缀并附上每一步的 kind + 错误信息——审计员能看出最后兜底是否真的被尝试。
 
@@ -121,24 +122,22 @@ impl SearchRegistry {
 | **DuckDuckGo** | ✅ | — | HTML 抓取，无密钥 |
 | **Firecrawl** | — | ✅ | 搜索 + 全量抓取；与 fetch 共享配置 |
 
-`SearchProviderType` 枚举是单源；`from_config` 用 `ProviderFactoryRegistry` 实例化已配置的 backend，未知 / 缺凭据会被跳过并 WARN。
+provider 的身份是 `provider_type` 字符串（如 `tavily` / `searxng`），代码里没有 provider 类型枚举；支持列表的单源是 `ProviderFactoryRegistry::known_provider_types()`。`from_config` 用 `ProviderFactoryRegistry` 实例化已配置的 backend，未知 / 缺凭据会被跳过并 WARN。
 
 ---
 
 ## 提供商测试
 
-测试配置而不保存凭据：
+测试配置而不保存凭据：`search.test` RPC 从 vault 解析 api_key，用 `ProviderFactoryRegistry` 构造 provider，跑一次只取一条结果的 live search。
 
 ```rust
-pub struct SearchProviderTestConfig {
-    pub provider_type: SearchProviderType,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,      // SearXNG 必需
-    pub engine_id: Option<String>,     // Google CSE 必需
+pub struct SearchTestResult {
+    pub success: bool,
+    pub message: String,
 }
 ```
 
-返回带有延迟、错误类型和成功状态的 `ProviderTestResult`；测试结果缓存 5 分钟，失败结果不缓存。
+成功时把该 backend 的 `verified` 置为 true 并落盘；失败只回一句 message。**结果不缓存** —— 每次点按都实打实探一次。
 
 ---
 
@@ -164,23 +163,26 @@ for result in results {
 
 ## 安全属性
 
-- **错误聚合含 kind 标签** — `classify_search_error` 把 `AlephError` 折叠成稳定的 kind 字符串，便于按 kind grep 日志（不含用户查询文本）
+- **错误聚合含 kind 标签** — `SearchErrorKind::of` 把 `AlephError` 折叠成稳定的 kind 字符串，便于按 kind grep 日志（不含用户查询文本）
 - **安全截断** — `latency_ms = elapsed.min(u32::MAX as u128) as u32` 防止延迟饱和到 `u32`
 - **无锁中毒** — 所有 `lock()` 调用都走 `unwrap_or_else(|e| e.into_inner())`
-- **max_results 上限** — `validated_max_results()` 把 `max_results` 夹到 `[1, 50]`
+- **max_results 上限** — `validated_max_results()` 把 `max_results` 夹到 `[1, MAX_SEARCH_RESULTS]`（100）
 - **timeout 验证** — `validated_timeout()` 把 `timeout_seconds` 钳到 ≥ 1
-- **测试缓存只缓存成功** — 失败结果不缓存（下次调用会重试）
+- **测试不缓存** — `search.test` 每次都实探一次，不缓存结果
 
 ---
 
 ## 代码位置
 
 - `src/search/mod.rs` — 模块入口点和重新导出
-- `src/search/provider.rs` — `SearchProvider` trait
+- `src/search/provider.rs` — `SearchProvider` trait 的兼容 re-export（定义在 `crates/aleph-slot-api/src/search.rs`）
+- `src/search/options.rs` — `SearchOptions` / `Recency` 的兼容 re-export
+- `src/search/error.rs` — `SearchErrorKind`（错误 kind 分类）
+- `src/search/factory.rs` — `ProviderFactory` / `ProviderFactoryRegistry`
 - `src/search/registry.rs` — 具有故障转移的 `SearchRegistry`
-- `src/search/options.rs` — `SearchOptions` 和 `QuotaInfo`
 - `src/search/result.rs` — `SearchResult` 类型
 - `src/search/providers/` — 提供商实现
+- `src/gateway/handlers/search_config/test.rs` — `search.test` handler
 
 ## 另请参阅
 

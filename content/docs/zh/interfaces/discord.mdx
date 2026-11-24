@@ -24,7 +24,7 @@ Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架�
 | 输入中指示器 | 支持 |
 | 嵌入 | 支持（出站） |
 | 斜杠命令 | 可配置 |
-| 交互式审批按钮 | 支持（通过 `DiscordPanel` / `TelegramChannelApprovalCapability` 流程） |
+| 交互式审批按钮 | 支持（Discord 在 `src/gateway/interfaces/discord/mod.rs` 里渲染 inline keyboard；Telegram 走 `TelegramChannelApprovalCapability`） |
 | 流式协议 | `EditBased` |
 | 最大消息长度 | 2,000 字符 |
 | 最大附件大小 | 25 MB（Nitro 为 100 MB） |
@@ -85,32 +85,21 @@ Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架�
 ### 最小配置
 
 ```toml
-[[channels]]
-id = "discord"
-channel_type = "discord"
+[channels.discord]
+type = "discord"
 enabled = true
-
-[channels.config]
 bot_token = "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.ABcDeF.1234567890abcdefghijklmnop"
 ```
 
 ### 完整配置参考
 
 ```toml
-[[channels]]
-id = "discord"
-channel_type = "discord"
+[channels.discord]
+type = "discord"
 enabled = true
 
-[channels.config]
-# 来自 Discord Developer Portal 的机器人令牌（必需）；支持 ${ENV_VAR} 扩展
-bot_token = "${DISCORD_BOT_TOKEN}"
-
-# 用于斜杠命令注册的应用 ID（可选）
-application_id = 123456789012345678
-
-# 入站消息的 DM 策略：open | allowlist | pairing | disabled
-dm_policy = "open"
+# 来自 Discord Developer Portal 的机器人令牌（必需）
+bot_token = "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.ABcDeF.1234567890abcdefghijklmnop"
 
 # 公会（服务器）白名单——空表示允许所有公会
 allowed_guilds = [123456789012345678]
@@ -118,11 +107,8 @@ allowed_guilds = [123456789012345678]
 # 公会内频道白名单——空表示允许所有频道
 allowed_channels = [987654321098765432]
 
-# 群组消息策略：open | allowlist | disabled
-group_policy = "open"
-
-# DM 用户 id 白名单
-allow_from = [123456789012345678]
+# 是否处理直接消息（默认：true）
+dm_allowed = true
 
 # 文本命令前缀（默认："!"）
 command_prefix = "!"
@@ -130,30 +116,28 @@ command_prefix = "!"
 # 仅在公会中被提及时响应（默认：true）
 respond_to_mentions = true
 
-# 注册并使用斜杠命令（默认：true）
+# 是否处理斜杠命令（默认：true）
 slash_commands_enabled = true
 
 # 处理时发送输入中指示器（默认：true）
 send_typing = true
 
 # Gateway intents 配置
-[channels.config.intents]
+[channels.discord.intents]
 guild_messages = true      # 接收公会消息（默认：true）
 direct_messages = true     # 接收 DM（默认：true）
 message_content = true     # 读取消息内容（默认：true，特权）
 guild_members = false      # 跟踪公会成员事件（默认：false，特权）
+guild_threads = false      # 跟踪线程创建事件（默认：false）
 ```
 
 <Callout type="warn">
-Discord 机器人令牌是长 Base64 编码字符串（通常 59+ 字符）。Aleph 在配置加载时验证令牌长度。
+Discord 机器人令牌是长 Base64 编码字符串（通常 59+ 字符）。Aleph 在配置加载时验证令牌长度，低于 50 字符的令牌会被拒绝。
 </Callout>
 
-### 环境变量模式
-
-```bash
-export DISCORD_BOT_TOKEN="MTIzNDU2..."
-export DISCORD_APPLICATION_ID="123456789012345678"  # 可选
-```
+<Callout type="info">
+频道配置段没有环境变量插值：写进 `config.toml` 的 `bot_token` 会在启动时被搬进凭据保险库（键 `channel:discord:bot_token`），随后从配置文件里抹掉；改完配置需要重启 Gateway。频道段也只认 `type` 与上表里的键——多余的键会被静默忽略，不会报错。
+</Callout>
 
 ## 适配器结构
 
@@ -226,7 +210,7 @@ Aleph 包含内置的权限审计系统（`permissions.rs`），检查机器人�
 
 ### 直接消息
 
-当 `dm_policy` 允许时处理 DM。不需要前缀或提及——DM 文本在路由的访问检查通过后转发给 Agent。
+当 `dm_allowed` 为 `true`（默认）时处理 DM。不需要前缀或提及——DM 文本在路由的访问检查通过后转发给 Agent。`dm_allowed` 为 `false` 时，Discord 侧的 DM 与斜杠命令都会在适配器里被直接丢弃。
 
 ### 对话 ID
 
@@ -285,14 +269,10 @@ let msg = OutboundMessage::text("channel_id", "Here is the file")
 
 ## 斜杠命令
 
-当 `slash_commands_enabled` 为 `true` 且 `application_id` 已设置时，Aleph 可以向 Discord 注册斜杠命令。这些在用户输入 `/` 时出现在命令选择器中：
-
-- `/ask` — 向 Aleph 发送消息
-- `/status` — 检查 Aleph 的状态
-- `/help` — 显示可用命令
+当 `slash_commands_enabled` 为 `true`（默认）时，适配器会接收 Discord 送达的斜杠命令交互，并把它转写成一条普通入站消息交给路由：命令名变成文本前缀，选项按 `名称=值` 逐个拼接（`/status mode=full`），随后与普通消息走同一套会话键与权限检查。
 
 <Callout type="info">
-斜杠命令注册需要 Discord 的斜杠命令 OAuth2 范围（Developer Portal 里名为 applications.commands）。全局命令可能需要长达一个小时才能传播；公会特定命令是即时的。
+Aleph 不会向 Discord 注册斜杠命令——这个进程里没有任何注册调用。想要 `/commands` 出现在 Discord 的命令选择器里，需要你自己在 Developer Portal 或用 Discord API 另行注册（范围名 `applications.commands`）。`slash_commands_enabled` 只决定「已送达的命令是否被派发」。全局命令的传播可能长达一小时，公会特定命令则是即时的。
 </Callout>
 
 ## 交互式审批按钮

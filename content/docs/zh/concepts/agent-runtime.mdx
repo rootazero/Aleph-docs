@@ -59,16 +59,16 @@ FlowOutcome → Gateway 渲染响应
 |--------------------------------|-------------------------------------|-----------------------------|
 | 模型说 `Done`                  | `Completed`                         | 正常                        |
 | `cancel` token 触发            | `Cancelled`                         | 协作式中止                  |
-| `max_iterations` 超出          | `MaxIterations`                     | `hit_limit = true`          |
-| `consecutive_failure_cap`      | `ConsecutiveFailures`               | `hit_limit = true`          |
+| `max_iterations` 超出          | `HitMaxIterations`                  | `hit_limit = true`          |
+| `consecutive_failure_cap`      | `ConsecutiveFailureCap`             | `hit_limit = true`          |
 | Think 阶段 `turn_timeout`      | `TurnTimeout { phase: "Think" }`    | `hit_limit = true`          |
 | `StallTracker::is_stalled`     | `StallTimeout { elapsed_ms }`       | `hit_limit = true`          |
 | 验证器链 `Veto`                | `VerifierVeto { ... }`              | 额外 Continue 一次          |
 | `SplitSession` 成功            | `Completed`                         | 重新绑定到子会话            |
 
 `hit_limit` 在其精度伙伴 `terminate_reason` 之外独立设置，使只看 boolean 的
-旧调用方依旧工作。任何 cap 触发后，会跑一段 `grace_turn`
-（`fire_boundary_grace_turn`，`GRACE_TIMEOUT_BUDGET = 30s`），让模型在退出
+旧调用方依旧工作。任何 cap 触发后，会跑一段 `fire_boundary_grace_turn`
+（budget `GRACE_TIMEOUT_BUDGET = 30s`），让模型在退出
 前产出干净的终止摘要；grace turn 用独立 budget 跑 fire-and-forget，挂起的
 provider 永远无法阻塞 shutdown。
 
@@ -114,7 +114,8 @@ pub enum TurnState { Continue, Done }
 顶层 agent 通过 `SubagentTool`（`src/agents/subagent_tool/`）生成子代理。
 子代理执行就是 gateway chat 路径用的同一个 `AgentHarness`——只有 wiring 不同：
 
-- `SubagentTool::spawn` 调到 `agent_runtime::execute_via_harness`，后者
+- `SubagentTool::spawn` 调到 `AgentRuntime::execute_via_harness`
+  （`src/agents/runtime.rs`），后者
   为每个 child 用从 parent `chain.child()` 下推得来的 `HarnessDeps` 构造
   一个 `AgentHarness`。
 - 子会话 key 是父 `SessionKey::Main` 套上

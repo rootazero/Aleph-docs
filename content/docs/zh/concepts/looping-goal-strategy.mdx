@@ -1,6 +1,6 @@
 ---
 title: "Loop / Goal / Strategy"
-description: "三个独立子系统：loop（持续循环）、goal（自主目标追求）、strategy（团队/裸循环策略）。共享 TreeBudget 单轨约束、跨会话 kill switch、四 composite key 命名空间，以及 9-action loop 工具 / 7-action goal 工具 / 3-action strategy 工具。"
+description: "三个独立子系统：loop（持续循环）、goal（自主目标追求）、strategy（团队/裸循环策略）。共享 TreeBudget 单轨约束、跨会话 kill switch、四 composite key 命名空间，以及 8-action loop 工具 / 7-action goal 工具 / 2-action strategy 工具。"
 ---
 
 > **当前状态（26.7.22+）。** 在 26.7.21 之前 Aleph 只有 cron（持久、跨会话、有自己的 session）和 heartbeat（短间隔心跳）。26.7.22+ 引入三个**独立子系统**，覆盖"现在这个会话里想持续做某事 / 想自己追求目标 / 团队需要按 plan 推进"的中间地带。三者**不互斥**——一个会话里可以同时有 loop + goal + 被某 strategy 引用。
@@ -56,7 +56,7 @@ pub struct LoopState {
 - **`stable_summary()`**：进 SYSTEM PROMPT 的部分——**不含倒计时**（prompt cache 按前缀键，每字节变动都让后续 history 重新写入 1.25× 而非 0.1× 读取）
 - **`live_status(now_ms)`**：倒计时搬到 transient trailing user message（cache 断点之后），字节变化只花自己
 
-### `loop` 工具（9 动作）
+### `loop` 工具（8 动作）
 
 ```rust
 loop(action: "start",     prompt, cadence, max_iterations?, deadline_ms?, token_budget?)
@@ -66,8 +66,7 @@ loop(action: "resume",    session_id)
 loop(action: "status",    session_id?, now_ms?)
 loop(action: "update",    session_id, prompt?, cadence?, max_iterations?, deadline_ms?, token_budget?)
 loop(action: "list",      session_id?)           // 列出当前会话 / 全部 loops
-loop(action: "claim_tick", session_id)          // 内部：续接钩子调用
-loop(action: "confirm_fire", session_id)        // 内部：tick 真触发后清除 pending
+loop(action: "stop_all", reason?)
 ```
 
 ### `LoopRegistry`（进程内）
@@ -139,7 +138,7 @@ pub enum GateOutcome {
 goal 子系统的停止判定**永远不能只靠模型自己说"我做完了"**：
 
 - **`GateOutcome` 类型状态**：`maker`（模型自报）+ `checker`（客观校验）两者必须都成功才 `Completed`
-- **`stop_hooks` 全局钩子**：模型的自报完成要走 `process_global_stop_hooks`，按既定目标逐个客观校验
+- **`stop_hooks` 全局钩子**：模型的自报完成要走 `execute_stop_hooks_arc`，按既定目标逐个客观校验
 - **失败关闭**（§goal 强化 ④）：任何 stop_hook 自身失败 → 默认 abort 而不是 continue（`goal_continuation::gate_veto` 把 `Error` 视为 veto，verifier 自身故障 = 不能宣称完成 = 不能验证通过 = 阻断 `complete`）
 - **跨会话 kill switch**：in-place `reconfiguration` 自动失效 welded strategy（`clear_goal_welded_strategy` 在 `commit_gate_pass` 成功后清，**不是** `uninstall` 路径）
 
@@ -209,11 +208,6 @@ pub struct Strategy {
     pub goal_id: Option<String>,    // 绑定到某个 goal；goal 变更自动 invalidation
 }
 
-pub enum StrategyKey {
-    NakedLoop { session_key: SessionKey },  // 裸循环 plan
-    TeamChat { team_id: String },           // 团队 plan
-    GoalBound { goal_id: String },          // goal-绑定
-}
 ```
 
 ### Composite key 命名空间
@@ -229,23 +223,9 @@ pub enum StrategyKey {
 
 ### Planner + 原子 fire-once
 
-```rust
-// src/strategy/planner.rs
-pub struct PlannerNode { /* tool-free fail-soft */ }
+`src/strategy/planner.rs` 的 `plan_strategy` 是无工具、失败软降级的一次性 LLM 调用。它接收 `PlannerContext`（工具描述、环境摘要、课程），构造 `RequestPayload`；provider/解析失败或 guardrails 为空时不返回策略。调用包含 provider I/O，不是纯函数。键由命名空间辅助函数生成字符串，不是键枚举。
 
-impl PlannerNode {
-    pub async fn plan_strategy(&self, ctx: PlannerContext) -> Option<Strategy> { /* ... */ }
-}
-
-// 团队聊天中：planner 必须 fire-once（防止 race）
-pub async fn try_fire_once(&self, key: &StrategyKey) -> Result<bool> {
-    self.store.put_if_absent(key, strategy).await    // → 仅一个 planner 触发成功
-}
-```
-
-Planner 是**tool-free 一次性 LLM 调用**（`ProviderRequest::new` 无 tool，含 curated `tool_descriptions` / `env_summary` / `lessons` 三块环境）。**自门控**：`strategy.guardrails` 全空 → `is_empty()` → planner 主动返回 None（不存，不污染 prompt 缓存）；同目标重 plan → `goal_id` 命中 → 跳过（已 plan 过）。输出**纯函数 / IO-free**——失败 fail-soft 永远不报错。
-
-`put_if_absent` 是**原子 fire-once** 原语——两个并发 first message 各自跑 planner，但只有一个真插入；`put` 的 last-write-wins 会让两人都付钱（+ 存 plan）。
+`src/strategy/store.rs` 的 `StrategyStore` 通过同步 `put_if_absent` 原子地保留同键的一条策略；它保护插入，不避免并发 planner 调用费用。
 
 ### `[strategy]` 配置
 
@@ -256,28 +236,18 @@ plan_naked_loop = true         # 默认 on：裸 loop 自动 plan
 objective_change_invalidate = true   # 默认 on：goal 变化时失效 welded strategy
 ```
 
-### `strategy` 工具（3 动作）
+### `strategy` 工具（2 动作）
 
-```rust
-strategy(action: "revise", key, objective?, approach?, phases?, guardrails?, success_criteria?)  // 改写现有 strategy
-strategy(action: "show", key)                // 渲染当前 strategy
-strategy(action: "dumb_write", key, content) // 旁路校验的写入（仅供受信任调用方）
+```text
+strategy(action: "revise", reason, new_strategy)
+strategy(action: "show")
 ```
 
-`revise` 走 `put`（覆写）；`show` 走 `render_strategy_summary`（cache-friendly stable 字节）；`dumb_write` 是**受信任调用方**旁路——R7 不让 LLM 自己绕过 planner 自门控，dumb_write 写在文档里只给受信任方（系统 / 治理层）。
+`StrategyArgs` 不接收调用方提供的键。工具解析当前任务策略；`revise` 要求非空原因及含具体 guardrails 的完整替代策略，没有旁路校验动作。
 
 ## 团队 run mode pin
 
-队长（team leader）在团队 run 启动时把 `usage_mode`（chat / work / code）**盖戳**（`run_mode::stamp`）并向子成员继承——团队 run 现在**拒绝**子成员发起 `session_set_mode` 工具调用：
-
-```rust
-// src/teams/runner.rs
-if turn.is_subagent() {
-    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
-    ensure!(request.action != Some("session_set_mode"),
-        "subagents inherit parent mode; cannot switch mid-team-run");
-}
-```
+`src/teams/run_mode.rs` 的 `stamp` 通过请求元数据将团队运行固定为 `SessionMode::Work` 和 `BusyInputMode::Queue`。群聊分发与任务派发两个生产入口共用此辅助函数。团队会话不能通过 `session_set_mode` 切换模式。
 
 `task_review` 审批可要求 `grounding` —— 接受元数据（acceptance metadata 通道，零迁移）携带 `[grounding]` 注释的证据（`exit_code` / `numeric` / `line_count`，**与 loop_graph anchor truth 闭集同词表**）。无 grounding 证据的 approve → bounce（`grounding_required`），reject 永不要求锚（拒绝天然保守）。
 
@@ -293,18 +263,18 @@ if turn.is_subagent() {
 - `src/looping/mod.rs` — `LoopRegistry`（in-process `Arc<Mutex<HashMap>>`）+ 进程全局 `init_global` / `global`
 - `src/looping/types.rs` — `Cadence` / `LoopStatus` / `LoopState` + `human_summary` / `stable_summary` / `live_status` 三态渲染
 - `src/looping/pursuit.rs` — `exhausted` / `should_continue` / `tick_delay_ms` / `tick_prompt` / `cap_reached_note` / `deadline_reached_note` / `budget_reached_note` / `stop_reason_note`（纯函数，R7 智能在 prompt）
-- `src/builtin_tools/loop_manage.rs` — 9 动作 `loop` 工具 + `LoopManageTool`
+- `src/builtin_tools/loop_manage.rs` — 8 动作 `loop` 工具 + `LoopManageTool`
 - `src/goal/mod.rs` — `init_global` / `global` 进程全局
 - `src/goal/types.rs` — `GoalStatus` / `PursuitMode` / `GateOutcome` / `Goal`（含 13 个字段：`id` / `session_id` / `objective` / `success_criteria` / `status` / `token_budget` / `continuations_used` / `deadline_ms` / `baseline_captured` / `pending_continuation_ms` / `waiting_until_ms` / `waiting_on_task` / `waiting_reason` / `budget_members` / `completed_at_ms` / `note` / `gate_outcome` / `gate_command` / `lessons` / `created_at_ms` / `updated_at_ms` / `permanent`）+ `BudgetMember` + `MAX_LESSONS = 5` + `MAX_BUDGET_MEMBERS = 32`
 - `src/goal/store.rs` — `GoalStore` + `ContinuationDecision` / `RearmDecision` 枚举 + `commit_gate_pass` / `claim_after_gate_veto` / `block_if_active` / `pause_if_active` / `pause_all_active` / `supersede_wait_timer` / `clear_wait_barrier` / `try_claim_settle_notify` 8 个原子方法
 - `src/goal/pursuit.rs` — `should_continue` / `continuation_prompt` / `exhausted_while_active` / `stop_reason_note` / `awaiting_gate` / `gateless_terminal_complete` / `reopen_after_gate_failure` / `gate_failure_prompt` / `wait_parked` / `wait_resume_prompt` / `confirm_complete`（hermes 风格纯函数）
 - `src/builtin_tools/goal.rs` — 7 动作 `goal` 工具 + `GoalTool`，含 `register_budget_member` (delegation 注册)
 - `src/strategy/mod.rs` — 4 个 key 构造函数 + `init_global` / `global`
-- `src/strategy/types.rs` — `Strategy` / `StrategyKey` / `is_empty` 自门控
+- `src/strategy/types.rs` — `Strategy` / `is_empty` 自门控
 - `src/strategy/store.rs` — `StrategyStore` (SQLite, PK = `key`) + `put` / `put_if_absent`（原子 fire-once）/ `get` / `delete` / `list_all`
-- `src/strategy/planner.rs` — `PlannerNode` (tool-free 一次性 LLM) + `plan_strategy` + `try_fire_once`（atomic 防火 race）+ `env_summary` + `PLANNER_SYSTEM` prompt
+- `src/strategy/planner.rs` — `PlannerContext` / `plan_strategy` / `env_summary`
 - `src/strategy/render.rs` — `render_strategy_summary` / `render_guardrails_only` / `render_workflow_global_frame`（纯函数，cache-friendly 字节确定，**不**含 now_ms / HashMap 迭代）
-- `src/builtin_tools/strategy_manage.rs` — 3 动作 `strategy` 工具
+- `src/builtin_tools/strategy_manage.rs` — 2 动作 `strategy` 工具
 - `src/teams/run_mode.rs` — 团队 run 模式盖戳（`run_mode::stamp`）+ subagent mode pin 守卫
 - `src/gateway/execution_engine/goal_continuation.rs` — `post_run` / `arbitrate_gate` / `block_goal_on_failure` / `rearm_goal_after_busy` / `clear_goal_welded_strategy` 五个执行点
 - `src/gateway/goal_budget.rs` — `tree_tokens`（tree budget 聚合）
@@ -312,9 +282,9 @@ if turn.is_subagent() {
 
 ## 26.7.x 补充
 
-### Loop 工具的 9 动作
+### Loop 工具的 8 动作
 
-26.7.x `loop` 工具补完到 9 动作（`start` / `stop` / `pause` / `resume` / `status` / `update` / `list` + 内部 `claim_tick` / `confirm_fire`），最后两个是续接钩子的 atomic 操作。`update` 走 `commit_field_update`（`reschedule = false` 保 live pending，true 清 live）——**不是**裸 `put`（裸 `put` 会与正在 fire 的 tick 抢 `pending` 字段）。
+`loop` 工具暴露八个动作：`start`、`stop`、`pause`、`resume`、`status`、`update`、`list`、`stop_all`。tick 调度使用内部 registry 方法 `try_claim_tick` 与 `confirm_fire`。`update` 通过 `commit_field_update` 保留实时 pending 状态，除非显式要求重排。
 
 ### Goal 工具的 7 动作
 
@@ -344,9 +314,9 @@ settlement-notification 的 stamp 是 `(id, completed_at_ms)`—— `completed_a
 
 ### 见另请参阅
 
-- [Loop 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/loop_manage.rs) — 9 动作实现
+- [Loop 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/loop_manage.rs) — 8 动作实现
 - [Goal 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/goal.rs) — 7 动作 + register_budget_member
-- [Strategy 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/strategy_manage.rs) — 3 动作 + revise / show / dumb_write
+- [Strategy 工具源码](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/strategy_manage.rs) — 2 动作：revise / show
 - [Goal continuation 驱动](https://github.com/rootazero/Aleph/blob/main/src/gateway/execution_engine/goal_continuation.rs) — post_run / gate_veto / clear_goal_welded_strategy
 - [Goal store 源码](https://github.com/rootazero/Aleph/blob/main/src/goal/store.rs) — `try_claim_settle_notify` CAS
 - [Loop registry 源码](https://github.com/rootazero/Aleph/blob/main/src/looping/mod.rs) — `stop_all` 跨会话 kill switch

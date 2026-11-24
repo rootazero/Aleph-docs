@@ -27,7 +27,7 @@ pub struct NodeRegistry { /* … */ }
 impl NodeRegistry {
     pub fn maybe_register_node(/* … */) -> NodeMatch { /* … */ }
     pub fn match_id(/* … */) -> Option<&NodeSession> { /* … */ }
-    pub fn environments_list(/* … */) -> Vec<Environment> { /* … */ }
+    pub fn list_environments(/* … */) -> Vec<Environment> { /* … */ }
 }
 ```
 
@@ -37,7 +37,7 @@ impl NodeRegistry {
 
 `NodeAdmission` is the admission entry point; `enroll_node_device` is the operator pre-enrollment (idempotent); `deregister_node` removes a node from `environments.list` and from `node_invoke` / `node_file` addressing. `DeregisterError` / `DeregisterOutcome` make the "deregistration sticks" semantics explicit.
 
-**Determinism:** `environments_list()` returns a sorted `Environment` vector; node keys run through `normalize_node_key` (Unicode normalization — CJK node names work) before lookup.
+**Determinism:** `list_environments()` returns a sorted `Environment` vector; node keys run through `normalize_node_key` (Unicode normalization — CJK node names work) before lookup.
 
 ### CommandTable
 

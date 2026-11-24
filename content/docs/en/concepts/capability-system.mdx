@@ -127,7 +127,7 @@ Runtime binaries such as `node`, `uv`, `ffmpeg`, and `playwright-cli` use a ledg
 ~/.aleph/runtimes/ledger.json
 ```
 
-`CapabilityLedger` (`src/runtimes/ledger.rs`) is the single persisted source for "can Aleph currently use this runtime executable". It does not download or install anything; probing and bootstrapping (`src/runtimes/ensure.rs`) perform those actions and then update the ledger. Each entry records the capability name, executable path, detected version, last successful probe time, source (`system` or `aleph_managed`), and status (`missing` / `probing` / `bootstrapping` / `ready` / `stale`).
+`CapabilityLedger` (`src/runtimes/ledger.rs`) is the single persisted source for "can Aleph currently use this runtime executable". It does not download or install anything; probing and bootstrapping (`src/runtimes/ensure.rs`) perform those actions and then update the ledger. Each entry records the capability name, executable path, detected version, last successful probe time, source (`system` or `CapabilitySource::AlephManaged`), and status (`missing` / `probing` / `bootstrapping` / `ready` / `stale`).
 
 RPC: `runtimes.list` reads the ledger and runtime specs, `runtimes.refresh` probes known capabilities, and `runtimes.install` accepts a capability name, runs asynchronously, and publishes progress events; the terminal state is persisted in the same `ledger.json` (`src/gateway/handlers/runtimes.rs`). A missing or corrupt ledger is rebuilt rather than trusted.
 

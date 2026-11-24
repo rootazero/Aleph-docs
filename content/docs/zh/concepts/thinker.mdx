@@ -1,209 +1,88 @@
 ---
 title: "思考器（Thinker / Prompt 引擎）"
-description: "Thinker 是 Aleph 的提示词构建引擎：~28 个细粒度 PromptLayer + Priority + 双轨 stable_summary / live_status 缓存调度 + 提示词契约（`reachable_layers` / `scaffold_bytes_ratchet`）。"
+description: "通过可组合层、已解析上下文与稳定/动态缓存分区构建提示词。"
 ---
-
-`thinker` 模块是 Aleph 的提示词构建引擎。它在 SYSTEM prompt 阶段拼装每个 session 的提示词，同时维护运行时记忆（`recall_context`）与 transient tail（`transient_recall`）两条平行的轨道。Round 9 之后用 **~28 个细粒度 PromptLayer** 替代了旧的 6 层心智模型；每个 layer 拥有优先级与简短 contract，由 `prompt_pipeline` 装配。
+`thinker` 模块通过可组合层构建系统提示词。稳定的精选记忆进入系统提示词；自动召回的记忆通过 `HarnessDeps::recall_context` 作为独立的临时尾部消息传递。
 
 ## 设计理念
 
-1. **细粒度层** — ~28 个独立 PromptLayer 各管一件事（`agent_role` / `environment` / `mcp_instructions` / `extra_files` / `guidelines` / `security` / `voice_mode` / `graph_topology` / `curated_memory` / `recall_context` / ...），R10「智能在提示词」要求每层可被独立评审。
-2. **Priority 排序** — 每个 layer 拥有 `priority()` 整数，pipeline 按升序拼装，让 cache-friendly（不变）的内容排在前面、动态（带时间戳 / 计数器）的内容排在后面。
-3. **stable / live 双轨** — SYSTEM prompt 部分（`stable_summary`）是 cache 前缀，**绝不**含倒计时；live 计数（deadline / next-wake）走 transient tail message，让 prompt cache 读写 0.1× / 1.25× 的不对称不被倒计时字节变动触发。
-4. **Provider-specific 渲染** — 同一段内容对 OpenAI / Anthropic / Ollama 的渲染格式不同；`thinker::prompt_pipeline` 拿到 provider 名字后调对应 `RenderStyle`（XML / fenced / inline）拼装。
-5. **契约守卫** — `prompt_contract::reachable_layers` 保证每个 layer 都能在 enabled 状态下出场或带理由进白名单；`scaffold_bytes_ratchet` 只允许减小字节数（任何「向上调整」必须显式 commit 论证）；`aleph-server prompt-size` 报告实时字节数。
-
----
+1. 每个 `PromptLayer` 持有一个职责及排序优先级。
+2. `LayerStability` 区分稳定前缀与动态后缀。
+3. `AssemblyPath` 选择基础或缓存入口。
+4. 各层自行包装输出，XML 辅助函数位于 `src/thinker/xml_util.rs`。
+5. `prompt_contract` 测试守卫可达性、脚手架增长与重复句子。
 
 ## 架构
 
 ```text
-┌─────────────────────────────────────────────┐
-│                  Thinker                     │
-├─────────────────────────────────────────────┤
-│                                             │
-│  Priority 0–800: 静态身份 / 配置 / 知识层   │
-│  Priority 800–1500: 静态 / 缓存友好         │
-│  Priority 1500–1720: 静态 / 缓慢变更         │
-│  Priority 1720: RuntimeContextLayer（动态    │
-│                  —— token / 计数 / 会话名）  │
-│  Priority >1720: transient recall（仅        │
-│                  transient tail）            │
-└─────────────────────────────────────────────┘
+TurnEnvelope + EnvironmentContract
+    → ContextAggregator → ResolvedContext
+    → LayerInput → PromptPipeline
+    → 稳定前缀 + 动态后缀（缓存路径）
+召回记忆 → 独立临时消息
 ```
-
-`PromptPipeline::assemble(provider, input)` 按上述顺序渲染所有 enabled 的 layer，得到一个 `String` 注入 SYSTEM prompt；`transient_recall` 部分另走 `HarnessDeps::recall_context`，不进 SYSTEM。
-
----
 
 ## 核心组件
 
+
+
 ### PromptLayer trait
 
-```rust
-#[async_trait]
-pub trait PromptLayer: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn priority(&self) -> i32;
-    async fn render(&self, input: &ThinkerContext) -> Result<String>;
-    /// 缺省按 contract.rs 推断；当某 layer 不该出现时显式返回 false 走「理由白名单」路径
-    fn is_reachable(&self, input: &ThinkerContext) -> bool { true }
-}
-```
-
-每个 layer 拥有：
-- `priority()`：拼装顺序；同优先级内 stable / 排序确定
-- `render(&ctx)`：纯函数 / IO-free（不许读 LLM 调用）；失败回退为「该层不出现」并记 warn
-- `is_reachable(&ctx)`：缺省 `true`；配置禁用 / 不在白名单的 layer 返回 `false` 并附理由进 `prompt_contract::reachable_layers` 的白名单
-
-### 内置 layer 清单（Round 9 之后，~28 个）
-
-按 priority 升序：
-
-| Layer | Priority | 角色 |
-|-------|----------|------|
-| `agent_role` | 0 | agent 身份 / 行为契约（R8 来源） |
-| `profile` | 30 | 当前 agent profile |
-| `soul` | 60 | soul.md 注入 |
-| `identity_files` | 90 | 身份文件（CLAUDE.md / soul.md / ...） |
-| `mcp_instructions` | 120 | MCP 集成说明 |
-| `environment` | 150 | 运行时环境摘要（OS / cwd / model） |
-| `runtime_capabilities` | 180 | 当前 provider 的能力声明 |
-| `runtime_context` | 1720 | **唯一动态 SYSTEM 层**：token 计数 / 终止原因 / session 名 |
-| `curated_memory` | 800 | `MemoryEnvelope` 的 stable 段 |
-| `recall_context` | transient tail | `transient_recall` 消息（不进 SYSTEM） |
-| `graph_topology` | 750 | 治理图渲染（仅治理会话） |
-| `voice_mode` | 1710 | 语音模式提示（仅语音轮次） |
-| `multi_step_conduct` | 300 | 多步行为准则 |
-| `operational_guidelines` | 350 | 操作守则 |
-| `guidelines` | 400 | 通用准则 |
-| `security` | 450 | 红线 / 安全策略 |
-| `mcp_protocol` | 200 | MCP 协议说明 |
-| `provider_guidance` | 500 | provider-specific 渲染提示 |
-| `skill_instructions` | 550 | 技能 SKILL.md 注入 |
-| `tool_runtime_state` | 600 | 工具运行时状态 |
-| `protocol_tokens` | 650 | 协议 tokens |
-| `citation_standards` | 700 | 引用规范 |
-| `standing_goal` | 720 | 当前 standing goal（如果存在） |
-| `memory_protocol` | 730 | 记忆协议说明 |
-| `plan_prompt` | 880 | 当前 welded Strategy 渲染 |
-| `extra_files` | 920 | 当前 session 的额外文件 |
-| `execution_plan` | 950 | 当前 scratchpad 执行列表 |
-| `doctor_repair_hint` | 1100 | `/doctor` 错误修复提示（条件性） |
-| `session_context_guide` | 780 | session 级指引 |
-
-> `RuntimeContextLayer` 是 SYSTEM 中**唯一**含 `current_total_tokens` / `terminate_reason` / `session_key` 数字的层 —— 这些数字每轮都变，**必须**放在 SYSTEM 段的末尾以最小化 cache 重写代价；其它 layer 全是 cache 友好内容。
-
-### ThinkerContext
+`src/thinker/prompt_layer.rs` 中的 trait 是同步的，核心方法如下：
 
 ```rust
-pub struct ThinkerContext {
-    pub session_key: SessionKey,
-    pub agent_id: AgentId,
-    pub voice: Option<VoiceContext>,         // 语音轮次上下文
-    pub running: RunningStats,              // 运行时统计（回合数 / token / 时间）
-    pub profile: Option<ProfileView>,
-    pub skills: Vec<SkillView>,
-    pub goals: Vec<GoalView>,
-    pub strategies: Vec<StrategyView>,
-    pub diagnostics: Vec<DiagnosticView>,   // 来自 doctor
-    pub memory: Option<MemoryEnvelope>,     // 已 recall 的 envelope
-    pub session_recent: Vec<ChatMessageView>, // 当前 session 近期
-    pub plan: Option<PlanView>,             // 当前 welded Strategy 渲染
-    pub vault: Option<VaultView>,           // vault 里的 secrets（加密态）
-    pub mcp: Option<McpView>,               // 当前 session 激活的 MCP servers
-    pub todo: Option<TodoView>,             // 当前 execution list
-    pub runtime: RuntimeView,                // OS / cwd / model / 计数
-    pub scratchpad: ScratchpadView,         // execution list + objective
-}
+fn name(&self) -> &'static str;
+fn priority(&self) -> u32;
+fn inject(&self, output: &mut String, input: &LayerInput);
 ```
 
-`render(&ctx)` 拿到这个上下文，按自己关心的字段渲染，**不**做 IO。`VoiceContext` 由 `voice_mode::get(session_key)` 注入；`MemoryEnvelope` 由 `MemoryContextProvider::build_envelope` 拼好；`PlanView` 由 `StrategyLayer` 拉 welded plan；`TodoView` 由 `ScratchpadLayer` 拉 `scratchpad_registry::get_active`。
+各层还声明装配路径、提示模式与稳定性。层向传入的缓冲区追加内容，不返回异步结果。
+
+### 内置 layer 清单
+
+`src/thinker/prompt_pipeline.rs` 的 `default_layers` 注册的部分层（按优先级升序）：
+
+| Layer | Priority |
+|---|---|
+| `soul` | 50 |
+| `agent_role` | 55 |
+| `curated_memory` | 60 |
+| `strategy` | 70 |
+| `profile` | 75 |
+| `environment` | 300 |
+| `runtime_capabilities` | 400 |
+| `security` | 600 |
+| `skill_instructions` | 1050 |
+| `memory_protocol` | 1105 |
+| `tool_runtime_state` | 1703 |
+| `mcp_instructions` | 1705 |
+| `voice_mode` | 1710 |
+| `runtime_context` | 1720 |
+| `session_context_guide` | 1750 |
+| `graph_topology` | 1754 |
+| `standing_goal` | 1755 |
+| `execution_plan` | 1756 |
+
+
+### ResolvedContext 与 LayerInput
+
+`src/thinker/context.rs` 定义 `EnvironmentContract`、`VoiceContext`、`TurnEnvelope`、`EnvelopeParent`、`ResolvedContext` 和 `ContextAggregator`。解析结果供各层读取；`LayerInput` 补充提示配置与装配入口相关输入。
+
+`ResolvedContext` 包含可选运行上下文、沙箱摘要、已渲染执行计划、常驻目标、图拓扑、策略及语音状态。`execution_plan` 是已渲染的 scratchpad 进度，由 `ExecutionPlanLayer` 消费，不是独立的 todo 视图对象。harness bridge 通过 `build_memory_user_message` 获取召回记忆，通过 `build_curated_message` 提供稳定的精选记忆信封。
 
 ### PromptPipeline 装配
 
-`PromptPipeline::assemble(provider, input)` 按层 priority 升序逐个调 `layer.render(&input)`，结果用换行符拼为单个字符串。失败 layer 记 warn 但不中断（`fail-soft`）；`prompt_contract` 校验所有 enabled layer 都有「出场」或「带理由进白名单」。
-
-```rust
-pub struct PromptPipeline {
-    layers: Vec<Arc<dyn PromptLayer>>,
-}
-```
-
-构造在 `bin/aleph-server/commands/start/builder/constructor/mod.rs::build_thinker_pipeline`：
-
-```rust
-PromptPipeline::new(vec![
-    Box::new(AgentRoleLayer),         // priority 0
-    Box::new(ProfileLayer),           // priority 30
-    Box::new(SoulLayer),              // priority 60
-    Box::new(IdentityFilesLayer),     // priority 90
-    Box::new(McpInstructionsLayer),   // priority 120
-    Box::new(EnvironmentLayer),       // priority 150
-    Box::new(McpProtocolLayer),       // priority 200
-    Box::new(RuntimeCapabilitiesLayer), // priority 180
-    Box::new(MultiStepConductLayer),  // priority 300
-    Box::new(OperationalGuidelinesLayer), // priority 350
-    Box::new(GuidelinesLayer),        // priority 400
-    Box::new(SecurityLayer),          // priority 450
-    Box::new(ProviderGuidanceLayer),  // priority 500
-    Box::new(SkillInstructionsLayer),  // priority 550
-    Box::new(ToolRuntimeStateLayer),  // priority 600
-    Box::new(ProtocolTokensLayer),    // priority 650
-    Box::new(CitationStandardsLayer), // priority 700
-    Box::new(StandingGoalLayer),      // priority 720
-    Box::new(MemoryProtocolLayer),    // priority 730
-    Box::new(GraphTopologyLayer),     // priority 750
-    Box::new(CuratedMemoryLayer),     // priority 800
-    Box::new(PlanLayer),              // priority 880
-    Box::new(ExtraFilesLayer),        // priority 920
-    Box::new(ExecutionPlanLayer),     // priority 950
-    Box::new(DoctorRepairHintLayer),  // priority 1100
-    Box::new(VoiceModeLayer),         // priority 1710
-    Box::new(RuntimeContextLayer),    // priority 1720
-])
-```
-
-`Priority 1720` 的 `RuntimeContextLayer` 故意**最后**渲染 —— 它是 SYSTEM prompt 中**唯一**动态层，每轮数字（`current_total_tokens` / `terminate_reason`）都会变；其它 27 个 layer 都是 cache 友好内容，**全部**排在 1720 之前（Anthropic prompt cache 的 prefix-keyed 模型：每字节变动让后续 history 重写 1.25× 而非 0.1× 读取）。
-
----
+`PromptPipeline` 持有 `Vec<Box<dyn PromptLayer>>`，`new` 按优先级排序。`execute` 将指定装配路径渲染为字符串；缓存装配使用 `execute_stable_with_mode` 和 `execute_dynamic_with_mode` 按稳定性拆分内容，没有 provider 专用渲染风格选择器。
 
 ## 两把尺（`src/thinker/prompt_contract.rs`）
 
-R10 红线在「智能在提示词 / 智能不在循环里」，新版本提供**两把尺**显式度量：
+`reachable_layers` 测试验证生产形状输入能唤醒已注册层，或在 `CONDITIONALLY_SILENT` 中解释条件性静默。这是测试清单，不是运行时白名单 API。
 
-```rust
-pub const fn reachable_layers(pipeline: &PromptPipeline) -> Vec<(&str, bool, Option<String>)>;
-pub fn scaffold_bytes_ratchet(input: &ThinkerContext) -> Result<usize, ContractError>;
-```
+`scaffold_bytes_ratchet` 限制脚手架增长，动态尾部与重复句子检查提供独立守卫。`aleph-server prompt-size` 报告测量的各层体积。这些是测试与 CLI 测量，不是提示词装配函数签名。
 
-- **`reachable_layers`** —— 列出所有 enabled layer；`is_reachable == false` 的 layer 必须带理由进白名单（`whitelist_disabled(name, reason)`），否则测试失败。
-- **`scaffold_bytes_ratchet`** —— 计算当前 `ThinkerContext` 下 SYSTEM prompt 的**仅 scaffold**字节数（即不含 RuntimeContext / recall_context / transient_recall），与上次记录对比，**只允许减小**，增大需要显式白名单。
-- `prompt_size` CLI 子命令 (`aleph-server prompt-size`)：报告当前 scaffold 字节数 + 每个 layer 的字节分布 + 距 R10 红线 CEILING 的余量。
+## `prompt_pipeline`
 
-> `prompt_size` 也供 loop / goal 的 continuation prompt 路径用（continuation 调 `build_system_prompt` 时也走同一 contract）；同一个 R10 红线是 SYSTEM prompt 共用的字节数预算。
-
----
-
-## `prompt_pipeline`（Round 9 引入）
-
-`PromptPipeline` 替代了旧的 `Thinker::build_prompt`，是 ~28 layer 的统一拼装点：
-
-```rust
-pub struct PromptPipeline {
-    layers: Vec<Box<dyn PromptLayer>>,
-}
-
-impl PromptPipeline {
-    pub fn new(layers: Vec<Box<dyn PromptLayer>>) -> Self;
-    pub fn assemble(&self, input: &ThinkerContext) -> Result<String>;
-    pub fn with_layers(self, layers: Vec<Box<dyn PromptLayer>>) -> Self;
-}
-```
-
-每个 layer 通过 `PromptLayer::inject(&mut String, &LayerInput)` 自行把内容写入共享输出缓冲；已无独立的按 provider 包裹的分发点。XML 转义 / 包裹助手在 `src/thinker/xml_util.rs`（`escape_xml` / `escape_xml_attr` / `push_text_element` / `push_block_with_attrs`）。
-
----
+默认层列表定义于 `src/thinker/prompt_pipeline.rs`。`PromptBuilder` 提供生产入口；各层通过 `LayerInput` 向共享缓冲区注入内容。共享 XML 转义辅助函数包括 `escape_xml` 和 `escape_xml_attr`。
 
 ## 历史：流式状态机
 
@@ -217,55 +96,44 @@ impl PromptPipeline {
 
 ---
 
+
 ## 关键源文件
 
-- `src/thinker/mod.rs` — 模块入口，re-export `PromptPipeline` / `ThinkerContext` / `PromptLayer`
-- `src/thinker/prompt_pipeline.rs` — `PromptPipeline` 与 layer 拼装
-- `src/thinker/prompt_contract.rs` — `reachable_layers` / `scaffold_bytes_ratchet` / `whitelist_disabled`
-- `src/thinker/prompt_layer.rs` — `PromptLayer` trait + `Box<dyn PromptLayer>` 包装
-- `src/thinker/soul.rs` — soul.md 解析
-- `src/thinker/identity_files.rs` — 身份文件注入
-- `src/thinker/context.rs` — `ThinkerContext` 字段定义
-- `src/thinker/runtime_context.rs` — `RuntimeContextLayer`（priority 1720，唯一动态 SYSTEM 层）
-- `src/thinker/nudges.rs` — 9 个 model-facing 提示词字面量（`MAX_STEPS_HINT` / `MAX_OUTPUT_TOKENS_RESUME_NUDGE` / `INTERRUPTION_NOTE` 等），从 harness 迁出后**集中**在这里供各 layer 引用
-- `src/thinker/security_context.rs` — `SecurityLayer`
-- `src/thinker/layers/curated_memory.rs` — `CuratedMemoryLayer`（拼装 `MemoryEnvelope` 的 stable 段）
-- `src/orchestrator/harness_bridge/prompt_build.rs` — transient-tail / recall-context 拼装（由 `HarnessDeps::recall_context` 承载，`src/harness/deps.rs`）
-- `src/thinker/project_instructions.rs` — 各种 `*Layer` 散件
-- `src/thinker/xml_util.rs` — XML 转义 / 包裹
-- `src/thinker/interaction.rs` — `InteractionManifest` 频道能力感知
-- `src/thinker/prompt_budget.rs` — `PromptBudget`（按 provider cap 约束 layer 数量）
-- `src/thinker/layers/{mod,voice_mode,graph_topology,curated_memory,doctor_repair_hint,multi_step_conduct,operational_guidelines,security,runtime_capabilities,protocol_tokens,citation_standards,plan,standing_goal,plan_prompt,execution_plan,extra_files,profile,provider_guidance,guidelines,environment,tool_runtime_state,security_session,supervisor_verification,tool_layer}.rs` — 20+ 具体 layer
-
----
+- `src/thinker/mod.rs`
+- `src/thinker/context.rs`
+- `src/thinker/prompt_layer.rs`
+- `src/thinker/prompt_pipeline.rs`
+- `src/thinker/prompt_builder/mod.rs`
+- `src/thinker/prompt_contract.rs`
+- `src/thinker/runtime_context.rs`
+- `src/thinker/layers/execution_plan.rs`
+- `src/thinker/layers/strategy.rs`
+- `src/thinker/layers/curated_memory.rs`
+- `src/orchestrator/harness_bridge/prompt_build.rs`
+- `src/thinker/xml_util.rs`
 
 ## 26.7.x 补充
 
-### Round 9 层重组
 
-26.7.x 把旧 6 层心智模型（Identity / Skills / Memory / Tools / Rules / Conversation）拆成 ~28 个细粒度 PromptLayer，每个独立可审、可禁用、可白名单。R10「智能在提示词 / 不在循环里」要求每层都有自己的 contract 与 priority。
 
-### 两把尺（R10 红线）
+### 层重组
 
-`prompt_contract::reachable_layers` + `scaffold_bytes_ratchet` 把 R10 红线从「手工心算」变成代码可度量。`aleph-server prompt-size` 报告实时字节数 + 每层字节分布，让 R10 触手可测。CEILING ratchet 在 harness / thinker 之间共享：SYSTEM prompt 的字节数上限于 `the_harness_line_budget_does_not_grow` 测试的 `CEILING` 是**同一把尺**（都是 R10 唯一字节预算的两个子集）。
+各层可独立审查。已注册层以 `default_layers` 与 `layer_info` 为准，不应假定旧的固定层数量。
 
 ### 语音模式适配
 
-26.7.x `VoiceModeLayer`（priority 1710）注入语音轮次的提示词规则 —— 包括「请修复 ASR 转写中的同音字错误」、「口语冗余保留作为 user 的语用信息」等。`VoiceContext` 字段由 `voice_mode::get()` 注入（active 才有值，transcription 标志由 `inbound_router` 设定）。
+`VoiceModeLayer` 读取解析后的 `VoiceContext` 并注入语音回合指令。
 
-### `transient_recall` 与 cache 友好
+### 召回记忆与缓存友好
 
-26.7.1+：双轨设计 —— stable `MemoryEnvelope` 走 SYSTEM prompt（cache 友好），live 倒计时（deadline / next-wake）走 transient tail message（cache 断点之后，字节变动只花自己）。**对应于 `looping::LoopState` 的 `stable_summary` vs `live_status`** —— 同一设计，thinker 与 looping 共享 R10 缓存调度。
+稳定精选记忆由 `CuratedMemoryLayer` 注入；实时召回记忆保留在系统提示词之外的临时消息路径。传输字段名为 `recall_context`。
 
 ### 提示词缓存调度
 
-`RuntimeContextLayer` 故意放在 priority 1720，是 SYSTEM prompt 中**唯一**含 token 计数 / 终止原因 / session_key 数字的层。其它 ~27 个 layer 全是 cache 友好内容（identity / profile / soul / environment / security / plan 等），**全部**排在 1720 之前 —— Anthropic prompt cache 是 prefix-keyed，每字节变动让后续 history 1.25× 写而 0.1× 读，**单次倒计时字节变化**会抵销整个对话的 cache 收益。
+缓存分区遵循 `LayerStability`，不是优先级 1720 必须最后的规则。`RuntimeContextLayer` 是动态层，但执行计划和治理层可以排在它之后。 运行数据描述环境（例如 `src/thinker/runtime_context.rs` 中的 `current_model` 与 `current_time`），不是累计 token 计数字段。稳定前缀的字节变化会使前缀缓存失效；动态内容应放在动态后缀或临时消息。技能提示预算是独立机制：`SkillPromptBudget` 位于 `src/skill/prompt.rs`，不是 thinker 全局层数预算。
 
-### 见另请参阅
+### 另请参阅
 
-- [R10 薄 Harness 红线](/docs/zh/philosophy/redlines#r10-薄-harness-哲学笨循环编排核心-thin-harness-dumb-loop) — 5 个「不」
-- [记忆系统](/docs/zh/concepts/memory) — `curated_memory` / `recall_context` 双轨来源
-- [Skill 触发器](/docs/zh/concepts/skill-system) — `skill_instructions` layer 来源
-- [架构 Harness 章节](/docs/zh/architecture/harness) — 层拼装位置
-- [Thinker 源码](https://github.com/rootazero/Aleph/blob/main/src/thinker) — 完整 layer 列表
-- [R10 字节数预算测试](https://github.com/rootazero/Aleph/blob/main/src/harness/tests/budget.rs) — `CEILING = 5535` 共享尺
+- [记忆系统](/docs/zh/concepts/memory)
+- [技能系统](/docs/zh/concepts/skill-system)
+- [Harness](/docs/zh/architecture/harness)

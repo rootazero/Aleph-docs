@@ -19,12 +19,11 @@ The resilience system is Aleph's persistence and state layer. After the agent-lo
 ```
 src/resilience/
 ├── mod.rs        # entry; only re-exports database + types
-├── types.rs      # AgentTask / TaskTrace / AgentEvent / Lane / RiskLevel / TaskStatus
+├── types.rs      # AgentTask / TaskTrace / Lane / RiskLevel / TaskStatus
 └── database/
     ├── mod.rs                 # module entry; DEFAULT_EMBEDDING_DIM etc.
     ├── state_database/        # StateDatabase implementation + schema migrations
     ├── channel_offsets.rs     # channel offset persistence
-    ├── events.rs              # AgentEvent persistence
     ├── group_chat.rs          # group-chat history persistence
     ├── memory_events.rs       # memory-system event log
     ├── migration.rs           # schema migrations
@@ -41,7 +40,6 @@ src/resilience/
 
 | Table / entity | Purpose | Key fields |
 |---|---|---|
-| **AgentEvent** | Tiered event persistence (Skeleton + Pulse) | `task_id`, `seq`, `event_type`, `is_structural` |
 | **AgentTask** | Task state + recovery metadata | `id`, `status`, `risk_level`, `lane`, `checkpoint_snapshot_path` |
 | **TaskTrace** | Shadow Replay execution trace | `task_id`, `step_index`, `event`, `timestamp` |
 | **group_chat** | Group-chat history | per-team persistence |
@@ -49,31 +47,11 @@ src/resilience/
 | **paired_users** | Paired-user records | pairing |
 | **channel_offsets** | Channel read offsets | webhook / event-source resync |
 
-`AgentUsageTotal` and `MemoryStats` are also exported and reused by recall and experience-store submodules in `src/memory/`.
+`aggregate_usage_by_agents` folds stored trace usage into `AgentUsageTotal` rows (`src/resilience/database/traces.rs`). The team snapshot uses this aggregation for its member agents.
 
-### Event tiers: skeleton and pulse
+### Event durability
 
-Events follow a two-tier persistence model:
-
-```rust
-impl AgentEvent {
-    // Structural events (Skeleton) — persisted immediately
-    pub const TYPE_TASK_STARTED:        &str = "task_started";
-    pub const TYPE_TOOL_CALL_STARTED:    &str = "tool_call_started";
-    pub const TYPE_TOOL_CALL_COMPLETED:  &str = "tool_call_completed";
-    pub const TYPE_ARTIFACT_CREATED:     &str = "artifact_created";
-    pub const TYPE_TASK_COMPLETED:       &str = "task_completed";
-    pub const TYPE_TASK_FAILED:          &str = "task_failed";
-
-    // Streaming events (Pulse) — batched before persistence
-    pub const TYPE_AI_STREAMING:         &str = "ai_streaming";
-
-    pub fn structural(task_id, seq, etype, payload) -> Self { /* is_structural = true */ }
-    pub fn pulse(task_id, seq, etype, payload)        -> Self { /* is_structural = false */ }
-}
-```
-
-**Skeleton events** represent state transitions that must survive crashes. They are written synchronously and used for recovery. **Pulse events** are high-frequency streaming data (token-by-token output) that is batched and can be dropped without affecting correctness.
+Current session events choose their write mode through `durability_of` in `src/session/events.rs`. Memory events are written separately through `src/resilience/database/memory_events.rs`.
 
 ---
 
@@ -236,7 +214,7 @@ Unattended runs take a different sink, `UnattendedRedactingSink` (`src/gateway/e
 
 ## Fail-closed
 
-26.7.21 hardening: when a policy file is missing or `permissive_default` disagrees with `Default::default()`, **authorization is refused** (never silently allowed). `DiminishingReturnsDetector` was removed from `harness/tests/budget.rs` — it was a deterministic completion judgment *inside* the loop, which R10 forbids. Hard stops are now bounded by `max_iterations`, the tool-loop verifier, and the model's own stop instead.
+For action-aware policy, an absent file uses the curated built-in defaults; an unreadable, oversized, or malformed file makes every action require approval (`ConfigApprovalPolicy::load_from`, `src/approval/config.rs`). The deterministic completion detector was removed as inconsistent with R10. Hard stops are now bounded by `max_iterations`, the tool-loop verifier, and the model’s own stop.
 
 ---
 
@@ -251,12 +229,11 @@ Unattended runs take a different sink, `UnattendedRedactingSink` (`src/gateway/e
 ```
 src/resilience/
 ├── mod.rs                       # only re-exports database + types
-├── types.rs                     # AgentTask / TaskTrace / AgentEvent / Lane / RiskLevel / TaskStatus
+├── types.rs                     # AgentTask / TaskTrace / Lane / RiskLevel / TaskStatus
 └── database/
     ├── mod.rs                   # module entry
     ├── state_database/          # StateDatabase + schema migrations
     ├── channel_offsets.rs
-    ├── events.rs                # AgentEvent persistence
     ├── group_chat.rs
     ├── memory_events.rs
     ├── migration.rs
@@ -268,6 +245,10 @@ src/resilience/
 > The historical stub RPCs (`heartbeat.*_stub` / `cron.*_stub`) have been realized; the full RPC is driven by the [Daemon](/docs/en/concepts/daemon), backed by `src/tasks/cron/` and `src/tasks/heartbeat/` and wired at startup in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_cron_handlers / register_heartbeat_handlers`.
 
 ---
+
+## Historical: resilience event tiers
+
+The old `AgentEvent` table used `is_structural` to distinguish state-transition records written immediately from streaming pulses that could be batched. Commit `75345d2ae` retired that unused agent-event schema; it did not remove session-event or memory-event persistence.
 
 ## See Also
 

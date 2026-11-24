@@ -264,7 +264,7 @@ pub struct WhisperTranscriber {
 
 ### Multi-Modal Attachment Architecture
 
-26.7.x: `MediaAttachment` carries an `encoding` field (`base64` / `utf8`). The `image_read` tool is an image-specific case of `file_read`.
+Current `MediaInput` (`src/media/types.rs`) uses a tagged enum for file paths, Base64 data with an explicit media type, and remote URLs, rather than a shared encoding field. Image reading is exposed through `image_read`.
 
 ### Vision
 

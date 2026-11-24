@@ -1,6 +1,6 @@
 ---
 title: "路由系统"
-description: "Aleph 真实的路由层：会话键解析（SessionKey）、DmScope 隔离、RouteBinding 分层匹配、RoutingRuleConfig（command / keyword 两阶段）、runtime overlay 与 provider failover 链。"
+description: "Aleph 真实的路由层：会话键解析（SessionKey）、DmScope 隔离、RouteBinding 分层匹配、自定义斜杠命令规则（RoutingRuleConfig）、runtime overlay 与 provider failover 链。"
 ---
 
 > **本页描述 Aleph 真实路由层（`src/routing/` + `src/config/types/routing.rs`）**，而非通用 Web 路由框架。
@@ -12,7 +12,7 @@ Aleph 路由系统由四层组成：
 3. **路由绑定解析**（`src/routing/resolve.rs` + `config.rs`）—— 把 `channel / peer / guild / team / account / default` 命中分层解析为 `ResolvedRoute`
 4. **运行时叠加**（`src/routing/overlay.rs`）—— `agent_switch` 绑定 + ghost-binding 检测，纠正 `gateway_route` 工具对 config-only 的误报
 
-AI 路由规则（`command` / `keyword` 两阶段匹配）由 `src/config/types/routing.rs` 定义；`[[rules]]` 中间件交付位于 `src/config/methods.rs`。
+自定义斜杠命令规则由 `src/config/types/routing.rs` 中的 `RoutingRuleConfig` 定义。
 
 ---
 
@@ -213,77 +213,32 @@ pub struct OverlaidRoute {
 
 ---
 
-## 5. RoutingRuleConfig（`src/config/types/routing.rs`）
+## 5. `RoutingRuleConfig`（`src/config/types/routing.rs`）
 
-```rust
-pub struct RoutingRuleConfig {
-    pub rule_type: Option<String>,         // "command" | "keyword" | 自动按 regex 检测
-    pub is_builtin: bool,                  // true：read-only（Settings UI 不可改）
-    pub regex: String,
-    pub provider: Option<String>,          // command 必填
-    pub system_prompt: Option<String>,     // keyword 必填；command 可选
-    pub strip_prefix: Option<bool>,        // command 默认 true；keyword 忽略
-    pub intent_type: Option<String>,       // "translation" / "research" / "code_generation" / "skills:build-macos-apps"
-    pub preferred_model: Option<String>,   // 覆盖自动选模
-    pub icon: Option<String>,              // SF Symbol icon（命令模式显示）
-}
-```
-
-`get_rule_type()` 自动按 `^/` 前缀检测；`should_strip_prefix()` 对 keyword 规则永远返回 `false`，对 command 默认 `true`。
+`get_rule_type` 返回配置的类型，或根据 `^/` 前缀推断类型。只有自定义斜杠命令规则会注册；`register_custom_commands` 读取 `regex`、`system_prompt` 和 `is_builtin`。命令规则必须指定一个已配置的 `provider` 才能通过校验，但注册不会用它来路由请求。`strip_prefix`、`preferred_model`、`intent_type` 和 `icon` 仍可为兼容而解析，不影响注册。
 
 ### 配置示例
 
 ```toml
 [[rules]]
-rule_type = "command"
 regex = "^/draw\\s+"
-provider = "gemini"
-system_prompt = "Draw a picture based on the prompt"
-intent_type = "image_generation"
-preferred_model = "gemini-2.5-pro-image"
-icon = "paintbrush.fill"
-
-[[rules]]
-rule_type = "keyword"
-regex = "translate to English"
-system_prompt = "Translate the target language to English"
-intent_type = "translation"
-
-# 短路：模式自带剥离（如 /^/echo\s+(.+)/ → 只把 \1 发给 AI）
-[[rules]]
-rule_type = "command"
-regex = "^/echo\\s+(.+)"
 provider = "default"
-strip_prefix = false   # AI 端不再做剥离
+system_prompt = "Draw a picture based on the prompt"
 ```
 
 ---
 
-## 6. 二阶段匹配（command + keyword）
+## 6. 斜杠命令匹配
 
-匹配管线对每条用户输入跑两个阶段，按顺序：
-
-```
-process_clipboard / inbound message
-    │
-    ├─ Phase 1: command 规则（first-match-stops）
-    │     ├─ regex 以 ^/ 开头命中 → 唯一一条匹配 → 立即停止
-    │     └─ 命中 → 用其 provider + 可选 strip_prefix
-    │
-    └─ Phase 2: keyword 规则（all-match）
-          ├─ regex 不以 / 开头命中 → 累加所有匹配
-          └─ 全部命中 → system_prompts \n\n 拼接，用 default_provider
-```
-
-`strip_prefix` 用于斜杠命令（如 `/loop` `/goal` `/mode`），匹配后从输入剥除前缀再发 AI——避免模型把命令名当字面文本处理。`command.executor` 内部用 `RegistryToolRegistry::resolve` 做最终 dispatch；fast-path 由 `gateway::execution_engine::slash_command::try_resolve_slash_command` 走 L0 直连，回退到 `gateway::execution_engine::slash_command::execute_slash_command_fast_path` 执行。
+`CommandParser` 将 `/name` 与参数分开，旧的 `strip_prefix` 字段不参与解析。网关通过 `src/gateway/execution_engine/slash_command.rs` 的 `try_resolve_slash_command` 将解析结果转换为执行元数据；当元数据要求直接调用工具时，`execute_slash_command_fast_path` 分发调用，不进入完整代理循环。关键词规则已退役。
 
 ---
 
-## 7. 历史：上下文感知（`[smart_matching]`，已移除）
+## 历史：7. 上下文感知（`[smart_matching]`，已移除）
 
-本页早期版本记载过一个由 `[smart_matching]` 配置节驱动的四层语义匹配栈（`SmartMatchingConfig`：命令快路径、加权关键词、上下文规则、AI 兜底，配有 `[[smart_matching.context_rules]]` / `[[smart_matching.keyword_rules]]` 表）。该配置节已被弃用且不起作用，并在提交 `54a12d89b`（"config: cut deprecated inert sections (smart_flow, smart_matching, dispatcher, subagent, evolution, media)"）中从配置 schema 里删除。配置文件里再写 `[smart_matching]` 不会被解析。
+本页早期版本记载过一个由 `[smart_matching]` 配置节驱动的四层语义匹配栈（`SmartMatchingConfig`：命令快路径、加权关键词、上下文规则、AI 兜底，另有上下文规则与关键词规则表）。该配置节已被弃用且不起作用，并在提交 `54a12d89b`（"config: cut deprecated inert sections (smart_flow, smart_matching, dispatcher, subagent, evolution, media)"）中从配置 schema 里删除。配置文件里再写 `[smart_matching]` 不会被解析。
 
-当前真正运行的是第 6 节的「命令 + 关键词」两阶段匹配，由 `RoutingRuleConfig`（第 5 节）驱动。没有单独的上下文推断层；与上下文相关的判断由 harness 循环内的模型完成。
+当前不再设独立的上下文推断层；相关判断由工具链循环内的模型完成。
 
 ---
 

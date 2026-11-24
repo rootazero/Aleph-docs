@@ -140,7 +140,7 @@ pub struct UnifiedTool {
 
 ## 公共接口（`src/executor/mod.rs`）
 
-executor 模块只导出注册表及其 trait，没有独立的结果/上下文类型层（旧的 `ExecutionResult` / `ToolCallRecord` / `ExecutionContext` / `ExecutorError` 一族已不存在——工具结果是 `serde_json::Value`，错误是 `AlephError`）。
+executor 模块导出注册表及其 trait。工具调用返回 `serde_json::Value` 或 `AlephError`；未接入生产的执行器本地结果类型和上下文类型已在 `3491b7551` 中移除。
 
 ```rust
 pub use builtin_registry::{

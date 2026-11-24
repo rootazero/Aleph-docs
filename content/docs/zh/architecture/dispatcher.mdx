@@ -5,7 +5,7 @@ description: "编排器级 flow 分发——FlowSpec 解析、沙箱配置、Har
 
 # 分发器
 
-分发器就是 `Orchestrator`——网关聊天入口与驱动每个 run 的工具链之间的缝。它**不**建模多步 DAG 计划：旧的 `TaskGraph` 概念已在第 6/7 阶段工具链迁移时退役。今天的编排器职责是：接受任意 channel 发来的 `FlowRequest`，解析正确的 `FlowSpec` + 沙箱 + 工具链，并生成产出 `FlowOutcome` 的 `HarnessRunner` 任务。
+分发器就是 `Orchestrator`——网关聊天入口与驱动每个 run 的工具链之间的缝。它**不**建模多步 DAG 计划。今天的编排器职责是：接受任意 channel 发来的 `FlowRequest`，解析正确的 `FlowSpec` + 沙箱 + 工具链，并生成产出 `FlowOutcome` 的 `HarnessRunner` 任务。
 
 **位置**: `src/orchestrator/dispatch.rs`
 
@@ -154,6 +154,10 @@ Act（位于 `AgentHarness::act`）按 **资源声明** 给工具调用分桶，
 跨批去重：在同一批或跨批中重复的 `(name, args)` 复用首次结果。
 
 ---
+
+## 历史：DAG 分发
+
+旧的 `TaskGraph` 设计把计划建模为多个任务。提交 `d475c15f1` 删除了分发器中的图实现，`3491b7551` 随后删除了仍引用它且未接入生产的执行器结果层；当前编排器为每个请求分发一次工具链运行。
 
 ## 另请参阅
 

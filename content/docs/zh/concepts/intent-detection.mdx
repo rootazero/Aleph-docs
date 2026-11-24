@@ -7,7 +7,7 @@ description: "R7 下由 LLM 处理意图，Harness 不运行独立意图规则�
 
 在 R7（LLM 主权）下，Aleph 不再在消息进入模型前运行正则、关键词、置信度阈值或独立意图分类器。用户消息由 LLM 在正常推理调用中理解；Harness 负责把模型请求与工具、权限和执行循环连接起来，而不预判消息意图。
 
-因此，`KeywordPolicy`、`KeywordIndex`、`AiIntentDetector`、`ExecutionIntentDecider`、`IntentCache`、`TaskCategory` 和基于消息意图的工具相关性评分都不是当前 R7 配置或运行路径。它们不应添加到 `config.toml`，也不应作为当前架构的实现依据。
+因此，代码仓里没有「意图检测」这一层：既没有意图规则引擎，也没有关键词策略、缓存或基于消息意图的工具相关性评分。R7 之前存在过的那批类型已在 2026-03 与 2026-05 的清理中删除（见下方「历史」小节），它们不应添加到 `config.toml`，也不应作为当前架构的实现依据。
 
 ## 工具呈现与权限
 
@@ -27,3 +27,9 @@ description: "R7 下由 LLM 处理意图，Harness 不运行独立意图规则�
 ## 相关配置
 
 意图没有独立配置段。模型与故障转移链配置在 `[providers.*]` 以及 `[general]` 的 provider 引用中；工具呈现和审批策略配置在 `[policies]`。详见[配置](/docs/zh/concepts/configuration)和[架构红线](/docs/zh/philosophy/redlines#r7-llm-主权原则-llm-sovereignty)。
+
+## 历史：R7 之前的意图检测层
+
+2026-03-08 的提交 `d71aad8dd`（"intent: delete legacy decision layer, classifier, ai_detector, presets"）删掉了意图判定层：决策聚合与 `ExecutionIntentDecider`（当时的 `core/src/intent/decision/`）、分类器与 `AiIntentDetector`（当时的 `core/src/intent/detection/`）、关键词策略 `KeywordPolicy` 与 `KeywordIndex`、以及 `IntentCache` 缓存。2026-05-21 的提交 `b31bf206e`（"intent: remove dead intent types module"）又删掉了剩下的 `core/src/intent/types/` 模块——`TaskCategory` 与 `IntentResult` 在那里。
+
+整个旧的 intent 目录（当年在 `core/src/intent/`）今天已不存在，`src/lib.rs` 也不再导出它。当时的分层（L0-L2 正则 / 关键词 / AI 分类器 + 单点决策器）与本节描述的旧名字，都只描述那段时间的世界。

@@ -101,7 +101,7 @@ pub struct SessionConfig {
 ## Safety
 
 - **No unwrap/expect** on user-facing paths
-- **Timeout safety** — `remaining_time()` uses `saturating_sub`
+- **Timeout safety** — `ClarificationManager` registers one-shot waits with a timeout and reaps expired entries on subsequent registration (`src/clarification/session.rs`)
 - **Concurrent access** — `tokio::sync::RwLock` (non-poisoning)
 - **No SQL/LanceDB** — Pure in-memory session tracking
 

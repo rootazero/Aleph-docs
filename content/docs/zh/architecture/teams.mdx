@@ -5,7 +5,7 @@ description: "团队管理：SQLite 持久化、CoordTask DAG 调度、leader �
 
 `teams` 模块为多代理协作提供团队管理，支持具有生命周期管理、Coord Task DAG 调度、计划审批（团队战略）和任务跟踪的结构化团队协作。
 
-> 历史上文档中提到的 `TeamLifecycle`、`TeamPlan`、`ApprovalState` 枚举以及 `teams/lifecycle.rs`、`teams/plans.rs`、`teams/sessions.rs`、`teams/artifacts.rs`、`teams/messages.rs` 已不再以独立模块/枚举形式存在。本页描述当前 `src/teams/` 中的真实代码。
+> 团队生命周期状态由 `src/teams/types.rs` 中的 `TeamStatus` 表示；计划提交和审查由 `src/teams/plans.rs` 中的 `PlanManager` 负责。
 
 ## 概览
 

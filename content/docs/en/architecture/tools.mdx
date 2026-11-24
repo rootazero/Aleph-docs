@@ -562,9 +562,9 @@ Extension tools are qualified as `ext__{plugin_id}__{tool_name}` in the registry
 
 `src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
 
-### `defer_mcp_tools` (the `[tools]` config key) / `enable_tool_search`
+### Deferred MCP tool discovery
 
-26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
+The tools configuration key `defer_mcp_tools` keeps deferred MCP tools out of the eager schema list. `tool_search` searches those tools and discloses matching schemas on demand (`src/tools/scoped/deferred.rs`, `src/tools/tool_search.rs`).
 
 ### Action-Aware Approval Gate
 
@@ -580,7 +580,7 @@ Extension tools are qualified as `ext__{plugin_id}__{tool_name}` in the registry
 
 ### Fail-Closed
 
-When `permissive_default` disagrees with `Default::default()`, **authorization is refused**.
+Action-aware policy uses curated defaults when the policy file is absent. An unreadable, oversized, or malformed file does not silently allow an action: all actions require approval (`ConfigApprovalPolicy::load_from`, `src/approval/config.rs`).
 
 ### Cross-Batch Dedup / Memo
 

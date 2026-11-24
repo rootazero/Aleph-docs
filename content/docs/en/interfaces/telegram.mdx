@@ -62,26 +62,21 @@ While still in BotFather, you can customize your bot:
 ### Minimal Configuration
 
 ```toml
-[[channels]]
-id = "telegram"
-channel_type = "telegram"
+[channels.telegram]
+type = "telegram"
 enabled = true
-
-[channels.config]
 bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 ```
 
 ### Full Configuration Reference
 
 ```toml
-[[channels]]
-id = "telegram"
-channel_type = "telegram"
+[channels.telegram]
+type = "telegram"
 enabled = true
 
-[channels.config]
-# Bot token from @BotFather (required); supports ${ENV_VAR} expansion
-bot_token = "${TELEGRAM_BOT_TOKEN}"
+# Bot token from @BotFather (required)
+bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 
 # Bot username without @ (auto-detected on connect)
 bot_username = "my_aleph_bot"
@@ -92,20 +87,17 @@ dm_policy = "pairing"
 # Group message policy: open | allowlist | disabled
 group_policy = "open"
 
-# Allowlist of phone numbers / user ids for DMs
-allow_from = [123456789, 987654321]
+# Allowlist of user ids for DMs — empty means no restriction
+allowed_users = [123456789, 987654321]
 
-# Allowlist for group chats
+# Allowlist for group chats — empty means no restriction
 allowed_groups = [-1001234567890]
 
-# Require @mention in group chats (default: true)
-require_mention = true
+# Whether DMs are handled (default: true; false is equivalent to dm_policy = "disabled")
+dm_allowed = true
 
-# Bot's name for mention detection in groups
-bot_name = "Aleph"
-
-# Polling interval (default: 1)
-polling_interval_secs = 1
+# Whether group messages are handled (default: true; false is equivalent to group_policy = "disabled")
+groups_allowed = true
 
 # Send typing indicator while processing (default: true)
 send_typing = true
@@ -115,16 +107,32 @@ max_retries = 3
 ```
 
 <Callout type="warn">
-Never commit bot tokens to version control. Use environment variables (`${TELEGRAM_BOT_TOKEN}`) or a secrets manager.
+Never commit bot tokens to version control. Channel sections have no environment-variable interpolation: a `bot_token` written into `config.toml` is moved into the credential vault at startup (key `channel:telegram:bot_token`) and then stripped from the file. A configuration change needs a Gateway restart.
 </Callout>
 
-### Environment Variable Mode
+### Multi-Account Configuration
 
-The simplest setup uses a single environment variable:
+The flat form above is the historical format: the loader first tries v2 and falls back to v1 when that fails, then upgrades the v1 config into a single v2 account (account id `default`). For multiple accounts, write the v2 `accounts` list directly — the account-only keys (`require_mention`, `bot_username`, `default_agent`, `proxy_url`, `error_policy`, …) live inside an account:
 
-```bash
-export TELEGRAM_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+```toml
+[channels.telegram]
+type = "telegram"
+enabled = true
+
+[[channels.telegram.accounts]]
+id = "main"
+bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+bot_username = "my_aleph_bot"
+dm_policy = "pairing"
+group_policy = "open"
+allowed_users = [123456789]
+allowed_groups = [-1001234567890]
+require_mention = true
 ```
+
+<Callout type="info">
+The credential vault only covers **top-level** fields of a channel block. A v2 `bot_token` sits inside an account, which is a nested field, so it is never moved into the vault — it stays in `config.toml`.
+</Callout>
 
 ## Adapter Structure
 
@@ -160,13 +168,9 @@ The adapter **does not own** pairing state. It forwards unknown senders to the i
 
 There is no per-channel pairing database anymore: 26.7.21 removed the channel-local pairing store. Pairing state lives in the gateway's `PairingStore` (SQLite-backed), and the operator resolves new pairings from the Panel via `channel.pairing.approve` / `reject`. The `TelegramConfigV2 → ChannelConfig` bridge feeds the router every DM/group/allowlist rule, so a change in `config.toml` is the same change the router enforces.
 
-## Long-Polling vs Webhook
+## Receiving Updates: Long-Polling Only
 
-Aleph supports two modes for receiving updates from Telegram:
-
-### Long-Polling (Default)
-
-The bot periodically asks Telegram's servers for new updates. This is the default and works out of the box with no additional infrastructure.
+Aleph's Telegram adapter receives updates by long-polling only: the bot periodically asks Telegram's servers for new updates. It works out of the box with no public URL or SSL certificate, and it works behind NATs and firewalls.
 
 **Pros:**
 
@@ -176,22 +180,12 @@ The bot periodically asks Telegram's servers for new updates. This is the defaul
 
 **Cons:**
 
-- Slightly higher latency (configurable via `polling_interval_secs`)
+- Slightly higher latency (bounded by the polling round trip and the backoff strategy)
 - Keeps a persistent connection to Telegram servers
 
-### Webhook Mode
-
-Telegram pushes updates to your server via HTTPS POST requests. Enable by configuring `webhook` in the channel config.
-
-**Pros:**
-
-- Lower latency (instant delivery)
-- More efficient for high-traffic bots
-
-**Cons:**
-
-- Requires a public HTTPS endpoint
-- Needs a valid SSL certificate (or self-signed with the `certificate` field)
+<Callout type="info">
+Telegram's webhook mode is not implemented in this adapter — on startup it calls `delete_webhook` to clear any existing webhook (polling and webhooks are mutually exclusive, and `getUpdates` silently returns nothing while a webhook is set). Receiving webhooks requires a separate receiver you deploy yourself.
+</Callout>
 
 ## User and Group Allowlists
 
@@ -205,21 +199,21 @@ Telegram user IDs are numeric. To find a user's ID:
 ### Allowlist Behavior
 
 ```toml
-# Empty list = allow everyone (subject to dm_policy)
-allow_from = []
+# Empty list = no restriction (subject to dm_policy)
+allowed_users = []
 
 # Specific users only
-allow_from = [123456789, 987654321]
+allowed_users = [123456789, 987654321]
 ```
 
-When `dm_policy = "allowlist"` and the sender is not in `allow_from`, the message is silently dropped. When `dm_policy = "pairing"` and the sender is not yet approved, the router mints a pairing code.
+When `dm_policy = "allowlist"` and the sender is not in `allowed_users`, the message is silently dropped. When `dm_policy = "pairing"` and the sender is not yet approved, the router mints a pairing code.
 
 ### Group Chat Behavior
 
 When Aleph receives a message in a group:
 
 1. Check if the group ID is in `allowed_groups` (or if the list is empty)
-2. Check if the sender is in `allow_from` (or if the list is empty)
+2. Check if the sender is in `allowed_users` (or if the list is empty)
 3. If both pass, route the message to the agent
 
 <Callout type="info">
@@ -277,7 +271,7 @@ Each Telegram conversation gets a unique session key:
 |---------|------------|
 | DM with user 12345 | `agent:main:dm:12345` or `agent:main:telegram:dm:12345` |
 | Group chat -100123 | `agent:main:telegram:group:-100123` |
-| Forum topic | `agent:main:telegram:topic:{thread_id}` |
+| Forum topic | `agent:main:telegram:group:-100123:topic:42` |
 
 The exact format depends on your `dm_scope` setting (see [Interfaces Overview](/docs/interfaces/overview)).
 
@@ -305,7 +299,7 @@ The Telegram interface handles common failure scenarios:
 |-------|----------|
 | **Invalid bot token** | Detected at startup via `getMe` API call; channel enters `Error` state |
 | **Rate limiting** | Telegram rate limits are respected; the registry retries on `RateLimited` (`SendRetryPolicy`, default 2 retries with bounded `retry_after`) |
-| **Network failure** | Long-polling reconnects automatically; webhook mode relies on Telegram's retry |
+| **Network failure** | Long-polling reconnects automatically with exponential backoff (base 2s, factor 1.8, cap 30s, ±25% jitter) |
 | **User not allowlisted** | Dropped silently; if `dm_policy = pairing` the router mints a code |
 | **Empty message** | Skipped (no text and no attachments) |
 | **Service messages** | Ignored (join/leave notifications, pinned messages, etc.) |
@@ -326,7 +320,7 @@ If either check fails, the channel reports a `ConfigError` or `AuthFailed` error
 |---------|----------|
 | Bot does not respond | Check that the channel is enabled in `config.toml` and that the router received the message (look for the sender id in the pairing store) |
 | Bot ignores group messages | Disable Privacy Mode via BotFather (`/setprivacy`) or ensure the bot is mentioned |
-| "User not in allowlist" in logs | Add the user's numeric Telegram ID to `allow_from`, or approve the pending pairing code from the Panel |
+| "User not in allowlist" in logs | Add the user's numeric Telegram ID to `allowed_users`, or approve the pending pairing code from the Panel |
 | "Failed to verify bot token" | Verify your token with `curl https://api.telegram.org/bot<TOKEN>/getMe` |
-| Messages are delayed | Decrease `polling_interval_secs` or switch to webhook mode |
+| Messages are delayed | Check whether the long-polling backoff is in the way (the first failures after a restart back off for up to 30s) |
 | Formatting looks broken | Aleph uses MarkdownV2; check that special characters are not double-escaped |

@@ -3,7 +3,7 @@ title: "ClawHub"
 description: "ClawHub（clawhub.ai）的历史参考 —— 其 HTTP 客户端已从 Aleph 退役。"
 ---
 
-> **状态（2026-07）：ClawHub 不再作为一等源可达。** 专属的 src/clawhub/ 模块已退役；指向它的 Settings 标签页被移除并并入 Settings → Advanced。ClawHub 内容的浏览、搜索、安装现统一通过[扩展商店](./extensions-store)进行，后者门面化 **aleph-hub** 目录（`https://hub.heyaleph.com/catalog.json`）以及 Claude / Aleph 插件市场、Official MCP Registry、Docker MCP Catalog。当前源码中 `clawhub` 仅以两种方式出现：作为 `HubCatalog` 条目上的 `via` 来源标签（当某 artifact 可溯源到 OpenClaw 上游时），以及作为 `markdown_skill` 加载器仍识别的 OpenClaw `ClawHub` SKILL.md 元数据命名空间（兼容旧式安装）。本页仅作历史参考保留。
+> **状态（2026-07）：ClawHub 不再作为一等源可达。** 专属的 src/clawhub/ 模块已退役；指向它的 Settings 标签页被移除并并入 Settings → Advanced。ClawHub 内容的浏览、搜索、安装现统一通过[扩展商店](./extensions-store)进行，后者门面化 **aleph-hub** 目录（`https://hub.heyaleph.com/catalog.json`）以及 Claude / Aleph 插件市场、Official MCP Registry、Docker MCP Catalog。当前源码中 `clawhub` 仅以两种方式出现：作为 `HubCatalogEntry` 条目上的 `via` 来源标签（当某 artifact 可溯源到 OpenClaw 上游时），以及作为 `markdown_skill` 加载器仍识别的 OpenClaw `ClawHub` SKILL.md 元数据命名空间（兼容旧式安装）。本页仅作历史参考保留。
 
 ## 设计理念（历史）
 
@@ -131,7 +131,7 @@ pub fn unix_ms_to_rfc3339(ts: i64) -> String
 
 | 位置 | 作用 |
 |---|---|
-| `src/hub/catalog_client.rs` | `HubCatalog` 条目上的 `"via": "clawhub"` 来源标签 —— 仅当某 artifact 溯源到 OpenClaw 上游；标签是纯信息性的，从不触发网络拉取。 |
+| `src/hub/catalog_client.rs` | `HubCatalogEntry` 条目上的 `"via": "clawhub"` 来源标签 —— 仅当某 artifact 溯源到 OpenClaw 上游；标签是纯信息性的，从不触发网络拉取。 |
 | `src/hub/types.rs` | `ExtensionEntry` 上的 `via` 字段；同样仅作信息。 |
 | `src/tools/markdown_skill/spec.rs` | `OpenClaw` 元数据命名空间（`ClawHub` SKILL.md 兼容） —— 加载器仍解析旧式 `ClawHub` 风格 SKILL.md frontmatter，使既有技能继续可装。 |
 | `src/skill/guard.rs` | 扫描技能目录时跳过 `.clawhub.json` 附属文件。 |

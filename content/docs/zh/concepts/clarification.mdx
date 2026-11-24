@@ -101,7 +101,7 @@ pub struct SessionConfig {
 ## 安全
 
 - **面向用户路径上无 unwrap/expect**
-- **超时安全** —— `remaining_time()` 使用 `saturating_sub`
+- **超时安全** —— `ClarificationManager` 的一次性等待注册带超时，过期项在后续注册时清理（`src/clarification/session.rs`）
 - **并发访问** —— `tokio::sync::RwLock`（无中毒）
 - **无 SQL/LanceDB** —— 纯内存会话跟踪
 

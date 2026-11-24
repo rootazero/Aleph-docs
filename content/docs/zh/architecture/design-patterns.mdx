@@ -337,10 +337,10 @@ pub struct RegistryToolAdapter { /* wraps any ToolRegistry as LoopTool */ }
 
 | Trait | 用途 | 典型实现 |
 |---|---|---|
-| `AiProvider` | LLM provider（含 failover） | `FailoverProvider`、`AnthropicAdapter`、`OpenAIAdapter` |
+| `AiProvider` | LLM provider（含 failover） | `FailoverProvider`、采用 `AnthropicProtocol` 或 `OpenAiProtocol` 的 `HttpProvider` |
 | `ToolService` / `LoopTool` | 工具执行 | `BuiltinToolRegistry` + `RegistryToolAdapter` |
 | `Sandbox` | 进程隔离 | `WorkspaceSandbox`、`WorktreeSandbox`、`OsSandboxDriver` |
-| `EmbeddingProvider` | embedding 后端 | `OpenAIEmbedding`、`FastEmbedEmbedding` |
+| `EmbeddingProvider` | embedding 后端 | `RemoteEmbeddingProvider` |
 | `Clock` | 可注入时钟 | `SystemClock`、测试 fake |
 | `TraceSink` | harness 观测 | `GatewayTraceSink`、`SpySink`（测试） |
 

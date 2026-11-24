@@ -404,7 +404,7 @@ on file change — no restart needed.
 ### Naming conventions
 
 - **snake_case**: `web_fetch`, `file_read`, `bash_exec`.
-- **Descriptive but concise**: `memory_search` over `search_memory_database`.
+- **Descriptive but concise**: `memory_search` is enough — don't spell out the implementation detail (that it is backed by a database) in the name.
 - **MCP tools**: write clean inner names (`get_weather`); the `server__`
   prefix is added by `McpHandler`.
 - **Do not** put colons or dots in tool names — they map to `_` and the

@@ -105,7 +105,7 @@ pub enum AcpSessionEvent {
 pub type PersistenceHook = Arc<dyn Fn(AcpSessionEvent) + Send + Sync>;
 ```
 
-`session_name` is `None` for the default unnamed session; `Some(name)` for parallel named sessions in the same `(harness, cwd)` slot — mirrors acpx's `-s backend` / `-s frontend` shape. `PersistenceHook` covers disk persistence; the separate live-broadcast `AcpSessionsChangedNotifier` drives `acp.sessions.changed` push.
+`session_name` is `None` for the default unnamed session; `Some(name)` distinguishes parallel named sessions in the same `(harness, cwd)` slot. `PersistenceHook` handles disk persistence. The separate `GatewayChangeHook` notifies the Gateway of pool changes; the Gateway publishes `AcpSessionsChanged` so clients can refresh the list.
 
 ## Modes of operation
 
@@ -127,7 +127,7 @@ User ──> Aleph ──> AcpAdapterManager ──> External CLI
               (full read/write)
 ```
 
-## RPC surface (wired at startup by `register_acp_handlers`)
+## RPC surface (registered at startup)
 
 | Group | Methods |
 |-------|---------|
@@ -135,7 +135,7 @@ User ──> Aleph ──> AcpAdapterManager ──> External CLI
 | Adapter presets | `acp.presets`, `acp.presets_meta`, `acp.test`, `acp.set_enabled` |
 | Sessions | `acp.sessions.list`, `acp.sessions.cancel`, `acp.sessions.shutdown` |
 
-Wiring lives in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_acp_handlers` (sibling of `register_cron_handlers` / `register_heartbeat_handlers`).
+Startup wires these methods through `register_config_handlers` in `src/bin/aleph-server/commands/start/builder/handlers/settings.rs`.
 
 ## Configuration
 

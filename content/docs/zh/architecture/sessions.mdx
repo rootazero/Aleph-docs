@@ -142,13 +142,10 @@ CREATE TABLE session_events (
 
 | 变体 | 用途 |
 |---------|---------|
-| `SessionCreated { identity, at }` | 日志上的首条事件；冻结 `SessionIdentityMeta` |
 | `SessionWoken { at, prior_head }` | `wake()` 之后的崩溃恢复检查点 |
-| `SessionDetached { at }` | actor 停止；事件保留在磁盘上 |
 | `RunStarted { run_id, at, project_root }` | harness run 开始；`project_root` 被盖戳以便崩溃恢复回到同一目录 |
 | `RunFinished { run_id, outcome, at }` | harness run 达到终止状态 |
 | `TurnStarted { turn_id, trigger, at }` | 一个 Think→Act 轮次开始；`trigger` 区分 user / synthetic / verifier-veto / grace |
-| `TurnEnded { turn_id, outcome, at }` | 轮次达到其终止结局 |
 | `UserMessage { turn_id, content, at, synthetic }` | 用户输入（当 `synthetic = true` 时为 verifier-veto nudge / grace 提示） |
 | `AssistantMessage { turn_id, content, usage, at }` | 每次调用的 LLM 输出；`usage` 是**每次调用**的 token 明细（调用与助手行是 1:1） |
 | `AssistantRunMeta { turn_id, run_id, context_tokens, context_window, total_tokens, input_tokens, output_tokens, … }` | 每个 run 的唯一权威账单；会话级计数器挂在这里，**且仅在这里** |
@@ -157,12 +154,11 @@ CREATE TABLE session_events (
 | `ToolCallApproved { call_id, source, approver, at }` / `ToolCallDenied { call_id, reason, at }` | 审批卡片裁决 |
 | `ToolResult { call_id, output, at }` / `ToolError { call_id, error, at }` | Act 结果（按 `call_id` 配对） |
 | `SubagentSpawned { subagent_id, parent_turn_id, at }` / `SubagentReturned { subagent_id, result, at }` | 子代理生命周期 |
-| `BudgetUpdated { kind, value, at }` | 上下文预算指令升级 |
 | `CompactionPerformed { kind, before_tokens, after_tokens, at }` | 压缩管道输出 |
 | `SessionForked { child_session_id, parent_turn_id, at }` | 一个轮次分裂出子会话（如 `SplitSession` 指令） |
 | `Error { kind, message, at }` | 域错误事件 |
 
-读取侧辅助函数 `src/session/projection.rs::project_messages` 把一段事件范围转换为 `Vec<ProjectedMessage>`，供需要经典消息历史视图而非原始事件的消费者使用。
+`src/session/projection.rs` 中的 `project_row` 将一条支持的 `SessionEvent` 转为 `ProjectedRow`；其他事件可以不产生行。网关投影器（`src/gateway/session_projector.rs`）使用这些行生成转录视图，而不是把原始事件直接交给界面。
 
 ---
 
@@ -174,7 +170,7 @@ CREATE TABLE session_events (
 
 ## 历史：Presence 显式启用（已移除）
 
-本页早期版本记载过 `src/tasks/` 下的 `presence` 上报器：它把 Slack 式主机在线快照（`PresenceSnapshot`：主机名、用户名、平台、空闲秒数）以 `host.presence.update` 广播到 Gateway 事件总线，需通过 `PresenceConfig::enabled`（默认 `false`）显式启用。2026-08-09 它与同类的 `mic_level` 上报器一并被移除：这两个主题从未有订阅者（没有渲染端、RPC 或通道消费它们），且广播会白白泄露主机名与操作系统用户名。详见 `src/tasks/mod.rs` 中的注释块。
+本页早期版本记载过 `src/tasks/` 下的 `presence` 上报器：它把 Slack 式主机在线快照（`PresenceSnapshot`：主机名、用户名、平台、空闲秒数）以 `host.presence.update` 广播到 Gateway 事件总线，需通过 `PresenceConfig::enabled`（默认 `false`）显式启用。提交 `aeb94f613` 在 2026-08-09 将它与同类的 `mic_level` 上报器一并被移除：这两个主题从未有订阅者（没有渲染端、RPC 或通道消费它们），且广播会白白泄露主机名与操作系统用户名。详见 `src/tasks/mod.rs` 中的注释块。
 
 能力本身并未丢失：`system_tool` 的 `user_idle_time` 动作可按需回答"键盘前是否有人"，集群节点存活由集群自带的 ping 与空闲看门狗跟踪。`src/gateway/event_visibility.rs` 里的 `host.` 分支被有意保留，作为失败关闭的默认值：此后任何 `host.*` 主题都是 `OperatorOnly`，而不会落入全局广播。
 

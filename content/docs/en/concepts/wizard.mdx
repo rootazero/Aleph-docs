@@ -10,7 +10,7 @@ The `wizard` module is a **session-based wizard framework** exposed as `wizard.*
 1. **Session-based state machine** — `session_id` keeps progress across multiple `wizard.next` / `wizard.answer` calls
 2. **`RpcPrompter` abstraction** — the flow implementation holds an `RpcPrompter`, pushes `WizardStep` to the client, waits for `wizard.answer` to deliver the value
 3. **Panel / desktop / any RPC client** can drive it; no terminal required
-4. **Sticky terminal states** — `cancel()` after `Done` does not overwrite the completed state or discard its `finish_data` payload
+4. **Sticky terminal states** — `cancel()` after `Done` does not overwrite the completed state
 
 ---
 
@@ -50,7 +50,6 @@ pub struct WizardSession {
     step_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<WizardStep>>>,
     answers: Arc<RwLock<HashMap<String, PendingAnswer>>>,
     error: Arc<RwLock<Option<String>>>,
-    finish_data: Arc<RwLock<Option<serde_json::Value>>>,
     cancel_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
 }
 ```
@@ -58,7 +57,7 @@ pub struct WizardSession {
 Key properties:
 
 - `step_tx` is owned *only* by the `RpcPrompter` inside the spawned flow task. When the task ends the prompter is dropped, the last sender goes away, the channel closes, and `next()` receives `None` — that is how it surfaces `Done`/`Error`.
-- Terminal states are sticky. `settle()` only accepts transitions out of `Running`; a late `cancel()` (e.g. client-disconnect cleanup in the result-pending window) cannot clobber a completed `Done` and discard its `finish_data`.
+- Terminal states are sticky. `settle()` only accepts transitions out of `Running`; a late `cancel()` (e.g. client-disconnect cleanup in the result-pending window) cannot clobber a completed `Done`.
 
 ### `WizardFlow` trait
 
@@ -72,7 +71,7 @@ pub trait WizardFlow: Send + Sync {
 
 ### `RpcPrompter`
 
-The only shipped prompter. `prompter.prompt(step)` pushes a `WizardStep` to the client and blocks until the matching `wizard.answer` arrives. `finish(data)` writes the terminal payload into `finish_data`, and the next `wizard.next` returns it as `WizardNextResult.data` on a `Done`.
+The only shipped prompter. `prompter.prompt(step)` pushes a `WizardStep` to the client and blocks until the matching `wizard.answer` arrives. `RpcPrompter` has no terminal-payload writer — the terminal state comes from what the flow returns.
 
 Supported step types:
 
@@ -81,10 +80,8 @@ Supported step types:
 | `Note` | Display only |
 | `Select` | Single select |
 | `MultiSelect` | Multi-select |
-| `Text` | Free text (with `sensitive` / `validation`) |
+| `Text` | Free text (with `sensitive`) |
 | `Confirm` | Yes/no (with default) |
-| `Progress` | Background progress (`StepExecutor::Gateway`, client just renders) |
-| `Action` | Server-executed action |
 
 ---
 
@@ -93,8 +90,8 @@ Supported step types:
 | Flow | `wizard_type` | Purpose |
 |---|---|---|
 | `OnboardingFlow` | `onboarding` | First-launch: provider × 2, model, thinking, messaging, review (6 steps) |
-| `QuickSetupFlow` | `quick-setup` | One API key, skip the rest (re-install / quick path) |
-| `ProviderSetupFlow` | `provider-setup` | Add / reconfigure a single provider |
+
+Only this one flow is wired today: the flow factory registered at server start recognises `onboarding` and nothing else, so any other `wizard_type` gets `Unknown wizard type`.
 
 `OnboardingFlow::run` step sequence:
 
@@ -121,7 +118,7 @@ Methods registered in the gateway handler set. `service_unavailable` placeholder
 | `wizard.cancel` | `{ session_id }` | `{ cancelled }` |
 | `wizard.status` | `{ session_id }` | `{ status, error?, current_step? }` |
 
-The terminal `WizardNextResult` can carry a `data` payload that the flow sets via `RpcPrompter::finish(data)`; onboarding typically uses this to return the issued token or a config-write summary.
+The terminal `WizardNextResult` carries only `done` / `status` / `error` — there is no separate terminal-payload field.
 
 ---
 
@@ -131,7 +128,7 @@ The terminal `WizardNextResult` can carry a `data` payload that the flow sets vi
 - **`unwrap_or_else(|e| e.into_inner())`** lock-recovery pattern (poisoned-lock safe)
 - **Explicit step validation** — `answer` checks that `step_id` matches the current step; carrying an `answer` on `wizard.next` is rejected (`wizard.answer` is the only path that accepts values)
 - **Channel-leak guard** — `RpcPrompter::prompt` removes the pending sender from the `answers` map if the step push fails, so it cannot leak for the rest of the session
-- **No in-process `CliPrompter`** — terminal UIs go through RPC and are rendered by Panel; the CLI never drives the wizard directly
+- **No in-process CLI prompter** — terminal UIs go through RPC and are rendered by Panel; the CLI never drives the wizard directly
 
 ---
 
@@ -139,10 +136,20 @@ The terminal `WizardNextResult` can carry a `data` payload that the flow sets vi
 
 - `src/wizard/mod.rs` — module entry point
 - `src/wizard/session.rs` — `WizardSession`, sticky terminal states, channel lifecycle
-- `src/wizard/prompter.rs` — `RpcPrompter`, `PendingAnswer`, `ProgressHandle`
-- `src/wizard/types.rs` — `WizardStep` / `WizardOption` / `WizardStatus` / `StepType` / `WizardNextResult` / `WizardAnswer`
-- `src/wizard/flows/onboarding.rs` — `OnboardingFlow` / `QuickSetupFlow` / `ProviderSetupFlow`
+- `src/wizard/prompter.rs` — `RpcPrompter`, `PendingAnswer`
+- `src/wizard/types.rs` — `WizardStep` / `WizardOption` / `WizardStatus` / `StepType` / `WizardNextResult`
+- `src/wizard/flows/onboarding.rs` — `OnboardingFlow`
 - `src/gateway/handlers/wizard.rs` — `wizard.*` RPC handlers, `WizardSessionManager`, `install_wizard_handlers`
+
+## History: the wizard flows and dead wires that were cut
+
+The types below existed once and have since been deleted. They are listed so that anyone reading old code or an old issue can tell where they went — not because they are still around today.
+
+- `QuickSetupFlow` (`quick-setup`) and `ProviderSetupFlow` (`provider-setup`) — structs that nothing ever drove. Deleted by the 2026-08-03 commit `e3f2bc32f` ("wizard: cut dead wires").
+- `WizardAnswer`, and the terminal-payload chain `finish_data` / `RpcPrompter::finish` — deleted by the same commit; the `data` field of `WizardNextResult` went with it.
+- `ProgressHandle` (implemented as `RpcProgressHandle`) — deleted by the same commit; the background-progress step was never wired.
+- `StepType::Action` — deleted by the same commit.
+- `StepType::Progress` and `StepExecutor::Gateway` — deleted by the 2026-08-16 commit `e31398639` ("wizard: cut dead StepType::Progress / StepExecutor::Gateway / with_validation / AlreadyDone"). Today's step types are `Note` / `Select` / `MultiSelect` / `Text` / `Confirm`, and the only executor is `Client`.
 
 ## Related Pages
 

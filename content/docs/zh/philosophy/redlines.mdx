@@ -33,7 +33,7 @@ Aleph 的架构由 **十条红线**管理——优先于所有其他设计考虑
 
 ### 允许
 
-- 在核心中定义诸如 `ScreenCapture`、`WindowManager`、`InputSimulator` 之类的 trait
+- 在核心中定义诸如 `ScreenCapture` 或描述窗口管理、输入模拟的能力接口（后两者是设计职责，并非当前 trait 名） 之类的 trait
 - 原生桥接通过平台原生 API 实现这些 trait
 - 核心通过 trait 接口在 IPC（UDS JSON-RPC）上调用能力
 

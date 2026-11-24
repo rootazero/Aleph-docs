@@ -9,13 +9,15 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 
 ## 架构
 
-事件流经两个内部总线：
+事件流经内部事件总线：
 
-1. **核心事件总线** —— 处理代理生命周期事件 (`AlephEvent`)。基于 `tokio::sync::broadcast` 通道构建，用于低延迟进程内交付。代理循环的每个组件都在这里发布：工具调用、会话状态更改、规划事件、子代理活动。
+1. **核心事件总线** —— 处理代理生命周期事件 (`AlephEvent`)。基于 `tokio::sync::broadcast` 通道构建，用于低延迟进程内交付。代理循环的每个组件都在这里发布：子代理完成与子代理树更新、团队事件、后台进程完成。
 
-2. **守护进程事件总线** —— 处理系统级事件 (`DaemonEvent`)。感知守护进程监视环境 —— 文件系统更改、进程活动、系统状态、时间触发器 —— 并在此发布观察结果。
+核心事件总线输入到 Gateway 的事件订阅系统，该系统把它作为统一的流通过 WebSocket 暴露给外部客户端。
 
-两个总线都输入到 Gateway 的事件订阅系统，该系统将它们作为统一的流通过 WebSocket 暴露给外部客户端。
+<Callout type="info">
+过去还有第二条「守护进程事件总线」，用于发布文件系统、进程、系统状态和时间触发器一类的环境观察事件。它连同整个 src/daemon/ 子系统已在提交 `32a6157f1` 中删除 —— 那套代码没有任何生产消费者。旧的事件层次与当时的自动化用法保留在本页末尾的「历史：守护进程事件总线」一节。
+</Callout>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -23,7 +25,7 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 │                                                               │
 │  代理循环 ──▶ 核心事件总线 ──┐                           │
 │                                   ├──▶ Gateway 事件路由器   │
-│  守护进程  ──▶ 守护进程事件总线 ──┘         │                │
+│                                              │                │
 │                                              │                │
 │                                     ┌────────┴────────┐      │
 │                                     │  模式匹配器     │      │
@@ -97,7 +99,7 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 |-------|-------------|------------|
 | `cron.job.changed` | 作业被创建、更新、删除，或仅运行状态变化 | `job_id`, `change` |
 
-`change` 的取值是 `created`、`updated`、`deleted`、`state_changed`。
+`change` 取自 `ChangeKind` 枚举的四个变体：`Created`、`Updated`、`Deleted`、`StateChanged`（线上以小写下划线形式序列化）。
 
 作业的**执行结果**不在事件流里：用 `cron.runs` 查某个作业的运行记录（`status` 取值为 `ok`、`error`、`skipped`、`timeout`），用 `cron.status` 看整体（`running`、`last_tick_at_ms`、`job_count`、`enabled_count`）。
 
@@ -126,27 +128,9 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 
 审批事件走 `approval.*` 主题；`exec.*` 是**方法**命名空间，用来查待批列表和下决策：`exec.approvals.pending`、`exec.approval.resolve`、`exec.grants.list`、`exec.grant.revoke`。
 
-### 守护进程事件
+### 环境观察事件（已移除）
 
-守护进程为环境感知发出自己的事件层次结构：
-
-**原始事件** —— 来自监视器的直接观察：
-- `TimeEvent` —— cron 调度匹配、间隔滴答、绝对时间触发器
-- `ProcessEvent` —— 进程启动、停止、CPU/内存阈值超出
-- `FsEvent` —— 文件创建、修改、删除、重命名
-- `SystemStateEvent` —— 电池电量、网络状态、显示器睡眠、用户活动、系统负载
-
-**派生事件** —— 从原始事件中的模式推断：
-- `ActivityChanged` —— 用户活动类型更改（编码、浏览、会议等）
-- `ProgrammingSessionStarted` / `ProgrammingSessionEnded` —— 检测到的编码会话
-- `ResourcePressureChanged` —— 系统资源压力级别转换
-- `MeetingStateChanged` —— 检测到的会议开始/结束
-- `IdleStateChanged` —— 用户空闲或返回
-
-**系统事件** —— 守护进程自我管理：
-- `WatcherStarted` / `WatcherStopped` —— 监视器生命周期
-- `ConfigReloaded` —— 守护进程配置更改
-- `Error` —— 守护进程级错误
+守护进程曾为环境感知发出自己的一整套事件层次（原始事件、派生事件、系统事件）。它连同整个 src/daemon/ 子系统已在提交 `32a6157f1` 中删除 —— 那套事件总线没有事件生产者，调度循环会永远阻塞。保留的设计存档见文末「历史：守护进程事件总线」。
 
 ## 订阅事件
 
@@ -278,17 +262,19 @@ function readEvent(frame) {
 
 ### 核心事件类型（内部）
 
-在内部，Aleph 使用带有序列号的类型化事件系统进行排序：
+在内部，Aleph 使用带序列号的类型化事件系统进行排序。全局总线把事件包在 `GlobalEvent` 里（`src/event/global_bus.rs`）：
 
 ```rust
-pub struct TimestampedEvent {
+pub struct GlobalEvent {
+    pub source_agent_id: String,
+    pub source_session_id: String,
     pub event: AlephEvent,
-    pub timestamp: i64,      // 毫秒精度
+    pub timestamp: i64,      // epoch 毫秒
     pub sequence: u64,       // 单调递增
 }
 ```
 
-`AlephEvent` 枚举涵盖所有核心事件类型：`InputReceived`、`ToolCallStarted`、`ToolCallCompleted`、`ToolCallFailed`、`SessionCreated`、`SubAgentStarted`、`AiResponseGenerated` 等。网关将这些映射到基于主题的格式以供外部消费。
+`AlephEvent` 枚举（`src/event/types.rs`）当前有 11 个变体：`SubAgentCompleted`、`SubAgentTreeUpdate`、`ProcessCompleted`、`TeamCreated`、`TeamMemberAdded`、`TeamMemberRemoved`、`TeamTaskAssigned`、`TeamTaskUpdated`、`TeamTaskCompleted`、`TeamTaskFailed`、`TeamDisbanded`。网关将这些映射到基于主题的格式以供外部消费。
 
 ## 构建反应式集成
 
@@ -408,26 +394,7 @@ ws.onmessage = (msg) => {
 
 ## 守护进程事件驱动自动化
 
-守护进程的事件系统启用环境感知自动化。守护进程监视世界并发出可以触发代理操作的事件：
-
-### 上下文感知响应
-
-守护进程检测您何时开始编程会话，并可以主动提供帮助：
-
-- **`ProgrammingSessionStarted`** —— 检测到 IDE 启动 + 项目目录中的文件更改
-- **`ActivityChanged`** —— 在编码、浏览、会议等之间转换
-- **`IdleStateChanged`** —— 用户空闲（后台任务的机会）
-- **`ResourcePressureChanged`** —— 系统内存或电池不足
-
-### 基于时间的触发器
-
-守护进程评估 cron 表达式和间隔计时器，发出 `TimeEvent` 事件：
-
-- `Cron { expression }` —— 匹配 cron 调度
-- `Interval { seconds }` —— 间隔计时器滴答
-- `Absolute { time }` —— 达到特定时间戳
-
-这些时间事件是内部驱动 cron 作业系统的原因 —— 守护进程触发触发器，cron 调度器拾取它进行执行。
+守护进程的事件系统曾启用环境感知自动化：守护进程监视世界并发出可以触发代理操作的事件。该子系统已在提交 `32a6157f1` 中删除，保留的设计存档见文末「历史：守护进程事件总线」。
 
 ## 设计原则
 
@@ -460,8 +427,8 @@ ws.onmessage = (msg) => {
 
 26.7.x Hooks 加固：
 
-- `context_injection_limit_bytes` —— 注入上下文限额（避免无界增长）
-- `require_consent` —— 同意门
+- 注入上下文限额 —— `HOOK_CONTEXT_TOKEN_LIMIT`（`src/extension/hooks/output_budget.rs`）给每个注入上下文块设 token 上界；超限文本落盘到 `~/.aleph/data/hook_outputs/` 下的文件，注入体只保留首尾预览与该路径
+- 同意门 —— `ShellHookConsent`（`src/extension/hooks/consent.rs`）登记 shell hook 的用户同意；`HookExecutor::inventory()` 的 `consent` 字段给出每个 hook 的同意状态
 - 运行时库存（runtime inventory）—— 列出已注册 hook
 
 ### Guardian Judge
@@ -474,8 +441,61 @@ ws.onmessage = (msg) => {
 
 ### Day-boundary 日志轮转
 
-26.7.24+：守护进程支持 day-boundary 日志轮转；`ALEPH-BOOT` marker。
+26.7.24+：aleph-server 的进程守护支持 day-boundary 日志轮转；`ALEPH-BOOT` marker。
 
 ### 完整 RPC
 
 详见 [网关方法参考](/docs/zh/gateway/methods) 中 cron / heartbeat / hooks。
+
+---
+
+## 历史：守护进程事件总线
+
+提交 `32a6157f1`（`refactor: remove orphaned daemon subsystem`，2026-05-19）删除了整个 src/daemon/ 子系统 —— 43 个文件、4830 行。`DaemonEvent` 事件层次没有生产消费者，其事件总线没有事件生产者，调度循环会永远阻塞。下面保留的是当时的设计，用于对照旧文档与旧日志。
+
+### 事件层次
+
+**原始事件** —— 来自监视器的直接观察：
+- `TimeEvent` —— cron 调度匹配、间隔滴答、绝对时间触发器
+- `ProcessEvent` —— 进程启动、停止、CPU/内存阈值超出
+- `FsEvent` —— 文件创建、修改、删除、重命名
+- `SystemStateEvent` —— 电池电量、网络状态、显示器睡眠、用户活动、系统负载
+
+**派生事件** —— 从原始事件中的模式推断：
+- `ActivityChanged` —— 用户活动类型更改（编码、浏览、会议等）
+- `ProgrammingSessionStarted` / `ProgrammingSessionEnded` —— 检测到的编码会话
+- `ResourcePressureChanged` —— 系统资源压力级别转换
+- `MeetingStateChanged` —— 检测到的会议开始/结束
+- `IdleStateChanged` —— 用户空闲或返回
+
+**系统事件** —— 守护进程自我管理：
+- `WatcherStarted` / `WatcherStopped` —— 监视器生命周期
+- `ConfigReloaded` —— 守护进程配置更改
+- `Error` —— 守护进程级错误
+
+### 守护进程事件驱动自动化
+
+守护进程的事件系统启用环境感知自动化。守护进程监视世界并发出可以触发代理操作的事件：
+
+#### 上下文感知响应
+
+守护进程检测您何时开始编程会话，并可以主动提供帮助：
+
+- **`ProgrammingSessionStarted`** —— 检测到 IDE 启动 + 项目目录中的文件更改
+- **`ActivityChanged`** —— 在编码、浏览、会议等之间转换
+- **`IdleStateChanged`** —— 用户空闲（后台任务的机会）
+- **`ResourcePressureChanged`** —— 系统内存或电池不足
+
+#### 基于时间的触发器
+
+守护进程评估 cron 表达式和间隔计时器，发出 `TimeEvent` 事件：
+
+- `Cron { expression }` —— 匹配 cron 调度
+- `Interval { seconds }` —— 间隔计时器滴答
+- `Absolute { time }` —— 达到特定时间戳
+
+这些时间事件是内部驱动 cron 作业系统的原因 —— 守护进程触发触发器，cron 调度器拾取它进行执行。
+
+### 已删除的会话与工具调用事件
+
+`AlephEvent` 里的会话与工具调用事件在之后的审计中被清理：`InputReceived`、`ToolCallStarted`、`ToolCallCompleted`、`ToolCallFailed`、`SessionCreated`、`AiResponseGenerated` 由 `68e103c6f`（`event: severed-wire audit fixes`，2026-08-16）删除，`SubAgentStarted` 由 `e7f0c3cec`（`multiagent: integrate teams/agents/loop_graph/workflow round`，2026-07-24）删除。前者没有发布者，后者被 `SubAgentCompleted` 与 `SubAgentTreeUpdate` 取代。

@@ -121,7 +121,8 @@ GroupChatBroadcaster::dispatch_user
 | `session.rs` | `GroupChatSession`：单个会话的状态机 |
 | `executor.rs` | `GroupChatExecutor`：执行回合、调用 LLM |
 | `persona.rs` | `PersonaRegistry`：persona 元数据 |
-| `channel.rs` | `GroupChatCommandParser` / `GroupChatRenderer`：命令解析与渲染 |
+| `channel.rs` | `DefaultGroupChatCommandParser`：解析群聊命令 |
+| `src/gateway/inbound_router/group_chat_handler.rs` | 格式化通道回复；未使用的渲染 trait 已在 `8ee77389b` 中移除 |
 | `protocol.rs` | 协议消息类型 |
 | `coordinator.rs` | 多人协作编排 |
 

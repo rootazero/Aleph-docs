@@ -3,9 +3,11 @@ title: "Core Types"
 description: "Where Aleph's shared data types live today, and the removed src/core module they replaced."
 ---
 
-Aleph has no single `core` module. Shared data types now live in their owning modules — the canonical current list is the 26.7.x Addendum below. The pre-26.7 src/core/ module (`MediaAttachment`, `CapturedContext`, `CompressionStats`, `MemoryEntry`) was removed and is recorded under History.
+Aleph has no single `core` module. Shared types live in their owning modules; see the current inventory below. The former src/core/ data containers are documented under History.
 
 ## History: src/core module
+
+The orphan directory and its old type definitions were removed in `7c24bc55c`, after the module was undeclared.
 
 The src/core/ module was a pure data container — no business logic, no platform-specific code, only `serde` plus std containers — designed for high cohesion and zero coupling. It was removed as its types migrated to owning modules or were dropped entirely. The four types it held are recorded below for reference.
 
@@ -122,7 +124,7 @@ The `similarity_score` field was filtered through `deserialize_with = "deseriali
 
 ### New Types
 
-- **`SessionEvent` / `SessionEventRecord` / `TurnId`** (`src/session/events.rs`) — 26.7.7+ `session_events` is the canonical event log; `TurnId` distinguishes turns within a session. `SessionEvent` itself is `#[non_exhaustive]`, with variants covering `SessionCreated` / `RunStarted` / `TurnStarted` / `UserMessage` / `AssistantMessage` / `ToolCall*` / `Approval*` / `Compaction` and others.
+- **`SessionEvent` / `SessionEventRecord` / `TurnId`** (`src/session/events.rs`) — 26.7.7+ `session_events` is the canonical event log; `TurnId` distinguishes turns within a session. `SessionEvent` itself is `#[non_exhaustive]`, with variants covering `SessionWoken` / `RunStarted` / `TurnStarted` / `UserMessage` / `AssistantMessage` / `ToolCall*` / `Approval*` / `Compaction` and others.
 - **`UnifiedMessage` / `ContentBlock`** (`src/providers/message.rs`) — 26.7.7+ LLM-agnostic intermediate message representation. `UnifiedMessage` has three variants (`User` / `Assistant` / `ToolResult`) covering what a single turn may carry; `ContentBlock` has five variants (`Text` / `Json` / `Thinking` / `ToolCall` / `Image`).
 - **`ProviderDelta`** (`src/providers/delta.rs`) — streaming output events; variants include `TextDelta` / `ThinkingDelta` / `ThinkingSignatureDelta` / `ToolCallStart` / `ToolCallArgDelta` / `ToolCallArgsComplete` / `ToolCallEnd` / `Usage` / `Done` / `Error`.
 - **`LoopStatus` / `LoopState`** (`src/looping/types.rs`) — 26.7.25+ loop state machine: `LoopStatus` is the `Active` / `Paused` / `Stopped` tri-state enum; `LoopState` is the per-session serializable struct (`session_id`, `prompt`, `cadence`, `next_wake_ms`, `pending_tick_wake_ms`, `iterations_used`, etc.), updated immutably (`with_*` / `spent_*` return new copies).

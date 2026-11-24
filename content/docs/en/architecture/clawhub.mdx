@@ -17,7 +17,9 @@ ClawHub integration previously let Aleph:
 - **Install skills** — download and install from the registry
 - **Sync metadata** — keep skill metadata up to date
 
-## Historical architecture (removed)
+## Historical: standalone ClawHub client
+
+The dedicated RPC handlers were removed in commit `950f78ba0`; the standalone client module was removed in `b4d395fca`.
 
 ```
 ClawHubClient  (src/clawhub/client.rs — removed)
@@ -26,7 +28,7 @@ ClawHubClient  (src/clawhub/client.rs — removed)
   └── Authentication (API tokens)
 ```
 
-### Historical `ClawHubClient` (removed)
+### Client interface
 
 ```rust
 pub struct ClawHubClient {

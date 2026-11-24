@@ -38,7 +38,7 @@ Aleph deliberately rejects symmetric mesh, multi-master, and distributed consens
         ▼               ▼                   ▼
    ┌─────────┐     ┌─────────┐        ┌──────────┐
    │ Node B   │    │ Node C   │        │  local   │
-   │NodeClient│    │NodeClient│        │ (the host│
+   │ Node CLI │    │ Node CLI │        │ (the host│
    │ dials →  │    │ dials →  │        │  is also │
    │  center  │    │  center  │        │  an env) │
    │ declares │    │ declares │        └──────────┘
@@ -91,7 +91,7 @@ The whole lifecycle reuses the existing pairing / token / tool machinery — the
 
 1. **Enroll.** On node B, the operator says (in natural language) "join this machine to `<center URL>`." B's `aleph-server node` arm dials out to the center and runs the **interactive pairing** flow: the center issues a 6-digit code, B prints it to stdout, and the center operator approves it from the **Panel** (the same approval surface used for cold-browser pairing). On approval the center mints a `DeviceRole::Node` token, which B persists at `~/.aleph/node/<name>.json` (mode `0600`).
 2. **Declare.** Once connected, B reports the **command catalog it is willing to expose** (names + JSON Schema), sourced from B's local tools/skills. **Default deny, explicit allowlist** — the center can only call what B approved.
-3. **Invoke.** The center LLM calls `node_invoke("node:B", "bash", { ... })` → the `node_invoke` tool → `NodeRegistry` finds B's session → the call is delivered over the always-open WS as a reverse-RPC `tool.call` frame → B's `NodeClient` dispatches it to a **local** tool → the result returns by id → the pending table wakes → control returns to the LLM. Long tasks stream back over the event channel.
+3. **Invoke.** The center LLM calls `node_invoke("node:B", "bash", { ... })` → the `node_invoke` tool → `NodeRegistry` finds B's session → the call is delivered over the always-open WS as a reverse-RPC `tool.call` frame → B's node CLI dispatches it through `CommandTable` to a **local** tool → the result returns by id → the pending table wakes → control returns to the LLM. Long tasks stream back over the event channel.
 4. **Perceive.** B's daemon events and sub-agent progress push back over the same WS. The center routes them by topic to subscribers — Panel rendering, and the center LLM reacting proactively.
 
 ---
@@ -101,7 +101,7 @@ The whole lifecycle reuses the existing pairing / token / tool machinery — the
 A plain Gateway connection is client→server request/response plus server→client one-way notifications (the event bus). The cluster needs the missing piece: **server→center can issue an id-correlated request down to a connected node and await its response.**
 
 ```
-center                                   node B (NodeClient)
+center                                   node B (node CLI)
   │  node_invoke("node:B","bash",{…})        │
   │                                          │
   ├─ pending.insert((conn,id), tx) ──────────┤
@@ -202,9 +202,9 @@ The cluster adds capability without touching the agent loop. The harness still o
 
 26.7.20+: `normalize_node_key` is Unicode-aware; CJK node names work correctly.
 
-### `cluster.deregister` / `enroll` / `environments_list`
+### Deregistration, enrollment, and environment listing
 
-26.7.x full RPC.
+The Gateway registers the environment-list RPC with `handle_environments_list` in `src/gateway/handlers/cluster.rs`.
 
 ### Node Config
 

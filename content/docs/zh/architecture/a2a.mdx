@@ -1,17 +1,17 @@
 ---
 title: "A2A 协议"
-description: "A2A 协议适配器：AgentCard / Task / Message 域、port trait、A2AService 子代理委派、CardRegistry / SmartRouter / LlmMatcher。"
+description: "A2A 协议适配器：AgentCard / Task / Message 域、port trait、A2AService 子代理委派、CardRegistry / SmartRouter。"
 ---
 
 `a2a` 模块是 [Agent-to-Agent (A2A)](https://github.com/anthropics/a2a) 协议适配器。它让 Aleph 既能与外部 A2A 代理通信，也能在内部把子代理委派给外部实现。
 
-> 文档历史版本的"domain/port/service/adapter"五桶划分仍然适用，但 `service` 子模块不再只有 `sub_agent`：现在 `service/` 同时承载 `card_builder` / `card_refresh` / `card_registry` / `llm_matcher` / `notification` / `smart_router`。
+> 文档历史版本的"domain/port/service/adapter"五桶划分仍然适用，但 `service` 子模块不再只有 `sub_agent`：现在 `service/` 同时承载 `card_builder` / `card_refresh` / `card_registry` / `notification` / `smart_router`。
 
 ## 概览
 
 A2A 支持：
 - **Agent Card 发现** —— 通过 `card_registry` 拉取并缓存 `AgentCard`；`card_refresh` 周期 + 健康监测
-- **LLM 智能路由** —— `llm_matcher` + `smart_router` 把自然语言任务描述路由到最匹配的 A2A 代理
+- **显式路由** —— `SmartRouter` 从已注册的 A2A 代理中匹配引号内的名称或别名。
 - **子代理委派** —— `A2ASubAgent`（`a2a/sub_agent.rs`）把委派链内的 A2A 子代理接回 Aleph 的记忆 / 运行时
 - **A2A 协议消息** —— `domain/message.rs::A2AMessage`（`text | file | data` Parts）、`A2ATask`（多轮 task with state machine）、`TaskState` 转换
 - **客户端 / 服务端** —— `adapter/client/` 与 `adapter/server/` 是 A2A JSON-RPC 双向适配
@@ -44,9 +44,8 @@ src/a2a/
 │   ├── card_builder.rs        # AgentCard 构造
 │   ├── card_refresh.rs        # 周期刷新 + spawn_card_refresh / spawn_health_monitor / refresh_all_cards
 │   ├── card_registry.rs       # CardRegistry：缓存 + 查询
-│   ├── llm_matcher.rs         # SemanticLlmMatcher：用 LLM 做语义匹配
 │   ├── notification.rs        # NotificationService / PushNotificationConfig
-│   └── smart_router.rs        # SmartRouter / LlmMatcher / RoutingDecision / RoutingMethod
+│   └── smart_router.rs        # SmartRouter / RoutingDecision / RoutingMethod
 └── adapter/            # 协议实现
     ├── mod.rs
     ├── auth/           # A2A auth 适配
@@ -102,16 +101,11 @@ pub struct ListTasksResult { /* tasks / next_page_token */ }
 pub use card_builder::CardBuilder;
 pub use card_refresh::{refresh_all_cards, spawn_card_refresh, spawn_health_monitor};
 pub use card_registry::CardRegistry;
-pub use llm_matcher::SemanticLlmMatcher;
 pub use notification::{NotificationService, PushNotificationConfig};
-pub use smart_router::{LlmMatcher, RoutingDecision, RoutingMethod, SmartRouter};
+pub use smart_router::{RoutingDecision, RoutingMethod, SmartRouter};
 ```
 
-`SmartRouter` 聚合 `LlmMatcher` 与 `CardRegistry`，把用户的自然语言任务映射到最佳 A2A 代理：
-
-- **`LlmMatcher::route(task_description)` → `RoutingDecision`** —— LLM 评分
-- **`CardRegistry::lookup(decision)`** —— 取对应 `AgentCard` + endpoint
-- **`SmartRouter::route_and_invoke`** —— 端到端：评分 → 选卡 → 委派
+`SmartRouter::route` 通过 `AgentResolver` 读取已注册的代理，排除不可达条目，仅在匹配引号内的名称或别名时返回 `RoutingDecision`。`A2ASubAgent::execute_delegation` 按显式提供的代理 ID 或名称选择目标；未提供时调用路由器，再将任务发给解析到的端点。提交 `54e757c88` 移除了基于 LLM 的匹配；当前没有语义回退。
 
 `spawn_card_refresh` + `spawn_health_monitor` 在后台保持 `CardRegistry` 新鲜；`refresh_all_cards` 一次性全量重拉。
 

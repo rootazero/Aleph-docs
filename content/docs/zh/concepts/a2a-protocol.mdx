@@ -140,9 +140,9 @@ pub enum TaskState {
 
 ## 能力发现
 
-远程代理通过 **Agent Card**（`src/a2a/domain/agent_card.rs` 中的 `AgentCard`）公布自身能力。Aleph 在每个 remote 的 `/.well-known/agent-card.json` URL 拉取 card，通过 `CardRegistry` 在本地缓存，并由 `CardRefresh` 按需刷新。按 id、name、URL 解析 card 的能力由 `AgentResolver` 端口提供。
+远程代理通过 **Agent Card**（`src/a2a/domain/agent_card.rs` 中的 `AgentCard`）公布自身能力。Aleph 在每个 remote 的 `/.well-known/agent-card.json` URL 拉取 card，通过 `CardRegistry` 在本地缓存，并在启动时由 `refresh_all_cards` 拉取真实 card 并更新缓存。按 id、name、URL 解析 card 的能力由 `AgentResolver` 端口提供。
 
-发现通过 `SmartRouter`（`src/a2a/service/smart_router.rs`）收敛：给定一段 prompt，由 `LlmMatcher`（语义）或回退启发式挑出最匹配的注册代理，再交由 `A2AClientPool` 真正发出 `message/send` 或 `message/stream`。
+发现由 `SmartRouter`（`src/a2a/service/smart_router.rs`）解析显式指定的代理名或别名，而非通过 LLM 语义匹配或启发式选择；解析结果再交给 `A2AClientPool` 发出 `message/send` 或 `message/stream`。
 
 ---
 

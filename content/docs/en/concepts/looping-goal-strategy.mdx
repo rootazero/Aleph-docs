@@ -1,6 +1,6 @@
 ---
 title: "Loop / Goal / Strategy"
-description: "Three independent subsystems: loop (sustained repetition), goal (autonomous objective pursuit), strategy (team or naked-loop plan). Shared TreeBudget single-rail invariant, cross-session kill switch, four composite-key namespaces, plus the 9-action loop / 7-action goal / 3-action strategy tool surfaces."
+description: "Three independent subsystems: loop (sustained repetition), goal (autonomous objective pursuit), strategy (team or naked-loop plan). Shared TreeBudget single-rail invariant, cross-session kill switch, four composite-key namespaces, plus the 8-action loop / 7-action goal / 2-action strategy tool surfaces."
 ---
 
 > **Current state (26.7.22+).** Before 26.7.21, Aleph only had cron (persistent, cross-session, own session) and heartbeat (short-interval pulse). 26.7.22+ introduces **three independent subsystems** covering the middle ground: "I want to keep doing X in this session right now" / "I want to autonomously pursue a goal" / "the team needs a plan". The three are **not mutually exclusive** — a single session can have a loop + a goal + be referenced by a strategy.
@@ -56,7 +56,7 @@ pub struct LoopState {
 - **`stable_summary()`**: enters SYSTEM PROMPT — **no countdown** (prompt cache is prefix-keyed, every byte change forces the whole history to re-WRITE at 1.25× instead of READ at 0.1×)
 - **`live_status(now_ms)`**: countdown moves to transient trailing user message (after cache breakpoint), byte changes cost only themselves
 
-### `loop` Tool (9 Actions)
+### `loop` Tool (8 Actions)
 
 ```rust
 loop(action: "start",     prompt, cadence, max_iterations?, deadline_ms?, token_budget?)
@@ -66,8 +66,7 @@ loop(action: "resume",    session_id)
 loop(action: "status",    session_id?, now_ms?)
 loop(action: "update",    session_id, prompt?, cadence?, max_iterations?, deadline_ms?, token_budget?)
 loop(action: "list",      session_id?)           // list current session / all loops
-loop(action: "claim_tick", session_id)          // internal: continuation hook
-loop(action: "confirm_fire", session_id)        // internal: clears pending after tick fires
+loop(action: "stop_all", reason?)                // cross-session kill switch
 ```
 
 ### `LoopRegistry` (in-process)
@@ -141,7 +140,7 @@ pub enum GateOutcome {
 Goal subsystem stop judgment **must never rely solely on the model saying "I'm done"**:
 
 - **`GateOutcome` type-state**: `maker` (model self-report) + `checker` (objective validation) must **both** succeed for `Completed`
-- **`stop_hooks` global hook**: the model's self-reported completion must pass through `process_global_stop_hooks`, which validates against the stated objectives
+- **`stop_hooks` global hook**: the model's self-reported completion must pass through `execute_stop_hooks_arc`, which validates against the stated objectives
 - **Fail-closed** (§goal hardening ④): any stop_hook failure → default abort, not continue. `goal_continuation::gate_veto` treats `Error` as a veto — verifier failure = completion cannot be verified = completion cannot be claimed = block `complete`
 - **Cross-session kill switch**: in-place `reconfiguration` auto-invalidates a welded strategy (`clear_goal_welded_strategy` runs on `commit_gate_pass` success, **not** the `uninstall` path)
 
@@ -211,11 +210,6 @@ pub struct Strategy {
     pub goal_id: Option<String>,    // bound to a goal; goal change auto-invalidates
 }
 
-pub enum StrategyKey {
-    NakedLoop { session_key: SessionKey },  // naked-loop plan
-    TeamChat { team_id: String },           // team plan
-    GoalBound { goal_id: String },          // goal-bound
-}
 ```
 
 ### Composite Key Namespaces
@@ -231,23 +225,9 @@ The four keys **never collide** — the same session can hold a goal strategy + 
 
 ### Planner + Atomic Fire-Once
 
-```rust
-// src/strategy/planner.rs
-pub struct PlannerNode { /* tool-free fail-soft */ }
+`plan_strategy` in `src/strategy/planner.rs` is a tool-free, fail-soft one-shot LLM call. It receives `PlannerContext` (tool descriptions, environment summary, and lessons), builds a `RequestPayload`, and returns no strategy on provider/parse failure or empty guardrails. The call itself performs provider I/O; it is not a pure function. Keys are strings built by the namespace helpers, not a key enum.
 
-impl PlannerNode {
-    pub async fn plan_strategy(&self, ctx: PlannerContext) -> Option<Strategy> { /* ... */ }
-}
-
-// In team chat: planner MUST fire-once (race protection)
-pub async fn try_fire_once(&self, key: &StrategyKey) -> Result<bool> {
-    self.store.put_if_absent(key, strategy).await    // → only one planner triggers successfully
-}
-```
-
-The planner is a **tool-free one-shot LLM call** (`ProviderRequest::new` with no tools, plus the curated `tool_descriptions` / `env_summary` / `lessons` environment triple). **Self-gate**: `strategy.guardrails` is empty → `is_empty()` → planner returns `None` itself (don't store, don't pollute the prompt cache); same objective re-plan → `goal_id` hits → skip (already planned once). Output is **pure / IO-free** — fail-soft, never errors.
-
-`put_if_absent` is the **atomic fire-once** primitive — two concurrent first messages both reach the planner, but only one inserts; a plain `put` (last-write-wins) would let both pay for the plan + store it.
+`StrategyStore` uses synchronous `put_if_absent` in `src/strategy/store.rs` to atomically retain only one strategy for a key. This protects insertion, not the cost of concurrent planner calls.
 
 ### `[strategy]` Configuration
 
@@ -258,28 +238,18 @@ plan_naked_loop = true         # default on: naked loop auto-plan
 objective_change_invalidate = true   # default on: welded strategy invalidated when goal changes
 ```
 
-### `strategy` Tool (3 Actions)
+### `strategy` Tool (2 Actions)
 
-```rust
-strategy(action: "revise", key, objective?, approach?, phases?, guardrails?, success_criteria?)  // rewrite existing strategy
-strategy(action: "show", key)                // render current strategy
-strategy(action: "dumb_write", key, content) // bypass-validation write (only for trusted callers)
+```text
+strategy(action: "revise", reason, new_strategy)
+strategy(action: "show")
 ```
 
-`revise` goes through `put` (overwrite); `show` goes through `render_strategy_summary` (cache-friendly stable bytes); `dumb_write` is the **trusted caller** bypass — R7 doesn't let the LLM itself bypass the planner self-gate, so `dumb_write` is documented for trusted callers only (system / governance layer).
+`StrategyArgs` has no caller-supplied key. The tool resolves the current task strategy; `revise` requires a non-empty reason and a complete replacement with concrete guardrails. There is no validation-bypass action.
 
 ## Team Run Mode Pin
 
-The team leader **stamps** `usage_mode` (chat / work / code) at team run start (`run_mode::stamp`) and inherits it to sub-members — team run mode now **rejects** sub-member `session_set_mode` tool calls:
-
-```rust
-// src/teams/runner.rs
-if turn.is_subagent() {
-    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
-    ensure!(request.action != Some("session_set_mode"),
-        "subagents inherit parent mode; cannot switch mid-team-run");
-}
-```
+`stamp` in `src/teams/run_mode.rs` pins team runs to `SessionMode::Work` and `BusyInputMode::Queue` through request metadata. Both group-chat fan-out and task-dispatch producers use this helper. Team sessions cannot switch mode through `session_set_mode`.
 
 `task_review` approvals can require `grounding` — the acceptance metadata channel (zero-migration) carries a `[grounding]` comment with evidence (kind ∈ `exit_code` / `numeric` / `line_count`, **the same closed set as loop_graph anchor truth**). An approve without grounding evidence bounces (`grounding_required`); a reject never requires an anchor (reject is naturally conservative).
 
@@ -295,18 +265,18 @@ if turn.is_subagent() {
 - `src/looping/mod.rs` — `LoopRegistry` (in-process `Arc<Mutex<HashMap>>>`) + process-global `init_global` / `global`
 - `src/looping/types.rs` — `Cadence` / `LoopStatus` / `LoopState` + `human_summary` / `stable_summary` / `live_status` three-state rendering
 - `src/looping/pursuit.rs` — `exhausted` / `should_continue` / `tick_delay_ms` / `tick_prompt` / `cap_reached_note` / `deadline_reached_note` / `budget_reached_note` / `stop_reason_note` (pure functions, R7 intelligence in the prompt)
-- `src/builtin_tools/loop_manage.rs` — 9-action `loop` tool + `LoopManageTool`
+- `src/builtin_tools/loop_manage.rs` — 8-action `loop` tool + `LoopManageTool`
 - `src/goal/mod.rs` — `init_global` / `global` process-global
 - `src/goal/types.rs` — `GoalStatus` / `PursuitMode` / `GateOutcome` / `Goal` (with 13 fields: `id` / `session_id` / `objective` / `success_criteria` / `status` / `token_budget` / `continuations_used` / `deadline_ms` / `baseline_captured` / `pending_continuation_ms` / `waiting_until_ms` / `waiting_on_task` / `waiting_reason` / `budget_members` / `completed_at_ms` / `note` / `gate_outcome` / `gate_command` / `lessons` / `created_at_ms` / `updated_at_ms` / `permanent`) + `BudgetMember` + `MAX_LESSONS = 5` + `MAX_BUDGET_MEMBERS = 32`
 - `src/goal/store.rs` — `GoalStore` + `ContinuationDecision` / `RearmDecision` enums + 8 atomic methods (`commit_gate_pass` / `claim_after_gate_veto` / `block_if_active` / `pause_if_active` / `pause_all_active` / `supersede_wait_timer` / `clear_wait_barrier` / `try_claim_settle_notify`)
 - `src/goal/pursuit.rs` — `should_continue` / `continuation_prompt` / `exhausted_while_active` / `stop_reason_note` / `awaiting_gate` / `gateless_terminal_complete` / `reopen_after_gate_failure` / `gate_failure_prompt` / `wait_parked` / `wait_resume_prompt` / `confirm_complete` (hermes-style pure functions)
 - `src/builtin_tools/goal.rs` — 7-action `goal` tool + `GoalTool`, includes `register_budget_member` (delegation registration)
 - `src/strategy/mod.rs` — 4 key constructor functions + `init_global` / `global`
-- `src/strategy/types.rs` — `Strategy` / `StrategyKey` / `is_empty` self-gate
+- `src/strategy/types.rs` — `Strategy` / `is_empty` self-gate
 - `src/strategy/store.rs` — `StrategyStore` (SQLite, PK = `key`) + `put` / `put_if_absent` (atomic fire-once) / `get` / `delete` / `list_all`
-- `src/strategy/planner.rs` — `PlannerNode` (tool-free one-shot LLM) + `plan_strategy` + `try_fire_once` (atomic fire-once) + `env_summary` + `PLANNER_SYSTEM` prompt
+- `src/strategy/planner.rs` — `PlannerContext` / `plan_strategy` / `env_summary`
 - `src/strategy/render.rs` — `render_strategy_summary` / `render_guardrails_only` / `render_workflow_global_frame` (pure functions, cache-friendly deterministic bytes, **no** `now_ms` / `HashMap` iteration)
-- `src/builtin_tools/strategy_manage.rs` — 3-action `strategy` tool
+- `src/builtin_tools/strategy_manage.rs` — 2-action `strategy` tool
 - `src/teams/run_mode.rs` — team run mode stamp (`run_mode::stamp`) + subagent mode pin guard
 - `src/gateway/execution_engine/goal_continuation.rs` — 5 execution points (`post_run` / `arbitrate_gate` / `block_goal_on_failure` / `rearm_goal_after_busy` / `clear_goal_welded_strategy`)
 - `src/gateway/goal_budget.rs` — `tree_tokens` (tree budget aggregation)
@@ -314,9 +284,9 @@ if turn.is_subagent() {
 
 ## 26.7.x Addendum
 
-### Loop Tool's 9 Actions
+### Loop Tool's 8 Actions
 
-26.7.x `loop` tool was completed to 9 actions (`start` / `stop` / `pause` / `resume` / `status` / `update` / `list` + internal `claim_tick` / `confirm_fire`); the last two are the continuation hook's atomic operations. `update` goes through `commit_field_update` (`reschedule = false` preserves live pending, `true` clears it) — **not** a raw `put` (a raw `put` would race with a firing tick over the `pending` field).
+The `loop` tool exposes eight actions: `start`, `stop`, `pause`, `resume`, `status`, `update`, `list`, and `stop_all`. Tick scheduling uses the internal `try_claim_tick` and `confirm_fire` registry methods. `update` uses `commit_field_update` to preserve live pending state unless rescheduling is requested.
 
 ### Goal Tool's 7 Actions
 
@@ -346,9 +316,9 @@ Team run rejects subagent `session_set_mode` — "the leader stamps, sub-members
 
 ### See Also
 
-- [Loop tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/loop_manage.rs) — 9-action implementation
+- [Loop tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/loop_manage.rs) — 8-action implementation
 - [Goal tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/goal.rs) — 7 actions + `register_budget_member`
-- [Strategy tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/strategy_manage.rs) — 3 actions + revise / show / dumb_write
+- [Strategy tool source](https://github.com/rootazero/Aleph/blob/main/src/builtin_tools/strategy_manage.rs) — 2 actions: revise / show
 - [Goal continuation driver](https://github.com/rootazero/Aleph/blob/main/src/gateway/execution_engine/goal_continuation.rs) — `post_run` / `gate_veto` / `clear_goal_welded_strategy`
 - [Goal store source](https://github.com/rootazero/Aleph/blob/main/src/goal/store.rs) — `try_claim_settle_notify` CAS
 - [Loop registry source](https://github.com/rootazero/Aleph/blob/main/src/looping/mod.rs) — `stop_all` cross-session kill switch

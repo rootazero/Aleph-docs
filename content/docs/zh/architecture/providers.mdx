@@ -364,18 +364,7 @@ pub enum ProviderHealth {
 
 ### 指标
 
-每个提供商通过原子计数器追踪实时指标：
-
-```rust
-pub struct ProviderMetrics {
-    pub total_requests: AtomicU64,
-    pub success_count: AtomicU64,
-    pub failure_count: AtomicU64,
-    pub total_latency_ms: AtomicU64,
-}
-```
-
-通过 `get_metrics()` 查询每个提供商的成功率和平均延迟。
+`FailoverHealth::snapshot` 返回各已跟踪提供商的熔断状态、连续失败次数、最近错误与剩余冷却时间（`src/providers/failover/health.rs`）。这是健康状态快照，不是成功率或平均延迟报表。
 
 ### 故障转移配置示例
 

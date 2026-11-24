@@ -5,11 +5,11 @@ description: "评估和基准测试 RPC 方法"
 
 `arena.*` 命名空间在当前 `aleph-server` 运行时**未被注册**。源码中既没有 `arena` 处理模块,也没有 `registry.register("arena.*", ...)` 的调用,更不存在 `arena` 模块——任何 `arena.*` 方法在运行时会返回 `Method not found`(错误码 `-32601`)。
 
-26.7.x 的 CHANGELOG 没有关于该命名空间的条目,最初的评估竞技场设计(竞技场基准任务、排行榜)在当前构建中已不存在。
+26.7.x 的 CHANGELOG 没有关于该命名空间的条目。Rust 侧的 src/arena/ 模块曾经存在（评估编排、阶段拓扑排序、竞技场查询），但它从未向网关注册过 RPC，并在提交 `e7f0c3cec`（`multiagent: integrate teams/agents/loop_graph/workflow round`，2026-07-24）中被整体删除。最初的评估竞技场设计（竞技场基准任务、排行榜）在当前构建中已不存在。
 
-## 方法
+## 历史：arena.* 命名空间（未注册的设计存档）
 
-下表所列方法在运行的 `aleph-server` 上**永远**不可达,这里仅作为历史设计的存档:
+下表所列方法在运行的 `aleph-server` 上**永远**不可达，这里仅作为历史设计的存档——包括 `benchmark_id` 这类从未出现在源码里的参数名。对应的 src/arena/ 模块已在提交 `e7f0c3cec`（2026-07-24）删除，且它从未向网关注册过 RPC。
 
 ### arena.list
 

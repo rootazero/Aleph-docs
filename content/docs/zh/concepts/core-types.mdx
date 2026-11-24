@@ -3,9 +3,11 @@ title: "核心类型"
 description: "Aleph 共享数据类型如今的归属，以及被移除的 src/core 模块。"
 ---
 
-Aleph 不再有单一的 `core` 模块。共享数据类型如今落在各自的归属模块中——当前的权威清单见下方 26.7.x 补充。26.7 之前的 src/core/ 模块（`MediaAttachment`、`CapturedContext`、`CompressionStats`、`MemoryEntry`）已移除，其类型记录在历史小节。
+Aleph 当前没有统一的 `core` 模块；共享类型由各自模块持有，见下方现状清单。旧 src/core/ 数据容器记录在历史章节。
 
 ## 历史：src/core 模块
+
+孤立目录及旧类型定义于 `7c24bc55c` 删除；此前模块已不再声明。
 
 src/core/ 模块曾是纯数据容器——无业务逻辑、无平台特定代码，外部依赖只有 `serde` 与标准库容器——秉持高内聚零耦合。随着类型迁移到归属模块或被彻底移除，该模块已删除。它曾承载的四个类型记录如下，供参考。
 
@@ -122,7 +124,7 @@ pub struct MemoryEntry {
 
 ### 新增类型
 
-- **`SessionEvent` / `SessionEventRecord` / `TurnId`**（`src/session/events.rs`）—— 26.7.7 起 `session_events` 是规范事件日志；`TurnId` 区分同一会话内的不同轮次。`SessionEvent` 自身是非穷举枚举（`#[non_exhaustive]`），变体覆盖 `SessionCreated`/`RunStarted`/`TurnStarted`/`UserMessage`/`AssistantMessage`/`ToolCall*`/`Approval*`/`Compaction` 等。
+- **`SessionEvent` / `SessionEventRecord` / `TurnId`**（`src/session/events.rs`）—— 26.7.7 起 `session_events` 是规范事件日志；`TurnId` 区分同一会话内的不同轮次。`SessionEvent` 自身是非穷举枚举（`#[non_exhaustive]`），变体覆盖 `SessionWoken`/`RunStarted`/`TurnStarted`/`UserMessage`/`AssistantMessage`/`ToolCall*`/`Approval*`/`Compaction` 等。
 - **`UnifiedMessage` / `ContentBlock`**（`src/providers/message.rs`）—— 26.7.7+ 引入的 LLM 无关中间消息表示。`UnifiedMessage` 三变体（`User` / `Assistant` / `ToolResult`）覆盖一轮中可能携带的内容；`ContentBlock` 五变体（`Text` / `Json` / `Thinking` / `ToolCall` / `Image`）。
 - **`ProviderDelta`**（`src/providers/delta.rs`）—— 流式输出事件；变体包括 `TextDelta` / `ThinkingDelta` / `ThinkingSignatureDelta` / `ToolCallStart` / `ToolCallArgDelta` / `ToolCallArgsComplete` / `ToolCallEnd` / `Usage` / `Done` / `Error`。
 - **`LoopStatus` / `LoopState`**（`src/looping/types.rs`）—— 26.7.25 引入的循环状态机：`LoopStatus` 是 `Active` / `Paused` / `Stopped` 三态枚举；`LoopState` 是会话级可序列化结构（`session_id`、`prompt`、`cadence`、`next_wake_ms`、`pending_tick_wake_ms`、`iterations_used` 等），不可变更新（`with_*` / `spent_*` 返回新副本）。

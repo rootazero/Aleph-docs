@@ -380,9 +380,26 @@ Add context-aware instructions before tool execution:
 
 26.7.x Hooks hardening:
 
-- `context_injection_limit_bytes` — bound injected context (avoid unbounded growth)
-- `require_consent` — consent gate
+- `HOOK_CONTEXT_TOKEN_LIMIT` — the token budget for injected context (`src/extension/hooks/output_budget.rs`); oversized text is spilled to a file under `~/.aleph/data/hook_outputs/`, and the injected block keeps only a head/tail preview plus that path
+- `ShellHookConsent` — the consent gate (`src/extension/hooks/consent.rs`); a hook that needs human confirmation is recorded as pending, and the `consent` field of `HookExecutor::inventory()` reports each hook's consent state
 - Runtime inventory — list registered hooks
+- Timeout isolation — every hook call carries its own timeout; a timeout declared for one entry of a `hooks.json` registration belongs to that action alone and does not leak onto its siblings
+- Declaration shape — hooks are declared per event name in `hooks.json`, each group holding one matcher and a list of actions
+
+```json
+{
+  "hooks": {
+    "before_tool_call": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          { "type": "command", "command": "./audit-shell-commands.sh", "timeout": 60 }
+        ]
+      }
+    ]
+  }
+}
+```
 
 ### `hooks_manage` Tool
 
@@ -408,7 +425,7 @@ hooks_manage(action: "stats")                        // hit rate / timeouts / co
 
 ### Day-Boundary Log Rotation
 
-26.7.24+: the daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
+26.7.24+: the aleph-server process daemon supports day-boundary log rotation; `ALEPH-BOOT` marker.
 
 ### Full RPC
 
