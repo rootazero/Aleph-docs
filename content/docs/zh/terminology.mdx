@@ -143,7 +143,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Capability（扩展期）** | 能力（扩展期） | 旧扩展模型里的权限声明（文件系统、网络、进程）；现已被 `src/capability/` 的能力模型取代，见[能力模型](/docs/zh/capabilities/capability-model) |
 | **Capability Ledger** | 能力账本 | 每次安装时从磁盘重建的可见能力清单（用于安装前披露） |
 | **Approval Gate** | 审批门 | 提升权限的人机回环审批 |
-| **fail-closed** | 失败关闭 | 缺失策略文件或默认值不一致时拒绝授权（`permissive_default` 必须等于 `Default::default()`） |
+| **fail-closed** | 失败关闭 | 不可读或损坏的策略不静默放行：`ConfigApprovalPolicy` 回退到 Ask；缺失策略文件则使用内置的分类默认值（`src/approval/config.rs`） |
 | **IdentityContext** | 身份上下文 | 流经执行的不可变身份快照 |
 | **Per-Agent Signing Key** | 每代理签名密钥 | 每个 Agent 独立的签名密钥，写入操作账本 |
 | **Operation Ledger** | 操作账本 | 由签名者拥有的签名操作序列 |
@@ -225,7 +225,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Composite Key** | 复合键 | `goal_key` / `loop_key` / `session_key` / `team_key` 四个命名空间 |
 | **Plan Team / Naked Loop** | 团队/裸循环策略 | `[strategy] plan_team` / `plan_naked_loop` 配置开关 |
 | **Atomic Put-if-Absent** | 原子首发 | `StrategyStore` 的 fire-once 机制（防 race） |
-| **Run Mode Pin** | 运行模式钉 | 队长盖戳 `usage_mode`；子代理继承；拒绝 `session_set_mode` mid-run |
+| **Run Mode Pin** | 运行模式钉 | 团队运行逐轮盖戳 `TEAM_RUN_MODE`（`src/teams/run_mode.rs`），固定为 Work，不继承用户会话模式 |
 | **Loop Auditor** | 循环审计员 | 内置受保护智能体；审计 / 监督模板默认走独立上下文证据 |
 | **`loadable`** | 可加载容器 | `data.rs` + `loader.rs`——所有 fetch 路由走它；failed fetch 不可表示为空 |
 | **Vault Card View** | Vault 卡片视图 | `cards.rs`——三态 shell（Loading / Empty / Content） |
@@ -273,15 +273,15 @@ description: "Aleph 概念的标准化术语和翻译"
 | `NoteFactRetrieval` | Note Fact Retrieval |
 | `CompressionService` | Compression Service |
 | `DreamDaemon` | Dream Daemon |
-| `DesktopBridgeClient` | Desktop Bridge Client |
-| `LoopGraph` | Loop-Graph Governance |
+| Desktop capability IPC client | Desktop Bridge Client |
+| `LoopGraphStore` | Loop-Graph Governance |
 | `GoalStore` | Goal Store |
 | `LoopState` | Loop State |
 | `ArtifactStore` | Artifact Store |
 | `ProjectStore` | Project Store |
 | `Hub` | Hub (Extensions / Secrets / Trust catalog) |
-| `SignerKey` | Per-Agent Signing Key |
-| `OperationLedger` | Operation Ledger |
+| `AgentKeystore` | Per-Agent Signing Key |
+| `AgentLedger` | Operation Ledger |
 | `Verification` | Verifier / Turn-verify context |
 | `Guardrail` | Guardrail (Block / Sanitize / Pass) |
 
@@ -309,7 +309,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | Provider 故障转移深克隆全会话 | 原子 regen marker + 单次克隆 | 性能/正确性修复 |
 | `aleph.svg` 静态路径硬编码 | `core_path("/aleph.svg")` | 跟随核心迁移 |
 | `max_iterations` 之外硬停 | 仅 `max_iterations` + 工具循环验证器 | R10 禁止循环内确定性完成判断 |
-| `EphemeralSession` / 双层 session | `SessionEventRecord` + TurnId | SessionEvent 体系 |
+| Ephemeral session (former model) / 双层 session | `SessionEventRecord` + TurnId | SessionEvent 体系 |
 
 ## 另请参阅
 

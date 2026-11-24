@@ -1,17 +1,166 @@
 ---
 title: "Changelog"
-description: "Release history, milestones, and notable changes in Aleph (through 2026-09-25)"
+description: "Release history, milestones, and notable changes in Aleph (through 2026-11-24)"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # Changelog
 
-Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-09-25 (including the two dated entries after `26.9.1`).
+Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-11-24.
+
+`VERSION` is still `26.9.1` after 2026-09-25 — the entries from 2026-09-26 to 2026-11-24 below record changes that are **merged on `main` but not yet released**.
 
 <Callout type="info">
-  This page is a **documentation-focused** summary derived from Aleph's main repository `CHANGELOG.md` — it surfaces **user-visible** changes (features, CLI/RPC, config, security) and omits pure-internal refactor details. For the full record, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
+  This page is a **documentation-focused** summary derived from Aleph's main repository `CHANGELOG.md` and git history — it surfaces **user-visible** changes (features, CLI/RPC, config, security) and omits pure-internal refactor details. For the full record, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
 </Callout>
+
+---
+
+## 2026-11-24 — Desktop host and protocol v1 converge: dual Panel renderers, a shared TSX shell, one v1 method set
+
+The desktop shape and the wire protocol changed in the same round: the Panel split into two renderers over one shared UI logic layer, the Gateway converged on a single v1 method set, and desktop IPC first landed as a read-only Unix channel plus a tier-gated Windows named pipe.
+
+### Added
+
+- **Dual Panel renderers over a shared UI logic layer** (`shared/ui_logic/src/panel/`) — one panel implementation now produces three artifacts: the Leptos WASM bundle (`interfaces/webchat/dist/`, embedded via `rust_embed` in `src/gateway/control_plane/assets.rs`), the TSX web package (interfaces/panel/out-web/, mounted at `/v1/panel/` via `[gateway].panel_web_dir`), and the TSX bundle (interfaces/panel/out-bundle/, embedded into the host via `include_str!` in `desktop/nsh-shell/build.rs`).
+- **A shared TSX shell** (`interfaces/panel/`) — layout, SDK generations, and the web host; panel layouts become persistable under stable IDs.
+- **The v1 method set** (`src/gateway/`) — three methods: `health` / `sessions.list` / `panel.capabilities.snapshot`, plus `panel_routes` and a CSP; the Gateway mounts the native TSX web v1 ingress on its TLS router.
+- **A per-user subject in `system.hello`** (`src/gateway/`) — the handshake response carries a per-user derived `subject`: HMAC-SHA256, domain separator `aleph.panel.subject.v1\0`, first 16 bytes as hex. It is **not** an identity credential; it only correlates several connections belonging to the same user.
+- **Desktop IPC** (`desktop/nsh-shell/`, `src/`) — opt-in read-only Unix IPC and tier-gated Windows named-pipe IPC; the client now uses bounded frames.
+
+### Changed
+
+- **Cold channel declaration** (`src/gateway/`) — declarative channel configuration no longer activates at startup; a declared or disabled channel is brought up only by an explicit start (`9976b7840`).
+- **Severed config, link, and adapter wires removed** (`3df8e0401`) — the disconnected configuration found by the audit is deleted instead of lingering in the config surface.
+
+---
+
+## 2026-11-16 — Capability system Phase 6–8: capability contracts, activation constraints, event audit
+
+The "Everything externally composable is a Capability" line landed its Gate A/B on 6 October; November filled in activation, constraints, special capabilities, and the event stream.
+
+### Added
+
+- **Gate A / Gate B** (`src/capability/`) — `CapabilityDescriptor`, the Zahir facade, the backend trait, and the ownership base types; an ownership tree with scope separation.
+- **The Phase 7 trio** (`src/capability/`) — activation and constraints, special capabilities, and the event stream with audit logging.
+- **Cold tools activate on first call** (`src/capability/`) — a declared but inactive tool is activated on demand the first time it is called.
+
+### Changed
+
+- **Phase 9 runtime proof and dependency validation** (`src/capability/`) — capability runtimes start with provable behaviour and validate their dependencies.
+
+---
+
+## 2026-11-05 — NSH desktop host takes shape
+
+### Added
+
+- **`desktop/nsh-shell` crate skeleton** (`desktop/nsh-shell/`) — a minimal NSH window; Phase 2 wires the connection layer into the window; Phase 3 brings up the core UI (session management, against a mock client first); Phase 4 adds UI components (input box, message list, streaming display).
+- **The `system.hello` protocol handshake handler** (`src/gateway/`).
+
+### Changed
+
+- **`ProviderRegistry` gains `unregister`** (`src/providers/registry.rs`) — the registry is no longer add-only.
+
+---
+
+## 2026-11-01 — Capability discovery snapshot and authenticated panel assets
+
+### Added
+
+- **A canonical discovery snapshot** (`src/gateway/`, `src/extension/`) — the Gateway exposes a discovery snapshot that the Panel consumes; extension "discovery" and "activation" become two separate things.
+- **An authenticated project selector** (`src/gateway/`) — panel project selection is authenticated, and the authentication context flows through RPC.
+- **Panel asset publishing** (`src/gateway/`, `shared/ui_logic/src/panel/`) — constrained asset publishing, explicit community selection, asset integrity fencing, and lifecycle-aware publishing.
+
+### Changed
+
+- **Capability resource dependency capture and atomic rotation** (`src/capability/`) — resource bindings rotate atomically while keeping canonical service dependencies.
+
+---
+
+## 2026-10-26 — Dynamic panel tabs and the terminal
+
+### Added
+
+- **Panel tab capability contracts and SDK boundaries** (`shared/ui_logic/src/panel/`, `shared/protocol/`) — a deterministic tab registry, tab SDK lifecycle boundaries, and a feature-gated dynamic tab loader.
+- **The terminal arrives in the panel** (`shared/ui_logic/src/panel/`, `interfaces/webchat/tabs/terminal/`) — terminal connection and topic lifecycle, dynamic terminal navigation, a standalone terminal WASM tab, and a modular terminal build pipeline.
+
+### Changed
+
+- **Channel lifecycle binding minting** (`src/gateway/`) — the Gateway mints canonical channel lifecycle bindings; capability live-ownership bindings switch to atomic validation.
+
+---
+
+## 2026-10-19 — Markdown session storage and request-boundary model hot switching
+
+### Added
+
+- **Markdown session storage** (`src/markdown/`) — sessions are stored as Markdown and can be managed from the panel; the migration boundary is hardened.
+- **Request-boundary model hot switching** (`src/`) — a request may switch models mid-request.
+- **Identity-aware clarification wire contracts** (`src/clarification/`) — clarification requests carry identity, and the resolution path is guarded.
+
+---
+
+## 2026-10-09 — SMS channel and browser live control
+
+### Added
+
+- **SMS channel** (`src/gateway/telecom/`) — channel contract and registration, relay wire contract and state guards, an encrypted SMS inbox, and offline SMS relay transport state.
+- **Browser live control** (`src/browser/`, `shared/protocol/`) — an authenticated viewer route, a single live owner per target stream, atomic live-control handover, and a task-bound browser live wire.
+- **Terminal observation wire contracts** (`shared/protocol/`).
+
+---
+
+## 2026-10-06 — Capability model Gate A/B and projection boundaries
+
+### Added
+
+- **`CapabilityDescriptor` and the ownership tree** (`src/capability/`) — Gate A delivers `CapabilityDescriptor`, the Zahir facade, the backend trait, and the ownership base types; Gate B delivers an ownership tree with scope separation.
+- **Capability events and memos** (`src/capability/`) — persisted capability event variants, approval-decision memos, and the hook memo sink boundary, with the production hook memo sink wired up.
+- **Projection-only subscription cursors** (`src/capability/`) — the boundary between projection and notification is now explicit.
+
+---
+
+## 2026-10-04 — Tool capability descriptors and registration scope
+
+### Added
+
+- **The tool capability descriptor contract** (`src/tool_metadata/`) — tool registration and invocation become descriptor-driven.
+- **`ToolRegistrationScope`** (`src/tools/`) — a separate registration-scope core; MCP tools belong to a scope; callers finish migrating.
+
+### Changed
+
+- **Atomic tool registry snapshots** (`src/executor/`) — the registry hands out snapshots rather than a live view, alongside stable replay contract identities and persisted tool-capability intent identities.
+
+---
+
+## 2026-10-02 — Context Fabric and module slimming
+
+### Added
+
+- **Context Fabric** (`src/context/`) — a fold registry records compression events; the fold economics ledger loads lazily; summaries carry a quality tag and only full-quality summaries are cached; `SmartCrusher` is folded in; the admission layer wiring is fixed by an audit.
+- **Verbatim fold restoration** (`src/tools/`) — the `session_decompress` tool restores the text that was folded away; log and search output uses lossy per-line importance compression.
+- **Cross-run fold nudge** (`src/context/`) — the baseline is seeded from the previous fold, and the growth threshold is configurable.
+
+### Changed
+
+- **The module-slimming series** (many modules) — the occams slimming pass sweeps 30+ modules over eight rounds (skill / spend / strategy / tasks / teams / metrics / orchestrator / pii / providers / resilience / search / secrets / security / session / harness / hub / identity / logging / loop_graph / gateway / generation / goal / group_chat / guardrails / clarification / cli / cluster / command / config / browser / bundled / canvas / capability / builtin_tools).
+- **The phantom Node runtime is deleted** (`src/extension/`) — the plugin SDK package, the media-video example, and the matching docs section go together.
+
+---
+
+## 2026-09-30 — Browser recording and channel capabilities
+
+### Added
+
+- **The `browser_record` tool** (`src/browser/`) — a recording pipeline that pipes the screencast into ffmpeg; the stop action is verified and measured against both engines; the screencast row comes back to the capability table.
+- **Native channel capabilities** (`src/channel*`) — Telegram `create_poll`, WhatsApp `set_group_icon`, and native iMessage (BlueBubbles) `CreatePoll` / `SetGroupIcon`, gated by `ChannelCapabilities` flags.
+
+### Fixed
+
+- **Metering skips empty accounts** (`src/`) — no ledger record is written when both the token total and the USD total are zero.
+- **The session file backend takes a lock** (`src/session/`) — the transcript is locked before it is rewritten.
 
 ---
 
@@ -41,7 +190,7 @@ A one-day polish pass over the Panel and TUI surfaces that followed `[26.9.1]`: 
 ### Fixed
 
 - **Panel** (`interfaces/webchat/src/`): the voice-button state machine no longer ghosts the "finish" transition or leaks the long-press timer; an IME composition gate stops Enter from sending during the Chinese candidate window; the attachment `<For>` key is a stable hash; team-chat attachment rejection preserves the tray; `ApprovalCard` and `ask.rs` gain regression tests; reattach retries on the next `connection_epoch`; event string-dispatch gains a static coverage guard.
-- **TUI** (`interfaces/tui/`): `subscribe_runtime_agents` retries on reconnect failure; `SessionKnobs` exposes `model_pin` as a fifth field; the `VERSION` test uses `CARGO_MANIFEST_DIR`; `halt_notice` falls back to `en`; the composer gains a scroll indicator and a sent-history boundary.
+- **TUI** (`interfaces/tui/`): runtime-agent subscriptions retry on reconnect failure; `SessionKnobs` exposes `model_pin` as a fifth field; the `VERSION` test uses `CARGO_MANIFEST_DIR`; `halt_notice` falls back to `en`; the composer gains a scroll indicator and a sent-history boundary.
 - **Shared / wire**: the user bubble renders sent attachments as chips on both surfaces (`AttachmentMeta` / `TuiAttachment`, via `push_user_message_with_attachments`); `ReasoningBlock` and `UncertaintySignal` stream events are consumed end-to-end on the Panel.
 
 ---
@@ -196,7 +345,7 @@ The largest feature drop in a while — 282 commits across three days. Three thr
 - **Gateway leaks and drops.** Per-connection event-forward task leak on every WS disconnect; channel forwarder died permanently on `broadcast::RecvError::Lagged`; webhook backpressure silently dropped inbound messages instead of returning 503; raw error chain leaked to the Panel — all fixed.
 - **Command injection on desktop `open` / `launch`** — now dispatched through `ShellExecuteW` instead of a shell; symlink planting during bundled-content extraction refused via `symlink_metadata`; skill download path traversal closed and the scanner file size capped; cluster `file.write` no longer has a TOCTOU window.
 - **Certificate approval could be authorized without a fingerprint match**; the webview microphone grant was not origin-restricted on Linux or Windows — both fixed.
-- **Approval failed open on a missing policy file**, and `permissive_default` disagreed with `Default::default()` — both now fail closed.
+- **Approval failed open on a missing policy file**, and the missing-policy fallback disagreed with `Default::default()` — both now fail closed.
 - **Prompt-boundary injection.** Transcript, focus, and prior-summary content now escape boundary markers before entering the prompt; `ToolAwareChunker` asserts a non-zero token ratio.
 - **Provider failover cloned the entire conversation on every request** and published route state non-atomically — ~2,000 lines of unreachable provider code were deleted.
 - **Extension lifecycle races** — concurrent `reload` is now serialized under the load guard; malformed plugin results are no longer masked as `ServiceResult::ok`; `AuthorInfo` parsing uses the leftmost separator.
@@ -264,7 +413,7 @@ A security and hardening release. The headline is **native gateway TLS for remot
 
 - **`skill_read` refused symlinked/duplicate skills** — now resolves by precedence.
 - **Gateway remote-auth rotation kick + device resurrection.**
-- **`serde_json` map-insert key type** in `message_history`.
+- **`serde_json` map-insert key type** in message-history code.
 - Two pre-existing `alephcore` lib-suite test failures unblocked.
 - Workspace-wide clippy / rust-doctor cleanups to keep `-D warnings` green.
 

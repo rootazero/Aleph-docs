@@ -2,9 +2,9 @@
   "title": "能力与插件",
   "pages": [
     "capability-model",
-    "slots-and-replacement",
     "trust-and-backends",
-    "hooks-and-prompts",
-    "plugin-package"
+    "slots-and-replacement",
+    "plugin-package",
+    "hooks-and-prompts"
   ]
 }

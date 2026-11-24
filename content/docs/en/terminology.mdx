@@ -143,7 +143,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Capability (extension era)** | 能力（扩展期） | The old extension model's permission declaration (filesystem, network, process); now superseded by the capability model in `src/capability/`, see [Capability Model](/docs/en/capabilities/capability-model) |
 | **Capability Ledger** | 能力账本 | Per-install visible capability list rebuilt from disk (used in pre-install disclosure) |
 | **Approval Gate** | 审批门 | Human-in-the-loop approval for elevated permissions |
-| **fail-closed** | 失败关闭 | Refuses authorization when a policy file is missing or `permissive_default` disagrees with `Default::default()` |
+| **fail-closed** | 失败关闭 | An unreadable or malformed policy never silently allows execution: `ConfigApprovalPolicy` falls back to Ask; an absent policy file uses curated built-in defaults (`src/approval/config.rs`) |
 | **IdentityContext** | 身份上下文 | Immutable identity snapshot flowing through execution |
 | **Per-Agent Signing Key** | 每代理签名密钥 | Each agent owns an independent signing key that writes the operation ledger |
 | **Operation Ledger** | 操作账本 | Signed operation sequence owned by the signer; replayable against the agent's identity chain |
@@ -225,7 +225,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Composite Key** | 复合键 | `goal_key` / `loop_key` / `session_key` / `team_key` four namespaces |
 | **Plan Team / Naked Loop** | 团队/裸循环策略 | `[strategy] plan_team` / `plan_naked_loop` config switches |
 | **Atomic Put-if-Absent** | 原子首发 | `StrategyStore` fire-once mechanism (race protection) |
-| **Run Mode Pin** | 运行模式钉 | Leader stamps `usage_mode`; subagents inherit; rejects `session_set_mode` mid-run |
+| **Run Mode Pin** | 运行模式钉 | Team runs stamp `TEAM_RUN_MODE` on every turn (`src/teams/run_mode.rs`), pinning Work rather than inheriting the user session mode |
 | **Loop Auditor** | 循环审计员 | Built-in protected agent; audit / supervision templates default to independent-context evidence |
 | **`loadable`** | 可加载容器 | `data.rs` + `loader.rs` — all fetches route through it; failed fetch unrepresentable as empty |
 | **Vault Card View** | Vault 卡片视图 | `cards.rs` — three-state shell (Loading / Empty / Content) |
@@ -273,15 +273,15 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `NoteFactRetrieval` | Note Fact Retrieval |
 | `CompressionService` | Compression Service |
 | `DreamDaemon` | Dream Daemon |
-| `DesktopBridgeClient` | Desktop Bridge Client |
-| `LoopGraph` | Loop-Graph Governance |
+| Desktop capability IPC client | Desktop Bridge Client |
+| `LoopGraphStore` | Loop-Graph Governance |
 | `GoalStore` | Goal Store |
 | `LoopState` | Loop State |
 | `ArtifactStore` | Artifact Store |
 | `ProjectStore` | Project Store |
 | `Hub` | Hub (Extensions / Secrets / Trust catalog) |
-| `SignerKey` | Per-Agent Signing Key |
-| `OperationLedger` | Operation Ledger |
+| `AgentKeystore` | Per-Agent Signing Key |
+| `AgentLedger` | Operation Ledger |
 | `Verification` | Verifier / Turn-verify context |
 | `Guardrail` | Guardrail (Block / Sanitize / Pass) |
 
@@ -309,7 +309,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | Provider failover deep-clone whole session | Atomic regen marker + single clone | Performance and correctness fix |
 | `aleph.svg` hardcoded static path | `core_path("/aleph.svg")` | Follows the core migration |
 | Hard stops outside `max_iterations` | `max_iterations` + tool-loop verifier only | R10 forbids deterministic completion judgments inside the loop |
-| `EphemeralSession` / dual-layer session | `SessionEventRecord` + `TurnId` | SessionEvent system |
+| Ephemeral session (former model) / dual-layer session | `SessionEventRecord` + `TurnId` | SessionEvent system |
 
 ## See Also
 

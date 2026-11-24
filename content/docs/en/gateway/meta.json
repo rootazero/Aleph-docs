@@ -1,4 +1,9 @@
 {
   "title": "Gateway RPC",
-  "pages": ["protocol", "protocol-v1", "auth", "methods"]
+  "pages": [
+    "protocol-v1",
+    "protocol",
+    "auth",
+    "methods"
+  ]
 }

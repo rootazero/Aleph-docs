@@ -4,6 +4,7 @@ description: "Technical documentation for Aleph — a self-hosted polymorphic AI
 ---
 
 import { Cards, Card } from "fumadocs-ui/components/card";
+import { Callout } from "fumadocs-ui/components/callout";
 
 > *"This is the first time in human history, a machine's soul has been given a body."*
 > — Ghost in the Shell
@@ -12,7 +13,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 
 > **Single-Core Multi-Terminal, Shell-Core Separation; Gateway Interoperability, Access Control.**
 >
-> One `aleph-server` core powers every interface — desktop app, CLI, TUI, Telegram, Discord, iMessage, and more. The native desktop shell is a thin container with zero business logic; all reasoning, tools, and state live in the core. Every terminal connects through the same authenticated WebSocket gateway, whether local or remote.
+> One `aleph-server` core powers every interface — desktop app, CLI, TUI, Telegram, Discord, iMessage, iPhone / iPad Panel, and more. The native desktop shell is a thin container with zero business logic; all reasoning, tools, and state live in the core. Every terminal connects through the same authenticated WebSocket gateway, whether local or remote.
 
 ## Key Features
 
@@ -26,25 +27,31 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 - **Cluster Federation** — one center core orchestrates many machines (nodes) as execution arms; node keys are Unicode-normalized (CJK node names work)
 - **Three-Tier Security Model** — fail-closed approval / sandbox / pairing, with `exec_tier`, session mode, and a capability ledger
 - **Loop-Graph Governance Layer** — team node / independent-evidence auditor (`loop-auditor`) / victory-claim watchers / objective ACLs
+- **Loop / Goal / Strategy Triangle** — in-session loops, autonomous goals with objective gates, and plans for teams or standalone loops (`src/goal/`, `src/strategy/`)
+- **Aleph Hub Single Source (`aleph-hub`)** — one official catalog for MCP, plugins, and skills, with a cold-start projection (`src/hub/primer.rs`)
+- **Artifacts / Deliverables** — an artifact store with a 50 MB limit and four origins; publish deliverables with `artifact_publish` and pin them in the Panel (`src/artifacts/`, `src/builtin_tools/artifact_publish.rs`)
+- **Vault Panel** — card views, dual-track search, evidence links, cross-agent selection, and source metadata (`interfaces/webchat/src/platform/wide/views/memory/`)
+- **Streaming Voice** — Deepgram / WhisperLiveKit streaming ASR, TTS provider fallback capped at two, and Voice-as-Context (`src/config/types/voice_local.rs`, `src/gateway/voice/outbound.rs`)
 - **Extensible** — type-safe built-in tools, capability-gated MCP discovery, plugins, Markdown skills, and custom tools share the scoped tool service and approval path
 - **Self-Hosted** — run on your own hardware, full control
 
 ## Architecture
 
 ```
-    Desktop                         Other terminals
-    ┌────────────────────────────┐  ┌─────┬─────┬──────────┬─────────┬──────────┐
-    │ Desktop host process       │  │ CLI │ TUI │ Telegram │ Discord │ iMessage │
-    │ aleph-nsh-shell            │  └──┬──┴──┬──┴─────┬────┴────┬────┴─────┬────┘
-    │ ┌────────────────────────┐ │     │     │        │         │          │
-    │ │ Panel (Leptos/WASM)    │ │     │     │        │         │          │
-    │ │ sole source of UI      │ │     │     │        │         │          │
-    │ └────────────────────────┘ │     │     │        │         │          │
-    └─────────────┬──────────────┘     │     │        │         │          │
-                  │                    │     │        │         │          │
-                  │                    │     │        │         │          │
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │ Capability contracts: capability / plugin / slot                       │
+    └───────────────────────────────────▲────────────────────────────────────┘
+                                        │
+    ┌──────────────────┐   ┌───────────────────────────┐   ┌──────────────────┐
+    │ Leptos/WASM      │◄─►│ shared/ui_logic/src/panel │◄─►│ TSX (nsh)        │
+    │ interfaces/      │   │ Runtime-neutral model     │   │ interfaces/      │
+    │ webchat/         │   │ depends on aleph_protocol │   │ panel/           │
+    └──────────────────┘   └───────────────────────────┘   └──────────────────┘
+
+    Panel / CLI / TUI / Telegram / Discord / iMessage
+                    │
                     WebSocket (JSON-RPC 2.0, optional wss://)
-                  ▼                    ▼     ▼        ▼         ▼          ▼
+                    ▼
     ┌────────────────────────────────────────────────────────────────────────┐
     │                       Aleph Core (aleph-server)                        │
     │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
@@ -66,7 +73,21 @@ import { Cards, Card } from "fumadocs-ui/components/card";
                                   Cluster Nodes (remote executors)
 ```
 
-**Shell-Core Separation.** The desktop side is a thin native host process (`aleph-nsh-shell`, source in `desktop/nsh-shell/`): window, tray, notifications and global hotkey — OS integration only, with **no business logic and no business UI**. All product UI lives in the Leptos Panel (source in `interfaces/webchat/`, served by the core at `http://127.0.0.1:18790` by default); all reasoning, tools, and state live in `aleph-server`. The host connects to a Gateway that is **already running** and does not own its lifecycle — its usage text says it “does not start, stop or reconfigure a service” (`desktop/nsh-shell/src/main.rs`); only when the `embedded-core` feature is explicitly enabled does it launch the bundled core, and only if nothing is listening on the local port (`desktop/host/src/local_server.rs`). Connecting to a remote core requires an HTTPS origin.
+**Two renderers, one model.** Leptos/WASM (`interfaces/webchat/`) and TSX (`interfaces/panel/`) share the runtime-neutral model in `shared/ui_logic/src/panel/`; that model depends only on `aleph_protocol` (`shared/ui_logic/src/panel/mod.rs`). Available tabs depend on the runtime: TSX currently implements only the overview, sessions, and capabilities built-in tabs. Other tabs targeting the Leptos DOM/WASM runtime appear as unavailable (`interfaces/panel/src/lib.rs`). This does not mean TSX has replaced Leptos.
+
+**Two desktop host tracks.** The legacy Tauri shell still ships the desktop application (`desktop/shell/`, crate `aleph-desktop-shell`); the release workflow still builds from that directory (`.github/workflows/aleph-app-release.yml`). The target host is NSH 0.6.0 (`desktop/nsh-shell/`, crate `aleph-nsh-shell`, with versions in `desktop/nsh-shell/Cargo.toml`), which currently has no release workflow (`.github/workflows/`). By default it hosts the same Leptos/WASM Panel, not a second business UI; switching to the TSX surface requires the `tsx-panel` feature, `ALEPH_SHELL_PANEL=tsx`, and no QA mode (`desktop/nsh-shell/src/main.rs`).
+
+NSH connects to an existing Gateway without managing its lifecycle by default (`desktop/nsh-shell/src/main.rs`); local core startup requires explicitly enabling `embedded-core` (`desktop/host/src/local_server.rs`). This does not establish a default desktop switch, daemon-supervisor migration, release distribution, Windows/Linux NSH acceptance, or legacy Tauri removal; the older host remains available and served as the G7 comparator (`docs/reference/DESKTOP_SHELL.md`). The iPhone / iPad host lives in `mobile/ios/AlephPaneliOS/`, with device support defined in `mobile/ios/project.yml`; its full-screen WKWebView hosts the same WASM Panel rather than separate iOS business UI (`mobile/ios/AlephPaneliOS/Views/PanelWebView.swift`).
+
+<Callout type="info">
+
+> **状态：规划中** — 蓝图出处：`docs/research/Everything-externally-composable-is-a-Capability.md`
+>
+> **Everything externally composable is a Capability.** This design principle requires externally composable capabilities that need dynamic discovery, invocation, replacement, subscription, or management to use Capability contracts (`AGENTS.md`). It is a design direction, not a claim that every entry point has been unified.
+
+</Callout>
+
+Capability contracts are already implemented in `src/capability/`; start with the [capability model](/capabilities/capability-model) to understand the current boundaries.
 
 **The Third Twin: Session Mode.** `chat` / `work` / `code` is the third user-adjustable dimension alongside `exec_tier` (execution approval tier) and `think_level` (thinking budget). It statically partitions the tool *presentation* surface only (progressive-disclosure core set + deferred-tool tier); permissions remain controlled by `exec_tier` and the approval gate. Switchable from the Panel composer pill, from Settings → Policies, or via the `session_set_mode` tool.
 
@@ -115,10 +136,22 @@ Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
     href="./architecture/overview"
   />
   <Card
+    icon="🏗️"
+    title="Desktop Hosts"
+    description="Understand the two desktop host tracks and what each currently delivers"
+    href="./desktop-hosts/overview"
+  />
+  <Card
+    icon="🔧"
+    title="Capabilities & Plugins"
+    description="Start with the capability model to discover, trust, and compose plugin capabilities"
+    href="./capabilities/capability-model"
+  />
+  <Card
     icon="🔌"
     title="Gateway RPC"
     description="WebSocket protocol, TLS + TOFU, authentication, method families, and registration status"
-    href="./gateway/protocol"
+    href="./gateway/protocol-v1"
   />
   <Card
     icon="💬"
@@ -183,7 +216,7 @@ Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
   <Card
     icon="📋"
     title="Changelog"
-    description="Rolling release notes from 26.7.21 through the 26.7.22+ update stream"
+    description="Release notes from 26.7.21 through 2026-11-24"
     href="./changelog"
   />
   <Card

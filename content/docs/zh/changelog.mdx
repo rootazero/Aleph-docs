@@ -1,17 +1,166 @@
 ---
 title: "更新日志"
-description: "Aleph 的发布历史、里程碑和重要变更（截至 2026-09-25）"
+description: "Aleph 的发布历史、里程碑和重要变更（截至 2026-11-24）"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # 更新日志
 
-Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。本页覆盖至 2026-09-25（含 `26.9.1` 之后的两条日期条目）。
+Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。本页覆盖至 2026-11-24。
+
+`VERSION` 在 2026-09-25 之后仍是 `26.9.1`——下面 2026-09-26 到 2026-11-24 的条目记录的是 `main` 分支上**已合入但尚未发版**的变更。
 
 <Callout type="info">
-  本页是从 Aleph 主仓库 `CHANGELOG.md` 派生的**文档视角**摘要：突出**用户可见**的变化（特性、CLI/RPC、配置、安全），并省略纯内部重构细节。完整记录请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
+  本页是从 Aleph 主仓库 `CHANGELOG.md` 与 git 历史派生的**文档视角**摘要：突出**用户可见**的变化（特性、CLI/RPC、配置、安全），并省略纯内部重构细节。完整记录请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
 </Callout>
+
+---
+
+## 2026-11-24 — 桌面宿主与协议 v1 收口：双 Panel 渲染器、共享 TSX shell、一套 v1 方法集
+
+桌面形态与线协议同时换代：Panel 拆成两套渲染器并共享一份 UI 逻辑层，Gateway 收敛出一套 v1 方法集，桌面 IPC 先落在只读 Unix 通道与分级启用的 Windows 命名管道上。
+
+### 新增
+
+- **Panel 双渲染器 + 共享 UI 逻辑层**（`shared/ui_logic/src/panel/`）——同一份面板逻辑产出三份资产：Leptos WASM（`interfaces/webchat/dist/`，经 `src/gateway/control_plane/assets.rs` 的 `rust_embed` 打包）、TSX Web 包（interfaces/panel/out-web/，经 `[gateway].panel_web_dir` 挂在 `/v1/panel/`）、TSX bundle（interfaces/panel/out-bundle/，经 `desktop/nsh-shell/build.rs` 的 `include_str!` 嵌入宿主）。
+- **TSX 共享 shell**（`interfaces/panel/`）——布局、SDK 代际与 web 宿主；面板布局改为可持久化的稳定 ID。
+- **协议 v1 方法集**（`src/gateway/`）——`health` / `sessions.list` / `panel.capabilities.snapshot` 三个方法，附带 `panel_routes` 与 CSP；Gateway 在 TLS 路由器上挂载原生 TSX Web 的 v1 ingress。
+- **`system.hello` 的 per-user subject**（`src/gateway/`）——握手响应带一个按用户派生的 `subject`：HMAC-SHA256、域分隔 `aleph.panel.subject.v1\0`、取前 16 字节 hex。它**不是**身份凭据，只用于把同一用户的多个连接关联起来。
+- **桌面 IPC**（`desktop/nsh-shell/`、`src/`）——只读 Unix IPC（opt-in）与 Windows 命名管道 IPC（分级启用）；客户端改走有界帧。
+
+### 变更
+
+- **频道冷声明**（`src/gateway/`）——声明式频道配置不再在启动时激活，只有显式 start 才把被禁用或被声明的频道拉起来（`9976b7840`）。
+- **移除 severed 配置、链接与适配器线路**（`3df8e0401`）——审计发现的断线配置被删掉，不再留在配置面里当噪音。
+
+---
+
+## 2026-11-16 — Capability 系统 Phase 6–8：能力契约、激活约束、事件审计
+
+「Everything externally composable is a Capability」这条主线在 10 月 6 日落 Gate A/B，11 月继续补齐激活、约束、特殊能力与事件流。
+
+### 新增
+
+- **Gate A / Gate B**（`src/capability/`）——`CapabilityDescriptor`、Zahir facade、后端 trait、所有权基础类型；所有权树与 scope 分离。
+- **Phase 7 三件套**（`src/capability/`）——激活与约束、特殊能力、事件流与审计日志。
+- **冷工具首次调用激活**（`src/capability/`）——declared 但未激活的工具在第一次调用时按需激活。
+
+### 变更
+
+- **Phase 9 运行时证明与依赖校验**（`src/capability/`）——能力运行时可证明地启动，并校验依赖。
+
+---
+
+## 2026-11-05 — NSH 桌面宿主起步
+
+### 新增
+
+- **`desktop/nsh-shell` crate 骨架**（`desktop/nsh-shell/`）——最小 NSH 窗口；Phase 2 连接层接入窗口；Phase 3 核心 UI（会话管理，先接 mock client）；Phase 4 UI 组件（输入框、消息列表、流式展示）。
+- **`system.hello` 协议握手处理器**（`src/gateway/`）。
+
+### 变更
+
+- **`ProviderRegistry` 增加 `unregister`**（`src/providers/registry.rs`）——注册表不再只能增。
+
+---
+
+## 2026-11-01 — 能力发现快照与面板资源认证
+
+### 新增
+
+- **规范化 discovery snapshot**（`src/gateway/`、`src/extension/`）——Gateway 暴露发现快照，Panel 消费它；扩展的「发现」与「激活」被拆成两件事。
+- **认证的项目选择器**（`src/gateway/`）——面板项目选择带认证，认证上下文贯穿 RPC。
+- **面板资产发布**（`src/gateway/`、`shared/ui_logic/src/panel/`）——受约束的资产发布、显式的社区选择、资产完整性围栏、生命周期化发布。
+
+### 变更
+
+- **能力资源依赖捕获与原子轮换**（`src/capability/`）——资源绑定可以原子轮换，并保留规范化服务依赖。
+
+---
+
+## 2026-10-26 — Panel 动态标签与终端
+
+### 新增
+
+- **面板标签能力契约与 SDK 边界**（`shared/ui_logic/src/panel/`、`shared/protocol/`）——确定性标签注册表、标签 SDK 生命周期边界、特性门控的动态标签加载器。
+- **终端进入面板**（`shared/ui_logic/src/panel/`、`interfaces/webchat/tabs/terminal/`）——终端连接与 topic 生命周期、动态终端导航、独立终端 WASM 标签、模块化终端构建流水线。
+
+### 变更
+
+- **频道生命周期绑定铸造**（`src/gateway/`）——Gateway 铸造规范化的频道生命周期绑定；能力的实时所有权绑定改为原子校验。
+
+---
+
+## 2026-10-19 — Markdown 会话存储与请求边界模型热切换
+
+### 新增
+
+- **Markdown 会话存储**（`src/markdown/`）——会话以 Markdown 存储，并可在面板里管理；迁移边界被加固。
+- **请求边界模型热切换**（`src/`）——一次请求内可以换模型。
+- **身份感知的澄清 wire 契约**（`src/clarification/`）——澄清请求带身份，解析路径受保护。
+
+---
+
+## 2026-10-09 — SMS 通道与浏览器实时控制
+
+### 新增
+
+- **SMS 通道**（`src/gateway/telecom/`）——通道契约与注册、relay wire 契约与状态守卫、加密的 SMS 收件箱、离线 SMS relay 传输状态。
+- **浏览器实时控制**（`src/browser/`、`shared/protocol/`）——认证的 viewer 路由、每个目标一条流的单一实时所有者、原子化实时控制交接、任务绑定的 browser live wire。
+- **终端观测 wire 契约**（`shared/protocol/`）。
+
+---
+
+## 2026-10-06 — 能力模型 Gate A/B 与投影边界
+
+### 新增
+
+- **`CapabilityDescriptor` 与所有权树**（`src/capability/`）——Gate A 交付 `CapabilityDescriptor`、Zahir facade、后端 trait、所有权基础类型；Gate B 交付带 scope 分离的所有权树。
+- **能力事件与 memo**（`src/capability/`）——持久化的能力事件变体、审批决策 memo、hook memo sink 边界，并把生产 hook memo sink 接上线。
+- **仅投影的订阅游标**（`src/capability/`）——投影与通知的边界被显式标注。
+
+---
+
+## 2026-10-04 — 工具能力描述符与注册作用域
+
+### 新增
+
+- **工具能力描述符契约**（`src/tool_metadata/`）——工具的注册与调用改由描述符驱动。
+- **`ToolRegistrationScope`**（`src/tools/`）——独立的注册作用域核心；MCP 工具按作用域归属；调用方完成迁移。
+
+### 变更
+
+- **原子工具注册表快照**（`src/executor/`）——注册表对外给出的是快照而不是活视图；配套稳定重放契约身份与持久化的工具能力意图身份。
+
+---
+
+## 2026-10-02 — Context Fabric 与模块简化
+
+### 新增
+
+- **Context Fabric**（`src/context/`）——fold 注册表记录压缩事件；fold 经济学账本懒加载；摘要打 quality tag，只缓存全质量摘要；`SmartCrusher` 并入；admission 层接线经过审计修复。
+- **fold 逐字还原**（`src/tools/`）——`session_decompress` 工具还原被折叠的原文；log/search 类输出走有损的行重要性压缩。
+- **跨运行 fold nudge**（`src/context/`）——基线从上一次 fold 播种，增长阈值可配置。
+
+### 变更
+
+- **模块简化系列**（多模块）——occams 简化分八轮扫过 30+ 模块（skill / spend / strategy / tasks / teams / metrics / orchestrator / pii / providers / resilience / search / secrets / security / session / harness / hub / identity / logging / loop_graph / gateway / generation / goal / group_chat / guardrails / clarification / cli / cluster / command / config / browser / bundled / canvas / capability / builtin_tools）。
+- **删除幽灵 Node 运行时**（`src/extension/`）——插件 SDK 包、media-video 示例与对应文档段一并删除。
+
+---
+
+## 2026-09-30 — 浏览器录制与频道能力
+
+### 新增
+
+- **`browser_record` 工具**（`src/browser/`）——screencast 送 ffmpeg 的录制流水线，停止动作经过验证，两种引擎实测；能力表里的 screencast 行恢复。
+- **频道原生能力**（`src/channel*`）——Telegram `create_poll`、WhatsApp `set_group_icon`、iMessage（BlueBubbles）原生 `CreatePoll` / `SetGroupIcon`，由 `ChannelCapabilities` 标志门控。
+
+### 修复
+
+- **计量跳过空账**（`src/`）——token 总量与 USD 皆为 0 时不再写账本记录。
+- **会话文件后端加锁**（`src/session/`）——改写 transcript 前先锁住 metadata。
 
 ---
 
@@ -41,7 +190,7 @@ Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版
 ### 修复
 
 - **Panel**（`interfaces/webchat/src/`）：语音按钮状态机不再幽灵化 "finish" 转换或泄漏长按计时器；IME 组合窗口阻止 Enter 在中文候选期发送；附件 `<For>` key 换成稳定哈希；团队聊天附件拒绝保留托盘；`ApprovalCard` 与 `ask.rs` 补回归测试；重连在下一个 `connection_epoch` 重试；事件字符串分发加静态覆盖守卫。
-- **TUI**（`interfaces/tui/`）：`subscribe_runtime_agents` 重连失败重试；`SessionKnobs` 暴露第五字段 `model_pin`；`VERSION` 测试用 `CARGO_MANIFEST_DIR`；`halt_notice` 回退到 `en`；composer 加滚动指示器与已发送历史边界。
+- **TUI**（`interfaces/tui/`）：运行时代理订阅在重连失败重试；`SessionKnobs` 暴露第五字段 `model_pin`；`VERSION` 测试用 `CARGO_MANIFEST_DIR`；`halt_notice` 回退到 `en`；composer 加滚动指示器与已发送历史边界。
 - **Shared / wire**：用户气泡在 Panel 与 TUI 上以 chip 渲染已发送附件（`AttachmentMeta` / `TuiAttachment`，经 `push_user_message_with_attachments`）；`ReasoningBlock` 与 `UncertaintySignal` 流事件在 Panel 端到端消费。
 
 ---
@@ -196,7 +345,7 @@ Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版
 - **Gateway 泄漏与丢弃**——WebSocket 断开时每个连接的事件转发任务泄漏；`broadcast::RecvError::Lagged` 上 channel forwarder 永久死亡；webhook 反压默默丢弃入站消息而不是返回 503；原始错误链泄漏到 Panel——以上全部修好。
 - **桌面 `open` / `launch` 命令注入**——改为通过 `ShellExecuteW` 而非 shell；打包内容解压时拒绝通过 `symlink_metadata` 植入符号链接；技能下载路径穿越关闭，扫描文件大小加封顶；集群 `file.write` 不再有存在检查与写入之间的 TOCTOU 窗口。
 - **证书审批可能不匹配指纹就被授权**，WebView 麦克风权限在 Linux/Windows 上未做来源限制——均已修复。
-- **策略文件缺失时审批失败开放**，`permissive_default` 与 `Default::default()` 不一致——两者现在都失败关闭；守护者判官 payload 隐藏密钥；heartbeat 探针拒绝危险与确认门控工具。
+- **策略文件缺失时审批失败开放**，缺失策略的默认处理 与 `Default::default()` 不一致——两者现在都失败关闭；守护者判官 payload 隐藏密钥；heartbeat 探针拒绝危险与确认门控工具。
 - **提示词边界注入**——转写、焦点、之前摘要内容在进入提示词前转义边界标记；`ToolAwareChunker` 断言非零 token 比率而不是算出 `usize::MAX`。
 - **提供商故障转移在每次请求时克隆整段会话**并以非原子方式发布路由状态——约 2,000 行不可达的 provider 代码被删除。
 - **扩展生命周期竞态**——并发 `reload` 现在在 load guard 下串行；格式错误的插件结果不再被掩盖为 `ServiceResult::ok`；`AuthorInfo` 解析使用最左分隔符。
@@ -294,7 +443,7 @@ Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版
 
 ### 移除
 
-- **四个零消费者的 harness 抽象（R10 行预算回收）**：`TraceSink::on_init_seam` + `emit_init_seams`、`HarnessCallback::on_tool_call`、`HarnessCallback::on_complete`、以及 `Harness` trait 本身——见 CHANGELOG 全文了解每个删除的理由。
+- **四个零消费者的 harness 抽象（R10 行预算回收）**：`TraceSink::on_init_seam` + 初始化接缝分发辅助函数、`HarnessCallback::on_tool_call`、`HarnessCallback::on_complete`、以及 `Harness` trait 本身——见 CHANGELOG 全文了解每个删除的理由。
 - **不可达的工具水合栈（~3,800 行）**——加上从未发生的缓存框架与一个不守信的配置旋钮。
 - **幻影的 4,900 行 harness 目标**——改为由 `budget.rs` 棘轮作为 R10 红线（现已测量，不手工计数；当前 5,043 行）。
 
