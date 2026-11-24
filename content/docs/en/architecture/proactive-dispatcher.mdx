@@ -1,9 +1,9 @@
 ---
 title: "Proactive Task Scheduling"
-description: "Daemon background tasks: cron / heartbeat services; runtimes capability ledger; wake queue and storm-prevention guards; no `src/daemon/`."
+description: "Daemon background tasks: cron / heartbeat services; runtimes capability ledger; wake queue and storm-prevention guards; no standalone daemon module."
 ---
 
-> The historical `daemon::dispatcher` module, the `src/daemon/` directory, and the `ProposedAction` / `PolicyEngine` / `DispatcherMode` enums have all been removed. This page describes the real code in `src/tasks/cron/` and `src/tasks/heartbeat/`, with collaboration from `src/tasks/shared/`, `src/runtimes/`, and `src/components/`.
+> The historical `daemon::dispatcher` module, the top-level `daemon` directory, and the `ProposedAction` / `PolicyEngine` / `DispatcherMode` enums have all been removed. This page describes the real code in `src/tasks/cron/` and `src/tasks/heartbeat/`, with collaboration from `src/tasks/shared/` and `src/runtimes/`.
 
 Proactive background task execution is now served by two orthogonal services:
 - **Cron** (`src/tasks/cron/`) — scheduled tasks triggered by cron expressions / intervals / one-shots
@@ -158,9 +158,9 @@ Three-phase flow:
 
 ---
 
-## Shared domain types (`src/components/`)
+## History: the removed `components` module
 
-`src/components/` is now a thin shell: `mod.rs` + `types/`. The legacy `EventHandler` chain (`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`) was removed during the Harness migration; only the shared domain types remain and are consumed by the event system.
+Earlier revisions of this page documented a thin top-level `components` module (`mod.rs` + `types/`) that held the shared domain types of the legacy `EventHandler` chain (`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`). The chain was removed during the Harness migration and the leftover shell was then cut entirely as dead scaffolding (commit `682e49adc`, "components: cut entire module"). Nothing in cron / heartbeat depends on it; the event system lives in `src/event/`.
 
 ---
 
@@ -178,7 +178,7 @@ Three-phase flow:
 ## Divergence from historical `daemon::dispatcher`
 
 - **No `ProposedAction` / `PolicyEngine` / `DispatcherMode`** — risk evaluation, policy enforcement live in the execution engine's `PermissionLayer` + `ContextRuleLayer` + `SmartFilter`
-- **No `src/daemon/` directory** — cron / heartbeat live directly under `src/tasks/`
+- **No top-level `daemon` directory** — cron / heartbeat live directly under `src/tasks/`
 - **No standalone notification queue / scheduling DAG** — notifications flow through `DeliveryEngine` and the gateway `event_bus`
 - **No `ActionExecutor` sub-component** — execution reuses the existing harness via `execution_engine::RunRequest`
 

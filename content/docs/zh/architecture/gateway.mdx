@@ -1,555 +1,300 @@
 ---
 title: "网关架构"
-description: "端口 18790 上的 WebSocket 控制平面、JSON-RPC 2.0 协议、多频道路由、中间件管道、事件分发和连接生命周期。"
+description: "Aleph 网关的职责、三个传输入口、请求分发路径、角色门控与事件出口"
 ---
 
-网关是与 Aleph 通信的单一入口点。它在 `ws://127.0.0.1:18790/ws` 上运行 WebSocket 服务器，使用 JSON-RPC 2.0，并将来自任何连接客户端（无论是原生 macOS 应用、Telegram 机器人还是终端 CLI）的请求路由到适当的处理程序。本页涵盖协议层、消息管道、多频道路由、为实时流式传输提供支持的事件系统，以及自签名 TLS + 客户端 TOFU 信任、单源错误回执等硬化机制。
+Aleph 网关是客户端与 agent、工具、工作流之间的控制平面：它接受连接、裁决调用方身份、把请求路由到对应的处理程序，并把内部产生的事件按主题广播给订阅者。本页只讲这些机制在当前代码里的实际形态；报文格式见 [Protocol v1](../gateway/protocol-v1)，凭据与配对见 [认证](../gateway/auth)，方法清单见 [方法参考](../gateway/methods/index)。
 
-要了解请求到达后如何管理会话，请参阅[会话服务](./session-service)。要了解路由到达代理后会发生什么，请参阅[代理工具链](./harness)。
+## 网关的职责
 
----
+网关进程把三件事收敛在一起：
 
-## 网关组件
+- **接入连接**：HTTP 路由表在 `src/gateway/server/mod.rs:1133` 组装。`/ws` 是 WebSocket 升级入口，`/health`、`/ready`、`/metrics` 是运维探针，其余请求落到控制面（`control_plane`）。面板静态资源、artifacts、canvas、attachments 与受限的浏览器 viewer 各自作为独立路由合并进来。同一个路由器上还合并了 OpenAI 兼容的 HTTP 面（`src/gateway/openai_api/router.rs`）：`/v1/models`、`/v1/models/{model_id}`、`/v1/chat/completions`、`/v1/embeddings`、`/v1/responses`、`/v1/health`。
+- **执行请求**：JSON-RPC 2.0 请求经中间件链进入方法注册表，落到具体处理程序。
+- **广播事件**：内部产生的事件进入 `src/gateway/event_bus.rs` 的总线，按主题投递到订阅了该主题的连接。
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        网关服务器                                    │
-│                  ws://127.0.0.1:18790/ws                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐        │
-│  │   入站       │     │   处理程序   │     │   出站       │        │
-│  │   路由器     │ ──▶ │   注册表     │ ──▶ │   发射器     │        │
-│  │              │     │              │     │              │        │
-│  │ • 解析请求   │     │ • 路由       │     │ • 流式传输   │        │
-│  │ • 验证       │     │ • 执行       │     │ • 事件       │        │
-│  └──────────────┘     └──────────────┘     └──────────────┘        │
-│                                                                     │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐        │
-│  │   会话       │     │    事件      │     │  频道        │
-│  │   管理器     │     │    总线      │     │  注册表      │
-│  │              │     │              │     │              │
-│  │ • SQLite     │     │ • 发布/订阅  │     │ • Telegram   │
-│  │ • 压缩       │     │ • 主题       │     │ • Discord    │
-│  │ • 历史       │     │ • 订阅       │     │ • iMessage   │
-│  └──────────────┘     └──────────────┘     └──────────────┘        │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+## 传输入口
 
-网关有六个核心组件：
+三个入口共用同一套 RPC 执行与事件分发内核，差别在传输、认证方式和可见的方法范围。
 
-- **入站路由器** — 解析传入的 JSON-RPC 帧，验证结构，并分派到正确的处理程序
-- **处理程序注册表** — 将方法名（如 `agent.run`、`session.list`）映射到处理函数
-- **出站发射器** — 将流式事件和最终响应发送回客户端
-- **会话管理器** — 在 SQLite 中持久化对话历史（`session.*` RPC 仍走 `SessionManager`，`session_events` 表是单一源，由 `src/session/` 的 actor 写入）
-- **事件总线** — 支持 glob 模式订阅的实时事件分发发布/订阅系统
-- **频道注册表**（`ChannelRegistry`）— 跟踪活动聊天集成（Telegram、Discord、iMessage 等），不再使用旧 `InterfaceRegistry` 名称
+| 入口 | 传输 | 认证方式 | 可用方法范围 | 上限 | 代码位置 |
+|------|------|----------|--------------|------|----------|
+| `/ws` | WebSocket（历史兼容入口） | `connect` 握手换角色 | 完整 RPC 方法集 | 状态上的 `max_connections`；另有按客户端 IP 的并发上限，loopback 豁免 | `src/gateway/server/connection/upgrade.rs` |
+| Desktop IPC | Unix domain socket | 同账号（`require_same_user`） | 只读：`system.hello`、`health`、`sessions.list` | `MAX_CONNECTIONS=8`、`WIRE_BUDGET=16 MiB`、`WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | 原生 TLS 上的 WebSocket | `POST /v1/session` 换会话 cookie | 完整 RPC 方法集 | `MAX_MESSAGE=1 MiB`、`MAX_SESSIONS=256`、`MAX_SOCKETS=8`、TTL 300s | `src/gateway/server/connection/web_v1.rs` |
 
----
+### 兼容 WebSocket 入口
 
-## JSON-RPC 2.0 协议
+`/ws` 是最早的入口，仍在生产路径上，但按现行口径它承担的是历史兼容角色；Protocol v1 的目标入口是下面两个。升级逻辑在 `src/gateway/server/connection/upgrade.rs` 的 `ws_upgrade_handler`，进入连接后走完整 RPC 方法集。
 
-所有通信都使用基于 WebSocket 帧的 [JSON-RPC 2.0](https://www.jsonrpc.org/specification)。有三种消息类型。
+升级前有三道拒绝：
 
-### 请求（客户端到网关）
+| 条件 | 拒绝 |
+|------|------|
+| 远端明文（未启用 TLS，且未放行 `allow_insecure_remote`） | 426 `TLS required for remote connections` |
+| `Origin` 不被状态上的 `origin_policy` 允许 | 403 `origin not allowed` |
+| 全局连接数达到状态上的 `max_connections` | 503 `Connection limit reached` |
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "uuid-xxx",
-  "method": "agent.run",
-  "params": {
-    "message": "Hello, what can you do?",
-    "session_key": "agent:main:main"
-  }
-}
-```
+按客户端 IP 的并发连接上限对 loopback 豁免，因为面板与本机 CLI 会同时开多条连接。状态上的 `max_connections` 与 `origin_policy` 定义在 `src/gateway/server/mod.rs`。受信代理带来的真实客户端 IP 由 `parse_trusted_ips` 解析——只接受裸 IP，不接受 CIDR。
 
-`id` 字段是客户端生成的 UUID。网关在响应中返回相同的 `id`，以便客户端可以将请求与响应匹配。
+### Desktop IPC 入口
 
-### 响应（网关到客户端）
+Desktop IPC 是给桌面宿主用的只读入口：Unix domain socket，同账号才能连上。入口由启动参数指定：`--desktop-ipc <socket>`（`src/bin/aleph-server/cli.rs:54`），服务端在 `src/gateway/server/mod.rs:1424` 的 `run_with_desktop_ipc` 里挂起监听。
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "uuid-xxx",
-  "result": {
-    "run_id": "run-123",
-    "status": "running"
-  }
-}
-```
+连接建立后的约束（`src/gateway/server/connection/local_ipc.rs`）：
 
-对于 `agent.run`，初始响应确认运行已启动。实际的 AI 输出通过流式事件到达。
+- **同账号**：`require_same_user`（`shared/client/src/local_ipc.rs:181`）校验对端 uid，不匹配直接断开。
+- **首帧必须是 `system.hello`**：否则回 `AUTH_REQUIRED` / `system.hello must be first`。
+- **方法白名单**：`execute` 只放行 `health` 与 `sessions.list`，其余回 `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`。
+- **身份**：角色取自 `active_desktop_owner`，调用方用户固定为 `OWNER_USER_ID`。
+- **不授予网络权限**：连接的 origin 记为 `NO_NETWORK_ORIGIN`（0.0.0.0），因此它拿不到任何要求网络来源的权限。
 
-### 事件（网关到客户端，无 id）
+资源上限：
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-123",
-      "content": "Hello! I can help you with..."
-    }
-  }
-}
-```
+| 常量 | 值 | 含义 |
+|------|-----|------|
+| `MAX_CONNECTIONS` | 8 | 同时在线的 Desktop IPC 连接数 |
+| `WIRE_BUDGET` | 16 MiB | 单连接可同时占用的线上字节预算，信号量许可按帧长扣减 |
+| `WRITE_TIMEOUT` | 5s | 单次写超时 |
+| `MAX_FRAME_BYTES` | 8 MiB | 单帧载荷上限（`shared/client/src/local_ipc.rs`） |
+| `MAX_INFLIGHT` | 8 | 单连接在途请求数（`shared/client/src/local_ipc.rs`） |
 
-事件是服务器发起的通知（无 `id` 字段）。客户端通过 `events.subscribe` 方法订阅事件主题。
+响应超过 `MAX_FRAME_BYTES` 时回 `INTERNAL_ERROR` / `response exceeds Desktop IPC limits`。
 
----
+### Web v1 入口
 
-## RPC 方法参考
+Web v1 是 Protocol v1 的目标网络入口：原生 TLS 上的 WebSocket，凭据用一次性交换拿到，而不是把长期令牌直接放进查询参数。
 
-### 代理方法
+两步：
 
-| 方法 | 说明 | 关键参数 |
-|--------|-------------|----------------|
-| `agent.run` | 启动代理执行 | `message`、`session_key`、`thinking?`、`model?` |
-| `agent.status` | 获取运行状态 | `run_id` |
-| `agent.cancel` | 取消正在运行的代理 | `run_id` |
-| `agent.abort` | 立即强制中止 | `run_id` |
+1. `POST /v1/session` 换会话凭据。请求体是 `{"device_token": "..."}` 或 `{"bootstrap_ticket": "..."}`（`Credentials` 枚举，`src/gateway/server/connection/web_v1.rs`）。校验通过后返回 204，并下发 `Set-Cookie: __Host-aleph-v1=<uuid>; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=300`，同时带 `Cache-Control: no-store`。
+2. `GET /v1/ws` 升级成 WebSocket。凭据由 cookie 携带（`cookie_handle`），子协议是 `aleph.protocol.v1`。
 
-### 会话方法
+两道前置门：
 
-| 方法 | 说明 | 关键参数 |
-|--------|-------------|----------------|
-| `session.get` | 获取会话信息 | `session_key` |
-| `session.list` | 列出所有会话 | `filter?` |
-| `session.history` | 获取消息历史 | `session_key`、`limit?` |
-| `session.compact` | 触发压缩 | `session_key` |
-| `session.delete` | 删除会话 | `session_key` |
+- **同源**：`same_origin` 要求请求不带 query、`Origin` 恰好等于 authority 的 https origin，且 authority 里不含 `@ / \ ? #`；不满足回 403。
+- **限速**：`throttle` 按客户端 IP 以 `RateLimitScope::Auth` 计配额，超限回 429。
 
-### 配置方法
+会话绑定在 `WebBinding` 上（`store`、`origin`、`token_id`、`device_id`、`user`、`expires`）。`current_role` 在绑定过期时返回 `None`，并且每次都要用 `active_device_principal` 复查设备令牌是否仍然有效、归属用户是否仍然一致。
 
-| 方法 | 说明 | 关键参数 |
-|--------|-------------|----------------|
-| `config.get` | 获取当前配置 | -- |
-| `config.patch` | 部分更新 (JSON Merge Patch) | `patch` |
-| `config.apply` | 完整配置替换 | `config` |
-| `config.reload` | 从磁盘重新加载 | -- |
+## 连接与身份
 
-### 事件方法
+### 登录墙
 
-| 方法 | 说明 | 关键参数 |
-|--------|-------------|----------------|
-| `events.subscribe` | 订阅事件主题 | `pattern` (glob) |
-| `events.unsubscribe` | 取消订阅 | `pattern` |
-| `events.list` | 列出活动订阅 | -- |
+连接被接受时就进入连接表，此时它还没有任何权限，角色是 `guest`。真正的授权发生在 `connect` 之后。
 
-### 记忆方法
-
-| 方法 | 说明 | 关键参数 |
-|--------|-------------|----------------|
-| `memory.store` | 存储事实 | `content`、`metadata?` |
-| `memory.search` | 搜索事实 | `query`、`limit?` |
-| `memory.delete` | 删除事实 | `fact_id` |
-| `memory.stats` | 获取记忆统计 | -- |
-
-### 浏览器方法 (CDP)
-
-| 方法 | 说明 | 关键参数 |
-|--------|-------------|----------------|
-| `browser.navigate` | 转到 URL | `url` |
-| `browser.click` | 点击元素 | `selector` |
-| `browser.type` | 键入文本 | `selector`、`text` |
-| `browser.screenshot` | 截图 | `selector?` |
-| `browser.evaluate` | 运行 JavaScript | `script` |
-
-### 其他方法域
-
-> 完整且权威的列表见 [网关方法参考](/docs/zh/gateway/methods) 与 `src/gateway/handlers/mod.rs::HandlerRegistry::new` 的注册块。下面是按域聚合的示例：
-
-| 域 | 说明 |
-|--------|---------|
-| `connect` | 独立方法（不挂前缀）；第一帧必为 `connect`；`device_token` / `bootstrap_ticket` / `token` |
-| `pairing.*` | 频道发送者审批（iMessage / Telegram 未知发件人），**非**设备认证 |
-| `plugin.*` / `plugins.*` | 插件安装 / 启用 / 禁用 / 调用；CC 兼容双前缀 |
-| `mcp.*` | MCP 服务器生命周期 + `call` + on-demand `list_*` 资源/提示发现 |
-| `skill.*` | 技能列表 / 安装 / 激活（v2 `SkillSystem`） |
-| `generation.*` | 图像 / 视频 / 语音生成 |
-| `cron.*` | 计划任务：list / add / remove / run |
-| `heartbeat.*` / `dreaming.*` | 后台任务 RPC |
-| `artifacts.*` | 工件 store：list / get / put |
-| `voice.*` | 语音会话 + delta 主题 |
-| `hub.*` | Aleph Hub：`primer` / `catalog_client` / `install` / `verify` / `trust` |
-| `strategy.*` / `goal.*` / `loop.*` | 三个独立长任务子系统 |
-| `graph.*` | 治理拓扑节点 / 边查询 |
-| `cluster.*` | 集群联邦 RPC（`environments.list` / `node_invoke` 等） |
-| `identity.*` / `agent_identity.*` | 代理身份签名账本 |
-| `exec_approvals.*` / `secret_approvals.*` | 操作 / 密钥审批 |
-| `gateway.*` | 网关自身：`credentials` / `identity.get` / `metrics.lanes` / `metrics.run_concurrency` 等 |
-| `wizard.*` | 向导会话（RPC 驱动，非 CLI 子命令） |
-
----
-
-## 消息管道
-
-当 WebSocket 帧到达时，网关通过分层中间件管道处理它：
-
-```
-WebSocket 帧
-    │
-    ▼
-┌────────────────────────────────┐
-│ 1. 帧解析                      │
-│    • 反序列化 JSON-RPC         │
-│    • 验证结构                  │
-│    • 提取方法 + 参数           │
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 2. 中间件管道                  │
-│    • TraceLayer (跨度/请求-id) │
-│    • MetricsLayer (计时)       │
-│    • AuthLayer (认证检查)      │
-│    • RateLimitLayer (配额)     │
-│    • ValidateLayer (模式)      │
-│    • HandlerService (分发)     │
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 3. 处理程序分发                │
-│    • 在注册表中查找方法        │
-│    • agent.run → ExecutionEngine│
-│    • session.* → SessionManager│
-│    • config.* → ConfigManager  │
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 4. 执行                        │
-│    • 处理程序处理请求          │
-│    • 可能生成 AgentLoop        │
-│    • 通过 EventBus 流式传输事件│
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 5. 响应                        │
-│    • JSON-RPC 结果帧           │
-│    • 或 JSON-RPC 错误帧        │
-└────────────────────────────────┘
-```
-
-中间件管道按此顺序为每个 JSON-RPC 请求运行：
-
-1. **TraceLayer** — 附加请求跨度和跟踪 ID 以实现可观察性
-2. **MetricsLayer** — 记录请求计时和方法级指标
-3. **AuthLayer** — 验证认证（当 `auth.mode = "none"` 时跳过）
-4. **RateLimitLayer** — 强制执行每个身份、每个范围的速率限制
-5. **ValidateLayer** — 在到达处理程序之前验证请求模式
-6. **HandlerService** — 分发到注册的处理程序进行执行
-
----
-
-## 多频道路由
-
-Aleph 同时支持多个聊天接口。每个接口（Telegram、Discord、iMessage 等）将其平台特定的消息转换为统一的 JSON-RPC 协议，并将其转发到网关。
-
-### 频道适配器（`src/gateway/channel.rs`）
-
-每个频道适配器实现 `Channel` trait；不通过功能标志开启，按需在运行时通过 `[channels.<type>]` 注册到 `ChannelRegistry`：
+`wall_admits`（`src/gateway/server/connection/auth.rs:64`）是唯一的授权判定：
 
 ```rust
-#[async_trait]
-pub trait Channel: Send + Sync {
-    fn info(&self) -> &ChannelInfo;
-    fn state(&self) -> &ChannelState;
-    fn id(&self) -> &ChannelId;
-    fn capabilities(&self) -> &ChannelCapabilities;
-    async fn health(&self) -> ChannelHealth;
-    async fn start(&mut self) -> ChannelResult<()>;
-    async fn stop(&mut self) -> ChannelResult<()>;
-    async fn send(&self, message: OutboundMessage) -> ChannelResult<SendResult>;
-    async fn send_typing(&self, conversation_id: &ConversationId) -> ChannelResult<()>;
-    fn approval_capability(&self) -> Option<Arc<dyn ChannelApprovalCapability>>;
+pub fn wall_admits(role: Option<&str>, method: &str) -> bool {
+    matches!(role, Some("operator" | "member")) || method == "connect"
 }
 ```
 
-内置适配器通过 `ChannelFactory` 注册到 `interfaces::register_channel_plugins`；未在该表注册的工厂不会被 `[channels.<type>]` 选中。`imessage` 和 `cli` 不走工厂表——iMessage 由 `initialize_channels` 直接构造，CLI 不是可配置频道。
+持有 `operator` 或 `member` 角色的连接可以发任何方法；`guest` 只能发 `connect`。未授权连接收到的提示是同文件 `:13` 的 `LOGIN_WALL_MESSAGE`：`Not authorized: present a valid Gateway token via \`connect\` to access this core.`
 
-### 可用接口
+同一个谓词用在两个方向：请求分发前查一次，事件投递前再查一次。只在一个方向上判定，未授权连接就会收到本该被挡住的事件。
 
-| 接口 | 位置 | 平台 |
-|-----------|------|----------|
-| CLI | `interfaces/cli/` | 所有平台 |
-| Telegram | `src/gateway/interfaces/telegram/` | 所有平台 |
-| Discord | `src/gateway/interfaces/discord/` | 所有平台 |
-| iMessage | `src/gateway/interfaces/imessage/`（Local + BlueBubbles 两种传输） | Local 仅 macOS，BlueBubbles 任意 |
-| Slack / Matrix / Mattermost / Signal / IRC / Nostr / XMPP / Email / Webhook / WeChat / Feishu / Line / QQ / MS Teams | `src/gateway/interfaces/<name>/` | 各平台 |
-| WebChat | 内置于 `aleph-server`（由 `rust_embed` 嵌入） | 所有平台 |
+### 握手 system.hello
 
-### 会话键解析
+`system.hello`（`src/gateway/handlers/system_hello.rs`）是 Protocol v1 的握手。它只做协议协商，不授予任何权限。
 
-每个频道生成一个唯一的会话键，决定对话是共享还是隔离（格式由 `DmScope` 与 `PeerKind` 决定，详见 [`src/routing/session_key.rs`]）：
-
-| 会话键格式 | 用例 |
-|-------------------|----------|
-| `agent:main:main` | 跨频道共享会话（`DmScope::Main` 或主会话） |
-| `agent:main:dm:user123` | 每用户隔离 DM（`DmScope::PerPeer`，**默认**） |
-| `agent:main:telegram:dm:user123` | 每频道每用户 DM（`DmScope::PerChannelPeer`） |
-| `agent:main:discord:group:guild-id` | Discord 服务器频道（群组） |
-| `agent:main:cron:daily-summary` | Cron 作业 / webhook（任务） |
-| `subagent:agent:main:translator` | 子代理委托（子代理） |
-| `agent:main:ephemeral:uuid` | 临时的，不持久化（短暂） |
-
-DM 范围可以按接口配置：
-
-```rust
-pub enum DmScope {
-    Main,           // 所有 DM 共享主会话
-    PerPeer,        // 每个用户隔离的会话（默认）
-    PerChannelPeer, // 按频道 + 用户隔离
-}
-```
-
----
-
-## 事件系统
-
-EventBus 提供用于实时事件分发的发布/订阅机制。客户端使用 glob 模式订阅。
-
-### 事件主题
-
-| 模式 | 事件 |
-|---------|--------|
-| `stream.*` | 所有流式事件 |
-| `stream.chunk` | 文本内容块 |
-| `stream.agent_trace` | 结构化循环发起的执行跟踪 |
-| `stream.tool_start` | 工具执行开始 |
-| `stream.tool_end` | 工具执行完成 |
-| `agent.*` | 代理生命周期事件 |
-| `agent.started` | 运行开始 |
-| `agent.completed` | 运行完成 |
-| `agent.error` | 运行错误 |
-| `session.*` | 会话事件 |
-| `config.*` | 配置更改事件 |
-| `system.tick` | 定期心跳（正常运行时间、连接、状态版本） |
-| `system.shutdown` | 服务器关闭通知 |
-
-### 订阅事件
+请求：
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": "sub-1",
-  "method": "events.subscribe",
-  "params": { "pattern": "stream.*" }
-}
-```
-
-订阅后，客户端接收所有匹配的事件作为服务器发起的通知，直到取消订阅。
-
----
-
-## 连接生命周期
-
-### 认证流程
-
-```
-客户端 WebSocket 连接
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 环回连接？                       │
-│   是 → 零配置 operator           │
-│         （无需凭据）             │
-│   否  → 第一帧必须是             │
-│         "connect" 方法          │
-└─────────────────────────────────┘
-    │
-    ▼ (远程)
-┌─────────────────────────────────┐
-│ resolve_connect_auth            │
-│   1. 设备令牌 (aleph-dt-*)     │
-│      —— 已配对设备长期令牌       │
-│   2. 引导票据 (aleph-bt-*)      │
-│      —— 5 分钟单次使用           │
-│   3. 共享 Gateway 令牌           │
-│      (aleph-<uuid>, HMAC)       │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 授权 → 角色 = operator          │
-│   WS 派发接收所有方法            │
-│   远程 WS 接 4001 关闭           │
-│   （设备撤销 / 令牌轮换）        │
-└─────────────────────────────────┘
-```
-
-默认绑定 `127.0.0.1`（仅环回），环回即零配置 operator。设 `[gateway] host = "0.0.0.0"` 开放局域网后，远程连接**必须**在 `connect` 帧上呈现有效凭据；`is_loopback` 判断读取原始 socket 端点，不解析 `X-Forwarded-For`（防伪）。授权完成即可获得完整 operator 权限（与本地等同）；远程 WS 在令牌轮换（`gateway.token.rotate`）或设备撤销（`gateway.devices.revoke`）时被即时踢出。
-
-### Connect 请求
-
-远程连接必须将 `connect` 消息作为第一帧发送：
-
-```json
-{
-  "method": "connect",
+  "id": 1,
+  "method": "system.hello",
   "params": {
-    "minProtocol": 1,
-    "maxProtocol": 1,
+    "protocol": { "major": 1, "minor": 0 },
     "client": {
-      "id": "macos-app",
-      "version": "1.0.0",
-      "platform": "macos"
+      "name": "aleph-nsh-desktop",
+      "version": "0.1.0",
+      "platform": "linux",
+      "ui_runtime": "nsh"
     },
-    "device_token": "aleph-dt-...",
-    "bootstrap_ticket": "aleph-bt-..."
+    "features": ["event_replay", "snapshot", "binary_channel"]
   }
 }
 ```
 
-> 环回客户端省略 `device_token` / `bootstrap_ticket` 字段。远程客户端首配对时发送 `bootstrap_ticket`（换取 `device_token` 回执），后续重连发送 `device_token`。`token`（旧版共享 Gateway 令牌）仍作为兜底接受。`device_id` 由客户端声明，与集群节点共用 namespace，因此会被拒与同名非 Panel 设备。
-
----
-
-## OpenAI 兼容路由
-
-除了 WebSocket JSON-RPC API 外，网关还在同一端口 (`18790`) 上暴露 OpenAI 兼容的 HTTP API（`src/gateway/openai_api/`）。这允许使用 OpenAI API 格式的现有客户端和工具无需修改即可连接到 Aleph。
-
-| 路由 | 方法 | 说明 |
-|-------|--------|-------------|
-| `/v1/models` | GET | 列出可用模型 |
-| `/v1/models/{model_id}` | GET | 获取模型详情 |
-| `/v1/chat/completions` | POST | 聊天完成（流式 + 非流式） |
-| `/v1/embeddings` | POST | 文本嵌入 |
-| `/v1/responses` | POST | OpenAI 响应 API |
-| `/v1/health` | GET | API 健康检查 |
-
-这些路由支持 bearer 令牌认证（与 WebSocket 共享令牌机制）。在 `[gateway] allow_insecure_remote = false` 的默认策略下，远程连接必须经过 TLS；非环回明文连接会被网关拒绝。
-
----
-
-## 热重载
-
-网关监视 `~/.aleph/config/aleph.toml` 的更改并应用它们而不重启：
-
-```
-~/.aleph/config/aleph.toml 修改
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 去抖 (500ms)                    │
-└─────────────────┬───────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────┐
-│ 解析 + 验证新配置               │
-└─────────────────┬───────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────┐
-│ 应用更改：                      │
-│ • 重启受影响的频道              │
-│ • 更新路由规则                  │
-│ • 发出 config.changed 事件      │
-└─────────────────────────────────┘
-```
-
-`[execution]` 下的运行上限（`max_runs_global` / `max_runs_per_agent`）通过 arc-swap 全局信号量热重载，无需重启。
-
----
-
-## HTTP 端点
-
-除了 WebSocket 服务器外，网关还在同一端口上提供 HTTP 端点：
-
-| 端点 | 用途 |
-|----------|---------|
-| `/ws` | WebSocket 升级端点 |
-| `/health` | 健康检查（返回 200 OK） |
-| `/metrics` | Prometheus 兼容指标 |
-| `/` | 内置 WebChat UI 的静态文件 (ControlPlane) |
-| `/login` | 会话 cookie 登录页面 |
-| `/auth/login` | 登录表单提交 |
-| `/auth/logout` | 注销（清除会话 cookie） |
-
-启用 A2A（代理到代理）时，额外的 A2A 路由会挂载在同一 HTTP 服务器上。
-
----
-
-## 接口配置示例
+响应：
 
 ```json
 {
-  "interfaces": {
-    "telegram": {
-      "token": "BOT_TOKEN",
-      "allowFrom": ["+1234567890"],
-      "groups": {
-        "*": { "requireMention": true }
-      }
-    },
-    "discord": {
-      "token": "BOT_TOKEN",
-      "guilds": ["guild-id-1"]
-    }
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocol": { "major": 1, "minor": 0 },
+    "server": { "name": "aleph-server", "version": "26.9.1" },
+    "connection_id": "conn-...",
+    "features": [],
+    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 }
   }
 }
 ```
 
-每个接口都有自己的认证和范围配置。Telegram 可以限制允许哪些电话号码；Discord 可以限制机器人加入哪些公会。
+- `params` 缺失或解析失败回 `INVALID_PARAMS`。
+- major 版本不同回 `INVALID_PARAMS` / `incompatible protocol major version`；major 相同则取双方 minor 的较小值（`negotiate_version`，`shared/protocol/src/system_hello.rs`）。
+- `features` 是「客户端请求 ∩ 服务端实现」的交集（`negotiate_features`）。当前服务端传入的实现列表是空的，因此协商结果恒为空数组——客户端不能因为握手里列了 `snapshot` 就假定该特性可用。
+- `limits` 是提示值而不是传输层强制限制，源码注释写明 `legacy wire hints, not enforced transport limits`。真正生效的帧长限制在 Desktop IPC 侧（`MAX_FRAME_BYTES` 与 `MAX_INFLIGHT`）。
+- `server.version` 取编译期常量 `ALEPH_VERSION`。
 
----
+## 请求分发
 
-## 相关页面
+一次请求的处理顺序：
 
-- [架构概览](./overview) — 完整系统图和模块映射
-- [代理工具链](./harness) — 网关分发到代理后会发生什么
-- [会话服务](./session-service) — 会话键解析和持久化
-- [工具架构](./tools) — 代理请求触发的工具执行
+```
+连接收帧
+  → JSON 解析（serde）
+  → 角色与权限判定（wall_admits、method_requires_admin）
+  → 幂等键与通道规划（rpc::prepare）
+  → 中间件链（validate → rate_limit → auth → metrics → trace）
+  → 方法注册表查找（HandlerRegistry::handle）
+  → 处理程序
+  → 响应
+```
 
----
+### 派发入口
 
-## 26.7.x 补充
+`src/gateway/server/connection/dispatch.rs` 提供三条入口：
 
-### 网关核心地位
+- `dispatch_for_connection`：旧 `/ws` 路径。`capabilities.ui.invoke` 特判——先用 `live_ui_caller` 取当前真实调用方，取不到就回 `viewer_denied_response`，避免用握手时的快照冒充。
+- `dispatch_for_peer`：Desktop IPC 与 Web v1 路径。
+- `dispatch_with_caller_context`：内部调用路径。
 
-`aleph-server` 进程内 gateway 处理：
+三者最终都汇到 `dispatch_ordinary` → `validate_live` → `dispatch_snapshot`。`dispatch_snapshot` 从同一次 `ConnectionState` 读里取出角色、用户、已验证用户与设备 id（`CallerSnapshot`），避免分次读取带来的身份漂移。
 
-- **WebSocket 协议**（JSON-RPC 2.0 over ws/wss）
-- **TLS**（自签名或用户提供，axum-server in-process 终止）
-- **认证**（环回零配置 operator / 设备令牌 / 引导票据 / 共享令牌 / WS Origin 校验）
-- **路由**（chat / config / memory / agents / tools / mcp / skills / plugins / extensions / channels / teams / projects / workspaces / runtimes / voice / artifacts / hub / strategy / goal / loop / ...）
-- **完整 RPC（详见 [方法参考](/docs/zh/gateway/methods)）**
+### 运行期角色门控
 
-### 单源错误回执
+`process_request`（同文件 `:511`）是单一 chokepoint：
 
-26.7.21+：执行错误统一通过 `ExecutionError::user_receipt(locale)`（位于 `src/gateway/execution_engine/`）转换为带稳定错误码与本地化短消息的用户回执，作为网关给 Panel / 频道的**单一来源**。原始类型化错误链不外泄——`src/bin/aleph-server/server_init.rs` 的 RPC 处理器与频道回执路径都通过同一函数取数，避免「两条错误冒泡」。
+- JSON 解析失败回 `PARSE_ERROR` / `Parse error: {e}`。
+- `method_requires_admin` 命中且调用方是 member 时，回 `AUTH_REQUIRED` 与 `ADMIN_REQUIRED_MESSAGE`：`Not authorized: this method requires operator privileges`。`None`（内部调用）与 `operator` 放行，`guest` 在登录墙那一层就被挡掉了。
+- 随后从请求参数里取出 `traceparent` 或新建根 trace，方法名、trace id、span id 进入同一条 span。
 
-### WS 任务泄漏修复
+`method_requires_admin`（`src/gateway/method_admin.rs:544`）的判定顺序是：`ADMIN_METHODS` 命中即需管理员；`MEMBER_CARVE_OUTS` 命中则豁免；否则按 `ADMIN_PREFIXES` 前缀匹配。
 
-26.7.21+（见 `src/gateway/server/handler.rs::forward_bus_to_client`）：每连接事件转发任务在 `try_send` 失败时立即退出，不再持全局 `broadcast::Receiver` 到进程退出；`RecvError::Lagged(n)` 不再被视为致命（落入溢出指标、由 ping/idle watchdog 触发 1008 重连）；webhook 反压返回 503 而不是默默丢弃。
+### 方法注册表
 
-### 自签名 TLS + 客户端 TOFU
+方法注册表是 `HandlerRegistry`（`src/gateway/handlers/mod.rs:1229`）。`register` 把方法名映射到处理程序；查不到方法回 `METHOD_NOT_FOUND` / `Method not found: {method}`。批量注册用 `register_handler!` 宏，定义在 `src/bin/aleph-server/commands/start/builder/handlers/mod.rs:35`。
 
-26.7.17 引入 in-process TLS（`src/gateway/tls.rs`），26.7.18 引入 SAN 自动发现 + drift sidecar，Panel 端 WKWebView 适配器（macOS 参考平台 + iOS Keychain 镜像）实现 **TOFU 证书信任**（fingerprint + SAN 审批 + 固定信任存储）。配置：
+`src/gateway/method_census.rs` 把「哪些方法已注册、各自属于 Open 还是 Admin」做成可执行的普查：它扫描生产代码里的注册调用，为每个方法钉住当前裁决；新增方法或翻转任一条目都会让普查测试失败，直到有人显式记录裁决。
 
-- `[gateway.tls]` —— 自签名或用户提供（`cert` / `key` 留空 → 自动生成）
-- `[gateway] trusted_proxy` —— 反向代理真实 IP
-- `[gateway] allow_insecure_remote = false`（默认）—— 失败关闭
+`src/gateway/method_visibility.rs` 是另一张表，形状不同：它记录「方法的返回值是否依赖调用方是谁」，并在每个处理程序里以 `visibility` 谓词落实。它本身不是派发门——数据可见性必须在处理程序内部按会话归属判断。
 
-### 设备 / 凭据 / 票 / 令牌 RPC
+### 中间件链
 
-26.7.21 在 `HandlerRegistry` 中注册：
+`MiddlewareChain::serve_with_panel_context`（`src/gateway/middleware/chain.rs:96`）自外向内是：
 
-- `gateway.credentials`
-- `gateway.identity.get`
-- `gateway.metrics.lanes` / `gateway.metrics.run_concurrency`
+| 层 | 文件 |
+|----|------|
+| `validate` | `src/gateway/middleware/validate.rs` |
+| `rate_limit` | `src/gateway/middleware/rate_limit.rs` |
+| `auth` | `src/gateway/middleware/auth.rs` |
+| `metrics` | `src/gateway/middleware/metrics.rs` |
+| `trace` | `src/gateway/middleware/trace.rs` |
+| `HandlerService` | `src/gateway/middleware/handler_service.rs` |
 
-`gateway.token.current` / `gateway.token.rotate` / `gateway.devices.list` / `gateway.devices.revoke` 通过启动期 `gateway_state` 注入（见 `src/gateway/handlers/mod.rs` 的 boot-phase 注册块）。
+链本身报错时回 `INTERNAL_ERROR` / `Middleware chain error`。中间件里的限速会产生 `RATE_LIMITED`。
 
-### 详见
+### 通道与幂等
 
-- [网关协议](/docs/zh/gateway/protocol) — 协议
-- [网关认证](/docs/zh/gateway/auth) — 认证 / 配对 / TOFU
-- [网关方法参考](/docs/zh/gateway/methods) — 完整 RPC
+每个方法被映射到一条通道（lane）：`Query`、`Execute`、`Mutate`、`System`（`src/gateway/lane.rs:37`）。映射顺序是显式覆盖表优先，其次按方法名最后一段的后缀启发式（`get`/`list`/`subscribe` 等归 `Query`，`install`/`uninstall` 归 `System`，`run`/`send`/`invoke`/`execute` 归 `Execute`），最后兜底到 `Mutate`。兜底选 `Mutate` 是有意的：源码注释说明旧实现兜底到 `Query`，会让没被覆盖到的副作用方法绕过幂等保护。
+
+`rpc::prepare`（`src/gateway/server/connection/rpc.rs:63`）负责幂等键与通道许可：
+
+- `idempotency_key` 里含保留分隔符会被拒，回 `INVALID_PARAMS`。
+- 要求幂等键的通道缺键时回 `IDEMPOTENCY_KEY_REQUIRED` / `idempotency_key required for mutating RPCs`，`data` 里带 `method`、`lane` 和提示。
+- 幂等槽位按「调用方 + 方法 + 键」命名空间化，浏览器 viewer 方法用独立前缀，避免与其他用户撞槽。
+
+执行阶段：
+
+- 拿不到通道许可时回 `INTERNAL_ERROR` / `Service congested, try again later`。
+- 重复请求等待在途副本超过 30 秒时回 `Request timed out waiting for in-flight duplicate`。
+
+## 事件出口
+
+### 两种线上形态
+
+服务端把内部事件封装成 JSON-RPC 通知发给客户端。事件走两条不同的线上形态（`src/gateway/event_bus.rs:423` 的 `publish_frame`）：
+
+| 帧类型 | 线上形态 |
+|--------|----------|
+| 有 `stream_method()` 的帧 | 直接发通知 `{"jsonrpc":"2.0","method":"stream.run_complete","params":帧体}` |
+| 没有 `stream_method()` 的帧 | 先发裸事件 `{"topic":"...","data":帧体}`，投递层再包装成 `{"jsonrpc":"2.0","method":"event","params":{"topic":"...","data":...}}` |
+
+第二种形态的 `event` 就是 `TOPIC_EVENT_METHOD`（`shared/protocol/src/jsonrpc.rs:85`），包装发生在 `src/gateway/server/connection/forward.rs:228` 的 `event_wire_form`。
+
+规范主题名与线上方法名是两套命名：规范名（`agent.run.complete`）主要出现在 `source_topic` 诊断字段里，线上订阅用的是 `stream.*`。完整的对照表见 [事件主题册](../gateway/methods/events)。
+
+### 投递过滤链
+
+一帧事件要送达某个连接，必须逐层通过 `src/gateway/server/connection/mod.rs:1373` 起的过滤链：
+
+1. `pty::manager::frame_admits`——PTY 帧按会话归属裁决。
+2. `ui_display_admits_connection`——`capabilities.ui.display` 另查一次显示挂载。
+3. `wall_admits`——登录墙，与请求方向同一个谓词。
+4. `can_receive`（`src/gateway/event_scope.rs`）——按主题前缀的粗粒度作用域。
+5. `surface::delivery::audience_allows`——按投递受众。
+6. `should_receive`（`src/gateway/handlers/events.rs`）——该连接是否订阅了这个主题。
+7. `event_admits_for`（`src/gateway/event_visibility.rs`）——逐帧按归属裁决。
+
+`stream.running_set_changed` 是链上唯一的「投影」帧：它被放行，但数组会按连接裁剪（`project_for`），每个连接只看到与自己相关的运行集。
+
+### 作用域与可见性
+
+两道机制分工不同：
+
+- `src/gateway/event_scope.rs` 是**粗粒度前缀规则**。`default_rules` 只登记了几条前缀（`pairing.`、`guest.`、`config.changed`、`node.`、`pty.`），命中的前缀要求调用方持有管理员作用域；没有规则命中的主题默认放行。`scope_for_role` 对 operator 返回 `["*"]`，对其他角色返回空。
+- `src/gateway/event_visibility.rs` 是**逐帧归属裁决**。`classify` 把主题和数据映射成一种 `SessionIdentity`（`BySessionKey`、`ByRunId`、`ByTeamId`、`ByUserId`、`ByCanvasScope`、`ByProjectScope`、`ByPtySession`、`OperatorOnly` 等），`event_admits_for` 按调用方身份逐帧重算。`session_identity_of` 在 `classify` 没命中时返回 `Global`，与作用域规则的默认放行一致。
+
+具体到每个主题归谁，见 [事件主题册](../gateway/methods/events) 的可见性一节。
+
+### 订阅与退订
+
+`events.subscribe`、`events.unsubscribe`、`events.list` 不走方法注册表，而是在连接循环里被单独拦截（`src/gateway/server/connection/mod.rs:630`），处理器在 `src/gateway/handlers/events.rs`。
+
+订阅状态由 `SubscriptionManager`（同文件 `:17`）保存：每个连接一个 `TopicFilter`，记录通配模式、例外模式与 `where` 谓词。匹配逻辑在 `src/gateway/event_bus.rs:150` 的 `topic_matches`：
+
+- 模式是 `*` 或 `**` 时匹配全部。
+- 模式最后一段是 `*` 或 `**` 时，匹配剩余任意深度——`stream.*` 能匹配 `stream.run_complete`。
+- 模式中间的 `*` 只吃一段——`*.complete` 匹配不到 `stream.run_complete`。
+- 两边都必须耗尽。
+
+匹配用的是事件的线上主题串：裸事件形态取 `topic` 字段，通知形态取 `method` 字段（`src/gateway/server/connection/forward.rs:187` 的 `extract_topic_and_data`），所以流式帧按 `stream.` 前缀匹配。
+
+`where` 谓词用 `FieldPredicate` 描述（`{"field":"...","equals":...}`），字段路径按 `.` 分段取值，不是 JSON Pointer。谓词非空而负载里没有对应字段时判为不匹配。
+
+## 配置热重载
+
+`src/gateway/hot_reload.rs` 的 `ConfigWatcher` 监听配置文件并去抖（默认 500ms），变更后重新加载并校验，把结果广播给订阅者。`ReloadMode::should_hot_reload` 决定哪些配置段可以热生效；`Hybrid` 模式下只有 `ui`、`channels`、`skills`、`workspace`、`cron` 这些段走热重载，其余需要重启。
+
+## 与桌面宿主的关系
+
+桌面宿主（NSH）连的是 Gateway 的 Desktop IPC 入口与 Web v1 入口，不经过旧的 `/ws`。宿主的形态、面板与插件边界见 [桌面宿主](../desktop-hosts/overview)。
+
+## 规划中：Gateway 的下一步
+
+以下条目在蓝图里有完整设计，但代码里还没有对应实现。
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（第 10 章 背压、流控和资源限制）；当前实现见 `src/gateway/lane.rs` 的通道许可与 `src/gateway/server/connection/rpc.rs` 的 `Service congested, try again later`。当前只有「拿不到许可就拒绝」的粗粒度流控，没有按订阅者速率整形。
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（第 9 章 Snapshot + Replay）；当前实现见 `shared/protocol/src/trace_replay.rs` 与 `shared/protocol/src/resume.rs`。`trace_replay.rs` 是持久化 trace 的查询 DTO，`resume.rs` 是恢复任务的回执，都不是事件重放；`session.get_snapshot` 在 `src/gateway/method_census.rs` 里没有登记。
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（第 11 章 二进制数据通道）；当前实现见 `shared/protocol/src/framing.rs` 与 `shared/protocol/src/system_hello.rs`。帧格式只有 4 字节大端长度前缀的文本帧，`Feature::BinaryChannel` 已在握手 DTO 里定义，但服务端的实现列表是空的。
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（第 18 章 验收测试）；当前实现见 `src/gateway/method_census.rs`。方法册已是可执行普查，但协议层的验收测试矩阵尚未建立。
+
+## 历史：传输入口的演进
+
+最早只有一个入口：`/ws`，一个 WebSocket 承载全部 RPC 与事件。Desktop IPC 与 Web v1 是后来加进来的，职责被明确切开——Desktop IPC 只读，Web v1 走网络且自带 TLS 与凭据交换。`/ws` 没有下线，它继续承担历史兼容入口的角色，新写的客户端应选 Desktop IPC 或 Web v1。
+
+## 另请参阅
+
+- [Protocol v1](../gateway/protocol-v1)：帧格式、握手与 JSON-RPC 规则。
+- [认证](../gateway/auth)：三种凭据、TTL 与撤销路径。
+- [事件主题册](../gateway/methods/events)：主题清单与逐主题可见性。
+- [JSON-RPC 错误模型](../api/jsonrpc)：错误码与错误对象结构。
+- [桌面宿主](../desktop-hosts/overview)：宿主如何连上网关。

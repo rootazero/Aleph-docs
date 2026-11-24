@@ -1,250 +1,61 @@
 ---
 title: "Authentication"
-description: "Gateway connection authentication, token lifecycle, and remote transport encryption"
+description: "Gateway authentication by entry point, token lifecycle, and remote TLS requirements."
 ---
 
-Aleph's trust boundary is the **network boundary**: loopback is the implicit operator (zero config); a remote connection must pass the `connect` login wall with one of three Gateway credentials. Once authorized the connection is single-tier `operator`, identical to local.
+This page explains how local and remote clients obtain Gateway permissions, and how transport encryption differs from authentication.
 
-Code anchors: `src/gateway/handlers/connect.rs` (handshake + authorization verdict), `src/gateway/server/handler.rs::ws_upgrade_handler` (upgrade gate + login wall), `src/gateway/origin_policy.rs` (browser cross-origin / DNS-rebinding defence), `src/gateway/tls.rs` (TLS material), `src/gateway/security/{shared_token.rs, device_token_manager.rs, store/}` (credentials + storage).
+## Authentication by Entry Point
 
-## Trust model at a glance
+| Entry point | Identity check | Implementation |
+|-------------|----------------|----------------|
+| Desktop IPC | Verifies the Unix socket peer; read-only and does not inherit the compatibility WS loopback grant | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | Native TLS; `POST /v1/session` creates a session from a valid device token or principal-bound bootstrap ticket, and `GET /v1/ws` requires a valid session cookie, matching origin, and current device principal | `src/gateway/server/mod.rs`, `src/gateway/server/connection/web_v1.rs` |
+| Compatibility `/ws` | The upgrade checks transport and `Origin` separately, then `connect` authenticates the connection. Remote callers with missing or invalid credentials cannot use authenticated RPCs. | `src/gateway/server/connection/upgrade.rs`, `src/gateway/handlers/connect.rs`, `src/gateway/server/connection/mod.rs` |
 
-```
-+---------------------+        +--------------------+        +-------------------+
-|  Same host / browser |  ──>  |  /ws upgrade (426) |  ──>  |  resolve_connect_ |
-|  (loopback / tauri:) |        |  first frame must be connect |       auth             |
-+---------------------+        +--------------------+        +-------------------+
-                                                                       |
-                                              +------------------------+------------------------+
-                                              |                        |                        |
-                                              v                        v                        v
-                                     loopback (params optional)   device_token (*)    bootstrap_ticket (*) / token
-                                              |                        |                        |
-                                       operator (implicit)   bound to a device_id   one-shot → fresh device_token
-```
+The two read-only entry points negotiate with `system.hello`, not with the compatibility `/ws` `connect` flow. See [IPC protocol](../security/ipc) for their RPC scope and cross-site protections (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
 
-- **Loopback** — same-host desktop / CLI / bridge process, zero config, `operator` immediately, never audited.
-- **Remote** — present one of the credentials below in `connect`, then call other methods; `trusted_proxy` resolves the real client from `X-Forwarded-For` (last entry) when the connection's peer is in `trusted_ips`.
-- **Single-tier `operator`** — there is no Chat / Config sub-tier; an authorized Panel has the same authority as a local user. Connection trust is orthogonal to *what an agent may do*, which is governed by `tools/scoped/`'s three-tier permission merge.
+## Compatibility `/ws` Credentials
 
-## The three credentials
+`resolve_connect_auth` grants implicit `operator` access only on direct loopback connections that do not present a nonempty `device_token` or `bootstrap_ticket`. A loopback connection that presents a device credential which fails verification does not fall back to the implicit grant. Remote credentials are tried in the order below. A device credential can also resolve a role from the user record; it does not always yield `operator` (`src/gateway/handlers/connect.rs`).
 
-`resolve_connect_auth` evaluates them in this order:
+| Order | `connect` parameter | Purpose and storage | Implementation |
+|-------|---------------------|---------------------|----------------|
+| 1 | `device_token` (`aleph-dt-*`) | Long-lived device credential; the server stores a SHA-256 hash | `src/gateway/security/device_token_manager.rs`, `src/gateway/security/store/tokens.rs` |
+| 2 | `bootstrap_ticket` (`aleph-bt-*`) | Single-use pairing credential, valid for 5 minutes by default; exchange returns a new device token | `src/gateway/security/device_token_manager.rs`, `src/gateway/handlers/connect.rs` |
+| 3 | `token` (`aleph-<uuid>`) | Legacy shared Gateway token, used only as a remote fallback | `src/gateway/handlers/connect.rs`, `src/gateway/security/shared_token.rs` |
 
-| # | Credential | Source | Storage | Revocation |
-|---|------------|--------|---------|------------|
-| 1 | **Loopback** (implicit) | Same-host process | — | — |
-| 2 | **Device token** `aleph-dt-<uuid>` | Exchanged for a bootstrap ticket at first `connect`; replayed thereafter | SHA-256 hash in `~/.aleph/data/security.db` | `gateway.devices.revoke` (precise socket close + drops every token for that device) |
-| 3 | **Bootstrap ticket** `aleph-bt-<uuid>` | `gateway.ticket.create` or `aleph-server pair` | Single INSERT, consumed on exchange | Single-use, default TTL 5 min (clamped 60s – 86 400s by `gateway_ticket.rs`) |
-| 4 | **Shared Gateway token** `aleph-<uuid>` | `SharedTokenManager::generate_token` (first boot) | HMAC hash in `~/.aleph/data/security.db`; plaintext only in memory | `gateway.token.rotate` — regenerates + revokes every paired Panel + force-closes every remote socket |
+### Pairing and Revocation
 
-### Bootstrap-ticket → device-token flow
+An authorized client can issue a bootstrap ticket with `gateway.ticket.create`. A compatibility connection exchanges it via `connect.bootstrap_ticket` and reconnects with the returned `device_token`. The exchange rejects a `device_id` that conflicts with a non-Panel device. The NSH credential service stores device credentials in the OS keyring, with no plaintext file fallback (`src/gateway/handlers/gateway_ticket.rs`, `src/gateway/handlers/connect.rs`, `src/gateway/security/device_token_manager.rs`, `desktop/nsh-shell/src/credentials.rs`, `shared/client/src/credential_store.rs`).
 
-```
-[Operator, authorised on machine A]
-    |  `gateway.ticket.create`  (or  `aleph-server pair`)
-    |  -> server mints `aleph-bt-<uuid>`  TTL=300s
-    |  -> response also carries LAN-friendly pairing URLs
-    |     (same-host bind ⇒ empty list; the Panel falls back to its own origin)
-    v
-[New device]  browser opens ?bt=<ticket>
-    |  /ws first frame: connect { bootstrap_ticket, device_id }
-    v
-[Server]  consumes the ticket atomically
-    |  creates a device row + `aleph-dt-<uuid>` (TTL 10y)
-    |  response carries device_token
-    v
-[Panel]  persists device_token; replays it on every reconnect
-```
+`gateway.devices.revoke` revokes a specific device. `gateway.token.rotate` rotates the shared token and revokes paired Panel devices. Web v1 session validation also rechecks that the device principal is still active (`src/gateway/handlers/gateway_devices.rs`, `src/gateway/handlers/gateway_token.rs`, `src/gateway/server/connection/web_v1.rs`).
 
-Code facts:
+### Headless Credential Tools
 
-- Bootstrap-ticket format: `device_token_manager.rs:88` — `format!("aleph-bt-{}", Uuid::new_v4())`.
-- Device-token format: `device_token_manager.rs:148` — `format!("aleph-dt-{}", Uuid::new_v4())`, default TTL `DEFAULT_DEVICE_TOKEN_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000` (10 years).
-- Device tokens are stored as **SHA-256 hashes**: `device_token_manager.rs:240` — `hex::encode(sha2::Sha256::digest(...))`.
-- Shared-token hash: `shared_token.rs:99-103` — `HMAC-SHA256(secret, token)` written via `set_shared_token_with_secret`.
-- `exchange_bootstrap_ticket` refuses a `device_id` that already names a non-Panel row (`DeviceTokenError::DeviceIdConflict`) — closes the namespace-collision vector where a one-shot ticket would mint an operator credential that the Panel roster cannot see and `revoke_all_panel_devices` cannot reach (`device_token_manager.rs:113-126`).
+`aleph-server pair [--ttl SECONDS]` can issue a bootstrap ticket without a running Gateway. Add `--user <id>` when issuing a principal-bound ticket for Web v1. `aleph-server bootstrap-token` prints the legacy shared token in plaintext to standard output; keep that output out of shared logs (`src/bin/aleph-server/cli.rs`, `src/bin/aleph-server/commands/pair.rs`, `src/bin/aleph-server/commands/bootstrap_token.rs`).
 
-### Audited events
+## Local and Remote Transport, and TLS
 
-Only **remote** `connect`s that are **rejected** are audited; loopback is operator and never logs.
+The Gateway's `check_network_exposure` rejects a non-loopback bind without native TLS, a trusted proxy, or explicit permission for plaintext. The compatibility `/ws` upgrade applies `refuse_insecure_remote` per connection: when there is neither native TLS nor a trusted proxy's `X-Forwarded-Proto: https`, and `allow_insecure_remote` is unset, remote upgrades receive `426 Upgrade Required`. Direct loopback can use plaintext, but NSH requires HTTPS for a remote `--connect <origin>`. The `aleph://open` deep link opens the host window; it is not a connection target (`src/gateway/server/mod.rs`, `src/gateway/server/connection/upgrade.rs`, `desktop/nsh-shell/src/main.rs`, `shared/client/src/connection_target.rs`, `desktop/nsh-shell/src/panel_bridge.rs`).
 
-| Source | Event | Bound |
-|--------|-------|-------|
-| `connect` rejected | `AuditEventType::AuthFailure` (in `src/security/audit.rs`) | `Auth`-scope rate limiter, ≤ 10/60s/IP |
-| `UnauthorizedFloodGuard` closes a socket | `AuditEventType::RateLimited` | One row per abusive connection, not per rejected request |
+### Native TLS
 
-## Remote transport encryption (TLS)
+Set `enabled = true` under `[gateway.tls]`. Provide PEM files in `cert_path` and `key_path`, or leave them empty to generate a self-signed certificate. Clients still need to trust the certificate presented, and TLS alone grants no Gateway permissions. Web v1 is registered only on the native TLS router; neither the compatibility plaintext switch nor proxy-only TLS termination enables it (`src/gateway/config.rs`, `src/gateway/tls.rs`, `src/gateway/server/mod.rs`).
 
-A remote connection is accepted only when **one of these holds** (`insecure_exposure_refused` in `src/gateway/server/mod.rs`):
+### Trusted Reverse Proxies and Client IPs
 
-```toml
-# Remote plaintext is refused by default. Pick one:
-[gateway]
-allow_insecure_remote = true          # only on a trusted LAN — you have been warned
+If a proxy terminates TLS for compatibility `/ws`, enable `[gateway.trusted_proxy]` with `enabled = true` and put the proxy's actual IP in `trusted_ips` (individual addresses only, no CIDR). Otherwise, a same-host proxy's loopback socket may be mistaken for a direct local connection and receive the implicit grant (`src/gateway/config.rs`, `src/gateway/trusted_proxy.rs`, `src/gateway/server/connection/upgrade.rs`).
 
-[gateway]
-tls.enabled = true                    # native TLS
-tls.cert_path = "/etc/letsencrypt/.../fullchain.pem"
-tls.key_path  = "/etc/letsencrypt/.../privkey.pem"
+`resolve_client` accepts forwarding headers only from a trusted peer. It parses the rightmost nonempty `X-Forwarded-For` entry and falls back to the peer IP if the entry is missing or invalid. That IP is used for rate limits and audit. Connections through a trusted proxy are always marked non-local, even if the fallback IP is loopback (`src/gateway/trusted_proxy.rs`, `src/gateway/server/connection/upgrade.rs`, `src/gateway/server/connection/mod.rs`).
 
-[gateway]
-tls.enabled = true                    # empty paths ⇒ self-signed
-                                       # (SAN auto-covers host's non-loopback IPs)
+## Browser Origins and Audit
 
-[gateway.trusted_proxy]
-enabled = true
-trusted_ips = ["127.0.0.1", "::1"]    # upstream TLS-terminating reverse proxy
-# + gateway.host still bound to 127.0.0.1
-```
+Compatibility `/ws` uses `OriginPolicy::is_allowed`: absent or blank `Origin` passes the origin check; browsers normally need an exact `[gateway] allowed_origins` match or an HTTP(S) IP or loopback origin whose authority matches the request `Host`. The legacy desktop webview's dedicated scheme is still an exception, not an NSH rule. Web v1 uses strict HTTPS same-origin checks instead. Neither check replaces authentication. See [IPC protocol](../security/ipc) for the full rules (`src/gateway/origin_policy.rs`, `src/gateway/server/connection/upgrade.rs`, `src/gateway/server/connection/web_v1.rs`).
 
-### A. Trusted reverse proxy (recommended; needs a domain)
+Compatibility `/ws` can log remote credential failures (`AuthFailure`) and unauthorized request floods (`RateLimited`). Web v1's `throttle` applies auth rate limits to both session exchange and upgrade (`src/gateway/server/connection/mod.rs`, `src/gateway/server/flood_guard.rs`, `src/security/audit.rs`, `src/gateway/server/connection/web_v1.rs`).
 
-Bind Aleph to loopback; Caddy / nginx terminates TLS in front:
+## See Also
 
-```toml
-[gateway]
-host = "127.0.0.1"
-allowed_origins = ["https://your.domain.com"]
-
-[gateway.trusted_proxy]
-enabled = true
-```
-
-```
-your.domain.com { reverse_proxy 127.0.0.1:18790 }
-```
-
-**`trusted_proxy` must be enabled in lock-step** — without it every remote client looks like `127.0.0.1` to Aleph and so auto-passes the loopback-operator test, a full auth bypass.
-
-### B. Native self-signed (no domain)
-
-```toml
-[gateway]
-host = "0.0.0.0"
-
-[gateway.tls]
-enabled = true
-# cert_path / key_path left empty ⇒ auto-generate and persist under ~/.aleph/data/tls/
-# san = []   # optional; default already covers all non-loopback interface IPs
-```
-
-`src/gateway/tls.rs::load_or_generate`:
-
-1. If the persisted `cert.pem` / `key.pem` / `sans.txt` exist and the desired SAN set is a **subset** of what's recorded → reuse.
-2. Drift or missing sidecar → delete `sans.txt` first, then write `cert.pem`, then `key.pem`, then `sans.txt` — atomic-regen marker commits the new pair only after every byte is on disk.
-3. Startup logs the SHA-256 fingerprint, so a Panel can pin it.
-
-Client verification: macOS / iOS run a [TOFU flow](#tofu--pairing-store-single-source) inside the App — shared decision core + pinned trust store + SHA-256 fingerprint + SAN parsing + approval splash (TOFU/change warning + approve/reject). Other clients follow the macOS reference.
-
-### C. Operator-provided certificate (domain, no proxy)
-
-```toml
-[gateway]
-host = "0.0.0.0"
-
-[gateway.tls]
-enabled = true
-cert_path = "/etc/letsencrypt/live/your.domain.com/fullchain.pem"
-key_path  = "/etc/letsencrypt/live/your.domain.com/privkey.pem"
-```
-
-```rust
-pub struct GatewayTlsConfig {
-    pub enabled: bool,
-    pub cert_path: String,
-    pub key_path: String,
-    pub san: Vec<String>,
-}
-```
-
-`load_or_generate` reads `cert_path` / `key_path` verbatim in the `TlsMode::Provided` branch; the self-signed branch ignores them (`src/gateway/tls.rs:48-91`).
-
-## Trusted-proxy / real client IP
-
-`src/gateway/trusted_proxy.rs::resolve_client` is the spoof-safe single source:
-
-```rust
-ResolvedClient { ip: IpAddr, secure: bool } =
-    if enabled && trusted_ips.contains(&peer) {
-        last_forwarded_for(headers).unwrap_or(peer),
-        forwarded_proto_https(headers)
-    } else {
-        (peer, false)    // untrusted peer → XFF ignored entirely
-    }
-```
-
-Used by:
-
-- `is_loopback` from the resolved IP — **XFF can never flip loopback** (forge `X-Forwarded-For: 127.0.0.1` and the real peer is still remote, so `is_loopback()` is `false`).
-- Per-IP concurrent-connection cap (`gateway.max_connections_per_ip`, default 64), `Auth`-scope rate-limit key, and the `AuthFailure` / `RateLimited` audit log all key on `resolved.ip`.
-- WS upgrade's `secure` field is `tls_enabled || resolved.secure` — a non-loopback client on an unencrypted leg is refused with `426 Upgrade Required`.
-
-## Origin policy / DNS-rebinding defence
-
-The browser-side gate (`src/gateway/origin_policy.rs`; browsers can't forge `Origin`):
-
-| Origin | Verdict | Why |
-|--------|---------|-----|
-| Missing / empty | **allow** | Native callers (CLI, bots, `tokio-tungstenite`) send none; only browsers do. |
-| Loopback / `tauri:` scheme | **allow** | Same-machine UI, desktop webview. |
-| `[gateway] allowed_origins` exact match | **allow** | Operator-configured extra origins. |
-| Same-origin + `Host` is an IP literal or loopback | **allow** | LAN-by-IP zero-config. A domain `Host` is **not** auto-allowed — DNS-rebinding defence. |
-| Anything else (public web domain) | **deny** | `403 origin not allowed`. |
-
-The escape hatch is `[gateway] allow_any_origin = true` — only for deployments fronting Aleph with their own reverse-proxy / auth layer (otherwise any web page the user visits can drive the agent).
-
-## TOFU / pairing-store single source
-
-Self-signed TLS is trusted from inside the App, end-to-end:
-
-- **Server** — `load_or_generate` keeps the SAN set in a sidecar; a newly-appearing interface IP triggers one atomic regen (new fingerprint, re-trust once). Drift detection lives in `gateway/tls.rs`.
-- **Client** — the macOS WKWebView cert-challenge adapter is the reference platform (proven end-to-end against a real self-signed remote): shared decision core + pinned TOFU trust store + SHA-256 fingerprint + SAN/subject parsing + approval splash (fingerprint + SAN + TOFU/change warning) + `pending-cert` state with approve/reject Tauri commands. iOS Keychain is the second wired adapter.
-- **Channel pairing** (`src/gateway/pairing_store.rs`, methods `pairing.list` / `pairing.approve` / `pairing.reject`) is a separate concept — it authorises **unknown channel senders** (iMessage / Telegram / Discord), **not** Panel device pairing. Channel access / pairing / allowlists are single-sourced on the inbound router.
-
-## Credential and vault components
-
-| Component | Path | Role |
-|-----------|------|------|
-| `SharedTokenManager` | `src/gateway/security/shared_token.rs` | Creates / rotates / validates the shared Gateway token; owns `SecretVault`. |
-| `DeviceTokenManager` | `src/gateway/security/device_token_manager.rs` | Bootstrap-ticket mint / consume, device-token issuance, per-device revocation. |
-| `SecurityStore` | `src/gateway/security/store/` | SQLite backend with `bootstrap_tickets` / `devices` / `tokens` / `identity` / `senders`. |
-| `SecretVault` | `src/secrets/vault.rs` | Encrypted at-rest; the **master key is the live shared token** (the `vault: RwLock<SecretVault>` field in `shared_token.rs:32`). |
-| `SecretMasker` | `src/exec/masker.rs` | Redacts secrets in any human-visible or audit-string (approval cards, logs, receipts). Built-in patterns cover OpenAI / Anthropic / AWS / GitHub classic + fine-grained / generic passwords / PKCS#8 `-----BEGIN PRIVATE KEY-----` (regression-tested at `masker.rs:99-123`). |
-
-### Headless credential tools
-
-All bypass the running daemon; they open `~/.aleph/data/security.db` (mode 0600, WAL) directly under the Spec-C singleton-lock protocol:
-
-```bash
-# Mint a bootstrap ticket + LAN-friendly pairing URLs (headless counterpart of
-# Settings → Security → "Pair new device")
-aleph-server pair [--ttl SECONDS]
-
-# Print the live shared Gateway token — one-shot, plaintext to stdout
-aleph-server bootstrap-token
-
-# Offline verify per-agent signing identities — independent of the daemon
-aleph-server identity verify
-```
-
-## Revocation
-
-Revocation takes effect **immediately**, not at the next handshake:
-
-- `gateway.token.rotate` regenerates the shared token, revokes every paired Panel device, and closes every remote socket (`handlers/gateway_token.rs::handle_token_rotate`). The response carries the fresh token and `revoked_devices`.
-- `gateway.devices.revoke {device_id}` revokes one Panel device; its live sessions are dropped to the login wall synchronously, then the socket is closed with WS 4001 `device_revoked` (`handlers/gateway_devices.rs`).
-- **Loopback survives** — token rotation never tears down same-host sessions (`rotated_should_close_remote` in `server/handler.rs` keys the close on `is_loopback`).
-- Failure-closed at the seam — `exchange_bootstrap_ticket` refuses a `device_id` that already exists with `device_type != "panel"`; otherwise a one-shot ticket could mint an operator credential that the Panel roster cannot see.
-
-## Rate-limit and audit
-
-- `src/gateway/rate_limiter.rs` — keyed on `(resolved_client_ip, method_scope)`; loopback exempt.
-- `src/gateway/server/flood_guard.rs::UnauthorizedFloodGuard` — counts unauthorized requests per connection, trips on threshold, writes `AuditEventType::RateLimited`.
-- `src/security/audit.rs` — `AuthFailure` / `RateLimited` rows, written from `ws_upgrade_handler` + the login-wall path.
-
-## See also
-
-- [Protocol](/docs/en/gateway/protocol) — WebSocket JSON-RPC 2.0
-- [Security / Pairing](/docs/en/security/pairing) — channel-side pairing flow
-- [Architecture / Gateway](/docs/en/architecture/gateway) — internal structure
+- [IPC protocol](../security/ipc): entry points and origin checks.
+- [Pairing](../security/pairing): device and channel sender pairing.

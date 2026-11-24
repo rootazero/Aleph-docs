@@ -11,7 +11,7 @@ description: "记忆流水线 RPC 方法"
 
 写入仍由 LLM / 工具驱动;RPC 面刻意只读第 1 层 + 第 2 层,加上少量会**失败关闭**的批量清除端点(老的"无操作伪造成功"形态已被删除——见 [批量清除](#批量清除))。
 
-十二个方法在 `register_memory_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/memory.rs:28-268`)中连接。处理函数位于 `src/gateway/handlers/memory.rs`;`dreaming.run_now` / `dreaming.list_insights` / `insights.tools` 伴随方法直接在 `HandlerRegistry::new()` 中注册。
+十二个方法在 `register_memory_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/memory.rs`)中连接。处理函数位于 `src/gateway/handlers/memory/`;`dreaming.run_now` / `dreaming.list_insights` / `insights.tools` 伴随方法直接在 `HandlerRegistry::new()` 中注册。
 
 ## 方法
 
@@ -160,16 +160,9 @@ description: "记忆流水线 RPC 方法"
 
 **响应:** 按活动/成功率排序的工具列表。
 
-## 批量清除
+## 批量清理
 
-两个老的"始终返回 `{ "deletedCount": 0 }`"的伪造已经**消失**——两者现在都失败关闭:
-
-| 方法 | 新行为 |
-|------|--------|
-| `memory.clear` | `INTERNAL_ERROR: Bulk memory clearing is not supported in the notes-based memory model.` |
-| `memory.clearFacts` | `INTERNAL_ERROR: Bulk note clearing is not supported; manage knowledge notes via the note_manage tool.` |
-
-`memory.delete` 是唯一合法的逐行删除。批量删除走 `note_manage`(第 2 层)或永远不运行(第 1 层)。
+当前 census 没有批量清空 RPC。使用 `memory.delete` 按记录删除;不要把它当作全库清空操作。知识笔记的管理另见内建工具 `note_manage`（不是 Gateway RPC）。
 
 ## 内建聊天工具(伴随面)
 

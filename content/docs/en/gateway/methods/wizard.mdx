@@ -3,7 +3,7 @@ title: "wizard.*"
 description: "Setup wizard RPC methods"
 ---
 
-`wizard.*` is the JSON-RPC surface for the configuration wizard. The five methods are registered as `service_unavailable` placeholders inside `HandlerRegistry::new()` and replaced with the real handlers by `install_wizard_handlers` once `WizardSessionManager` is built at server boot (`src/bin/aleph-server/commands/start/mod.rs:655-660`). The runtime factory ships only the `onboarding` flow; any other `wizard_type` returns `Unknown wizard type` from the `start` handler.
+`wizard.*` is the JSON-RPC surface for the configuration wizard. The five methods are registered as `service_unavailable` placeholders inside `HandlerRegistry::new()` and replaced with the real handlers by `install_wizard_handlers` once `WizardSessionManager` is built at server boot (`src/bin/aleph-server/commands/start/mod.rs`). The runtime factory ships only the `onboarding` flow; any other `wizard_type` returns `Unknown wizard type` from the `start` handler.
 
 The wizard state itself is process-local — restarting the daemon drops in-flight sessions. There is no CLI subcommand equivalent any more (`aleph wizard` was removed); the Panel drives these RPCs.
 

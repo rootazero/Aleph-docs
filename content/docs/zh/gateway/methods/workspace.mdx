@@ -3,7 +3,7 @@ title: "workspace.*"
 description: "工作空间管理 RPC 方法"
 ---
 
-`workspace.*` 是对 `AgentEnvStore`(SQLite 后端)的运行时接口。五个核心方法在 `register_workspace_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:6-88`)中连接;频道绑定面在同一个模块,因为绑定/解绑接缝与 `agent_switch` 内建工具共享。
+`workspace.*` 是对 `AgentEnvStore`(SQLite 后端)的运行时接口。五个核心方法在 `register_workspace_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/settings.rs`)中连接;频道绑定面在同一个模块,因为绑定/解绑接缝与 `agent_switch` 内建工具共享。
 
 存储模型是**每个 agent 一个工作空间,每个 agent 多个频道**。工作空间是逻辑隔离边界——它承载 agent 的 profile、项目根和绑定表;它**不**拥有文件目录(工作目录在运行时从 `sessions.set_project_root` 绑定)。
 
@@ -90,15 +90,15 @@ description: "工作空间管理 RPC 方法"
 
 **响应:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`。之前的一对一映射有损,新形态落地时已被替换。
 
-## 不作为 RPC 存在的方法
+## 历史：旧工作空间操作
 
-之前版本中描述但**未在当前 alpeh-server 上注册**的方法:
+以下旧版名称已不在 census 中,不是当前 RPC;替代操作如下:
 
 | 方法 | 不作为 RPC 存在的原因 |
 |------|---------------------|
-| `workspace.activate` | 运行时没有"活动工作空间"概念——代理循环每轮从会话的 `project_root`(通过 `sessions.set_project_root` 设置)读取,"活动"开关会冗余。 |
-| `workspace.files` | 工作空间存储是 `AgentEnvStore` 行,不是目录列表。使用 `fs.list_dir`(限定到项目根)或 agent 自己的工具面。 |
-| `workspace.delete` | 运行时只暴露 `archive`;归档后行被保留。 |
+| workspace.activate（旧版，未注册） | 运行时没有"活动工作空间"概念——代理循环每轮从会话的 `project_root`(通过 `sessions.set_project_root` 设置)读取,"活动"开关会冗余。 |
+| workspace.files（旧版，未注册） | 工作空间存储是 `AgentEnvStore` 行,不是目录列表。使用 `fs.list_dir`(限定到项目根)或 agent 自己的工具面。 |
+| workspace.delete（旧版，未注册） | 使用 `workspace.archive` 归档,用 `workspace.unarchive` 恢复。 |
 
 ## 另请参阅
 

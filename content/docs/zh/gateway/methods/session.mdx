@@ -19,7 +19,7 @@ description: "会话管理 RPC 方法"
 |------|------|------|------|
 | `agent_id` | string | 否 | 按 agent id 过滤 |
 
-**响应:** `{ "sessions": [ ...SessionInfo... ], "count": N }`。每行包含 `key`、`agent_id`、`session_type`、`message_count`、`created_at`(RFC3339)、`last_active_at`(RFC3339)、`updated_at`(Unix 秒,驱动 Panel 排序)、`topic`(解析顺序:`topic` → `identity_meta.custom.topic` → 未泄漏的 `derived_title`)、`status`、`state`、`label`、`input_tokens`、`output_tokens`、`model`、`model_provider`、`parent_session_key`、`compaction_count`、`channel`(来源:`telegram` / `discord` / `gui:chat` / `null`)、`project_root`、`exec_tier`(每会话覆盖,或 `null`)、`mode`(每会话覆盖,或 `null`)。
+**响应:** `{ "sessions": [ ...SessionInfo... ], "count": N }`。每行包含 `key`、`agent_id`、`session_type`、`message_count`、`created_at`(RFC3339)、`last_active_at`(RFC3339)、`updated_at`(Unix 秒,驱动 Panel 排序)、`topic`(解析顺序:`topic` → `identity_meta` → `custom` → `topic` → 未泄漏的 `derived_title`)、`status`、`state`、`label`、`input_tokens`、`output_tokens`、`model`、`model_provider`、`parent_session_key`、`compaction_count`、`channel`(来源:`telegram` / `discord` / `gui:chat` / `null`)、`project_root`、`exec_tier`(每会话覆盖,或 `null`)、`mode`(每会话覆盖,或 `null`)。
 
 ### sessions.history
 
@@ -85,7 +85,7 @@ description: "会话管理 RPC 方法"
 | `status` | string | 否 | 新 status |
 | `model` | string | 否 | 新 model id |
 | `model_provider` | string | 否 | 新 provider 名 |
-| `metadata` | object | 否 | `identity_meta.custom` 补丁——`exec_tier` / `session_mode` 在此校验 |
+| `metadata` | object | 否 | `identity_meta` → `custom` 补丁——`exec_tier` / `session_mode` 在此校验 |
 
 **响应:** `{ "session_key", "updated" }`。
 

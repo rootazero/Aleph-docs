@@ -13,7 +13,7 @@ description: "系统日志和诊断 RPC 方法"
 | [`logs.setLevel`](#logssetlevel) | 设置全局日志级别 |
 | [`logs.getDirectory`](#logsgetdirectory) | 返回日志目录绝对路径 |
 
-> 历史别名 `logs.list` / `logs.get` / `logs.tail` / `logs.levels` / `logs.set_level` 不是 RPC；运行时只暴露以上三个端点。
+> 本命名空间提供以上三个端点；读取最近日志使用 `daemon.logs`。见 `src/gateway/handlers/logs.rs` 与 `src/gateway/handlers/daemon_control.rs`。
 
 ### logs.getLevel
 

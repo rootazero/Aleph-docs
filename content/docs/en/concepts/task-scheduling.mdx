@@ -102,7 +102,7 @@ pub trait Clock: Send + Sync + 'static {
 
 ### RPCs (real implementations)
 
-All `cron.*` RPCs registered in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` are backed by real handlers (`src/gateway/handlers/cron/real.rs`). The earlier `*_stub` placeholders that lived in `src/gateway/handlers/cron/stubs.rs` are no longer reached on the hot path:
+All `cron.*` RPCs registered in `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` are backed by real handlers (`src/gateway/handlers/cron/real.rs`). The earlier `*_stub` placeholders were severed in the 2026-08-17 audit (`sw-gateway-batch1-F01`); the real handlers in `src/gateway/handlers/cron/real.rs` are the only surface now:
 
 | Method | Handler |
 |---|---|
@@ -192,7 +192,7 @@ The `tasks::shared` module provides cross-cutting infrastructure consumed by bot
 - `targets` — Delivery target type definitions (channels, webhooks).
 - `active_hours` — Quiet-hours and active-hours gating for jobs.
 - `retry_hint` — Retry policy primitives (transient vs permanent classification).
-- `reaper` — Periodically calls `cron.reap_history` / `heartbeat.reap_history` so `cron_runs` / heartbeat history rows do not grow without bound.
+- `reaper` — Periodically runs `CronHistoryReaper` / `HeartbeatHistoryReaper` (`tasks::shared::reaper`) so `cron_runs` / heartbeat history rows do not grow without bound.
 
 ---
 
@@ -236,7 +236,6 @@ The `tasks::shared` module provides cross-cutting infrastructure consumed by bot
 - `src/tasks/shared/clock.rs` — `Clock` trait + `SystemClock` + `FakeClock`
 - `src/tasks/shared/schedule.rs` — Pure scheduling computation
 - `src/tasks/shared/delivery.rs` — `DeliveryEngine` and friends
-- `src/tasks/shared/store.rs` — SQLite helpers
 - `src/tasks/shared/targets.rs` — Delivery target types
 - `src/tasks/shared/active_hours.rs` — Active-hours gating
 - `src/tasks/shared/retry_hint.rs` — Retry classification
@@ -244,7 +243,6 @@ The `tasks::shared` module provides cross-cutting infrastructure consumed by bot
 
 **RPCs:**
 - `src/gateway/handlers/cron/real.rs` — real `cron.*` handlers
-- `src/gateway/handlers/cron/stubs.rs` — legacy stubs (kept for regression tests, not dispatched)
 - `src/gateway/handlers/heartbeat.rs` — real `heartbeat.*` handlers (the file also contains the legacy `*_stub` definitions as regression tests)
 - `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` — registers `cron.*` and `heartbeat.*` on the gateway server
 

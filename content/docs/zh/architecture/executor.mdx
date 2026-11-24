@@ -21,7 +21,7 @@ Harness 循环（harness::agent::loop_graph / harness::agent::think）
      │
      ▼
 ToolService (scoped tool stack: src/tools/scoped/builder.rs)
-     │   Adapter: src/tools/adapters/registry_adapter
+     │   Adapter: src/tools/adapters/registry_adapter.rs
      │   将 Arc<dyn ToolService> 暴露为 LoopTool
      │
      ▼
@@ -69,7 +69,7 @@ pub trait ToolRegistry: Send + Sync {
 }
 ```
 
-生产实现是 `BuiltinToolRegistry`（`src/executor/builtin_registry/registry/`），由 `src/tools/adapters/registry_adapter::RegistryToolAdapter` 包装为 `LoopTool`，再由 gateway 的 `ScopedToolService` 暴露给 harness。句柄访问器让执行引擎在不污染每次调用签名的情况下，把 workspace 和 session-scoped 上下文传递给工具。
+生产实现是 `BuiltinToolRegistry`（`src/executor/builtin_registry/registry/`），由 `src/tools/adapters/registry_adapter.rs::RegistryToolAdapter` 包装为 `LoopTool`，再由 gateway 的 `ScopedToolService` 暴露给 harness。句柄访问器让执行引擎在不污染每次调用签名的情况下，把 workspace 和 session-scoped 上下文传递给工具。
 
 ---
 
@@ -106,7 +106,7 @@ impl BuiltinToolRegistry {
 | `get_builtin_tool_names()` | 列出全部已注册名字 |
 | `create_tool_boxed()` | 类型擦除的工具构造工厂 |
 
-测试（`tests/gateway_feature_gate.rs::BuiltinToolRegistry::test_resolve_plugin_handler_*`）验证插件工具走 `plugin:<plugin_id>:<name>` 直接 fast-path，并通过 `ExtensionManager::sync_runtime_snapshots` 同步。
+测试（`src/executor/builtin_registry/mod.rs` 的 `test_resolve_plugin_handler_*`）验证插件工具走 `plugin:<plugin_id>:<name>` 直接 fast-path，并通过 `ExtensionManager::sync_runtime_snapshots` 同步。
 
 ---
 
@@ -138,17 +138,24 @@ pub struct UnifiedTool {
 
 ---
 
-## 公共结果类型（`src/executor/types.rs`）
+## 公共接口（`src/executor/mod.rs`）
+
+executor 模块只导出注册表及其 trait，没有独立的结果/上下文类型层（旧的 `ExecutionResult` / `ToolCallRecord` / `ExecutionContext` / `ExecutorError` 一族已不存在——工具结果是 `serde_json::Value`，错误是 `AlephError`）。
 
 ```rust
-pub struct ExecutionResult { content, tool_calls, task_results, execution_time_ms, success, error }
-pub struct ToolCallRecord { tool_name, parameters, result, success, execution_time_ms }
-pub struct TaskExecutionResult { task_id, description, success, output, error, execution_time_ms }
-pub struct ExecutionContext { app_context, window_title, session_id, stream }
-pub enum ExecutorError { ExecutionFailed, ToolError, TaskFailed { task_id, error }, Timeout, Cancelled }
+pub use builtin_registry::{
+    create_tool_boxed, BuiltinToolConfig, BuiltinToolRegistry,
+    BUILTIN_TOOL_DEFINITIONS, TOOL_CATEGORIES,
+};
+pub use tool_registry::ToolRegistry;
+pub const TOOLS_OUTSIDE_DEFINITIONS: &[&str];   // subagent, tool_search
+pub const REGISTRY_ONLY_TOOL_NAMES: &[&str];    // 已注册但不在 BUILTIN_TOOL_DEFINITIONS 中
+pub fn is_builtin_tool_name(name: &str) -> bool;
 ```
 
-`ExecutionResult.task_results` 字段承载多任务计划（`TaskExecutionResult`）的逐项结果——这只是数据结构，不是独立调度器。`src/orchestrator/summary_format.rs` 中的 `TerminateReason::DiminishingReturns` 是 loop 在输出停滞时的**停止原因标签**，不是预先存在的硬检测器；R10 之后硬检测器已被删除，循环通过 `max_iterations`、工具循环验证和模型自停来约束。
+`ToolRegistry`（`src/executor/tool_registry.rs`）是分发接缝：`get_tool(name) -> Option<&UnifiedTool>`、`execute_tool(name, arguments) -> Result<Value>`、`execute_plugin_tool_with_authority`（默认拒绝，仅受控插件运行时覆写），以及上文所述的可选句柄访问器。
+
+循环退出原因不属于 executor：它们是 `src/orchestrator/dispatch.rs` 中的 `TerminateReason`。`TerminateReason::DiminishingReturns` 是**已退役信号**，仅为 i18n 与摘要向后兼容而保留——R10 之后硬检测器已被删除，循环通过 `max_iterations`、工具循环验证、连续失败上限和模型自停来约束。
 
 ---
 

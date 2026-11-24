@@ -88,7 +88,7 @@ pub struct Environment { /* 序列化外部视图 */ }
 - 参数化 SQL 查询（无注入风险）
 - 锁使用 `unwrap_or_else(|e| e.into_inner())` 模式
 - 所有查询使用 `params![]` 进行绑定
-- `cluster.file.write` 不再存在 check-then-write TOCTOU
+- `file.write` 不再存在 check-then-write TOCTOU
 
 ---
 
@@ -145,7 +145,7 @@ pub struct Environment { /* 序列化外部视图 */ }
 
 - 实时舰队 feed
 - 节点身份持久化（连接 verdict 上的 `last_seen_at`）
-- 集群写入 R8 完整化（之前是半完成；`cluster.file.write` 不再有 TOCTOU）
+- 集群写入 R8 完整化（之前是半完成；`file.write` 不再有 TOCTOU）
 
 ### 与 Dreaming / Insights 的关联
 

@@ -1,425 +1,90 @@
 ---
-title: "JSON-RPC API"
-description: "Complete method reference for the WebSocket JSON-RPC 2.0 interface"
+title: "JSON-RPC protocol"
+description: "Gateway message envelopes, error codes, events, and reverse tool calls"
 ---
 
-This page is a compact quick-reference for every JSON-RPC method exposed by the Aleph Gateway. For detailed request/response examples, follow the links to the individual method pages.
+This page explains Gateway JSON-RPC message semantics, not individual method parameters.
 
-## Transport
+## Message forms
 
-All methods are invoked over a **WebSocket** connection to the Gateway server (default `ws://127.0.0.1:18790`). The protocol is JSON-RPC 2.0 — every request requires `jsonrpc`, `method`, and `id` fields. Notifications (no `id`) are used for server-to-client events.
+Gateway JSON-RPC 2.0 messages are requests, responses, and notifications. Shared types are `JsonRpcRequest`, `JsonRpcResponse`, and `JsonRpcError` in `shared/protocol/src/jsonrpc.rs`. See the [method index](../gateway/methods) for method names.
+
+## Requests and responses
+
+`JsonRpcRequest.id` is `Option<Value>`, not a string-only type: `new()` generates a string ID and `with_id()` accepts a JSON value. Requests expecting a response carry an `id`; `notification()` sets it to `None`, serialization omits it, and `is_notification()` checks for `None`. Do not use explicit JSON `null` as a client correlation ID. Optional `params: Option<Value>` is not restricted to objects. See `shared/protocol/src/jsonrpc.rs`.
+
+A response carries the corresponding `id: Value`. The `success()` and `error()` constructors populate only `result` or `error`, respectively. Errors contain `code`, `message`, and optional `data`. This exclusivity is a constructor convention, not a mutually exclusive enum. See `shared/protocol/src/jsonrpc.rs`.
+
+The request and success response below use `echo` (`src/gateway/handlers/echo.rs`); a separate example illustrates the error envelope:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "agent.run",
-  "params": { "message": "Hello" }
-}
+{"jsonrpc":"2.0","id":"req-1","method":"echo","params":{"text":"hello"}}
 ```
-
-## Authentication
-
-When `require_auth` is enabled in the Gateway config, the **first message** on a new WebSocket connection must be `connect`. All subsequent requests are rejected until authentication succeeds.
-
-| Method | Description | Parameters |
-|--------|-------------|------------|
-| `connect` | Authenticate a WebSocket connection | `token` (string), `client_id` (string, optional) |
-
-## Method Index
-
-### Core
-
-| Method | Description |
-|--------|-------------|
-| `health` | Health check, returns `{ status: "ok" }` |
-| `echo` | Echo back params |
-| `version` | Server version and build |
-| `system.info` | System metrics (CPU, memory, disk, uptime) |
-| `request.state` | Per-request runtime state snapshot |
-
-### `agent.*` / `agents.*` — Agent Execution
-
-[Full documentation](/docs/en/gateway/methods/agent)
-
-| Method | Description |
-|--------|-------------|
-| `agent.run` | Start an agent run (streaming) |
-| `agent.status` | Run status (polling) |
-| `agent.cancel` | Cancel a running agent |
-| `agent.list` / `agents.list` | List agent configurations |
-| `agents.get` | Get one agent |
-| `agents.create` / `agents.update` / `agents.delete` | CRUD |
-| `agents.set_default` | Default agent |
-| `agents.teams` | List teams an agent belongs to |
-| `agents.tools_schema` | Tool schema for an agent |
-| `agents.files.list` / `.get` / `.set` / `.delete` | Agent file CRUD |
-| `agents.bindings` | Channel-to-agent bindings |
-
-### `session.*` / `sessions.*` — Session Management
-
-| Method | Description |
-|--------|-------------|
-| `session.usage` | Session cost (daemon-computed, core pricing) |
-| `session.compact` | Trigger manual compaction |
-| `session.truncate` | Truncate session |
-| `sessions.list` | List sessions with filters |
-| `sessions.delete` | Delete a session |
-
-### `chat.*` — Chat Control
-
-| Method | Description |
-|--------|-------------|
-| `chat.send` | Send a chat message (wired at boot via `agent_init`) |
-| `chat.abort` | Abort current chat generation |
-| `chat.history` | Get chat history |
-| `chat.clear` | Clear chat history |
-| `chat.rewind` | Rewind to an earlier turn |
-| `chat.context_estimate` | Estimate context window usage |
-
-### `config.*` — Configuration
-
-| Method | Description |
-|--------|-------------|
-| `config.schema` | Configuration JSON Schema |
-| `config.get` / `config.path` | Read active config / a sub-key |
-| `config.reload` | Reload from disk |
-| `config.validate` | Validate without applying |
-| `config.patch` | Patch active config |
-
-### `exec.*` — Command Execution Security
-
-| Method | Description |
-|--------|-------------|
-| `exec.approval.request` | Request command approval |
-| `exec.approval.resolve` | Resolve a pending approval |
-| `exec.approvals.get` / `exec.approvals.set` | Approval configuration CRUD |
-| `exec.approvals.pending` | List pending approvals |
-
-### `events.*` — Event Subscriptions
-
-| Method | Description |
-|--------|-------------|
-| `events.subscribe` | Subscribe to event topics |
-| `events.unsubscribe` | Remove subscriptions |
-| `events.list` | List active subscriptions |
-
-### `logs.*` — Logging
-
-| Method | Description |
-|--------|-------------|
-| `logs.getLevel` / `logs.setLevel` | Component log level |
-| `logs.getDirectory` | Log directory |
-| `logs.tail` | Stream recent log entries |
-
-### `commands.*` / `tools.*` — Commands & Tools
-
-| Method | Description |
-|--------|-------------|
-| `commands.list` | List registered commands |
-| `command.execute` | Execute a command |
-| `tools.catalog` | Full tool catalog |
-| `tools.effective` | Effective tools (after progressive disclosure / mode) |
-| `tools.invoke` | Invoke a tool |
-| `tools.cancel_call` | Cancel an in-flight call |
-| `tools.in_flight` | List in-flight calls |
-
-### `wizard.*` — Setup Wizards (Panel-driven)
-
-`wizard.*` is wired at boot via `install_wizard_handlers` (`src/gateway/handlers/wizard.rs`) once `WizardSessionManager` is constructed. There is no CLI subcommand — the Panel invokes these from the handshake window.
-
-| Method | Description |
-|--------|-------------|
-| `wizard.start` | Start a wizard session |
-| `wizard.next` | Advance (no answer) |
-| `wizard.answer` | Answer and advance |
-| `wizard.cancel` | Cancel the session |
-| `wizard.status` | Session status |
-
-### `cron.*` / `heartbeat.*` — Scheduled Jobs
-
-`cron.*` and `heartbeat.*` are registered as phase-1 placeholders; the boot path replaces them with live handlers when the corresponding service is up.
-
-| Method | Description |
-|--------|-------------|
-| `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` | Job CRUD |
-| `cron.run` / `cron.runs` | Trigger + history |
-| `cron.status` / `cron.toggle` | Scheduler control |
-| `heartbeat.list` / `.get` / `.create` / `.update` / `.delete` | Heartbeat CRUD |
-| `heartbeat.toggle` / `.wake` / `.runs` | Heartbeat control |
-
-### `channel.*` / `channels.*` / `channel.pairing.*` — Channels
-
-[Full documentation](/docs/en/gateway/methods/channels)
-
-| Method | Description |
-|--------|-------------|
-| `channels.list` | List channels (registered + configured) |
-| `channels.status` | Channel status |
-| `channels.set_agent` | Bind channel to agent |
-| `channels.dead_letters` | Inspect dead-letter queue |
-| `channels.redrive_dead_letters` | Re-send dead-letter messages |
-| `channel.start` / `channel.stop` | Lifecycle |
-| `channel.create` / `channel.delete` | CRUD |
-| `channel.send` | Send a message |
-| `channel.pairing_data` | Pairing payload (QR / code) |
-| `channel.pairing.list` / `.approve` / `.reject` / `.approved` / `.revoke` | Pairing flow |
-| `discord.validate_token` / `discord.list_guilds` / `discord.list_channels` / `discord.audit_permissions` | Discord Panel helpers |
-
-### `browser.*` — Browser Automation
-
-| Method | Description |
-|--------|-------------|
-| `browser.navigate` / `browser.click` / `browser.type` / `browser.screenshot` / `browser.evaluate` / `browser.snapshot` | Headless browser control |
-| `browser_config.*` | Browser configuration (proxy, allowed domains, headless flag) |
-
-### `memory.*` — Memory Operations
-
-| Method | Description |
-|--------|-------------|
-| `memory.search` / `memory.compress` / `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace` | Memory subsystem |
-| `memory_config.*` | Memory configuration |
-
-### `mcp.*` / `mcp_config.*` — MCP
-
-| Method | Description |
-|--------|-------------|
-| `mcp.list` / `mcp.add` / `mcp.update` / `mcp.delete` / `mcp.status` / `mcp.logs` | MCP server CRUD |
-| `mcp.start` / `mcp.stop` / `mcp.restart` | MCP lifecycle |
-| `mcp.tools` / `mcp.resources` / `mcp.prompts` | Capability aggregation |
-| `mcp_config.list` / `.get` / `.create` / `.update` / `.delete` | Settings-page CRUD |
-
-### `plugin.*` / `plugins.*` / `extensions.*` — Extensions
-
-| Method | Description |
-|--------|-------------|
-| `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall` | Legacy namespace |
-| `plugin.list` / `plugin.install` / `plugin.installFromZip` / `plugin.uninstall` / `plugin.update` | Canonical CC-compatible namespace |
-| `plugin.enable` / `plugin.disable` / `plugin.load` / `plugin.unload` / `plugin.reload` | Plugin lifecycle |
-| `plugin.callTool` / `plugin.executeCommand` | Invocation |
-| `plugin.marketplace.list` / `.add` / `.update` / `.remove` / `.install` | Marketplace |
-| `extensions.catalog` / `extensions.installed` / `extensions.toggle` / `extensions.uninstall` / `extensions.disclosure` / `extensions.configure` / `extensions.install` | Extensions Store |
-
-### `skills.*` / `markdown_skills.*` — Skills
-
-| Method | Description |
-|--------|-------------|
-| `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install` | Skill lifecycle |
-| `markdown_skills.load` / `.reload` / `.list` / `.unload` | Markdown skill runtime |
-
-### `bundled.sync` — Bundled Content
-
-| Method | Description |
-|--------|-------------|
-| `bundled.sync` | Sync bundled content to user dir |
-
-### `services.*` — Background Services
-
-| Method | Description |
-|--------|-------------|
-| `services.start` / `services.stop` / `services.list` / `services.status` | Service lifecycle |
-
-### `pty.*` — Embedded Terminal
-
-| Method | Description |
-|--------|-------------|
-| `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list` | PTY session CRUD |
-
-### `hooks.*` — User-Level Hooks
-
-| Method | Description |
-|--------|-------------|
-| `hooks.list` / `hooks.registry` / `hooks.add` / `hooks.remove` / `hooks.reload` / `hooks.events` | `~/.aleph/hooks.json` admin |
-
-### `providers.*` / `embedding_providers.*` / `generation_providers.*` / `rerank_config.*` / `search_config.*`
-
-Provider configuration (read / write / test) plus embedding, generation, rerank, and search provider surfaces.
-
-### `runtimes.*` — Capability Probe / Ledger
-
-| Method | Description |
-|--------|-------------|
-| `runtimes.list` / `runtimes.refresh` / `runtimes.install` | External-tool ledger |
-
-### `models.*` — Model Discovery
-
-| Method | Description |
-|--------|-------------|
-| `models.list` / `models.get` / `models.capabilities` | Model metadata |
-
-### `identity.*` — Identity
-
-| Method | Description |
-|--------|-------------|
-| `identity.get` / `identity.set` / `identity.clear` / `identity.list` | Identity ("soul") management |
-
-### `workspace.*` / `projects.*` — Workspaces & Projects
-
-| Method | Description |
-|--------|-------------|
-| `workspace.create` / `.list` / `.get` / `.update` / `.archive` | Workspace CRUD |
-| `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get` | Project CRUD |
-
-### `teams.*` / `teams.chat.*` — Teams & Group Chat
-
-| Method | Description |
-|--------|-------------|
-| `teams.list` / `teams.get` / `teams.disband` / `teams.delete` | Team lifecycle |
-| `teams.list_tasks` / `teams.create_task` / `teams.update_task` | Task CRUD |
-| `teams.task.trace` / `teams.usage` | Task introspection |
-| `teams.chat.send` / `teams.chat.cancel` / `teams.chat.thread` / `teams.chat.history` | Group-chat run control |
-
-### `group_chat.*`
-
-| Method | Description |
-|--------|-------------|
-| `group_chat.start` / `group_chat.mention` / `group_chat.end` / `group_chat.list` / `group_chat.history` | Group chat orchestration |
-
-### `subagent.tree`
-
-| Method | Description |
-|--------|-------------|
-| `subagent.tree` | Sub-agent hierarchy snapshot |
-
-### `graph.*` — Governance Topology
-
-| Method | Description |
-|--------|-------------|
-| `graph.query` / `graph.node_detail` / `graph.search` | Graph read |
-| `graph.update_note` / `graph.rename_note` / `graph.delete_note` | Graph write |
-
-### `dreaming.*`
-
-| Method | Description |
-|--------|-------------|
-| `dreaming.run_now` | Trigger a dream run |
-
-### `trace.*`
-
-| Method | Description |
-|--------|-------------|
-| `trace.list` / `trace.get` / `trace.by_runs` | Trace replay |
-
-### `daemon.*` / `gateway.*` — Daemon & Gateway Credentials
-
-| Method | Description |
-|--------|-------------|
-| `daemon.status` / `daemon.shutdown` / `daemon.logs` | Daemon lifecycle |
-| `gateway.token.current` / `gateway.token.rotate` | Gateway token |
-| `gateway.ticket.create` | Pairing ticket |
-| `gateway.devices.list` / `gateway.devices.revoke` | Trusted devices |
-| `gateway.credentials` | Credentials bundle |
-| `gateway.identity.get` | Identity snapshot |
-| `gateway.metrics.lanes` / `gateway.metrics.run_concurrency` | Metrics |
-| `gateway.flow.reload` | Reload gateway flow config |
-| `oauth.*` / `gateway.ticket.*` | OAuth + ticket surface |
-
-### `cluster.*` / `flow_admin.*`
-
-| Method | Description |
-|--------|-------------|
-| `cluster.*` | Cluster enrollment / node control |
-| `flow_admin.*` | Flow admin |
-
-### `activity.*` / `insights.*` / `debug.*`
-
-| Method | Description |
-|--------|-------------|
-| `activity.stats` | Activity counter |
-| `insights.tools` | Tool usage insights |
-| `debug.*` | Debug surfaces |
-
-### `secret_approvals.*` / `secret_migration.*` / `secrets.*` / `security_config.*` / `fetch_config.*` / `general_config.*` / `generation_config.*` / `behavior_config.*` / `execution_config.*` / `acp_config.*` / `mcp_config.*`
-
-Configuration CRUD per area.
-
-### `pairing.*`
-
-| Method | Description |
-|--------|-------------|
-| `pairing.*` | Gateway-level pairing admin |
-
-### `flow_admin.*` / `fs.*`
-
-| Method | Description |
-|--------|-------------|
-| `flow_admin.*` | Flow admin |
-| `fs.*` | Filesystem helpers |
-
-### `voice.*`
-
-| Method | Description |
-|--------|-------------|
-| `voice.*` | Voice streaming controls |
-
-### `route_config.*` / `routing_rules.*` / `pairing.*`
-
-| Method | Description |
-|--------|-------------|
-| `route_config.*` | Route binding CRUD |
-| `routing_rules.*` | Routing rules CRUD |
-
-## Error Codes
-
-Standard JSON-RPC 2.0 error codes plus Aleph extensions:
-
-| Code | Constant | Description |
-|------|----------|-------------|
-| `-32700` | `PARSE_ERROR` | Invalid JSON |
-| `-32600` | `INVALID_REQUEST` | Malformed JSON-RPC request |
-| `-32601` | `METHOD_NOT_FOUND` | Method does not exist |
-| `-32602` | `INVALID_PARAMS` | Invalid method parameters |
-| `-32603` | `INTERNAL_ERROR` | Internal server error |
-| `-32000` | `AUTH_REQUIRED` | Authentication required (send `connect` first) |
-| `-32001` | `AUTH_FAILED` | Authentication credentials rejected |
-| `-32002` | `PERMISSION_DENIED` | Insufficient permissions |
-| `-32003` | `RATE_LIMITED` | Too many requests |
-| `-32004` | `RESOURCE_NOT_FOUND` | Requested resource not found |
-| `-32005` | `TIMEOUT_ERROR` | Operation timed out |
-| `-32006` | `TOOL_ERROR` | Tool execution failed |
-
-Error response format:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32601,
-    "message": "Method not found: agent.nonexistent"
-  }
-}
+{"jsonrpc":"2.0","id":"req-1","result":{"echo":{"text":"hello"}}}
 ```
 
-## Event Topics
+```json
+{"jsonrpc":"2.0","id":"req-1","error":{"code":-32602,"message":"Invalid params: missing field"}}
+```
 
-Events are delivered as JSON-RPC notifications (no `id` field) to subscribed clients. Subscribe via `events.subscribe`.
+## Error codes
 
-| Topic Pattern | Description |
-|---------------|-------------|
-| `stream.start` | Agent response streaming begins |
-| `stream.chunk` | Text chunk from agent |
-| `stream.tool_start` | Tool invocation started |
-| `stream.tool_end` | Tool execution completed |
-| `stream.thinking` | Reasoning step (CoT) |
-| `stream.end` | Streaming finished |
-| `agent.started` | Agent run started |
-| `agent.completed` | Agent run finished |
-| `agent.error` | Agent run failed |
-| `agent.cancelled` | Agent run cancelled |
-| `session.created` | New session created |
-| `session.deleted` | Session deleted |
-| `session.compacted` | Session compacted |
-| `config.changed` | Configuration modified |
-| `config.reloaded` | Config reloaded from file |
-| `cron.triggered` | Cron job triggered |
-| `cron.completed` | Cron job completed |
-| `cron.failed` | Cron job failed |
-| `exec.approval_requested` | Approval needed for command |
-| `exec.approval_resolved` | Approval decision made |
+Each row matches a constant and its defined meaning in `shared/protocol/src/jsonrpc.rs`; not every transport necessarily emits every code.
 
-## See Also
+| Code | Constant | Meaning | When applicable |
+|---|---|---|---|
+| -32700 | `PARSE_ERROR` | Parse error | Invalid JSON received |
+| -32600 | `INVALID_REQUEST` | Invalid request | JSON is not a valid request object |
+| -32601 | `METHOD_NOT_FOUND` | Method not found or unavailable | No available method matches the request |
+| -32602 | `INVALID_PARAMS` | Invalid parameters | Method parameter validation fails |
+| -32603 | `INTERNAL_ERROR` | Internal error | An internal JSON-RPC error occurs |
+| -32000 | `AUTH_REQUIRED` | Authentication or role authorization required | Authentication required; also used for operator-only refusals |
+| -32002 | `RATE_LIMITED` | Rate limited | A rate limit is exceeded |
+| -32003 | `AGENT_ERROR` | Agent execution error | Agent execution fails |
+| -32004 | `TOOL_ERROR` | Tool execution error | Tool execution fails |
+| -32008 | `PERMISSION_DENIED` | Permission denied | An operation is not permitted |
+| -32009 | `RESOURCE_NOT_FOUND` | Resource not found | The requested resource cannot be found |
+| -32010 | `TIMEOUT_ERROR` | Operation timeout | An operation times out |
+| -32031 | `REVISION_CONFLICT` | Canvas revision conflict | canvas.apply supplies a stale base_revision |
 
-- [Rust API](/docs/en/api/rust) — Core crate reference for library usage
-- [Gateway Overview](/docs/en/gateway/overview) — Architecture and connection details
-- [Protocol](/docs/en/gateway/protocol) — Transport format and authentication flow
+## Operator refusal message
+
+`ADMIN_REQUIRED_MESSAGE` is defined in `shared/protocol/src/jsonrpc.rs` with the exact text below. At runtime, `method_requires_admin` in `src/gateway/method_admin.rs` classifies operator-only methods. Authenticated members receive `AUTH_REQUIRED` (-32000), not `PERMISSION_DENIED`. The gate is called in `src/gateway/server/connection/dispatch.rs`.
+
+```text
+Not authorized: this method requires operator privileges
+```
+
+## Event notifications
+
+`TOPIC_EVENT_METHOD = "event"` names the topic envelope’s `method`, not the topic itself. Notifications omit `id`; `params` carries `topic` and `data`, as documented in `shared/protocol/src/jsonrpc.rs`. This differs from streaming events that use per-frame method names. See [Gateway events](../gateway/methods/events) for topics.
+
+Owner and scope checks in `src/gateway/event_visibility.rs` constrain visibility: subscribing does not grant access to other users’ events.
+
+```json
+{"jsonrpc":"2.0","method":"event","params":{"topic":"agent.run.complete","data":{}}}
+```
+
+This shows the envelope only; event definitions in `src/gateway/events/frame.rs` determine the actual `data` schema.
+
+## Tool-call envelopes
+
+Reverse-RPC payloads in `shared/protocol/src/jsonrpc.rs` let the server request client-side tool execution and the client return a result. They are payloads within JSON-RPC, not replacements for its outer `id`.
+
+| Type | Fields and constraints |
+|---|---|
+| `ToolCallParams` | `call_id: String`, `tool_name: String`, `params: Value`, `context: ToolCallContext` (defaults when omitted) |
+| `ToolCallContext` | All optional: `run_id: String`, `session_key: String`, `timeout_ms: u64` |
+| `ToolCallResult` | `call_id: String`, `success: bool`; optional: `result: Value`, `error: String`, `duration_ms: u64` |
+
+The result’s `call_id` must match the call. `ToolCallResult::success()` / `error()` populate a value or error string; `with_duration()` adds elapsed time. See `shared/protocol/src/jsonrpc.rs`.
+
+## Relationship to Protocol v1
+
+JSON-RPC defines message semantics; see [Protocol v1](../gateway/protocol-v1) for framing, handshakes, and transports. Corresponding code lives in `shared/protocol/src/framing.rs`, `shared/protocol/src/system_hello.rs`, and `src/gateway/server/connection/`.
+
+## History: method index moved
+
+This page formerly held the full method index. It now lives in the [method reference](../gateway/methods), tracking `RPC_METHOD_CENSUS` in `src/gateway/method_census.rs`.

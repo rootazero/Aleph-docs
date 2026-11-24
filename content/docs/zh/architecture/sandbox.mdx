@@ -5,7 +5,7 @@ description: "每会话工作空间配置、能力执行和 exec 类工具的 OS
 
 沙箱是 exec 类工具实际运行的地方。它提供 Aleph 与操作系统之间的执行边界 —— 确保每个子进程在具有受限文件系统、网络和进程能力的作用域工作空间内运行。
 
-有关更广泛的安全模型，请参阅[安全概览](./security/overview)。有关工具如何使用沙箱，请参阅[工具架构](./tools)。
+有关更广泛的安全模型，请参阅[安全概览](../security/overview)。有关工具如何使用沙箱，请参阅[工具架构](./tools)。
 
 ---
 
@@ -213,8 +213,9 @@ pub trait OsSandboxDriverTrait: Send + Sync {
 
 | 平台 | 实现 | 机制 |
 |----------|---------------|-----------|
-| macOS | `src/exec/sandbox/executor.rs` 中的 `OsSandboxDriver` | `sandbox-exec` seatbelt 配置文件 |
-| Linux | Bubblewrap 驱动程序 | `bwrap` 命名空间 + seccomp |
+| macOS | `src/sandbox/platforms/macos/seatbelt.rs` 中的 `SeatbeltDriver` | `sandbox-exec` seatbelt 配置文件 |
+| Linux | `src/sandbox/platforms/linux/bwrap.rs` 中的 `BubblewrapDriver` | `bwrap` 命名空间 + seccomp |
+| Windows | `src/sandbox/platforms/windows/driver.rs` 中的 `WindowsSandboxDriver` | Job object（`job.rs`）+ WFP 网络过滤（`wfp.rs`） |
 
 ---
 
@@ -268,8 +269,8 @@ pub fn build_sandbox(
 ## 相关页面
 
 - [工具架构](./tools) —— exec 类工具如何使用沙箱
-- [安全概览](./security/overview) —— 更广泛的安全模型
-- [沙箱深度解析](./security/sandboxing) —— OS 级沙箱机制
+- [安全概览](../security/overview) —— 更广泛的安全模型
+- [沙箱深度解析](../security/sandboxing) —— OS 级沙箱机制
 
 ---
 

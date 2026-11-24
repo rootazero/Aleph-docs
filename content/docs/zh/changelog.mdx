@@ -1,17 +1,169 @@
 ---
 title: "更新日志"
-description: "Aleph 的发布历史、里程碑和重要变更"
+description: "Aleph 的发布历史、里程碑和重要变更（截至 2026-09-25）"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # 更新日志
 
-Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。
+Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。本页覆盖至 2026-09-25（含 `26.9.1` 之后的两条日期条目）。
 
 <Callout type="info">
   本页是从 Aleph 主仓库 `CHANGELOG.md` 派生的**文档视角**摘要：突出**用户可见**的变化（特性、CLI/RPC、配置、安全），并省略纯内部重构细节。完整记录请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
 </Callout>
+
+---
+
+## 2026-09-25 — Workflow 对标 round-4 (Budget · Determinism · Fan-in/out · Structured Output)
+
+把 workflow 编排从「声明式 + 复用 dispatcher」进一步演化为「可预算、可静态守护、可 fan-in/out、可强制 schema」的复合体；不引入 vm/JS 运行时，不改 harness。
+
+### 新增
+
+- **WorkflowRunBudget 运行预算**（`src/workflow/budget.rs`）——`WorkflowRunBudget { total: Option<u64>, spent: AtomicU64 }` 提供 `remaining()` / `try_charged(cost)` / `snapshot()`；uncapped 走 `total=None` 旁路（不用 `u64::MAX` 假上限）；超额拒绝且不动 `spent`。`materialize` 入口读 `WorkflowDef::budget`。本轮只挂「挂在哪里」，`cost` 固定为 1，token/字符估算不在本轮。
+- **Determinism 静态审计**（`src/workflow/determinism.rs`）——`audit_step_prompt(prompt) -> Vec<DeterminismFinding>` 手写逐字符扫描，识别 `{now}` / `{time}` / `{timestamp}` / `{uuid}` / `{guid}` / `{random}` / `{random:N}` / `{rand}` 运行时变量引用；双花括号 `{{name}}` 不在扫描范围（确定性字面替换）。save/import 时作为 advisory warn 跑一遍。
+- **Parallel Step Group 并行步骤组**（`src/workflow/def.rs` + `src/workflow/compile.rs`）——`WorkflowStepDef.parallel_group: Option<String>` 字段；同组 sibling step 在 materialize 时共享 `[workflow_parallel_group, workflow_parallel_index, workflow_parallel_size]` 三元 metadata，index 取声明顺序。dispatcher 不新增并行运行时——Aleph 本就并行跑无依赖 step。
+- **Collect Step 汇流步骤**（`src/workflow/collect.rs`）——`WorkflowStepKind::Collect` 变体 + `collect_from: Vec<String>` + `reduce: Option<CollectReduce>`；`CollectReduce::{Concat | JsonArray | First}`，未设 reduce 时 materialize 静默填 Concat；collect step 自己不发 agent run，fan-in 由 dispatcher 达成。
+- **`fail_unanswered_clarify` 清理器**（`src/teams/dispatcher/schedule/reclaim.rs`）——`TeamDispatcher::fail_unanswered_clarify`（24h grace，默认禁）；纯函数谓词 `should_fail_unanswered_clarify` 守边界。
+- **SchemaOutput 强制器**（`src/teams/dispatcher/output_contract.rs`）——`SchemaOutcome::{Ok | ParseError | ValidationError}` + `validate_step_output(task, final_text)`；先剥 ` ```json ``` ` 代码栅再 `jsonschema` 验证；`schedule/mod.rs::finalize_step` 是唯一入口。
+
+### 修复
+
+- **cancel/notified 防重章回归**（`src/teams/dispatcher/schedule/settle.rs`）——`is_cancel_provenance(task)` 与 `should_rearm_on_reopen(...)` 两个纯函数；`is_cancel_provenance=true` 时永不 re-arm；cancel/rerun_failed/reopen 三路径由回归测试守住。
+
+---
+
+## 2026-09-21 — Panel & TUI polish round 1 (L1, audit-first)
+
+对 `[26.9.1]` 之后 Panel 与 TUI 表面的一天抛光：11 个 Tier-1 pin-down 修复 + Tier-2 硬化。无协议变更、无新公开表面。
+
+### 修复
+
+- **Panel**（`interfaces/webchat/src/`）：语音按钮状态机不再幽灵化 "finish" 转换或泄漏长按计时器；IME 组合窗口阻止 Enter 在中文候选期发送；附件 `<For>` key 换成稳定哈希；团队聊天附件拒绝保留托盘；`ApprovalCard` 与 `ask.rs` 补回归测试；重连在下一个 `connection_epoch` 重试；事件字符串分发加静态覆盖守卫。
+- **TUI**（`interfaces/tui/`）：`subscribe_runtime_agents` 重连失败重试；`SessionKnobs` 暴露第五字段 `model_pin`；`VERSION` 测试用 `CARGO_MANIFEST_DIR`；`halt_notice` 回退到 `en`；composer 加滚动指示器与已发送历史边界。
+- **Shared / wire**：用户气泡在 Panel 与 TUI 上以 chip 渲染已发送附件（`AttachmentMeta` / `TuiAttachment`，经 `push_user_message_with_attachments`）；`ReasoningBlock` 与 `UncertaintySignal` 流事件在 Panel 端到端消费。
+
+---
+
+## 26.9.1 — 内嵌终端 + 项目房间绑定频道 + 全子系统审计扫荡
+
+五天 549 commits，两条特性 + 一次大规模扫荡：终端成为一等表面；项目房间可绑定频道会话；40-defect 审计扫荡。
+
+### 新增
+
+- **内嵌终端端到端**（`src/gateway/pty/`、`src/gateway/handlers/pty.rs`）——字符网格带宽字形与 wrap、scrollback、alternate screen、resize、光标定位、erase、C0/SGR；屏幕在服务端持有并按 16ms cadence 发 diff；`pty.attach` 重放到带 gap 检测的客户端。Panel 新增 Terminal 导航模式 + canvas2d 网格渲染器。
+- **终端权限按作用域**——`pty.screen` / `pty.exit` 下发与会话所有权绑定；spawn cwd 钉在已注册 workspace；会 abort daemon 的几何被拒绝；`[policies.terminal]` 会话门默认开。
+- **项目房间绑定频道会话**（`src/gateway/handlers/projects_channel.rs`、`qa/rooms_channel_bind`）——`projects.channel.bind` / `unbind` / `list`；roster 门控的绑定臂；`session_store::rescope` 接收 project id。可从 CLI `aleph projects`、Panel 房间设置、`project_manage bind_workspace` 触达。
+- **`grep` 与 `find` 成为工具**——内容搜索与文件名发现各自有独立动词，走共享 `.gitignore` 感知遍历。
+- **搜索实现收敛为单一实现**（`src/tools/scoped/search_steer.rs`）——每个 provider 声明其可表达的能力并钉到 wire；显式 provider 被尊重；一个调用可扇出到多个后端；搜索工具不再丢弃四个字段。
+- **跨客户端更早加载的历史窗口**——协议、CLI、TUI、Panel 使用同一套词汇。
+- **磁盘会话损坏修复**——归一化毫秒级 `last_active_at`、从 transcript 重建撕裂的 `metadata.json`、隔离无法重建的文档。
+- **Windows shell 统一**（`src/utils/shell.rs`、`qa/winshell/run.sh`）——pwsh → powershell → cmd 阶梯、UTF-8 + POSIX 退出码、两种 argv 上限阈值。
+
+### 修复
+
+- **SSRF 与 DNS rebinding 按类修复（不再按列表）**——URL 抓取携带策略、协议相对与百分号编码绕过关闭、Discord token regex 锚定、PII email regex TLD 量词封顶。
+- **失败的运行现在报告失败**——退出臂不再把四种 `HarnessError` 变体都扇入 `Cancelled`；一套 halt 词汇覆盖协议、CLI、TUI、Panel。
+- **transcript 顺序唯一**——两个后端各自回答顺序、其中两条还是 DELETE。
+- **`require_operator_tier` 在缺失 `TurnContext` 时 fail-open**——已关闭。
+- **幂等键按 `(principal, method)` 命名空间**——connect 速率限制不再因单个客户端锁定整个 NAT。
+- **`crate::sync_primitives` 成为唯一入口**——canvas/identity/loop_graph/extension 等不再绕过它直连 `std::sync`。
+- **40 个已核实缺陷**跨五个子系统 + 8 轮逐模块逻辑审计 + 22 轮编号修复；报告归档于 `review-results/`。
+
+---
+
+## 26.8.27 — 项目房间全貌 + 等待阶段上线 + 流式渲染重构 + CapabilitySlot
+
+四条主线 + 一处修正：项目房间长全脸；等待成为 wire 概念；流式渲染不再每 token 重建一切；进程全局句柄迁移到 `CapabilitySlot`。
+
+### 新增
+
+- **项目房间端到端**（`src/gateway/handlers/projects.rs`、`qa/teamchat_rooms`）——`project_manage` 作为对话面；Panel 新增 Kanban / Workspace / Memory 标签；`projects.changed` 推送主题，下发按 roster 门控；`projects.*` 授权单一共享派生。
+- **提示词中的房间 roster 层**——模型被告知房间里还有谁；委托子代理继承父级 `<room_context>`。
+- **等待阶段作为独立 wire 表示**（`src/gateway/event_emitter/types.rs`、`src/gateway/busy_queue/`）——`StreamEvent::RunQueued` + 协议孪生；`TicketGuard::ahead` 报告 lane 位置；busy-input 队列 crash-durable。
+- **`CapabilitySlot`**（`src/gateway/security/store/slot.rs`）——`install(v)` 写值 + 盖章一次动作；conditional install 的 else 臂必须 `decline(...)`；`core/capability-wiring` 报告三态（未启动 / 完整 / 有洞）。
+- **流式渲染只渲染变化部分**——Panel `TypewriterRenderer`（`interfaces/webchat/src/state/typewriter.rs`）挂载一次、分稳定区与 tail 区；TUI 窗口化渲染 + 每条消息渲染行缓存 + 无变化 tick 不 `terminal.draw()`。
+- **重连对账而非重置**——TUI 加入进行中的 run、渲染 peer 消息、回填 turn age；Panel 在根部修复重连。
+- **协议拥有双方分类的 receipt code**——Panel 读服务端 `error_code` 而非匹配消息关键字。
+- **`note_manage` 可按地址读单条笔记**——检索不再只返回截断到 4k 的排序摘录。
+- **Markdown 流式安全**（`interfaces/webchat/src/components/markdown.rs`）——CommonMark 栅检测与引用链接定义边界。
+- **完整桌面应用跨重启保留远端目标**——探测 `/ready` 而非裸 TCP connect。
+
+### 修复
+
+- **八处诊断检查把「无法查看」答成「没有」**——`Presence`/`DirListing` 使第三种答案成为 `Err(Finding)`；`Unknown` 故意不是 `Presence` 变体。
+- **harness 行棘轮被 grant 解除而非漂移**——重新测量为 5233。
+- **单一命令可通过 stdin 打掉 daemon**——`command_text` 有界。
+- **Windows 保留名文件名越界 sanitize**——stem 规则在首个 `.` 或 `:` 处切割。
+- **一次被拒绝的转录端点连带打掉 daemon**——已修。
+- **`purge_all` 阻塞 async runtime**——无 Tokio runtime 时回退内联执行。
+- **本版本自己的 gate 在开始前就是红的**——`cargo fmt --check` 在 26 个文件失败，修复后 clippy 才能运行。
+
+---
+
+## 26.8.23 — 白板画布 + 按主体花费预算 + Panel 成熟 + 多用户第 7 轮
+
+有史以来最大发布（1,461 commits）。四条主线：白板画布、按主体花费账本、显式作用域层、Panel 成熟 + 多用户第 7 轮。
+
+### 新增
+
+- **白板画布**（`src/canvas/`、`docs/reference/CANVAS.md`）——四层架构、乐观锁并发（revision-keyed batch rebase）、capability-URL 资产面、iframe 沙箱边界；画廊在 Panel 左栏。
+- **按主体花费预算**（`src/config/types/policies/spend.rs`）——新 `[policies.spend]` 段 + 每周期持久账本 + 单一准入谓词。
+- **`plan` 执行层级 + plan → build 交接**（`src/config/types/policies/exec_tier.rs`）——只读规划层：mutating 工具被拒；人经 `scratchpad(request_approval)` 批准后同一轮翻转到 restore 层。
+- **`/btw` 侧问**（`src/gateway/btw/`）——运行中提问不脱轨；`BtwTurn` 单一派生。
+- **市场浏览 + Claude Code 插件兼容**——按名安装不再需要先知道名字。
+- **`workspace_manage` + 防漂移 workspace CLI**（`src/gateway/handlers/workspace.rs`）——`workspace get|update|list --include-archived|unarchive`。
+- **Provider 预设选择器**——56 张预设卡折叠成可搜索 disclosure。
+- **浏览器对齐轮**——`browser_batch`、`TextGone`、`Time` 等待条件。
+- **按来源扩展用量追踪**——Panel 用量徽章 + `idle-extensions` 医生检查。
+- **持久审批授权 + 列出/撤销面**。
+- **`<environment_context>` XML 信封**（`src/orchestrator/harness_bridge/prompt_build.rs`）。
+- **`memory.retrieve_with_trace` 检索 x-ray**（`src/gateway/handlers/memory/runtime.rs`）+ 14 个真实机器 QA fixture（`qa/`）。
+
+### 修复
+
+- **工厂安装上每个省略 `working_dir` 的 `bash` 调用都被拒**——值现在走 gateway 拥有的通道。
+- **受管浏览器驱动从未启动浏览器**——28 条子命令从未 `open`。
+- **斜杠命令从不携带参数**——`/model <id>` 在所有斜杠面失败校验。
+- **十个工具被广告但不可分发**——`plugin_manage` 在三个面注册但 dispatcher 无 arm。
+- **Telegram 与 Feishu 策略配置死**——secret 迁移后 gating 路径静默回退默认。
+- **Feishu 限流被当作永久失败**——现在读服务端实际发送的 header。
+- **八个 gateway 面上记忆读取回答错误分区**——读者用裸 persona 而非分区 id。
+- **`metadata.json` 非原子读改写损坏**——写入原子化。
+- **临时目录泄漏 7,623 棵树、4.0 GB**——现在 atexit 钩子清理。
+
+---
+
+## 26.7.31 — Linux 一等桌面 + 产物交付 + 正确性扫荡
+
+400 commits。三条主线：Linux 成为一等桌面目标；模型有办法交接完成产物；持续性正确性扫荡。
+
+### 新增
+
+- **Linux AT-SPI2 无障碍层 + 原生窗口管理**（`desktop/shared/`、`src/builtin_tools/desktop/`）——四个 AX 工具 + set-of-marks + password gate 在 Linux 可用；EWMH via `x11rb` + sway/Hyprland IPC；session type/clipboard/app launch 收敛到 `desktop/shared` 单一来源。
+- **`artifact_publish` 与产物面**（`src/builtin_tools/artifact_publish.rs`、`src/artifacts/`）——模型可把完成产物发布为独立渲染文档；产物钉在 Panel 右栏顶部；会话可导出为自包含零 `<script>` HTML。
+- **每代理身份 + 签名操作账本**（`src/gateway/security/store/identity.rs`）——每代理 Ed25519 密钥对；工具执行记录在签名哈希链上；离线 `aleph-server identity` 验证器。
+- **双时代 MCP 客户端**——2026-07-28 spec 移除 `initialize` 握手。
+- **Aleph Hub 安装链端到端接线**（`src/hub/`）——catalog ingest 校验条目计数/重复 id/保留 `local:` 命名空间。
+- **动态 webhook 挂载表**——`channel.create` / `stop` / `delete` 免重启生效。
+- **Panel 记忆 Vault 重建**——双轨搜索、卡片列表、深链、pager、批量操作栏、markdown 导出、`notes_citing` 证据链。
+- **Loop 与 Goal 暂停/恢复**（`src/looping/`、`src/goal/`）——新增 `Paused` 状态；跨会话操作只能降级活动（stop/pause/clear），永不 arm。
+- **Voice as context**（`src/gateway/voice/`）——`[voice]` vocabulary 双消费（ASR bias + 提示侧误识别提示）；TTS provider 回退。
+- **`severed-wire-audit` 技能**——找 producer/consumer 都完整但注册/分发/订阅缺失的功能。
+
+### 修复
+
+- **Windows 桌面坐标两义**——DPI 不感知进程读虚拟化坐标而截图未缩放，1.5× 错位修复。
+- **macOS 报告三件它做不到的事成功**——Escape 紧急停止已死却报告已 arm；现在 `CGEventTap` + 诚实失败。
+- **`key_button` 绕过桌面输入门**——held input 现在在按下它的 rail 上释放。
+- **手动 `/compact` 对模型上下文无效**——现在 summary + checkpoint + 软退役 `session_events` 前缀，不删除。
+- **busy-queue 票持有整个 agent run**——`Steer`/`Interrupt` 结构上不可达，已修。
+- **环境信封谎报工作目录**——`cwd`/`os`/`arch`/`shell`/`git` 现在只来自 `RuntimeContext`。
+- **模型选择从未到达 wire**——路由状态现在报告真实下一拨号顺序。
+- **`--config` 九个消费者中只有一个兑现**——路径在 `main()` 钉一次。
+- **Panel 远程认证 `devices` 单表**——命名空间守卫对称、按设备撤销即时。
+- **CI 未运行每个集成测试**——19 个测试从未与真实 `~/.aleph` 隔离。
 
 ---
 
@@ -50,7 +202,7 @@ Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版
 - **扩展生命周期竞态**——并发 `reload` 现在在 load guard 下串行；格式错误的插件结果不再被掩盖为 `ServiceResult::ok`；`AuthorInfo` 解析使用最左分隔符。
 - **集群节点键按字节切片**，CJK 节点名断裂——现在按 Unicode 归一化。
 - **macOS 截屏与录音轨道**——屏幕录制通过 `setSourceRect` 裁剪到所请求区域（按物理像素而非点）；完成时验证产生了输出再报告成功；OCR、窗口捕获、媒体、输入、截屏轨道上的类型化 bridge 错误被保留而不是扁平化；`screen_record` 序列化错误会向上传播而不是变成 `null`。
-- **Harness ratchet 收紧至当前 `CEILING`**（`src/harness/tests/budget.rs:335` 守）——通过移除 `DiminishingReturnsDetector` 硬停（R10 禁止循环内确定性完成判断）。卡住的运行受 `max_iterations` + 工具循环验证器 + 模型自身停止控制。代码是权威；本文档数字只是 `CEILING` 的副本。
+- **Harness ratchet 收紧至当前 `CEILING`**（`src/harness/tests/budget.rs:795` 守）——通过移除 `DiminishingReturnsDetector` 硬停（R10 禁止循环内确定性完成判断）。卡住的运行受 `max_iterations` + 工具循环验证器 + 模型自身停止控制。代码是权威；本文档数字只是 `CEILING` 的副本。
 - **会话与团队完整性**——`retire_from` 原子；关闭超时被上报；活跃团队名通过部分索引保证唯一；团队协议文本与工件内容大小加封顶；`sessions` 与 `tasks` 增加 presence opt-in、加哈希的 carryover 文件名、确定性的模板环境排序。
 - **线缆请求 id 不再用 UUID**——换成原子计数器，从 `aleph-protocol` 移除该依赖；一个编译失败的自定义 regex 不会再把合法的 regex 一并丢弃。
 
@@ -239,18 +391,18 @@ Harness 可靠性与抛光发布。头条是**上下文"永不破"保证**——
 
 ---
 
-## 26.7.22+ 滚动更新（截至 VERSION 26.7.21 之后）
+## 滚动更新补充（历史快照）
 
-> **未发布到 release tag。** 26.7.21 release 之后的提交密集滚动至下一个 release tag —— 当前 `VERSION` 仍为 `26.7.21`，但 `main` 分支已累积 ~12,500 次提交。本节是从 26.7.21 起点的滚动摘要，覆盖 7 条主要工作线。
+> **历史快照。** 本节是早期在正式版本条目（26.7.31 及之后）尚未补齐时补写的滚动摘要，覆盖更早的跨发布工作线。现在上方已有权威的正式版本条目，本节只保留未被 26.7.31 / 26.8.23 / 26.8.27 / 26.9.1 正式覆盖的部分。
 
-### A. Aleph Hub 单一源（`aleph-hub`，替代旧 `src/store/`）
+### A. Aleph Hub 单一源（`aleph-hub`，取代旧的扩展商店子系统）
 
 **新增 `src/hub/` 模块**（14 个文件）：`cache.rs`、`catalog_client.rs`、`hub_catalog.rs`、`install.rs`、`official_mcp.rs`、`official_plugins.rs`、`official_skills.rs`、`primer.rs`、`reconcile.rs`、`secrets.rs`、`trust.rs`、`types.rs`、`verify.rs`、`mod.rs`。
 
 - **`hub::primer` 冷启动投影**：启动时把官方 MCP 预设、官方插件与官方技能统一投影进同一份 `ExtensionEntry` 缓存（`~/.aleph/hub_catalog.db`）
 - **`hub::catalog_client` 直接 HTTP 客户端**：拉取 `https://hub.heyaleph.com/catalog.json`，做 schema-version 校验、注入扫描、条目归一化与缓存同步
 - **官方 MCP 预设随 `aleph-hub` 自动可见**，无需手动 `mcp.add`
-- **退役**：`mcp.list_presets` / `mcp.install_preset`；Settings → MCP 「推荐」段；旧 `src/store/` 模块
+- **退役**：`mcp.list_presets` / `mcp.install_preset`；Settings → MCP 「推荐」段；旧扩展商店模块（2026-06-20 已重命名为 `src/hub/`）
 
 **Hub 内置工具**注册在主工具注册表中，不属于独立的 Hub Agent：
 
@@ -262,34 +414,9 @@ Harness 可靠性与抛光发布。头条是**上下文"永不破"保证**——
 | `hub_install_run` | 执行信任与用户同意关卡后安装 |
 | `hub_install_verify` | 安装后验证 |
 
-### B. Artifacts / Deliverables 系统
+### C. Vault 面板重构（panel/memory 深度）— Memory RPC 行为变更
 
-**新增 `src/artifacts/` + `src/export/` 模块**（artifact store + session HTML 导出 + markdown 导出 + page + collect + CSS）。
-
-- **`artifact_publish` 工具**：让模型把完成的工作产物发布为 `Deliverable`
-- **`artifacts.*` RPC**（`handlers/artifacts.rs`，~650 行）：`read_text` / `export_html` / `list`，512 KB cap + UTF-8 边界
-- **`session.export_html` + `artifacts.read_text`**：纯读路由走 Lane 修复（不应进 Mutate lane）
-- **Telegram / CLI / TUI** 上 `artifact_publish` 必须按 `turn.channel_id` 分支 carry 实质，否则降级为 banner + 自动打开 pane
-- **Panel "Deliverables" 面板**（`interfaces/webchat/src/components/artifacts/`）：替代原 inspector；4 个 round review 后达到 text preview + artifact-driven badge + 可见 fallbacks
-- **Gateway capability byte route**（`src/gateway/server/artifact_route.rs`）暴露 artifacts 给远端
-
-### C. Vault 面板重构（panel/memory 深度）
-
-13 次 `panel/memory:` 提交 + `platform/wide/views/memory/` 11 个子模块 + `platform/phone/memory/` 7 个子模块。
-
-- **卡片视图**（`cards.rs`，三态 shell：`Loading` / `Empty` / `Content`）
-- **批量操作栏**（`batch_bar.rs`）：跨多卡批量归档 / 导出 / 加标签
-- **双轨搜索**：`raw` 行 vs `notes` 行；`hits invalidate`；facets chip
-- **深链 / 锚点**：`locate_note` 页码在 page-size selector 后正确
-- **证据链 / `notes_citing`**：把反链渲染到 drawer
-- **来源**（`provenance.rs`）：writer / timestamp / source event 三元组
-- **跨代理选择**（`selection.rs`）：原子一致性，避免并发选择丢更新
-- **Pager**（`pager.rs`，带 page-size selector）
-- **Loadable**（`data.rs` + `loader.rs`）：所有 4 个 fetch 路由走它，failed fetch 不可表示为空
-- **Toast**（`toast.rs`）：per-push seq identity（模块私有 slot）
-- **Stats**（`stats.rs`）：scope 到单一 agent；`raw_rows_total = filtered_count`（带回归测试 pin）
-
-**Memory RPC 行为变更**（`memory.listFacts` / `memory.search`）：
+面板重构部分已并入 26.7.31「Panel 记忆 Vault 重建」条目。此处仅保留未被正式版本覆盖的 Memory RPC 行为变更：
 
 - `listFacts` 返回 `total` + 携带 `tags` / `link_count` / `updated_at` 字段
 - `memory.search total = filtered count`（**不是** store total）

@@ -18,16 +18,16 @@ The Thinker owns all LLM interactions and prompt assembly. The sole public entry
 | `PromptBuilder` | `prompt_builder/` | Build system prompts for sub-agent and main-loop paths |
 | `PromptPipeline` | `prompt_pipeline.rs` | Composable prompt-assembly engine over a sorted layer list |
 | `PromptLayer` | `prompt_layer.rs` | Trait for individual layers; declares priority / paths / stability |
-| `PromptConfig` | `prompt_builder.rs` | User-tunable prompt knobs (`language`, `extra_files`, …) |
+| `PromptConfig` | `prompt_builder/` | User-tunable prompt knobs (`language`, `extra_files`, …) |
 | `InteractionManifest` | `interaction.rs` | Channel capability awareness (paradigm + capabilities + constraints) |
 | `SecurityContext` | `security_context.rs` | Policy-driven permissions |
 | `ContextAggregator` | `context.rs` | Reconcile interaction + security into `ResolvedContext` |
 | `PromptMode` | `prompt_mode.rs` | `Full` / `Compact` / `Minimal` mode filter |
 | `IdentityFiles` | `identity_files.rs` | Loaded `SOUL.md` / `IDENTITY.md` / `AGENTS.md` / `TOOLS.md` / `HEARTBEAT.md` |
 | `SoulManifest` | `soul.rs` | `SOUL.md` structured parser (used by `identity.get` preview) |
-| `MemoryContextProvider` | `memory_context_provider.rs` | Memory envelope + orientation + recall-message builder |
+| `MemoryContextProvider` | `memory_context_provider/` | Memory envelope + orientation + recall-message builder |
 | `UnifiedMessage` / `ProviderDelta` | `src/providers/message.rs` | LLM-agnostic message + streaming delta |
-| `MessageAssembler` | `src/providers/message_assembler.rs` | Single reducer that owns the assembled message + strips inline `<think>` live |
+| `MessageAssembler` | `src/gateway/message_assembly/assembler.rs` | Single reducer over a run's streamed visible text; strips reasoning / memory framing from the live stream (sole consumer: the execution engine's event drain) |
 
 ---
 

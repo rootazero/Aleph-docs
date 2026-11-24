@@ -19,7 +19,7 @@ pub trait Sandbox: Send + Sync + 'static {
 ```
 
 Production boots an `Arc<dyn Sandbox>` pointing at `WorkspaceSandbox`
-(`src/sandbox/workspace.rs`), which owns three concerns:
+(`src/sandbox/workspace/mod.rs`), which owns three concerns:
 
 1. **Workspace provisioning** — materialize
    `~/.aleph/workspaces/{hash(session_id)}/` on first exec, keep it alive
@@ -45,7 +45,7 @@ OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 3-tier
 
 **Source locations:**
 - Trait + re-exports + test helper: `src/sandbox/mod.rs`
-- Six-step pipeline: `src/sandbox/workspace.rs`
+- Six-step pipeline: `src/sandbox/workspace/mod.rs`
 - Command-policy layer: `src/sandbox/command_policy/` (`rules.rs`,
   `normalize.rs`, `hooks.rs`)
 - Capabilities: `src/sandbox/capabilities.rs` (`SandboxCapabilities` +
@@ -73,7 +73,7 @@ The on-disk path is deterministic:
 workspace_root / session_key_to_filename(session_id)
 ```
 
-`session_key_to_filename` (`src/sandbox/workspace.rs:114`) SHA-256s the
+`session_key_to_filename` (`src/sandbox/workspace/path.rs:74`) SHA-256s the
 JSON-serialized `SessionId` and truncates to 16 bytes (32 hex chars) —
 short and safe across every `SessionKey` variant regardless of the
 characters those variants may carry.
@@ -87,7 +87,7 @@ Each `SessionWorkspace` carries:
 
 ## The six-step `execute` pipeline
 
-`WorkspaceSandbox::execute` (`src/sandbox/workspace.rs:124`) implements
+`WorkspaceSandbox::execute` (`src/sandbox/workspace/mod.rs:206`) implements
 the spec §8 pipeline:
 
 1. **Session resolve** — `self.for_session(&cmd.session_id)` → lazy dir
@@ -109,7 +109,7 @@ the spec §8 pipeline:
    timeout, max_output_bytes)`. Default 60 s timeout and 1 MiB output
    budget (split stdout + stderr). Both overrideable on `WorkspaceSandbox`
    via `with_timeout` / `with_max_output_bytes`. Precedence:
-   `cmd.timeout` > `capabilities.timeout_secs` > configured default.
+   `cmd.timeout` > `SandboxCapabilities.timeout_secs` > configured default.
 6. **Audit** — `tracing::info!(target: "capability_ledger", …)` record
    carrying `session_id`, `program`, `caps`, `exit_code`, `signal`,
    `duration_ms`. Downstream tracing subscribers can sink it to any store.
@@ -249,8 +249,8 @@ virtual address space on all three OSes:
 `SandboxCapabilities.timeout_secs` is the per-call override of
 `SandboxConfig.default_timeout_seconds`, enforced as the
 `WorkspaceSandbox::execute` wall-clock timeout. Precedence,
-most-specific first: `SandboxCommand.timeout` > `capabilities.timeout_secs`
-> configured default. `capabilities.timeout_secs` is the **only** timeout
+most-specific first: `SandboxCommand.timeout` > `SandboxCapabilities.timeout_secs`
+> configured default. `SandboxCapabilities.timeout_secs` is the **only** timeout
 carrier.
 
 ### Windows — AppContainer (preferred) → RestrictedToken → JobObject
@@ -363,12 +363,12 @@ The sandbox stack is testable at every seam without real subprocesses or
 OS sandboxing:
 
 - **Fake OS driver** — implement `OsSandboxDriverTrait`, count `run`
-  calls, return canned `SandboxOutput`. Used by `src/sandbox/workspace.rs`
+  calls, return canned `SandboxOutput`. Used by `src/sandbox/workspace/mod.rs`
   unit tests and integration tests.
 - **Fake approval requester** — implement `ApprovalRequester` and hand
   the resulting box to `ApprovalGate::new(cfg, Some(Box::new(requester)))`.
   Unit tests use this to drive every branch of step 3.
-- **`MockSandbox`** (`src/sandbox/mod.rs:50`, `#[cfg(test)]`) — records
+- **`MockSandbox`** (`src/sandbox/mod.rs:89`, `#[cfg(test)]`) — records
   every `SandboxCommand` and returns canned `SandboxOutput`. Used by
   exec-class tools (`bash_exec`, `code_exec`) to assert they route through
   the sandbox seam.

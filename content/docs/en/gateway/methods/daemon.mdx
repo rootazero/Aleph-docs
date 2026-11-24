@@ -13,7 +13,7 @@ description: "Daemon control and lifecycle RPC methods"
 | [`daemon.shutdown`](#daemonshutdown) | Initiate graceful shutdown |
 | [`daemon.logs`](#daemonlogs) | Tail recent logs by level and line count |
 
-> `daemon.start` / `daemon.stop` / `daemon.restart` / `daemon.reload` are not RPCs. Daemon lifecycle is owned by the host (`aleph-server daemon`, `aleph-server service`, or a service manager like `systemd` / `launchd`).
+> Process startup and service management belong to the CLI or system service manager; use `daemon.shutdown` for Gateway shutdown. See `src/gateway/handlers/daemon_control.rs`.
 
 ### daemon.status
 

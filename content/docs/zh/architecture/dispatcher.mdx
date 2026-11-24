@@ -9,7 +9,7 @@ description: "编排器级 flow 分发——FlowSpec 解析、沙箱配置、Har
 
 **位置**: `src/orchestrator/dispatch.rs`
 
-> **注意**：没有 `src/dispatcher/` 目录。历史上的 Dispatcher 模块——`ToolRegistry`、`RiskEvaluator`、`ToolIndex`、`HydrationResult`——已在第 6/7 阶段工具链迁移期间被解散。工具聚合现在位于 `src/tools/registry.rs`，执行器位于 `src/executor/`，工具调用护栏位于 `src/tools/scoped/`。
+> **注意**：源码树中没有独立的 dispatcher 模块。历史上的 Dispatcher 模块——`ToolRegistry`、`RiskEvaluator`、`ToolIndex`、`HydrationResult`——已在第 6/7 阶段工具链迁移期间被解散。工具聚合现在位于 `src/tools/registry.rs`，执行器位于 `src/executor/`，工具调用护栏位于 `src/tools/scoped/`。
 
 ---
 

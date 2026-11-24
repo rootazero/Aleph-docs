@@ -65,7 +65,7 @@ Discord 接口使用 [serenity](https://github.com/serenity-rs/serenity) 框架�
 
 导航到 **OAuth2 > URL Generator**：
 
-1. 在 **Scopes** 下，选择 `bot` 和 `applications.commands`
+1. 在 **Scopes** 下，选择 `bot` 和斜杠命令 scope（Developer Portal 里名为 applications.commands）
 2. 在 **Bot Permissions** 下，选择：
    - **Send Messages**（必需）
    - **View Channel**（必需）
@@ -292,7 +292,7 @@ let msg = OutboundMessage::text("channel_id", "Here is the file")
 - `/help` — 显示可用命令
 
 <Callout type="info">
-斜杠命令注册需要 `applications.commands` OAuth2 范围。全局命令可能需要长达一个小时才能传播；公会特定命令是即时的。
+斜杠命令注册需要 Discord 的斜杠命令 OAuth2 范围（Developer Portal 里名为 applications.commands）。全局命令可能需要长达一个小时才能传播；公会特定命令是即时的。
 </Callout>
 
 ## 交互式审批按钮
@@ -340,6 +340,6 @@ guild_members = false      # GUILD_MEMBERS intent (privileged)
 | 机器人忽略频道中的消息 | 检查 `allowed_guilds` 和 `allowed_channels`；验证机器人具有 View Channel 权限 |
 | 机器人响应每条消息 | 设置 `respond_to_mentions = true` 或使用 `command_prefix` |
 | "Failed to create Discord client" | 验证机器人令牌有效且足够长（59+ 字符） |
-| 斜杠命令不出现 | 确保 `application_id` 已设置且机器人被邀请时带有 `applications.commands` 范围 |
+| 斜杠命令不出现 | 确保机器人被邀请时带有斜杠命令 OAuth2 范围（Developer Portal 里名为 applications.commands） |
 | 权限审计显示红色 | 使用审计的 `fix_suggestions` 在服务器设置中授予缺少的权限 |
 | 附件发送失败 | 检查机器人在目标频道中是否具有 **Attach Files** 权限 |

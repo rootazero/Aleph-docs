@@ -1,24 +1,17 @@
 ---
 title: "核心类型"
-description: "在 Aleph 代码库中使用的共享类型定义 — MediaAttachment、CapturedContext、CompressionStats 和 MemoryEntry。"
+description: "Aleph 共享数据类型如今的归属，以及被移除的 src/core 模块。"
 ---
 
-`core` 模块提供在 Aleph 所有层之间共享的纯数据类型。它没有业务逻辑，没有平台特定代码，外部依赖只有 `serde` 与标准库容器。
+Aleph 不再有单一的 `core` 模块。共享数据类型如今落在各自的归属模块中——当前的权威清单见下方 26.7.x 补充。26.7 之前的 src/core/ 模块（`MediaAttachment`、`CapturedContext`、`CompressionStats`、`MemoryEntry`）已移除，其类型记录在历史小节。
 
-## 设计理念
+## 历史：src/core 模块
 
-`core` 模块遵循**高内聚零耦合**的原则。此模块中的每个类型都是具有 `Debug`、`Clone`、`Serialize` 和 `Deserialize` 派生实现的纯数据容器。除了简单的字段访问之外没有方法 —— 业务逻辑存在于消费这些类型的模块中。
+src/core/ 模块曾是纯数据容器——无业务逻辑、无平台特定代码，外部依赖只有 `serde` 与标准库容器——秉持高内聚零耦合。随着类型迁移到归属模块或被彻底移除，该模块已删除。它曾承载的四个类型记录如下，供参考。
 
-这种设计确保：
-- 类型可以在服务器、桌面桥接和客户端接口之间共享，而不会引入繁重的依赖
-- 序列化合约通过 `serde` 保持稳定和版本化
-- 模块编译快速，永远不会阻塞其他模块
+### MediaAttachment
 
----
-
-## MediaAttachment
-
-多模态内容支持，用于来自剪贴板或文件上传的图像、文档和视频（`src/core/types.rs`）。
+多模态内容支持，用于来自剪贴板或文件上传的图像、文档和视频（原 src/core/types.rs；统一的 `MediaType` 现位于 `src/media/types.rs`）。
 
 ```rust
 pub enum MediaType {
@@ -39,20 +32,14 @@ pub struct MediaAttachment {
 }
 ```
 
-`encoding` 字段决定如何解释 `data`：
-
 - `ContentEncoding::Base64` — 二进制内容编码为 Base64（图像、PDF）
 - `ContentEncoding::Utf8` — 纯文本内容（markdown、提取的文本）
 
-`MediaAttachment` 自带 `Debug` 实现，会把 `data` 重写成 `<REDACTED: N bytes>` 防止日志泄露载荷。`MediaType` 与 `ContentEncoding` 都标了 `#[non_exhaustive]`，新增变体是非破坏性变更。
+`MediaAttachment` 自带 `Debug` 实现，把 `data` 重写为 `<REDACTED: N bytes>` 防止日志泄露载荷。`MediaType` 与 `ContentEncoding` 都标了 `#[non_exhaustive]`。
 
-**用法：** 由 `CapturedContext` 用于将剪贴板内容从 Desktop Bridge 传递到 Thinker；由生成或接收文件的工具输出使用。
+### CapturedContext
 
----
-
-## CapturedContext
-
-来自用户活动应用程序的上下文，从原生桌面层桥接（`src/core/types.rs`）。
+来自用户活动应用程序的上下文，从原生桌面层桥接（原 src/core/types.rs）。
 
 ```rust
 pub struct CapturedContext {
@@ -62,18 +49,15 @@ pub struct CapturedContext {
 }
 ```
 
-**字段：**
-- `window_title` — 活动窗口的标题（例如，"Notes.app", "VS Code"）
+- `window_title` — 活动窗口标题
 - `attachments` — 交互时刻捕获的剪贴板内容（图像、文件）
 - `session_id` — 多轮对话的会话标识符
 
-**用法：** 当用户通过 Desktop Bridge 交互时注入到提示词上下文中，使 AI 了解用户当前正在处理的内容。
+Desktop Bridge 的 `CapturedContext` 注入已移除；剪贴板捕获现由 `src/builtin_tools/system_tool.rs`（clipboard_read / clipboard_write）与 desktop 子模块处理。
 
----
+### CompressionStats
 
-## CompressionStats
-
-关于内存压缩状态的统计信息，供设置 UI 使用以显示内存健康状态（`src/core/types.rs`）。
+关于内存压缩状态的统计信息，供设置 UI 显示内存健康（原 src/core/types.rs）。
 
 ```rust
 pub struct CompressionStats {
@@ -84,19 +68,14 @@ pub struct CompressionStats {
 }
 ```
 
-**字段：**
-- `total_raw_memories` — 第 1 层：压缩前存储的原始用户消息
-- `total_facts` — 第 2 层：从记忆中提取的压缩事实
-- `valid_facts` — 仍然被视为活动的未失效事实
-- `facts_by_type` — 按类型细分（偏好、计划、学习等）；用 `BTreeMap` 而非 `HashMap` 是为了给出确定性的迭代顺序
+- `total_raw_memories` — 第 1 层原始用户消息
+- `total_facts` — 第 2 层压缩事实
+- `valid_facts` — 仍未失效的活动事实
+- `facts_by_type` — 按类型细分（偏好、计划、学习等）；用 `BTreeMap` 保证确定性迭代顺序
 
-**用法：** 由 Gateway 的配置处理程序查询，以在 Panel UI 中填充内存仪表板。
+### MemoryEntry
 
----
-
-## MemoryEntry
-
-由 Memory 系统的 API 返回的记忆记录，适合序列化到客户端（`src/core/types.rs`）。
+由 Memory 系统 API 返回、适合序列化到客户端的记忆记录。当前 wire 投影位于 `src/gateway/handlers/memory/mod.rs`，字段为 `id` / `agent_id` / `content` / `session_id` / `timestamp`——旧的 `window_title` / `user_input` / `ai_output` / `similarity_score` 被移除，因为 `RawMemory` 只存一个 `content` 字段，`ai_output` 与 `window_title` 每行都是空字符串。
 
 ```rust
 pub struct MemoryEntry {
@@ -109,15 +88,11 @@ pub struct MemoryEntry {
 }
 ```
 
-`similarity_score` 通过 `deserialize_with = "deserialize_finite_f32_opt"` 过滤 NaN/Inf——载荷里的坏值会让排序/排名下游中毒，因此在反序列化时直接丢弃比留一个无效分安全。
+`similarity_score` 曾通过 `deserialize_with = "deserialize_finite_f32_opt"` 在反序列化时丢弃 NaN/Inf。
 
-**用法：** 由内存搜索查询返回。当通过向量搜索检索条目时，`similarity_score` 字段被填充，指示与查询的相关性。
+> 内层长生命周期记忆另有一个 `crate::memory::MemoryEntry`（src/memory/context/mod.rs），带 `embedding`/`namespace`/`agent`/`context: ContextAnchor` 等字段用于内存存储。
 
-> 内层长生命周期记忆另有一个 `crate::memory::MemoryEntry`（`src/memory/context/mod.rs`），带 `embedding`/`namespace`/`agent`/`context: ContextAnchor` 等字段用于内存存储。Wire/面板所用的 `core::MemoryEntry` 是其序列化形态。
-
----
-
-## 这些类型的使用位置
+### 这些类型曾用在哪里
 
 | 类型 | 使用者 | 目的 |
 |---|---|---|
@@ -126,17 +101,19 @@ pub struct MemoryEntry {
 | `CompressionStats` | Memory, Gateway, Panel UI | 内存健康显示 |
 | `MemoryEntry` | Memory, Gateway | API 响应序列化 |
 
+### 代码位置
+
+- src/core/mod.rs — 模块入口，重新导出
+- src/core/types.rs — 类型定义
+
+（两者均已移除）
+
 ---
-
-## 代码位置
-
-- `src/core/mod.rs` — 模块入口点，重新导出
-- `src/core/types.rs` — 类型定义
 
 ## 另请参阅
 
 - [内存系统](/docs/zh/concepts/memory) — 记忆如何存储和压缩
-- [桌面桥接](/docs/zh/concepts/desktop-bridge) — 如何从原生应用捕获 CapturedContext
+- [桌面桥接](/docs/zh/architecture/desktop-bridge) — 如何捕获原生窗口/剪贴板上下文
 - [思考器](/docs/zh/concepts/thinker) — 如何将上下文注入提示词
 
 ---
@@ -152,7 +129,7 @@ pub struct MemoryEntry {
 - **`GoalStatus` / `Goal` / `GoalStore`**（`src/goal/types.rs`）—— 26.7.x 新增的目标子系统。`GoalStatus` 是 `Active` / `Paused` / `Blocked` / `Complete`；`PursuitMode` 是 `Passive` / `Active { max_iterations }`；`GateOutcome` 拆分 maker/checker 验收（`Unchecked` / `Passed`）。
 - **`ArtifactRecord`**（`src/artifacts/store.rs`）—— 工件存储的记录类型；`MAX_ARTIFACT_BYTES = 50 MiB` 与 `MAX_ARTIFACTS_PER_SESSION = 200` 守门，根目录 `<aleph_data_dir>/artifacts`。
 - **`AgentKeystore` / `AgentLedger` / `LedgerRecord` / `LedgerAction` / `LedgerOutcome` / `ChainReport` / `as_actor` / `current_actor`**（`src/identity/{keystore,ledger,record,verify,actor}.rs`）—— 每代理 Ed25519 密钥、哈希链签名账本，以及子代理/委派场景下的「扮演角色」 task-local。
-- **`NoteRelationArg`**（`src/builtin_tools/note_manage.rs`）—— 类型化关系边，`note_manage` 工具的输入参数；返回面是 `note_graph_query` 工具（`src/builtin_tools/note_graph_query.rs`）。
+- **`NoteRelationArg`**（`src/builtin_tools/note_manage/args.rs`）—— 类型化关系边，`note_manage` 工具的输入参数；返回面是 `note_graph_query` 工具（`src/builtin_tools/note_graph_query.rs`）。
 - **`CapabilityLedger`**（`src/runtimes/ledger.rs`）—— 每次安装时从磁盘重建的可见能力清单（`plugin.install` / `runtimes.install` 的支撑），以 JSON 持久化。
 
 ### 见另请参阅

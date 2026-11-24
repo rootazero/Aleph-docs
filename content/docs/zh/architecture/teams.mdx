@@ -141,7 +141,7 @@ pub struct SqliteTeamStore { /* Arc<Mutex<Connection>> */ }
 
 > `Blocked` 与 `Unsatisfiable` 由查询时派生；`from_stored` 显式拒绝两者（写回路径上不允许）。`CoordTaskStatus::is_terminal()` 与 `is_settled()` 分别给出"持久终态"与"观察者角度已结束"的判定；后者用于团队 / 工作流"全部 settled"完成谓词。
 
-依赖边通过 `coord_task.blocked_by` 表示，dispatcher 通过 `src/teams/dispatcher/schedule/` 的 `select_schedulable` / `settle` / `reclaim` / `failure` 维护就绪性、重新调度、超时回收与失败传播。
+依赖边保存在 coord_task 的 `blocked_by` 字段（`src/teams/artifacts.rs`），dispatcher 通过 `src/teams/dispatcher/schedule/` 的 `select_schedulable` / `settle` / `reclaim` / `failure` 维护就绪性、重新调度、超时回收与失败传播。
 
 ### 验证循环：`task_review`
 
@@ -182,19 +182,17 @@ impl AlephTool for TaskReviewTool {
 
 ## 团队 Run Mode Pin
 
-26.7.25+：队长在 `teams.run` 时把 `usage_mode`（chat / work / code）**盖戳**并向子成员继承：
+每个由团队发起的 agent 运行（群聊成员运行、任务派发与工作流步骤）都不继承全局模式，而是由 `stamp` 把 `TEAM_RUN_MODE`（`Work`）与 `TEAM_RUN_BUSY_INPUT_MODE`（`Queue`）写入请求元数据：
 
-- **子代理不能发起 `session_set_mode` 工具调用**——继承是单向的
-- `teams.run` 拒绝任何来自子代理的 `session_set_mode` 请求
-- 队长通过 `task_review` 切换模式时，整队重新对齐
+- 两个运行入口——`teams::broadcast::member_run_metadata` 与 `teams::dispatcher::runner::task_run_metadata`——都调用同一个 `stamp`，不各自维护副本
+- `ExecutionEngine::resolve_turn_mode` 把请求携带的模式视为最高优先级并写回会话，之后每一轮重新钉住
+- `is_team_session` 只匹配 `team_chat` 与 `team` 两种直接 `Task` 会话键；成员运行里派生的子代理有自己的会话键和显式传入的模式，`stamp` 不会触碰
+- 收窄团队能力的旋钮是每个成员的 `tools` 声明（`teams::member_provision`），不是会话模式
 
 ```rust
 // src/teams/run_mode.rs
-if turn.is_subagent() {
-    ensure!(turn.parent_mode.is_some(), "team run mode pin must be carried");
-    ensure!(request.action != Some("session_set_mode"),
-        "subagents inherit parent mode; cannot switch mid-team-run");
-}
+pub const TEAM_RUN_MODE: SessionMode = SessionMode::Work;
+pub const TEAM_RUN_BUSY_INPUT_MODE: BusyInputMode = BusyInputMode::Queue;
 ```
 
 ## 配置
@@ -217,7 +215,7 @@ require_plan_approval = true
 | 协调任务 | `teams.create_task`、`teams.update_task`、`teams.list_tasks`、`teams.add_task_comment`、`teams.list_task_comments`、`teams.list_task_events`、`teams.list_task_runs` |
 | 任务控制 | `teams.task.pause`、`teams.task.resume`、`teams.task.retry`、`teams.task.skip`、`teams.task.trace`、`teams.task.journal.get`、`teams.task.journal.list` |
 | 快照 | `teams.snapshot.create`、`teams.snapshot.get`、`teams.snapshot.list`、`teams.snapshot.restore`、`teams.snapshot.delete` |
-| 工作流 | `teams.workflow.export_canvas`、`teams.workflow.import_canvas`、`teams.workflow.approve_step`、`teams.workflow.reject_step`、`teams.workflow.retry_step` |
+| 工作流 | `teams.workflow.approve_step`、`teams.workflow.reject_step`（画布导入导出走内建工具 `team_workflow_canvas`；步骤重试用 `teams.task.retry`） |
 | ACP 成员 | `teams.acp_member.add`、`teams.acp_member.list`、`teams.acp_member.remove` |
 | 杂项 | `teams.list_templates`、`teams.usage` |
 

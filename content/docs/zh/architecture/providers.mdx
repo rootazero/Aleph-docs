@@ -453,18 +453,19 @@ custom:
 
 ### 步骤 1：添加预设
 
-编辑 `src/providers/presets.rs` 并将条目添加到 `PRESETS` HashMap：
+编辑 `src/providers/presets/registry.rs`，向 `PROFILES` 切片追加一个 `(&str, ProviderPreset)` 元组（惰性初始化时会连同别名一起折叠进 `PRESETS` 映射）。`ProviderPreset::new` 接收必填的四元组；可选字段使用 `src/providers/presets/mod.rs` 中定义的 `with_*` 构建方法：
 
 ```rust
-m.insert(
+(
     "my-provider",
-    ProviderPreset {
-        base_url: "https://api.my-provider.com/v1",
-        protocol: "openai",
-        color: "#ff6600",
-        default_model: "my-model-v1",
-    },
-);
+    ProviderPreset::new(
+        "https://api.my-provider.com/v1", // base_url
+        "openai",                         // protocol
+        "#ff6600",                        // color
+        "my-model-v1",                    // default_model
+    )
+    .with_display("My Provider"),
+),
 ```
 
 ### 步骤 2：实现适配器（仅适用于新协议）
@@ -514,9 +515,9 @@ registry.register("my-protocol", Arc::new(MyProtocol::new(client)))?;
 
 26.7.21+ 重大：故障转移不再克隆整段会话；改用**原子计数器**与**原子 regen marker**守护切换。约 2,000 行不可达的 provider 代码被删除。
 
-### VESR 动态模型路由
+### VESR 动态模型路由（已移除）
 
-26.6.29+：替代确定性路由器，Aleph 记录每个完成运行的 outcome 并在运行开始时回忆一份 per-model 履历（k-NN over sqlite-vec），所以模型能看到哪些模型在此类工作上**实际**表现过。
+26.6.29 引入：Aleph 记录每个完成运行的 outcome，并在运行开始时回忆一份 per-model 履历（k-NN over sqlite-vec）。该实现（当时 routing 目录下的 recall 与 experience store 两个模块）**已从仓库删除**——`src/routing/` 现在只处理 agent 路由语法。当前模型选择由 `src/providers/capability_gate.rs`（prompt-blind 能力下限）与随后的 failover 遍历完成，见 [路由系统](/docs/zh/architecture/routing) 第 8 节。
 
 ### Provider 预设刷新
 

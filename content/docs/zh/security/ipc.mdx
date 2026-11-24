@@ -1,400 +1,62 @@
 ---
 title: "IPC 协议"
-description: "Gateway WebSocket 控制平面 + JSON-RPC 2.0 + 设备票 / token 握手"
+description: "Gateway 的本地 Unix socket、Web v1 与兼容 WebSocket 入口及其安全边界。"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
-## 概览
-
-Aleph 的客户端 ↔ Gateway 通信是单一 **WebSocket 控制平面**，承载
-JSON-RPC 2.0 协议。审批、文件 IO、工具调用、配置更新、内存查询、模型
-选择 —— 一切走 `/ws`。
-
-历史上曾有一个 Unix-socket UI 协议用于审批传输
-（`src/exec/socket.rs` 文档说明）—— 它从未被接入 server，已经移除。
-今天的现实只有一条线：WebSocket + JSON-RPC。
-
-**源位置：**
-- WS 服务器 + handler：`src/gateway/server/handler.rs`（`axum` 的
-  `WebSocketUpgrade`）
-- WS /ws 路由：`src/gateway/server/`（handler / per_client_buffer /
-  flood_guard / metrics_endpoint）
-- JSON-RPC 协议：`src/gateway/protocol.rs`
-- 凭证解析：`src/gateway/handlers/connect.rs::resolve_connect_auth`
-- 设备票 / token：`src/gateway/security/device_token_manager.rs`
-- 集群反向 RPC：`src/gateway/cluster/`（`exec.approval.resolve` 也接受
-  可选 `reason`）
-- 审计：`src/security/audit.rs`
-
-## 架构
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                         Gateway Server                           │
-│                  ws://127.0.0.1:18790/ws                        │
-│   （远端：wss://...，TLS 自签或代理终止）                          │
-├────────────────────────────────────────────────────────────────┤
-│   Inbound Router  ─►  Handler Registry  ─►  Outbound Emitter    │
-│   • connect handshake     • agent.run     • stream.chunk        │
-│   • per-IP rate-limit     • chat.send     • agent.trace         │
-│   • flood guard           • exec.approval • tool_start / end    │
-│                          • tools.*       • session.*           │
-│                          • mcp.*         • events.subscribe     │
-│                          • gateway.*                             │
-│                          • runs.*                                │
-└────────────────────────────────────────────────────────────────┘
-```
-
-## 信任边界
-
-信任边界是网络边界。loopback 永远免密；远端连接**必须**出示有效凭证，
-按优先级解析（`src/gateway/handlers/connect.rs::resolve_connect_auth`）：
-
-1. **loopback** ⇒ operator（无凭证）；
-2. **设备 token**（`aleph-dt-*`）—— 长生命周期，绑定到一台已配对设备；
-3. **启动票**（`aleph-bt-*`）—— 5 分钟单次，握手时换取新的设备 token；
-4. **共享 Gateway token**（`aleph-<uuid>`，`SharedTokenManager`）——
-   HMAC-hashed，常数时间验证。
-
-有效凭证 = 完整操作员权限（与本机相同）；缺失 / 无效 ⇒ WS 分发拒绝除
-`connect` 之外的所有方法。
-
-WS `Origin` 检查（`src/gateway/origin_policy.rs`）作为最后一道额外阻挡
-公共 web 页面跨域驱动本地 daemon。
-
-## Connect 握手
-
-`/ws` 上的第一帧必须是 `connect`。Loopback 全部省略凭证字段；远端客户端
-在 `connect` params 里出示：
-
-```json
-{
-  "method": "connect",
-  "params": {
-    "minProtocol": 1,
-    "maxProtocol": 1,
-    "client": {
-      "id": "macos-app",
-      "version": "1.0.0",
-      "platform": "macos"
-    },
-    "device_token": "aleph-dt-…",
-    "bootstrap_ticket": "aleph-bt-…"
-  }
-}
-```
-
-`resolve_connect_auth` 解决授权。响应回显 `role` / `authorized` /
-`needs_token` —— Panel 据此渲染登录墙或解锁完整 app。一个启动票交换也
-返回一个客户端为后续重连持久化的新 `device_token`。
-
-一个被拒绝的远端 `connect` 记录在安全审计 log
-（`AuditEventType::AuthFailure`，由 `Auth`-scope rate limiter 约束）。
-
-> Loopback 客户端完全省略凭证字段。远端客户端在首次配对时发
-> `bootstrap_ticket`（收到 `device_token` 作回报），然后每次重连发
-> `device_token`。`token`（遗留共享 Gateway token）作为后备接受。
->
-> `device_id` 是**客户端断言**的，`devices` 表与集群节点共享一个命名
-> 空间 —— 交换过程会拒绝一个已经命名了非 Panel 设备的 `device_id`
-> （`cluster::admit_node` 拒镜像情况）。没有这道保护，一张票就能换一个
-> Panel 看不到、无法撤销的操作员 token。
-
-## JSON-RPC 协议
-
-### 请求格式（Client → Gateway）
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "uuid-xxx",
-  "method": "agent.run",
-  "params": {
-    "message": "Hello",
-    "session_key": "agent:main:main"
-  }
-}
-```
-
-### 响应格式（Gateway → Client）
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "uuid-xxx",
-  "result": {
-    "run_id": "run-123",
-    "status": "running"
-  }
-}
-```
-
-### 事件格式（Gateway → Client）
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-123",
-      "content": "Hello! How can I help you?"
-    }
-  }
-}
-```
-
-## RPC 方法（节选）
-
-| 方法 | 描述 | 参数 |
-|------|------|------|
-| `connect` | LAN-trust 握手（远端要求凭证） | `device_token` / `bootstrap_ticket` / `token` |
-| `agent.run` | 启动 agent 执行 | `message`, `session_key`, `thinking?`, `model?`, `exec_tier?` |
-| `agent.status` | 获取 run 状态 | `run_id` |
-| `agent.cancel` / `agent.abort` | 取消 / 强制中止 run | `run_id` |
-| `session.get` / `session.list` / `session.history` | 会话查询 | `session_key`, `limit?` |
-| `session.compact` / `session.delete` | 会话管理 | `session_key` |
-| `config.get` / `config.patch` / `config.apply` / `config.reload` | 配置管理 | —— |
-| `events.subscribe` / `events.unsubscribe` / `events.list` | 事件订阅 | `pattern`（glob） |
-| `exec.approval.list` / `exec.approval.resolve` | 审批决策 | `{outcome, reason?}` |
-| `memory.store` / `memory.search` / `memory.delete` / `memory.stats` | 长期记忆 | —— |
-| `browser.navigate` / `browser.click` / `browser.type` / `browser.screenshot` / `browser.evaluate` | 浏览器 per-action 入口 | —— |
-| `mcp.*` | `start` / `stop` / `list` / `call` | —— |
-| `gateway.ticket.create` / `gateway.devices.*` / `gateway.token.rotate` | 设备 / token 管理 | —— |
-| `runs.*` | `list` / `status` / `wait` / `queue` | —— |
-| `models.*` / `generation.*` / `cron.*` / `plugins.*` / `skills.*` / `interfaces.*` | 各域 RPC | —— |
-
-## 事件主题
-
-事件用 glob 模式订阅：
-
-| 模式 | 事件 |
-|------|------|
-| `stream.*` | 所有流式事件 |
-| `stream.chunk` | 文本块 |
-| `stream.agent_trace` | 结构化、loop-originated 执行 trace |
-| `stream.tool_start` / `stream.tool_end` | 工具执行边界 |
-| `agent.*` | agent 生命周期 |
-| `agent.started` / `agent.completed` / `agent.error` | agent 状态 |
-| `session.*` / `config.*` | 会话 + 配置事件 |
-
-## 远程连接的传输加密（TLS）
-
-reachability 控制*谁能打开 socket*；TLS 控制*线上字节是否可读*。
-两者独立：Gateway token 认证身份，TLS 加密信道。一个 `host = "0.0.0.0"`
-的部署若没 TLS，token 和每条消息都明文，嗅探 client 与 server 之间的任何
-一跳。
-
-**强制（默认关闭；loopback 永远豁免）**：loopback
-（`127.0.0.1` / `::1`）保持明文 `ws://` —— 零配置桌面 / CLI / 同机代理
-不变。对**非 loopback** 绑定 Aleph 现在是失败关闭：
-
-- **启动门**（`check_network_exposure`）：非 loopback 绑定且无原生 TLS、
-  无受信代理、`allow_insecure_remote = false` 的配置**拒绝启动**，
-  给出可操作错误。（这是有意的破坏性变更 —— 一个之前能用的
-  `host = "0.0.0.0"` 明文配置现在必须选下面的补救之一。）
-- **每连接门**（`refuse_insecure_remote`）：远端客户端 leg 未加密时，
-  在 WS upgrade 处用 `426 Upgrade Required` 拒绝，即使启动门通过了一个
-  宽松组合。"加密"指进程内终止的原生 TLS，或一个设了
-  `X-Forwarded-Proto: https` 的受信代理。
-
-三种满足方式：
-
-### Tier ① —— TLS 反向代理（推荐；需要域名）
-
-Aleph 保持绑定 **loopback**；同机 Caddy / nginx 终止 TLS 并转发给它。
-代理配置保持平凡 —— 所有健壮性都在 Aleph 里。
-
-```toml
-[gateway]
-host = "127.0.0.1"                       # aleph 保持 loopback；代理同机
-allowed_origins = ["https://your.domain.com"]
-
-[gateway.trusted_proxy]
-enabled = true                            # 信任代理的 X-Forwarded-For / -Proto
-```
-
-`Caddyfile`（整个文件 —— Caddy 自动准备 Let's Encrypt）：
-
-```
-your.domain.com {
-    reverse_proxy 127.0.0.1:18790
-}
-```
-
-> **`trusted_proxy` 在这里是安全关键，不只是形式**。代理通过 loopback
-> 连 Aleph，所以**没有** `trusted_proxy` 时每个远端客户端在 Aleph 看
-> 来都是 `127.0.0.1` —— 即**自动授权为 loopback 操作员**，完整绕过授权。
-> 设了 `trusted_proxy = true` 后 Aleph 从 `X-Forwarded-For` 读真实客户端
-> IP（spoof-safe：只有 `trusted_ips` 里的 peer 被相信），所以远端客户端
-> 被正确视为远端，必须出示 Gateway-token 凭证，并且 per-IP rate-limit /
-> cap / audit 按真实客户端键控。**启用代理而不设 `trusted_proxy` 是个
-> 错误**。
-
-### Tier ② —— 原生自签名 TLS（无域名；更弱）
-
-无域名、无代理 —— Aleph 在 `~/.aleph/data/tls/` 上首次启动时生成并
-持久化一个自签名证书并 log 其 SHA-256 指纹。SAN **自动覆盖** loopback
-加上该 box 的每个非 loopback 接口 IP（例如 VPS `eth0` 上的公网 IP），
-所以通过那个 IP 连接能过 TLS hostname 验证；通过 `[gateway.tls] san =
-[...]` 添加 hostname 或 NAT 后的公网 IP。客户端仍然收到浏览器证书警告
-（一次性接受，或钉住指纹）—— 加密是真的，信任锚是手动的。新出现的地址
-regen 证书（新指纹 ⇒ 重新信任一次）；`sans.txt` sidecar 跟踪覆盖使
-churn 最小。注意 SAN 枚举了**每个**本地接口 IP —— 包括私网 / LAN 和
-Docker-bridge 地址 —— 所以任何检查证书的人都能学到 box 的接口图；对
-个人服务器无害，但如果这要紧，通过 `san` + loopback bind 只列出你
-需要的。
-
-```toml
-[gateway]
-host = "0.0.0.0"
-
-[gateway.tls]
-enabled = true          # 空 cert/key 路径 ⇒ 自动自签名
-# san = ["vps.example.com"]
-```
-
-Panel 对任何非 loopback 主机硬编码 `wss://`，对远端 gateway 拒绝明文
-socket —— 远端 Panel 自动走 TLS。
-
-### Tier ③ —— 原生 TLS + 真实证书（域名，无代理）
-
-指向操作员提供的 PEM 文件（例如 certbot 输出）。Aleph 自己终止 TLS。
-
-```toml
-[gateway]
-host = "0.0.0.0"
-
-[gateway.tls]
-enabled = true
-cert_path = "/etc/letsencrypt/live/your.domain.com/fullchain.pem"
-key_path  = "/etc/letsencrypt/live/your.domain.com/privkey.pem"
-```
-
-### 逃生口 —— `allow_insecure_remote`
-
-```toml
-[gateway]
-host = "0.0.0.0"
-allow_insecure_remote = true    # 危险：明文到远端客户端
-```
-
-恢复 pre-hardening 行为（启动门 + 每连接门都撤销）。仅用于明知接受明文
-的受信任、隔离 LAN。绝不在公网接口上。
-
-## 集群节点的远程 RPC
-
-集群节点（`aleph-server node --center ws://...`）通过反向 WS RPC 与
-中心通信：
-
-- 节点连接到中心 `/ws`，按 panel device 协议握手（设备 token / 启动票）；
-- 中心把 `agent.run` 委派给节点；
-- 节点上的 `exec.approval.resolve` 接受可选 `reason` 参数
-  （`ApprovalRequester` trait 现在返回 `outcome + reason`；不能携带 reason
-  的 transport 用 `From<ApprovalOutcome>`）—— 老节点忽略它。
-
-## 远端客户端 IP 解析（受信代理）
-
-per-IP 滥用保护（per-IP 连接上限、rate limiter、`Auth`-scope lockout）
-键控 **原始 socket peer 地址**（`peer_addr.ip()`，逐字）。
-
-`X-Forwarded-For` / 受信代理解析在 LAN-trust revert 中**移除**且**不**
-恢复 —— 配置里的 `trusted_proxy` key 是静默忽略的遗留字段，没有
-`src/gateway/trusted_proxy.rs`。在原始 peer 上保持 loopback 检查是有意
-为之：意味着 `is_loopback`（零配置操作员授权）永远不能被伪造的
-`X-Forwarded-For` 头伪造。
-
-权衡：网关前面挂反向代理时，每个客户端都塌成代理的 socket 地址，所以
-per-IP 保护限定的是**代理**而不是单个客户端。在上游（代理）终止
-client-identity 信任如果你需要 per-client 限制，并把 Gateway token 当
-作传输认证。（恢复 fail-closed、allowlist-门控的受信代理 XFF 解析
-—— 永远不让转发头影响 `is_loopback` —— 被追踪为未来增强。）
-
-## WS Origin 检查（最后一道）
-
-浏览器给每个 WebSocket upgrade 和跨域 `fetch` 附带一个不可伪造的
-`Origin` header。用户碰巧访问的恶意公共 web 页面仍然能**到达**
-`ws://127.0.0.1:18790/ws`（loopback 不会从浏览器被防火墙挡住），所以
-没有 origin check 它能打开本地 daemon 的控制信道 —— 跨域 WebSocket 混淆
-代理（及其 DNS-rebinding 变体）。origin gate
-（`src/gateway/origin_policy.rs`）被保留为浏览器表面的**唯一**验证。
-它防御公网，**不**防御 LAN 邻居。
-
-`OriginPolicy::is_allowed` 决定：
-
-| Origin | 判定 | 为什么 |
-|--------|------|-------|
-| **缺失 / 空** | 允许 | 原生客户端（CLI、bots、bridges、`tokio-tungstenite`）不发；只有浏览器发。 |
-| **loopback**（`127.0.0.0/8`、`::1`、`localhost`、`*.localhost`） | 允许 | 同机 UI。 |
-| **`tauri:` scheme** | 允许 | 桌面 shell 自有 webview origin，远程页面不可伪造。 |
-| **精确 allow-list 匹配**（`[gateway] allowed_origins`） | 允许 | 操作员配置的额外 origins（用于拆分 panel / API 部署）。 |
-| **同源**（Origin authority == 请求 `Host`） | 仅当 `Host` 是 IP literal 或 loopback 时允许 | IP 到达的 LAN 部署（`http://10.10.10.6:18790`）无需配置即可工作；IP literal 不能 DNS-rebind。**域名** `Host` **不**自动允许 —— 部署必须把它的 origin 加到 `allowed_origins`。 |
-| 其他（公共 web 域名） | **拒绝** | |
-
-> **DNS-rebinding —— 已防御**。经典 DNS-rebinding 攻击把一个域名
-> （`evil.com`）rebind 到 gateway 自己的地址，所以受害者的页面携带
-> `Origin == Host == evil.com` 会溜过朴素的同源检查。Aleph 通过把同源分支
-> 门控在 `Host` 上关闭这个：同源**仅当** `Host` 是 IP literal 或
-> loopback 时自动允许（`127.0.0.0/8`、`::1`、`localhost`、
-> `*.localhost` 或裸 IPv4 / IPv6 地址）。rebinding 攻击必须用域名（A 记录
-> 是被 rebind 的那个），域名 `Host` 不再通过同源 —— 它落到拒绝。权衡：
-> 零配置**域名**部署（从 `aleph.example.com` 提供 panel，没有
-> `allowed_origins`）现在被拒，必须把它的 origin 加到 `[gateway]
-> allowed_origins`。IP 到达的 LAN 部署和 loopback 访问不受影响。
-
-**逃生口 —— `allow_any_origin`**：设 `[gateway] allow_any_origin = true`
-无条件信任每个 Origin（`OriginPolicy::allow_any`）。仅用于自己前面挂了
-反向代理 / auth 层的部署；它让 agent 可以被用户浏览器访问的任何 web 页面
-驱动，所以除非你知道为什么，否则保持 `false`。
-
-## 限速与反滥用
-
-- **全局 `max_connections`** 上限
-- **per-IP 并发连接上限**（`gateway.max_connections_per_ip`，默认 64，
-  `0` 禁用，loopback 豁免）—— 远端 peer 打开大量空闲 socket 的 slot
-  耗尽防护。
-- **flood guard**（`src/gateway/server/flood_guard.rs`）—— 一个远端连接
-  持续探测（连发未授权 `connect`）被关闭。
-- **per-scope rate limiter**（`Auth`-scope 等）
-
-被 `AuthFailure` / `RateLimited` 关闭的连接记录在安全审计 log
-（`src/security/audit.rs`）。
-
-## 审计与追踪
-
-每个 JSON-RPC 请求解析一个 [W3C `traceparent`](https://www.w3.org/TR/trace-context/)：
-入站 `params.traceparent` 被尊重（其 trace id 被采用），否则 mint 一个
-新的 128-bit 根 trace。分发咽喉打开一个携带 `trace_id` / `span_id` 的
-`tracing` span，响应回显一个 `traceparent` 把 server 的 span 命名为父，
-所以多跳调用图能缝合在一起。这是轻量级传播层
-（`src/gateway/trace_context.rs`），**不是** OpenTelemetry 集成 —— OTel
-SDK 会为这个（考虑 Aleph 自己的 trace 持久化 + `tracing` 日志）违反
-R3 核心极简。
-
-> 注意：JSON-RPC middleware 链在 server 构造时构建一次并 per-connection
-> 克隆。per-connection 重建过去会在每个 connect 重新安装全局请求状态
-> 注册表，把 `/metrics` 请求生命周期计数器清零并低估在飞请求。
-
-## 指标 + 健康
-
-Gateway 暴露：
-
-- `GET /health` —— 活性探针
-- `GET /ready` —— 就绪探针
-- `GET /metrics` —— Prometheus 文本展示（v0.0.4）请求生命周期计数器、
-  连接 gauge、rate-limiter 压力，以及请求时长直方图
-  （`aleph_gateway_request_duration_ms`，由 per-request `elapsed_ms`
-  middleware 已经测得）；只导出聚合计数（无 payload / secret），和
-  probe 一样未认证。实现：
-  `src/gateway/server/metrics_endpoint.rs` +
-  `src/gateway/middleware/latency.rs`。
+本页说明 Panel 与本地客户端如何进入 Gateway，以及来源、身份和执行审批分别在哪里检查。
+
+## 入口与信任边界
+
+| 入口 | 传输与身份 | RPC 范围 | 实现 |
+|------|-----------|----------|------|
+| Desktop IPC | Unix domain socket；校验对端身份，不授予网络连接权限 | 只读：先 `system.hello`，随后只允许 `health`、`sessions.list` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | Gateway 原生 TLS；`POST /v1/session` 换取会话 cookie，`GET /v1/ws` 校验会话后升级 | 只读：先 `system.hello`，随后只允许 `health`、`sessions.list` | `src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs` |
+| 兼容 WebSocket | 默认 `ws://127.0.0.1:18790/ws`；`connect` 区分直连环回与出示凭据的远端 | 兼容控制平面；认证与传输门见[网关认证](../gateway/auth) | `src/gateway/config.rs`、`src/gateway/server/connection/upgrade.rs`、`src/gateway/handlers/connect.rs` |
+
+## Desktop IPC：本地只读 socket
+
+用 `aleph-server start --desktop-ipc <socket>` 显式启用 Unix listener（`src/bin/aleph-server/cli.rs`、`src/bin/aleph-server/commands/start/mod.rs`）。服务端每个 listener 最多同时处理 8 个连接，要求 socket 对端有效用户相同，并且只在存在有效桌面所有者时处理请求。每连接共享 16 MiB 的 wire budget，单次写入期限 5 秒。分发使用占位 IP `0.0.0.0`，不因本地 IPC 获得网络入口的环回特权（`src/gateway/server/connection/local_ipc.rs`）。
+
+有界帧由 `shared/protocol/src/framing.rs` 定义。客户端帧上限为 8,388,608 字节，同时在途请求最多 8 个，`system.hello` 超时 5 秒（`shared/client/src/local_ipc.rs`）。NSH 的 `--desktop-ipc-status <socket>` 只查询已有 Gateway 的健康状态，不打开 Panel，也不降级到 WebSocket（`desktop/nsh-shell/src/main.rs`、`desktop/nsh-shell/src/ipc_status.rs`）。
+
+## Panel 来源校验与跨站防护
+
+### Web v1：严格 HTTPS 同源
+
+`same_origin` 在会话交换和 WS 升级时都要求 `Origin` 精确匹配请求 authority 推导出的 HTTPS origin，并拒绝带查询串的请求；`throttle` 按客户端地址限流。`redeem` 验证设备令牌或兑换引导票；`cookie_handle` 读取会话句柄，升级还会核对绑定的 origin 与当前设备身份。Cookie 标有 `Secure`、`HttpOnly`、`SameSite=Strict`（`src/gateway/server/connection/web_v1.rs`）。这个入口不借用兼容 `/ws` 的来源白名单。
+
+### 兼容 `/ws`：来源与认证分开
+
+`ws_upgrade_handler` 调用 `OriginPolicy::is_allowed`，来源不符返回 `403`（`src/gateway/server/connection/upgrade.rs`、`src/gateway/origin_policy.rs`）。规则如下：
+
+| `Origin` | 默认判定 |
+|----------|----------|
+| 缺失或为空 | 通过来源检查；不代表通过认证 |
+| 与 `[gateway] allowed_origins` 中一项精确匹配（忽略大小写） | 通过 |
+| HTTP(S) 的 authority 与请求 `Host` 一致，且 `Host` 是 IP 字面量或环回主机 | 通过；例如 `http://127.0.0.1:18790` 对应 `127.0.0.1:18790` |
+| 旧桌面 webview 的专用 scheme | 仍有兼容例外，不是 NSH 的来源规则 |
+| 其他 | 拒绝；域名同源、不匹配端口的环回页面均不会自动放行 |
+
+`allow_any_origin = true` 会绕过此检查，不建议开启（`src/gateway/config.rs`、`src/gateway/origin_policy.rs`）。NSH 加载的 Panel origin 由 `ConnectionTarget` 约束：远端使用 HTTPS，导航比较 scheme、host、port。`aleph://open` 是宿主单独处理的精确深链，不是 Panel 来源，也不授予 RPC 权限（`shared/client/src/connection_target.rs`、`desktop/nsh-shell/src/panel_bridge.rs`）。
+
+## 敏感操作与审计
+
+### 执行审批
+
+允许页面连接不等于批准执行。Panel 通过 `exec.approval.resolve` 提交用户决策；Gateway 处理审批，执行门按工具和规范化参数绑定授权。可见的审批摘要做脱敏，不拿脱敏值计算授权指纹（`interfaces/webchat/src/api/exec_approval.rs`、`src/gateway/handlers/exec_approvals.rs`、`src/sandbox/exec_approval/action.rs`）。两条只读入口均不开放审批 RPC（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+
+### 凭据存储和日志
+
+Gateway 的安全存储在 `src/gateway/security/store/`，设备令牌按哈希校验（`src/gateway/security/device_token_manager.rs`）。NSH 的凭据服务使用共享客户端的 OS 钥匙串存储；不可用时不回退到明文存储（`desktop/nsh-shell/src/credentials.rs`、`shared/client/src/credential_store.rs`）。
+
+兼容连接的认证失败和未认证请求洪泛可写入安全审计日志；Desktop IPC 的 peer 关闭日志只记录错误类别。未在本阶段核实所有日志都经过同一脱敏器，不要把审批摘要的脱敏范围扩展成对所有日志的保证（`src/gateway/server/connection/mod.rs`、`src/security/audit.rs`、`src/gateway/server/connection/local_ipc.rs`）。
+
+### 请求追踪与健康探针
+
+Gateway 共用分发器可采用 RPC 参数中的 `traceparent` 关联请求（`src/gateway/server/connection/dispatch.rs`、`src/gateway/trace_context.rs`）。Gateway 路由还提供 `/health`、`/ready` 和 `/metrics` 三个独立 HTTP 探针；它们不是 Desktop IPC socket 的方法（`src/gateway/server/mod.rs`、`src/gateway/server/probe.rs`、`src/gateway/server/metrics_endpoint.rs`）。
 
 ## 另请参阅
 
-- [安全概览](/docs/zh/security/overview) —— 网络边界 + Gateway token
-- [执行审批](/docs/zh/security/exec-approval) —— 通过 `exec.approval.*` RPC
-  路由
-- [配对](/docs/zh/security/pairing) —— 启动票 + 设备 token
-- [沙箱](/docs/zh/security/sandboxing) —— OS 级强制
+- [网关认证](../gateway/auth)：凭据、配对与 TLS。
+- [网关协议](../gateway/protocol)：兼容 `/ws` 的握手与消息格式。
+- [执行审批](./exec-approval)：执行门与决策。

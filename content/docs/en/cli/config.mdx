@@ -52,9 +52,11 @@ excluded_tools = ["dangerous_tool"]
 | `device_name` | string | Human-readable name shown to the server |
 | `auth_token` | string? | Saved authentication token |
 | `default_session` | string? | Session key used when `--session` is not provided |
-| `manifest.tool_categories` | string[] | Tool categories this client supports |
-| `manifest.specific_tools` | string[] | Specific tools to include |
-| `manifest.excluded_tools` | string[] | Tools to exclude from this client |
+| `[manifest]` section's `tool_categories` | string[] | Tool categories this client supports |
+| `[manifest]` section's `specific_tools` | string[] | Specific tools to include |
+| `[manifest]` section's `excluded_tools` | string[] | Tools to exclude from this client |
+
+The three `[manifest]` keys are **reserved**: they stay on the config struct and on the wire, but the "tell the server which tools this surface can render" handshake they were specced for was never activated.
 
 ---
 
@@ -82,7 +84,7 @@ aleph-server config get agent.main.model --json
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<PATH>` | no | Dot-separated config path (e.g. `general.language`) |
+| `<PATH>` | no | Dot-separated config path (e.g. the `language` key under the `general` section) |
 
 | Flag | Default | Description |
 |------|---------|-------------|

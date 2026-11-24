@@ -1,0 +1,69 @@
+---
+title: "Hooks and Prompt Assembly"
+description: "Distinguish the Hook@1 wire contract, the current hook execution path, and planned prompt layer replacement."
+---
+
+This page explains how to read capability hook requests, responses, and prompt replacement declarations, and where they fit relative to the current execution path.
+
+## Hooks and the two contracts
+
+In Hook@1, a hook descriptor identifies an extension point by `SlotId` and event type. `validate_hook_request` checks the descriptor's contract version, matches its event against the request, and validates the request facts. It does not compare the descriptor's `SlotId` with the request's `slot`. IDs correlate facts; they grant no authority. This pure contract does not dispatch hooks, handle approvals, or issue grants (`crates/aleph-slot-api/src/slot.rs`, `shared/protocol/src/hook.rs`).
+
+`crates/aleph-slot-api/src/hooks.rs` exposes both the legacy `HookEvent` and re-exports of the new contract. The legacy enum has 24 variants for `hooks.json` and plugin JSON-RPC; they are not Hook@1 wire tags. Core's `HookExecutor` still runs legacy hooks. The new trait does not migrate Core's `HookContext`, `HookResult`, or `HookConfig`. To configure today's hooks, see [Automation Hooks](../automation/hooks) (`crates/aleph-slot-api/src/hooks.rs`, `crates/aleph-slot-api/src/slot.rs`, `src/extension/hooks/mod.rs`, `src/extension/hooks/executor.rs`).
+
+## Hook@1 wire contract
+
+`HOOK_CONTRACT_VERSION` is `1`. The tables and validation rules in this section come from `shared/protocol/src/hook.rs`.
+
+| Type | Fields and validation |
+|---|---|
+| `HookEnvelope` | `version`, `session_id`, `turn_id` (`Option<String>`), `slot`, and `event` (`HookInput`). Session start and end observer events cannot specify a turn ID; all other events require a nonempty `turn_id`. |
+| `HookResponseEnvelope` | `version` and `response` (`HookResponse`). Decoding checks the version; rules that depend on the original input require a separate `validate_response` call. |
+
+Both envelopes deserialize through internal wire structs with `deny_unknown_fields` and a `TryFrom` conversion, so unknown envelope fields are rejected. `validate_envelope` checks the version and input facts; `validate_response` checks the input-response pairing and event-specific constraints. Neither function executes a hook.
+
+| `HookEventTag` | Wire tag | `HookResponse` payload |
+|---|---|---|
+| `ToolPre` | `tool.pre` | `action` (`ToolPreAction`) |
+| `ToolPost` | `tool.post` | Optional `replacement` |
+| `Prompt` | `prompt` | `append` and `replace` |
+| `Compaction` | `compaction` | `summary` |
+| `Continue` | `continue` | `request` and optional `reason` |
+| `IngestFilter` | `ingest_filter` | `keep_ids` |
+| `Observer` | `observer` | `ack` |
+
+Decisions about a pending tool call belong to `ToolPreAction`, not to the top-level `HookResponse`. The variants are `Continue` (with optional `updated_input`), `Deny` (with `reason`), and `Ask` (with `reason`). An `Ask` that passes wire validation does not mean approval took place (`shared/protocol/src/hook.rs`).
+
+## Priority bands and checks after a rewrite
+
+Today's `HookRegistry` rejects `System` priority for user and plugin registrations and downgrades a plugin request for `High` to `Normal` (`src/extension/hooks/registry.rs`). If a legacy pre-tool hook rewrites arguments, current tool dispatch reruns the deny rules, operator check, and confirmation check on the final arguments. Approval of the original arguments does not clear the rewritten call (`src/tools/scoped/dispatch.rs`).
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §6.3–6.4 describes the full origin- and trust-based priority bands, access to the high-priority band for authorized plugins, and checks after rewrites as a Hook@1 execution contract. The current rules do not imply that the full Hook@1 dispatch path is wired up.
+
+## Prompt layer replacement
+
+A `Prompt` input carries a list of `PromptLayerView` values, each with `id`, `text`, and `replaceability`. The `Replaceability` variants `Pinned` and `Replaceable` serialize as `pinned` and `replaceable`. A response can submit `append` and `replace` entries; each `ReplaceLayerRequest` names one target layer through `replaceable_layer_id` and supplies its `text`. A response can request multiple replacements, but each must target a distinct, declared `Replaceable` layer. It cannot target a `Pinned` layer. These checks validate a response; they do not authorize a runtime prompt change (`shared/protocol/src/hook.rs`).
+
+The current system prompt is assembled by `PromptBuilder` and the harness assembly entry point (`src/thinker/prompt_builder/mod.rs`, `src/orchestrator/harness_bridge/prompt_build.rs`). See [Prompt System](../concepts/prompt-system) for existing layers and cache boundaries. A layer ID in the wire contract is not a replacement entry point in that assembly pipeline.
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §7.1–7.2 proposes a pinned default and classification of actual layers, a separately budgeted area for plugin additions, authorized per-layer replacements, and rejection of pinned-layer replacements. This page does not give a working configuration example or a list of replaceable runtime layers.
+
+## Registration and snapshots
+
+Core's internal `VersionedRegistry<T, E, L>` returns one immutable generation through `snapshot`. A successful `transact` that changes state publishes a new revision before notifying; a no-op or error does not publish. `revision` reads the current revision, and `subscribe` provides notifications, not durable replay (`src/capability/versioned_registry.rs`). The current `HookRegistry` already uses this primitive to publish registration facts, the executor, and diagnostics as one generation. This is not a registration API for plugins to call directly (`src/extension/hooks/registry.rs`).
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §6.5 describes a broader versioned registry design, including projecting hooks into the capability ownership tree. The presence of the snapshot primitive does not establish that the entire design is in use.
+
+## Observation, audience, and audit
+
+| Capability observation layer | Current boundary | Source |
+|---|---|---|
+| Events | Bounded, instance-scoped records commit to memory before live notification and optional persistence. They are not authority or a replay log. | `src/capability/events.rs` |
+| Audience | `EventAudience` and `TrustedEventScope` bound the audience and request scope for observations. They are not a separate access control list. | `src/capability/event_audience.rs` |
+| Audit projection | Audit is a read-only projection over the shared event buffer and is not mounted in the production query path. The live bridge does not read it. | `src/capability/audit.rs`, `src/gateway/capability_events.rs` |
+
+These observation interfaces are not evidence that Hook@1 is wired into dispatch (`src/capability/events.rs`, `crates/aleph-slot-api/src/slot.rs`).
+
+## JavaScript and TypeScript plugin paths
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §6.6 proposes three Hook@1 paths: Command scripts exchanging JSON over standard input and output, persistent MCP services for stateful hooks, and WASM for isolated computation. The proposed npm SDK and scaffolding are not current developer entry points.

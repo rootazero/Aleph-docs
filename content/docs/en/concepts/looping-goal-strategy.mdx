@@ -270,7 +270,7 @@ strategy(action: "dumb_write", key, content) // bypass-validation write (only fo
 
 ## Team Run Mode Pin
 
-The team leader **stamps** `usage_mode` (chat / work / code) on `team.run` and inherits it to sub-members — `teams.run` now **rejects** sub-member `session_set_mode` tool calls:
+The team leader **stamps** `usage_mode` (chat / work / code) at team run start (`run_mode::stamp`) and inherits it to sub-members — team run mode now **rejects** sub-member `session_set_mode` tool calls:
 
 ```rust
 // src/teams/runner.rs
@@ -307,7 +307,7 @@ if turn.is_subagent() {
 - `src/strategy/planner.rs` — `PlannerNode` (tool-free one-shot LLM) + `plan_strategy` + `try_fire_once` (atomic fire-once) + `env_summary` + `PLANNER_SYSTEM` prompt
 - `src/strategy/render.rs` — `render_strategy_summary` / `render_guardrails_only` / `render_workflow_global_frame` (pure functions, cache-friendly deterministic bytes, **no** `now_ms` / `HashMap` iteration)
 - `src/builtin_tools/strategy_manage.rs` — 3-action `strategy` tool
-- `src/teams/runner.rs` — `team.run` mode stamp + subagent mode pin guard
+- `src/teams/run_mode.rs` — team run mode stamp (`run_mode::stamp`) + subagent mode pin guard
 - `src/gateway/execution_engine/goal_continuation.rs` — 5 execution points (`post_run` / `arbitrate_gate` / `block_goal_on_failure` / `rearm_goal_after_busy` / `clear_goal_welded_strategy`)
 - `src/gateway/goal_budget.rs` — `tree_tokens` (tree budget aggregation)
 - `src/gateway/execution_engine/goal_wait.rs` — barrier handling
@@ -336,7 +336,7 @@ The settle-notification stamp is `(id, completed_at_ms)` — `completed_at_ms` i
 
 ### Team Run Mode Pin
 
-`teams.run` rejects subagent `session_set_mode` — "the leader stamps, sub-members inherit". `task_review` accepts metadata carrying a `[grounding]` comment (kind ∈ `exit_code` / `numeric` / `line_count`) as evidence, **the same closed set as loop_graph anchor truth**. Reject never requires an anchor (reject is naturally conservative); an approve without grounding evidence bounces on `task_review(require_grounding=true)` (`grounding_required`).
+Team run rejects subagent `session_set_mode` — "the leader stamps, sub-members inherit". `task_review` accepts metadata carrying a `[grounding]` comment (kind ∈ `exit_code` / `numeric` / `line_count`) as evidence, **the same closed set as loop_graph anchor truth**. Reject never requires an anchor (reject is naturally conservative); an approve without grounding evidence bounces on `task_review(require_grounding=true)` (`grounding_required`).
 
 ### Cross-task / Cross-Session Kill Switch
 

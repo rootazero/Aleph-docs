@@ -15,11 +15,11 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 
 1. **一核多端** —— 一个 `aleph-server` 进程驱动所有界面。无论你通过桌面应用、CLI、Telegram 还是 Discord 聊天，同一个核心处理所有推理、工具执行和状态管理。
 
-2. **壳核分离** —— 桌面应用是一个*薄原生壳*（Tauri v2）。它拥有窗口、托盘、通知和 OS 集成——但**零业务逻辑和零业务 UI**。所有产品 UI 在由核心提供的 Leptos Panel 中。所有推理、工具和状态在 `aleph-server` 中。壳可以连接本地核心或远程核心（通过 Tailnet/VPN）。
+2. **壳核分离** —— 桌面应用是一个*薄原生宿主*（NSH，`desktop/nsh-shell`）。它拥有窗口、托盘、通知和 OS 集成——但**零业务逻辑和零业务 UI**。所有产品 UI 在由核心提供的 Leptos Panel（`interfaces/webchat`）中。所有推理、工具和状态在 `aleph-server` 中。宿主连接已存在的本机或远程核心（远程使用 HTTPS），不托管其生命周期。
 
-3. **网关互通** —— 每个终端使用相同的认证 WebSocket 协议（`JSON-RPC 2.0` over `ws://`）。CLI 工具、Telegram 机器人和桌面壳都在同一个网关上调用相同的方法。
+3. **网关互通** —— 每个终端使用相同的认证 WebSocket 协议（`JSON-RPC 2.0` over `ws://`）。CLI 工具、Telegram 机器人和桌面宿主承载的 Panel 都在同一个网关上调用相同的方法。
 
-4. **权限控制** —— 每个连接都经过认证。桌面壳从核心的安全数据库读取共享令牌。远程连接使用相同的令牌机制。访客会话携带受限范围。详细信息请参阅[身份与安全](#身份与安全)。
+4. **权限控制** —— 每个连接都经过认证。桌面宿主经原生凭据通道保存并出示设备凭据（`desktop/nsh-shell/src/credentials.rs`）。远程连接同样要求认证。访客会话携带受限范围。详细信息请参阅[身份与安全](#身份与安全)。
 
 > **从「多端」到「多体」。** 一核多端让一个大脑拥有多个 I/O 通道。[集群联邦](./cluster) 把同一原则推进到多个*执行体*：一个中心核编排多台机器（节点）协同工作 —— 而集群始终只有一个心智。
 
@@ -29,95 +29,102 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           接口层 (I/O)                                         │
+│                                接口层 (I/O)                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
-│  │ 桌面应用  │  │   CLI    │  │ Telegram │  │ Discord  │  │  TUI     │      │
-│  │  壳      │  │          │  │Interface │  │Interface │  │          │      │
-│  │(Tauri v2)│  │          │  │          │  │          │  │          │      │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘      │
-│       │             │             │             │             │             │
-│       └─────────────┴─────────────┴─────────────┴─────────────┘             │
-│                                   │                                          │
-│                    WebSocket (JSON-RPC 2.0) + 认证令牌                       │
-│                          ws://127.0.0.1:18790/ws                             │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                              网关层                                           │
-│                         (控制平面 + 路由)                                     │
+│  ┌───────────────────────────┐  ┌─────┐  ┌─────┐  ┌─────────┐  ┌─────────┐  │
+│  │      桌面宿主 (NSH)       │  │ CLI │  │ TUI │  │Telegram │  │ Discord │  │
+│  │      aleph-nsh-shell      │  │     │  │     │  │Interface│  │Interface│  │
+│  │ ┌───────────────────────┐ │  └──┬──┘  └──┬──┘  └────┬────┘  └────┬────┘  │
+│  │ │   面板 Panel (WASM)   │ │     │        │          │            │       │
+│  │ │  interfaces/webchat   │ │     │        │          │            │       │
+│  │ └───────────────────────┘ │     │        │          │            │       │
+│  └─────────────┬─────────────┘     │        │          │            │       │
+│                │                   │        │          │            │       │
+│                └───────────────────┴─┬──────┴──────────┴────────────┘       │
+│                                      │                                      │
+│                     WebSocket (JSON-RPC 2.0) + 认证令牌                     │
+│                           ws://127.0.0.1:18790/ws                           │
+│             Panel 静态资源嵌入 aleph-server，宿主只承载 WebView             │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                   网关层                                    │
+│                              (控制平面 + 路由)                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │   路由器     │  │  会话管理器  │  │   事件总线   │  │  安全模块    │        │
-│  │  (JSON-RPC) │  │             │  │             │  │  (认证)      │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │ 接口注册表   │  │   配置热重载 │  │   Webhooks  │  │    Cron     │        │
-│  │             │  │             │  │             │  │  调度器      │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                           编排器层                                            │
-│                  (AgentDef + FlowSpec 解析 + 分发)                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │   路由器    │  │ 会话管理器  │  │  事件总线   │  │  安全模块   │         │
+│  │ (JSON-RPC)  │  │             │  │             │  │   (认证)    │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘         │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │ 接口注册表  │  │ 配置热重载  │  │  Webhooks   │  │    Cron     │         │
+│  │             │  │             │  │             │  │   调度器    │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘         │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                  编排器层                                   │
+│                      (AgentDef + FlowSpec 解析 + 分发)                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        编排器                                          │   │
-│  │  解析 AgentDef + FlowSpec，构建 HarnessDeps，分发                      │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                              工具链层                                         │
-│                        (Think→Act 循环 + 停止钩子)                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                                编排器                                 │  │
+│  │           解析 AgentDef + FlowSpec，构建 HarnessDeps，分发            │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                  工具链层                                   │
+│                         (Think→Act 循环 + 停止钩子)                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                         AgentHarness                                 │   │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐   │   │
-│  │  │ 上下文  │→ │  思考   │→ │   行动  │→ │停止钩子 │→ │ 压缩    │   │   │
-│  │  │ (预算)  │  │(Thinker)│  │ (工具)  │  │  检查   │  │ (预算)  │   │   │
-│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘  └─────────┘   │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                      │
-│  │  ToolService │  │    Guards    │  │   Overflow   │                      │
-│  │  (工具执行)   │  │  (安全)      │  │  检测器      │                      │
-│  └──────────────┘  └──────────────┘  └──────────────┘                      │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                            存储层                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                             AgentHarness                              │  │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐      │  │
+│  │  │ 上下文  │→ │  思考   │→ │  行动   │→ │停止钩子 │→ │  压缩   │      │  │
+│  │  │ (预算)  │  │(Thinker)│  │ (工具)  │  │  检查   │  │ (预算)  │      │  │
+│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘  └─────────┘      │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │ ToolService  │  │    Guards    │  │   Overflow   │  │  桌面能力层  │     │
+│  │  (工具执行)  │  │    (安全)    │  │    检测器    │  │ (desktop/*)  │     │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                   存储层                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌────────────────────────────┐  ┌────────────────┐  ┌─────────────────┐    │
-│  │  记忆 (SQLite+sqlite-vec)  │  │ 弹性恢复       │  │  配置存储       │    │
-│  │  ┌──────┐ ┌───────┐        │  │   (SQLite)     │  │  ┌─────┐┌────┐ │    │
-│  │  │Facts │ │ Graph │        │  │  ┌──────────┐  │  │  │TOML ││Keys│ │    │
-│  │  │+Vec  │ │ Nodes │        │  │  │  状态    │  │  │  │File ││    │ │    │
-│  │  │+FTS  │ │ Edges │        │  │  │ 数据库   │  │  │  └─────┘└────┘ │    │
-│  │  └──────┘ └───────┘        │  │  └──────────┘  │  └─────────────────┘    │
-│  └────────────────────────────┘  └────────────────┘                         │
+│  ┌────────────────────────────┐   ┌────────────────┐   ┌─────────────────┐  │
+│  │  记忆 (SQLite+sqlite-vec)  │   │    弹性恢复    │   │    配置存储     │  │
+│  │  ┌──────┐ ┌───────┐        │   │    (SQLite)    │   │  ┌─────┐ ┌────┐ │  │
+│  │  │Facts │ │ Graph │        │   │  ┌──────────┐  │   │  │TOML │ │Keys│ │  │
+│  │  │ +Vec │ │ Nodes │        │   │  │   状态   │  │   │  │File │ │    │ │  │
+│  │  │ +FTS │ │ Edges │        │   │  │  数据库  │  │   │  └─────┘ └────┘ │  │
+│  │  └──────┘ └───────┘        │   │  └──────────┘  │   └─────────────────┘  │
+│  └────────────────────────────┘   └────────────────┘                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 第 1 层：接口
 
-最顶层包含所有客户端应用程序。每个客户端——无论是桌面壳、终端 CLI 还是 Telegram/Discord 机器人——都通过单个经过认证的 WebSocket 端点 `ws://127.0.0.1:18790/ws` 连接到同一个网关。通信使用 JSON-RPC 2.0，意味着每个客户端无论平台如何都使用相同的协议。
+最顶层包含所有客户端。每个客户端——无论是桌面宿主承载的 Panel、终端 CLI / TUI 还是 Telegram/Discord 机器人——都连接到同一个网关，使用同一套 JSON-RPC 2.0 协议。既有入口是经过认证的 WebSocket 端点 `ws://127.0.0.1:18790/ws`（路由注册在 `src/gateway/server/mod.rs`）。
 
-**桌面壳（Tauri v2）。** 原生桌面应用是"最后一公里原生壳"。它提供：
-- 托管 Leptos Panel（`http://127.0.0.1:18790`）的原生窗口 + webview
-- 带有"退出"和"退出并停止 Aleph"选项的系统托盘
-- 通过 WebSocket 事件桥接的 OS 通知
-- 全局召唤热键（`CmdOrCtrl+Shift+A`）
-- 用于深度链接的 `aleph://` URL 方案
-- 后台自动更新检查器
-- 开机自启
-- 守护进程生命周期监督（核心崩溃时重新启动）
+**桌面宿主（NSH）。** 原生桌面宿主是"最后一公里原生壳"：`desktop/nsh-shell`，crate `aleph-nsh-shell`，基于 nsh 0.6.0（`desktop/nsh-shell/Cargo.toml`）。它提供：
+- 原生窗口 + WebView，承载由网关提供的 Leptos Panel（本机目标为 `http://127.0.0.1:18790`，见 `shared/client/src/connection_target.rs`）
+- 系统托盘（`desktop/nsh-shell/src/main.rs` 中的 `set_tray`）
+- 经 Panel 桥接转发的 OS 通知（`desktop/nsh-shell/src/panel_bridge.rs`，协议类型在 `shared/protocol/src/panel_shell.rs`）
+- 全局召唤热键（默认 `mod+shift+a`；`ALEPH_SHELL_HOTKEY=disabled` 关闭）
+- 用于深度链接的 `aleph://` URL 方案（`main.rs` 中的 `.url_schemes(["aleph"])`）
+- 登录项状态的只读查询（`--autostart-status`，`desktop/nsh-shell/src/autostart.rs`）；宿主不写入登录项
+- 设备凭据的原生存取（`desktop/nsh-shell/src/credentials.rs`）
 
-关键的是，壳包含**零业务逻辑和零业务 UI**。所有产品 UI（聊天、记忆、设置）在 Panel 中（由核心提供的 WASM）。所有推理、工具和状态在 `aleph-server` 中。这种分离意味着：
-- 壳可以独立于核心更新
-- 核心可以在服务器上无头运行，而壳远程连接
-- 同一个核心同时服务桌面壳、CLI 和消息机器人
+NSH 没有自动更新器，也没有守护进程监督——它不托管 Gateway 的生命周期。平台验收状态以 `docs/reference/DESKTOP_SHELL.md` 为准：目前只有 macOS 有本机验收证据，NSH 也还没有发布流水线。
 
-**远程核心支持。** 桌面壳可以通过 Tailnet 或 VPN 连接到远程 `aleph-server`。Panel 的目录选择器通过 JSON-RPC（`fs.*`）浏览*服务器*的文件系统，确保远程部署的正确语义。认证使用壳在启动时注入的共享令牌（通过核心的 `bootstrap-token` 子命令从 `~/.aleph/data/security.db` 读取）。
+关键的是，宿主包含**零业务逻辑和零业务 UI**。所有产品 UI（聊天、记忆、设置）在 Panel（`interfaces/webchat`，由核心提供的 WASM）中；NSH 承载的是同一个 Panel，而不是第二套业务 UI（`docs/reference/DESKTOP_SHELL.md`）。所有推理、工具和状态在 `aleph-server` 中。这种分离意味着：
+- 宿主可以独立于核心更新
+- 核心可以在服务器上无头运行，而宿主远程连接
+- 同一个核心同时服务桌面宿主、CLI 和消息机器人
+
+**连接而非托管。** 宿主连接已存在的 Gateway，不启动、停止或重配服务（`main.rs` 的帮助文本）。唯一的例外是默认关闭的 `embedded-core` feature：启用后，本机目标在打开 Panel 前经 `aleph-desktop-host` 做准入检查，仅当 `127.0.0.1:18790` 拒绝连接时才启动同级的 `aleph-server` 二进制（`desktop/host/src/local_server.rs` 的 `ensure_compatible_ready`）；端口被其他进程占用或已有 Gateway 时，宿主都不会接管或停止它。
+
+**远程核心支持。** 宿主可以用 `--connect <origin>` 连接远程 `aleph-server`，远程源必须使用 HTTPS。Panel 的目录选择器通过 JSON-RPC（`fs.*`，见 `src/gateway/lane.rs`）浏览*服务器*的文件系统，确保远程部署的正确语义。宿主不读取核心的安全数据库；认证凭据由宿主经 `credentials.rs` 存取，`aleph-server bootstrap-token` 子命令（`src/bin/aleph-server/commands/bootstrap_token.rs`）仍在核心侧。
 
 ### 第 2 层：网关
 
@@ -185,7 +192,7 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 
 ## 核心模块
 
-> 26.7.22+ 当前 `aleph-server` 进程内有 **70 个 `src/<module>` 目录 + 6 个顶层 `.rs` 文件**（`canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`）。下面的清单按用途分组，与 `src/` 目录树同步。
+> 26.7.22+ 当前 `aleph-server` 进程内有 **69 个 `src/<module>` 目录（含 `bin/`）+ 6 个顶层 `.rs` 文件**（`json_canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`）。下面的清单按用途分组，与 `src/` 目录树同步。
 
 | 模块 | 路径 | 用途 |
 |--------|------|---------|
@@ -194,7 +201,7 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 | **harness** | `src/harness/` | Think→Act 循环、停止钩子、上下文预算、压缩、`HarnessDeps` 结构 |
 | **agents** | `src/agents/` | 代理运行时、子代理生成、`think_level` 解析、模型绑定 |
 | **thinker** | `src/thinker/` | LLM 交互、提示构建（`PromptBuilder` / `PromptPipeline`）、层注册 |
-| **tool_metadata** | `src/tool_metadata/` | 工具元数据 + risk + unified 索引 + slash 别名（取代旧 `src/dispatcher/`） |
+| **tool_metadata** | `src/tool_metadata/` | 工具元数据 + risk + unified 索引 + slash 别名（取代已退役的独立 dispatcher 模块） |
 | **providers** | `src/providers/` | AI 提供商实现 + 故障转移链 + MoA 聚合器 |
 | **tools** | `src/tools/` | `AlephTool` trait、工具服务器、scoped 工具服务、turn 预算 |
 | **builtin_tools** | `src/builtin_tools/` | 内置工具（`hub/` 收敛 `store/`，`skill_reader/`、`browser_tools/` 按动作拆分） |
@@ -211,10 +218,9 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 | **looping** | `src/looping/` | Loop 子系统（进程内 `LoopRegistry` + 状态机） |
 | **goal** | `src/goal/` | Goal 子系统（持久化 `GoalStore` + 客观 gate + TreeBudget） |
 | **strategy** | `src/strategy/` | Strategy 子系统（composite-keyed `StrategyStore` + planner + renderer） |
-| **hub** | `src/hub/` | **Aleph Hub 单一源**（取代旧 `src/store/`）— `primer` / `catalog_client` / `official_*` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
+| **hub** | `src/hub/` | **Aleph Hub 单一源**（取代已退役的独立 store 模块）— `primer` / `catalog_client` / `official_*` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
 | **artifacts** | `src/artifacts/` | 工件存储（`ArtifactStore` + `MAX_ARTIFACT_BYTES = 50 MB` + 4 个 `ArtifactOrigin`） |
 | **export** | `src/export/` | session HTML / Markdown 导出 + CSS + collect + page + document |
-| **clipboard** | `src/clipboard/` | 剪贴板上下文（10 秒） + 多模图片提取 |
 | **projects** | `src/projects/` | 项目存储（`projects.json` + lock） |
 | **vision** | `src/vision/` | 视觉子系统（claude / OpenAI-compat / 多模） |
 | **a2a** | `src/a2a/` | A2A 协议适配器 |
@@ -223,9 +229,7 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 | **browser** | `src/browser/` | 浏览器自动化（secret guard / PII 单一源） |
 | **cluster** | `src/cluster/` | 单中心节点联邦 — reverse RPC、节点注册、`node_invoke` / `node_file` |
 | **command** | `src/command/` | 轻量命令补全聚合（顶层 `mod.rs` / `parser.rs`） |
-| **components** | `src/components/` | 共享域类型（仅 `types`，原 EventHandler 链路已于 Harness 迁移期间删除） |
 | **context** | `src/context/` | 上下文管理（`ContextBudget` / `ContextCompactor` / `PreflightPipeline`） |
-| **core** | `src/core/` | 核心类型和原语 |
 | **diagnostics** | `src/diagnostics/` | 诊断工具 |
 | **discovery** | `src/discovery/` | 服务发现 |
 | **domain** | `src/domain/` | 共享领域类型 |
@@ -235,7 +239,6 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 | **group_chat** | `src/group_chat/` | 群聊管理 |
 | **guardrails** | `src/guardrails/` | Guardrail 注册表（输入 / 输出 / 工具调用） |
 | **identity** | `src/identity/` | 代理身份与签名 |
-| **init_unified** | `src/init_unified/` | 一次性安装协调（5 阶段：目录 / 配置 / 数据库 / 运行时 / 技能） |
 | **logging** | `src/logging/` | 日志基础设施 |
 | **markdown** | `src/markdown/` | Markdown 处理 |
 | **media** | `src/media/` | 媒体处理 |
@@ -254,6 +257,14 @@ Aleph 的架构建立在四个原则之上，这些原则指导每一个设计�
 | **utils** | `src/utils/` | 工具函数 |
 | **verification** | `src/verification/` | Verifier 链（`StopHookVerifier` / `ToolLoopVerifier` / 模型 robustness profile） |
 | **wizard** | `src/wizard/` | 向导流程（RPC 驱动的 `wizard.next` 会话，非 CLI `aleph wizard` 子命令） |
+| **executor** | `src/executor/` | 内置工具注册表（`builtin_registry/`）+ `ToolRegistry` trait；桌面平台实现在此组合根按目标 OS 注入 |
+| **capability** | `src/capability/` | 进程全局能力句柄（可判定是否已安装）、激活 / 审计 / 普查 |
+| **clarification** | `src/clarification/` | 人在回路澄清：挂起的 agent 回合向人提问并解析回答 |
+| **scope** | `src/scope/` | 数据隔离的作用域词汇与环境归属 |
+| **spend** | `src/spend/` | 按主体与整机的 USD 花费上限 |
+| **canvas** | `src/canvas/` | 白板画布核心：文件存储 + 每画布写锁 + 乐观并发 `revision` |
+| **bundled** | `src/bundled/` | 编译期内嵌的官方技能与插件，启动时解压到 `~/.aleph/` |
+| **cli** | `src/cli/` | 服务端侧的 CLI 支撑（`endpoint` / `ipc_client` / `policy`） |
 
 ---
 
@@ -435,6 +446,9 @@ Aleph 仓库组织为 Cargo 工作空间：
 ```
 aleph/
 ├── Cargo.toml              # 工作空间根 + alephcore 包
+├── justfile                # 构建 / 检查 / 测试入口
+├── config.search.example.toml
+├── CHANGELOG.md
 ├── src/                    # alephcore 库 + aleph-server 二进制文件
 │   ├── lib.rs              # 库 crate 入口点
 │   ├── bin/
@@ -451,16 +465,14 @@ aleph/
 │   ├── sandbox/            # WorkspaceSandbox、OsSandboxDriver
 │   ├── session/            # SessionService、仅追加事件日志
 │   ├── workflow/           # 声明式工作流模板、编译、.workflow.js 互操作
-│   └── ...                 # 50+ 附加模块
+│   └── ...                 # 其余模块见上方「核心模块」表
 ├── desktop/
-│   ├── shell/              # Tauri v2 原生桌面应用（薄壳）
-│   │   ├── src/            # 窗口、托盘、守护进程生命周期、通知
-│   │   ├── splash/         # 启动闪屏
-│   │   └── binaries/       # 捆绑的 aleph-server + bridge 二进制文件
-│   ├── shared/             # DesktopCapability trait + IPC 协议
-│   ├── macos/              # macOS 原生桥接 (Swift)
-│   ├── linux/              # Linux 原生桥接
-│   └── windows/            # Windows 原生桥接
+│   ├── nsh-shell/          # 桌面宿主 aleph-nsh-shell（NSH 0.6.0，薄壳）
+│   ├── host/               # aleph-desktop-host：本机 Gateway 准入探测
+│   ├── shared/             # aleph-desktop：DesktopPlatform + *Capability trait、Swift 助手客户端
+│   ├── macos/              # macOS 平台实现（bridge/ 为 Swift 助手）
+│   ├── linux/              # Linux 平台实现
+│   └── windows/            # Windows 平台实现
 ├── shared/
 │   ├── protocol/           # 共享类型 (aleph-protocol crate)
 │   ├── logging/            # 日志基础设施
@@ -469,10 +481,12 @@ aleph/
 ├── interfaces/
 │   ├── cli/                # 终端客户端
 │   ├── tui/                # TUI 客户端
-│   └── webchat/            # 基于 Web 的聊天接口 (WASM)
+│   └── webchat/            # Panel（Leptos/WASM），经 rust_embed 内嵌进 aleph-server
 ├── docs/                   # 架构文档和设计规范
 └── plugins/                # 插件示例和 SDK
 ```
+
+仓库里仍保留的 `desktop/shell/` 是过渡期遗留的旧宿主，最终将删除，本站不再描述它。
 
 工作空间根 `Cargo.toml` 定义共享依赖版本，以便所有成员保持同步。
 
@@ -659,33 +673,31 @@ Aleph 通过分层协议适配器架构支持多个 AI 提供商：
 
 ### 完整模块清单
 
-`aleph-server` 进程内 ~70 个 `src/<module>` 目录 + 6 个顶层 `.rs` 文件。26.7.22+ 之后**新增** / **重组**的顶层模块：
+`aleph-server` 进程内 69 个 `src/<module>` 目录 + 6 个顶层 `.rs` 文件。26.7.22+ 之后**新增** / **重组**的顶层模块：
 
 | 模块 | 路径 | 用途 |
 |------|------|------|
 | **artifacts** | `src/artifacts/` | 工件存储（`ArtifactStore` + `MAX_ARTIFACT_BYTES = 50 MB` + 4 个 `ArtifactOrigin`） |
 | **export** | `src/export/` | session HTML / Markdown 导出 + CSS + collect + page + document |
-| **hub** | `src/hub/` | **Aleph Hub 单一源**（替代旧 `src/store/`）——`primer` / `catalog_client` / `official_{mcp,plugins,skills}` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
+| **hub** | `src/hub/` | **Aleph Hub 单一源**（替代已退役的独立 store 模块）——`primer` / `catalog_client` / `official_{mcp,plugins,skills}` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
 | **looping** | `src/looping/` | Loop 子系统（进程内 `LoopRegistry` + 状态机 Active/Paused/Stopped） |
 | **goal** | `src/goal/` | Goal 子系统（持久化 `GoalStore` + 客观 gate + TreeBudget） |
 | **strategy** | `src/strategy/` | Strategy 子系统（composite-keyed `StrategyStore` + planner + renderer） |
-| **clipboard** | `src/clipboard/` | 剪贴板上下文（10 秒） + 多模图片提取 |
 | **projects** | `src/projects/` | 项目存储（`projects.json` + lock） |
 | **vision** | `src/vision/` | 视觉子系统（claude / OpenAI-compat / 多模） |
 
 **重组 / 重命名**（路径变化但概念延续）：
 
-| 旧路径 | 新路径 | 说明 |
+| 旧模块（相对 src 目录） | 新路径 | 说明 |
 |--------|--------|------|
-| `src/store/` | `src/hub/` | Hub 收敛：`SourceProvider` trait 退役；改为直接 HTTP 客户端 + `primer` 冷启动投影 |
-| `src/dispatcher/` | `src/tool_metadata/` | 工具元数据 + loom 并发 + risk + unified 索引 |
-| `src/tasks/goal_pursuit.rs` | `src/goal/pursuit.rs` | goal 子系统独立 |
-| `src/gateway/voice/voice_mode.rs` | `src/gateway/voice/session_mode.rs` | 与 `policies/session_mode` 命名对齐 |
-| `src/builtin_tools/store/` | `src/builtin_tools/hub/` | Hub 内置工具：`hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify` |
-| `src/builtin_tools/skill_reader.rs` | `src/builtin_tools/skill_reader/{mod,list,read,tests}.rs` | 技能读取子目录化 |
-| `src/builtin_tools/browser_tools.rs` | `src/builtin_tools/browser_tools/{cookies,dialog,drag,emulate,hover,network,pdf,resize,scroll,session,upload}.rs` | 浏览器工具按动作拆开 |
+| `store/` | `src/hub/` | Hub 收敛：`SourceProvider` trait 退役；改为直接 HTTP 客户端 + `primer` 冷启动投影 |
+| `dispatcher/` | `src/tool_metadata/` | 工具元数据 + loom 并发 + risk + unified 索引 |
+| `tasks/goal_pursuit.rs` | `src/goal/pursuit.rs` | goal 子系统独立 |
+| `builtin_tools/store/` | `src/builtin_tools/hub/` | Hub 内置工具：`hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify` |
+| `builtin_tools/skill_reader.rs` | `src/builtin_tools/skill_reader/{mod,list,read,tests}.rs` | 技能读取子目录化 |
+| `builtin_tools/browser_tools.rs` | `src/builtin_tools/browser_tools/{cookies,dialog,drag,emulate,hover,network,pdf,resize,scroll,session,upload}.rs` | 浏览器工具按动作拆开 |
 
-**新增顶层文件**：`src/canvas_io.rs`、`src/pricing.rs`、`src/command/{mod,parser}.rs`（轻量命令补全聚合）。
+**新增顶层文件**：`src/json_canvas_io.rs`、`src/pricing.rs`、`src/command/{mod,parser}.rs`（轻量命令补全聚合）。
 
 ### 详见
 

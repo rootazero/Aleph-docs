@@ -68,7 +68,7 @@ Of the four built-in templates, `strategy-room` and `code-review` declare a surf
 
 - Team lifecycle: `teams.create`, `teams.get`, `teams.list`, `teams.rename`, `teams.disband`, `teams.delete`, `teams.list_templates`
 - Tasks: `teams.create_task`, `teams.update_task`, `teams.list_tasks`, `teams.list_task_runs`, `teams.list_task_comments`, `teams.list_task_events`, `teams.add_task_comment`, plus `teams.task.pause`, `teams.task.resume`, `teams.task.retry`, `teams.task.skip`, `teams.task.trace`, `teams.task.journal.get`, `teams.task.journal.list`
-- Workflow: `teams.workflow.export_canvas`, `teams.workflow.import_canvas`, `teams.workflow.approve_step`, `teams.workflow.reject_step`, `teams.workflow.retry_step`
+- Workflow: `teams.workflow.approve_step`, `teams.workflow.reject_step`
 - Conversation: `teams.chat.send`, `teams.chat.cancel`, `teams.chat.history`, `teams.chat.thread`
 - Snapshots: `teams.snapshot.create`, `teams.snapshot.list`, `teams.snapshot.get`, `teams.snapshot.restore`, `teams.snapshot.delete`
 - ACP member: `teams.acp_member.add`, `teams.acp_member.remove`, `teams.acp_member.list`
@@ -76,7 +76,7 @@ Of the four built-in templates, `strategy-room` and `code-review` declare a surf
 
 `team_task_control` (pause/resume/retry/skip/cancel), `task_exit_journal`, `team_workflow_canvas`, and `team_snapshot` are exposed to the LLM through built-in tools. The LLM-facing review path is `task_review`; admin-level task control is via the RPCs above.
 
-There is no `teams.run` RPC and no `sequential | parallel | hierarchical` coordination mode. Parallelism comes from the task DAG, dispatcher limits, and group-chat fan-out.
+There is no separate team-run RPC and no `sequential | parallel | hierarchical` coordination mode. Parallelism comes from the task DAG, dispatcher limits, and group-chat fan-out.
 
 ## See Also
 

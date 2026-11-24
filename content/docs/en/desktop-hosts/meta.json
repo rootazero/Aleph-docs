@@ -1,0 +1,9 @@
+{
+  "title": "Desktop Hosts",
+  "pages": [
+    "overview",
+    "panel",
+    "panel-runtime",
+    "plugin-ui"
+  ]
+}

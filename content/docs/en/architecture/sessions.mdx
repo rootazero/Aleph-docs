@@ -1,11 +1,11 @@
 ---
 title: "Session Management"
-description: "SessionKey taxonomy, SessionService actor pipeline, SessionEvent log, presence opt-in, per-session run registry, and template-env deterministic ordering."
+description: "SessionKey taxonomy, SessionService actor pipeline, SessionEvent log, the removed presence reporter, per-session run registry, and template-env deterministic ordering."
 ---
 
 # Session Management
 
-Sessions are the stateful backbone of every Aleph run. Each session has a structured `SessionKey`, an append-only `SessionEvent` log persisted through `SessionService`, and a per-session run mutex enforced by `SessionRunRegistry`. This page covers the key taxonomy, the event log, the actor pipeline, presence opt-in, and the cross-cutting lifecycle concerns.
+Sessions are the stateful backbone of every Aleph run. Each session has a structured `SessionKey`, an append-only `SessionEvent` log persisted through `SessionService`, and a per-session run mutex enforced by `SessionRunRegistry`. This page covers the key taxonomy, the event log, the actor pipeline, the history of the removed presence reporter, and the cross-cutting lifecycle concerns.
 
 For how sessions are created during request routing, see [Gateway Architecture](./gateway). For how sessions feed into the harness, see [Harness](./harness).
 
@@ -172,24 +172,11 @@ The read-side helper `src/session/projection.rs::project_messages` turns an even
 
 ---
 
-## Presence Opt-In
+## History: Presence Opt-In (removed)
 
-`src/tasks/presence/` carries a Slack-style host presence snapshot onto the Gateway event bus:
+Earlier revisions of this page documented a `presence` reporter under `src/tasks/` that broadcast a Slack-style host presence snapshot (`PresenceSnapshot`: hostname, username, platform, idle seconds) on the Gateway event bus as `host.presence.update`, opt-in via `PresenceConfig::enabled` (default `false`). It was removed on 2026-08-09 together with the sibling `mic_level` reporter: neither topic ever had a subscriber (no renderer, RPC, or channel consumed them), and the broadcast leaked the host's hostname and OS username for no reader. See the comment block in `src/tasks/mod.rs`.
 
-```rust
-pub struct PresenceSnapshot {
-    pub hostname: String,
-    pub username: String,
-    pub platform: PlatformTag,
-    pub idle_seconds: Option<u64>,
-    pub idle_state: IdleState,
-    pub captured_at: DateTime<Utc>,
-}
-```
-
-`PresenceReporter::spawn` ticks at `PresenceConfig::interval_secs` (default 30s), collects `(hostname, username, platform, idle_seconds)` via the `SystemCapability` trait, and publishes `TopicEvent` keyed by `host.presence.update`. **Default disabled** — `PresenceConfig::enabled = false` out of the box to avoid leaking PII over the event bus. Operators opt in per-host.
-
-Brain lives in `src/tasks/presence/` (policy, scheduling, publish format); limb stays in the `desktop/` crates that implement `SystemCapability` (mirrors the cron / mic-level brain–limb split).
+The capability itself is not lost: `system_tool`'s `user_idle_time` action answers "is a human at this keyboard" on demand, and cluster node liveness is tracked by the cluster's own ping and idle watchdog. The `host.` arm in `src/gateway/event_visibility.rs` deliberately outlives the reporter as a fail-closed default: any future `host.*` topic is `OperatorOnly` rather than falling through to a global broadcast.
 
 ---
 
@@ -217,7 +204,7 @@ The sanitized prefix stays grep-friendly; the FNV-1a suffix makes collisions dis
 envs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
 ```
 
-The `cluster.environments_list` handler also orders online nodes before offline before alphabetical. The earlier unsorted `HashMap` iteration leaked registry order into the Panel / node_list view; the deterministic ordering is pinned by `list_environments_is_sorted_by_name_then_id` and `environments_list_orders_online_before_offline_and_by_name`.
+The `environments.list` handler (`src/gateway/handlers/cluster.rs`) also orders online nodes before offline before alphabetical. The earlier unsorted `HashMap` iteration leaked registry order into the Panel / node_list view; the deterministic ordering is pinned by `list_environments_is_sorted_by_name_then_id` and `environments_list_orders_online_before_offline_and_by_name`.
 
 ---
 
@@ -231,11 +218,11 @@ The harness emits one `SessionEvent` per Think step plus a single `AssistantRunM
 
 | Method | Description |
 |--------|-------------|
-| `session.get` | Get session info |
-| `session.list` | List sessions (filter by activity, agent, …) |
-| `session.history` | Get message history (legacy projection) |
+| `sessions.preview` | Get a session preview / summary (`session.get` does not exist) |
+| `sessions.list` | List sessions (filter by activity, agent, …) |
+| `sessions.history` | Get message history (legacy projection) |
 | `session.compact` | Trigger compression |
-| `session.delete` | Delete a session |
+| `sessions.delete` | Delete a session |
 
 ---
 

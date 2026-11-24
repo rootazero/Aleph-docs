@@ -3,7 +3,7 @@ title: "providers.*"
 description: "AI 模型提供商配置 RPC 方法"
 ---
 
-`providers.*` 是 LLM 提供商 CRUD 接口。十二个方法在加载实时 `Config` 之后,通过 `register_config_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:260-404`)注册。`create` / `update` / `delete` / `setDefault` 各有两种注册(基础 + `_hot` 变体),但 registry 只暴露 hot 变体;`multi_registry` 决定启动时连接哪个,`None` 时回退到 config-only 路径。OAuth 方法通过 `register_oauth_handlers` 在 OAuth 状态 cell 旁边独立注册。
+`providers.*` 是 LLM 提供商 CRUD 接口。十二个方法在加载实时 `Config` 之后,通过 `register_config_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/settings.rs`)注册。`create` / `update` / `delete` / `setDefault` 各有两种注册(基础 + `_hot` 变体),但 registry 只暴露 hot 变体;`multi_registry` 决定启动时连接哪个,`None` 时回退到 config-only 路径。OAuth 方法通过 `register_oauth_handlers` 在 OAuth 状态 cell 旁边独立注册。
 
 伴随的子命名空间(`embedding_providers.*`、`generation_providers.*`、`rerank_config.*`、`runtimes.*`、`moa.*`、`routing_rules.*`、`voice.*`、`browser_config.*`、`fetch_config.*`、`search_config.*`、`memory_config.*`、`general_config.*`、`behavior_config.*`、`execution_config.*`、`route_config.*`、`generation_config.*`、`security_config.*`、`acp.*`)由同一个 `register_config_handlers` 调用一同连接。它们遵循相同的 vault-backed 配置模式;只有 `acp.*` 取决于是否构造了 `AcpAdapterManager`。
 
@@ -199,7 +199,7 @@ description: "AI 模型提供商配置 RPC 方法"
 | `search_config.*` | `get` / `update` / `test` / `deleteBackend` |
 | `memory_config.*` | `get` / `update` / `retrieve_with_trace` |
 | `general_config.*` / `behavior_config.*` / `execution_config.*` / `route_config.*` / `generation_config.*` / `security_config.*` | `get` / `update` |
-| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown`(仅在构造了 `AcpAdapterManager` 时) |
+| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `acp.sessions.list` / `acp.sessions.cancel` / `acp.sessions.shutdown`(它们属于 `acp.*` 命名空间,不是顶层 `sessions.*`;`cancel` 是协作式取消、即发即忘,`shutdown` 终止 (harness, cwd, name) 对应的 ACP 会话且幂等;仅在构造了 `AcpAdapterManager` 时) |
 
 每个子命名空间遵循相同的 vault-backed 模式(API 密钥和密钥值位于 `ai:<name>` / `embed:<id>` / `gen:<id>` / `web_fetch:<backend>` / `search:<backend>`,永远不会出现在持久化配置中)。
 

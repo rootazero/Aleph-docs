@@ -122,7 +122,7 @@ Plugin origins resolve duplicate IDs as `Config > Workspace > Global > Bundled`.
 
 Plugin components use `plugin:component` qualified names. Built-ins keep short names. The registry also keeps short-name compatibility keys; a conflicting short name does not remove either qualified component, and the first registered owner wins the short key.
 
-`CapabilityDeclaration` is the common registration model for:
+`CapabilityDeclaration` is the common registration model for plugins (a declaration model — the runtime capability model is a different thing, it lives in `src/capability/`, see [Capability Model](/docs/en/capabilities/capability-model)):
 
 - `Tool`
 - `Hook`
@@ -182,10 +182,10 @@ The plural `plugins.*` methods remain compatibility aliases. Marketplace install
 
 - `src/extension/mod.rs` — `ExtensionManager`
 - `src/extension/manifest/` — manifest adapters and parsers
-- `src/extension/discovery/` — scanning and conflict resolution
+- `src/discovery/` — scanning and conflict resolution
 - `src/extension/registry/` — plugin component registry
 - `src/extension/loader.rs` — Static, MCP, and WASM loading
-- `src/extension/mcp_config.rs` — `.mcp.json` parsing and namespacing
+- `src/extension/mcp_config/` — `.mcp.json` parsing and namespacing
 - `src/extension/hooks/` — hook execution and consent
 - `src/extension/runtime/wasm/` — WASM runtime
 - `src/extension/watcher.rs` — hot reload

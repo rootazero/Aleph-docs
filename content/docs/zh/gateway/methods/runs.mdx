@@ -3,27 +3,25 @@ title: "runs.*"
 description: "运行生命周期和队列 RPC 方法"
 ---
 
-当前 `aleph-server` 运行时**没有** `runs.*` JSON-RPC 命名空间。`registry.register("runs.*", ...)` 从未被调用,不存在 `runs` 处理模块,本页面之前版本中描述的方法(`run.wait`、`run.queue_message`)都不是网关协议的一部分。
+当前运行时没有 `runs.*` JSON-RPC 命名空间，也没有独立的运行等待或消息排队 RPC；注册表见 `src/gateway/method_census.rs`。
 
 之前页面暗示的功能——等待运行结束、或向活动运行推入消息——通过其他名称暴露:
 
-- **运行状态**:`chat.send` / `chat.abort` / `agent.run` / `agent.cancel`。事件总线上 `agent.*` 主题的订阅者会看到 `agent.started`、`agent.completed`、`agent.error`,以及按轮的 `stream.agent_trace` 事件。
+- **运行状态**:`chat.send` / `chat.abort` / `agent.run` / `agent.cancel`。事件总线上 `agent.*` 主题的订阅者会看到 `agent.started`、`agent.run.complete`、`agent.run.error`,以及按轮的 `stream.agent_trace` 事件（定义见 `src/gateway/events/frame.rs`）。
 - **运行中转向**:来自源频道(默认)的 `Steer` 消息会被注入到活动事件日志,在下一轮边界被消费。事件总线负责扇出,没有单独的"队列" RPC。
 - **运行中 HITL 审批**:`exec.approval.resolve` 和 `clarification.resolve` 是运行中交互的合法入口(一卡一提示)。
-
-之前版本把 `run.wait` 和 `run.queue_message` 描述得好像存在一样。它们不存在,按它们写的客户端代码会得到 `Method not found`(`-32601`)。
 
 ## 实际存在的内容
 
 在线上最接近的对应物:
 
-- `agents.*`——每个运行的生命周期 RPC(启动、状态、取消、强制中止)位于 `/docs/zh/gateway/methods/agent`。
+- `agent.*`——每个运行的生命周期 RPC(启动、状态、取消、恢复)位于 `/docs/zh/gateway/methods/agent`。
 - `subagent.tree`——快照活动的后台子代理树(`{ "nodes": [...], "count": N }`)。
 - `chat.send`——发起一次聊天轮次;响应携带 `run_id`,可与事件总线关联。
 
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
-- [agent.*](/docs/zh/gateway/methods/agent)——运行生命周期(启动 / 状态 / 取消 / 强制中止)
+- [agent.*](/docs/zh/gateway/methods/agent)——运行生命周期(启动 / 状态 / 取消 / 恢复)
 - [chat.*](/docs/zh/gateway/methods/chat)——聊天轮次传输以及它返回的 `run_id`
 - [events.subscribe](/docs/zh/gateway/methods/events)——订阅 `agent.*` / `stream.*` 主题获取实时运行状态

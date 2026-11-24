@@ -48,9 +48,9 @@ The two physical tiers realise a four-layer cognitive model. `CognitiveLayer` is
 | **Semantic** (facts & rules) | Distilled `preference` / `learning` / `skill` / `reference` notes | Severity-floored confidence decay |
 | **Raw** (audit / 回溯 base) | `raw_memories` rows behind every distillation | Retention sweep only |
 
-Retrieved items are stamped with their layer in the assembled memory context (markdown header + XML `layer="…"` attribute) so the model perceives the structure. Notes flagged `permanent: true` (or tagged `permanent` / `pinned`), and categories in `memory.memory_decay.protected_types`, are exempt from decay/archival — the "永久核心知识不受影响" guarantee.
+Retrieved items are stamped with their layer in the assembled memory context (markdown header + XML `layer="…"` attribute) so the model perceives the structure. Notes flagged `permanent: true` (or tagged `permanent` / `pinned`), and categories in the `protected_types` key of the `[memory.memory_decay]` table, are exempt from decay/archival — the "永久核心知识不受影响" guarantee.
 
-Hot-surfacing and time-decay at recall are on by default (`memory.retrieval_scoring`): frequently-recalled notes bubble up (`reinforcement`, from `recall_signals` counts), stale ones fade (`recency`); both read existing data with no extra model calls.
+Hot-surfacing and time-decay at recall are on by default (`[memory.retrieval_scoring]` config): frequently-recalled notes bubble up (`reinforcement`, from `recall_signals` counts), stale ones fade (`recency`); both read existing data with no extra model calls.
 
 **Embeddings** are pluggable via the `EmbeddingProvider` trait (OpenAI / SiliconFlow / Ollama through the OpenAI-compatible `RemoteEmbeddingProvider`); the **data-stays-local** requirement is met today by pointing it at a local **Ollama**. A *bundled* in-binary ONNX backend is intentionally **not** added — it would pull a heavy single-purpose native dependency into core (R3) for a privacy goal the local-Ollama path already satisfies. It remains a clean future addition behind the same trait if the trade-off changes.
 
@@ -366,14 +366,14 @@ Update-over-create is preferred throughout.
 | `src/memory/notes/` | `KnowledgeNote`, `NoteStore`, `NoteIndexer` |
 | `src/memory/store/` | `RawMemoryStore`, `DreamStore`, `CompressionStore` traits + `SqliteMemoryBackend` |
 | `src/memory/store/sqlite/vec.rs` | sqlite-vec integration |
-| `src/memory/retrieval/` | Generic retrieval interfaces |
-| `src/memory/scoring_pipeline/` | Scoring stages |
+| `src/memory/rerank/` | Rerank providers (Cohere, Jina, Pinecone, SiliconFlow, vLLM, Voyage) |
+| `src/memory/note_retrieval/scoring.rs` | Recency / reinforcement weighting and MMR reordering (`recency_multiplier`, `apply_reinforcement`, `mmr_reorder`) |
 | `src/memory/dreaming/mod.rs` | `DreamDaemon`, `StrategySelector`, `MutationGate` |
 | `src/memory/dreaming/evolution/` | **SkillOpt evolution gate** (gate / budget / evidence / score) |
 | `src/memory/dreaming/stages/` | All `DreamStage` impls |
 | `src/memory/events/` | `MemoryEvent`, event sourcing |
 | `src/memory/transcript_indexer/` | Transcript chunking and indexing |
-| `src/memory/namespace/` | `MemoryNamespace`, isolation levels |
+| `src/memory/namespace.rs` | `NamespaceScope` (single `Owner` variant — a column tag, not an isolation boundary; isolation lives in `src/memory/project_scope.rs`) |
 | `src/memory/scratchpad/` | In-session working-memory buffer |
 
 ---

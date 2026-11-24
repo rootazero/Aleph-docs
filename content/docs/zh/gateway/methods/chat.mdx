@@ -1,0 +1,93 @@
+---
+title: "chat.*"
+description: "面向聊天客户端的高层 RPC 方法：发送、中止、历史、清空、回退与上下文估算"
+---
+
+`chat.*` 是**面向聊天客户端的高层封装**，实现位于 `src/gateway/handlers/chat.rs`。它们不是另一套执行引擎——底层复用 [`agent.*`](./agent) 的执行适配器（`AgentRunManager`），只是把参数与响应收敛成聊天场景更简单的形状。
+
+方法全集见 `src/gateway/method_census.rs` 的 `RPC_METHOD_CENSUS`，六个方法全部为 `Class::Open`：
+
+| 方法 | 用途 |
+|---|---|
+| `chat.send` | 发送一条消息（包装 `agent.run`） |
+| `chat.abort` | 中止当前生成 |
+| `chat.history` | 读取聊天历史 |
+| `chat.clear` | 清空聊天历史 |
+| `chat.rewind` | 从指定事件序号起回退对话（编辑重发的服务端一半） |
+| `chat.context_estimate` | 估算会话下一次 prompt 的上下文占用 |
+
+## chat.send
+
+发送消息。**参数结构与 `agent.run` 完全相同**——共用 `AgentRunParams`，代码里没有第二份字段副本（历史上的 `SendParams` 已删除），`input` 字段同时接受 `message` 作为别名。
+
+**响应:** `{ "run_id": String, "session_key": String, "streaming": bool }`。
+
+流式增量不会直接回给调用方，而是以事件形式推送，见 [网关事件](./events)。
+
+## chat.abort
+
+中止一次正在运行的生成。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `run_id` | string | 是 | 要中止的 run id |
+| `session_key` | string | 否 | 连同该会话的等待队列一起放弃 |
+
+`session_key` 是可选的：老客户端不传也能工作，但只停一个 run 会留下仍然占着会话槽位的排队消息——取消会释放槽位、唤醒队首等待者，用户刚表示不想收到的那些消息仍会一个接一个地触发完整的 agent run。不传 `session_key` 就是这种情况。
+
+## chat.history
+
+读取聊天历史。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_key` | string | 是 | 规范 session key |
+| `limit` | number | 否 | 最大消息数，省略则取全部 |
+
+**响应:** 消息数组。每条消息（`ChatMessage`）包含 `role`、`content`、`timestamp`（ISO 8601），以及可选的 `run_id`、`context_tokens`、`context_window`、`total_tokens`、`speaker_id`。可选字段在无值时会被省略，而不是写成 `null`。
+
+`context_tokens` / `context_window` / `total_tokens` 记录在 assistant 回合上，因此 Panel 重载后上下文占用条仍然能重新投影。
+
+## chat.clear
+
+清空指定会话的聊天历史。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_key` | string | 是 | 要清空的会话 |
+
+清空会作废权威事件日志的对应部分（与 `sessions.reset`、`sessions.delete`、`chat.rewind` 同一族语义），因此被删掉的对话不会通过回放、BM25 搜索或下次启动时的投影协调器重新浮现。
+
+## chat.rewind
+
+从给定事件序号起**回退**对话，这是「编辑并重发」的服务端一半。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_key` | string | 是 | 要回退的会话 |
+| `seq` | number | 是 | 第一个要作废的事件序号，**含该序号** |
+
+语义细节：
+
+- `seq >= seq` 的事件离开实时会话日志，其投影行也从转录中删除；`seq` 之前的部分原样保留，从未被投影成事件行的转录行（启动期的孤立通知、历史遗留行）也不受影响。
+- 调用方传入的是**想要替换的那条消息**的序号：投影器把行 id 写成 `"{session_key}:{seq}"`（见 `src/session/projection.rs`）。要编辑重发用户消息，就在该消息的 `seq` 处回退——它和其后的一切消失——然后用 `chat.send` 发新文本。
+- `chat.rewind` **从不**追加替换内容本身。
+- `seq` 必须 `>= 1`（第一条追加落在序号 1）。
+
+## chat.context_estimate
+
+估算会话下一次 prompt 的上下文占用，供上下文占用条使用。返回 `null` 表示无法解析会话或模型，此时 Panel 保持占用条隐藏。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_key` | string | 是 | 要估算的会话 |
+
+**响应:** `{ "used_tokens": Number, "window_tokens": Number }`，或 `null`。
+
+这个方法返回的 `used_tokens` 来自该会话的**整条事件日志**，`window_tokens` 来自该会话所绑定的模型，因此它不是「只读一个 token 计数」那么简单——调用方能推断出会话用的是哪个模型、以及大概说了多少。于是它受 `src/gateway/method_visibility.rs` 的 `KeyChecked` 可见性处理：只有对该会话可见的调用方能拿到估计值。
+
+拒绝时复用的是本方法自己的 `null` 形状，而不是另造一个只为拒绝存在的错误码。
+
+## 可见性
+
+六个方法在 `src/gateway/method_visibility.rs` 里都是 `Treatment::KeyChecked`——是否能调用取决于调用方对目标会话的可见性，而不是方法本身是否公开。相关说明见 [JSON-RPC 错误模型](/docs/zh/api/jsonrpc)。

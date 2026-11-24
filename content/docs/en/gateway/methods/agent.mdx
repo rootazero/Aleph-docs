@@ -14,7 +14,7 @@ Agent methods control Aleph's core AI execution loop (the Think→Act harness). 
 | [`agent.cancel`](#agentcancel) | Cancel an in-flight run |
 | [`agent.list`](#agentlist) | List agents registered in the router |
 
-> Historical aliases such as `agent.history` / `agent.clear` / `agent.respondToInput` / `agent.events` are not RPCs. Use `chat.history` / `chat.clear` for session reads and [`events.*`](./events) for streaming.
+> Use `chat.history` / `chat.clear` for session history and clearing, and [`events.*`](./events) for subscriptions. See `src/gateway/method_census.rs`.
 
 ### agent.run
 
@@ -157,7 +157,7 @@ After `agent.run` is accepted, the event bus delivers run lifecycle changes as W
 |-------|-------------|
 | `run.accepted` | Run queued and started |
 | `agent.reasoning` | Reasoning-phase output |
-| `agent.reasoning.block` | Reasoning block (dual-process cognition) |
+| `agent.reasoning` | Reasoning event; see `src/gateway/events/frame.rs` |
 | `agent.tool.start` | Tool call begins |
 | `agent.tool.update` | Tool progress update |
 | `agent.tool.end` | Tool call ends |

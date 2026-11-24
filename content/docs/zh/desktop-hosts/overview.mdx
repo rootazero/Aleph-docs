@@ -1,0 +1,177 @@
+---
+title: "桌面宿主"
+description: "Aleph 桌面端的目标形态 NSH 宿主：它是什么、如何连接 Gateway、提供哪些原生集成，以及当前的平台支持边界"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+本页回答两个问题：Aleph 的桌面端到底是什么，以及它如何与 Gateway 配合运行。
+
+## 桌面宿主是什么
+
+桌面宿主是一个薄原生壳：只提供窗口容器、托盘、全局热键、通知、凭据存取和登录项状态读取等系统级集成。业务界面全部在 [Panel](./panel) 里，宿主不持有任何聊天或会话投影（`desktop/nsh-shell/src/shell_host.rs` 的模块注释：`The native shell hosts the canonical Panel; it owns no chat projection.`）。这对应红线 R2：产品 UI 只有一个真值源。
+
+桌面宿主的目标形态是 NSH：crate `aleph-nsh-shell`，位于 `desktop/nsh-shell/`，基于 nsh 0.6.0（`nsh-core`、`nsh-base`、`nsh-engine` 均锁定为 `=0.6.0`，见 `desktop/nsh-shell/Cargo.toml`）。NSH 托管的是同一个 Leptos/WASM Panel，不是第二套业务 UI（`docs/reference/DESKTOP_SHELL.md`）。
+
+<Callout type="warn" title="过渡期说明">
+仓库里仍有一个旧桌面壳（`desktop/shell/`），它是过渡期遗留，最终会删除；本站不再描述它的架构。目前发布流水线构建的仍是旧壳，NSH 还没有自己的发布流水线，详见 [构建](../development/building)。
+</Callout>
+
+## 进程模型
+
+NSH 是一个独立进程，在窗口里加载 Panel 的 WebView。Panel 的地址由连接目标决定：本地目标是 `http://127.0.0.1:18790/`，远程目标是该 origin 的根路径（`shared/client/src/connection_target.rs` 的 `ConnectionTarget::panel_url`）。
+
+### 只连接已存在的 Gateway
+
+`aleph-nsh-shell --help` 的用法文本给出了宿主的语义（`desktop/nsh-shell/src/main.rs`）：
+
+```text
+Usage: aleph-nsh-shell [--connect <origin> | --autostart-status | --desktop-ipc-status <socket>]
+
+Connects to an existing Gateway; does not start, stop or reconfigure a service.
+Use HTTPS for a remote origin. No target or credential URL is persisted.
+```
+
+也就是说，宿主的原生根只拥有窗口回调和任务，不拥有 Gateway 的生命周期。`docs/reference/DESKTOP_SHELL.md` 同样写明 NSH 使用已有的 Gateway，且没有宿主侧的 daemon supervisor 迁移。
+
+### 内嵌启动（`embedded-core` 特性）
+
+上面的语义有一个编译期例外。`desktop/nsh-shell/Cargo.toml` 定义了 feature `embedded-core`（依赖 `aleph-desktop-host` 的 `gateway-admission`），默认不开。启用它并且连接目标是本地（`ConnectionTarget::Local`、非 QA 启动）时，`desktop/nsh-shell/src/shell_host.rs` 的 `acquires_local_server` 为真，`desktop/nsh-shell/src/main.rs` 会在开窗前调用 `aleph_desktop_host::local_server::ensure_compatible_ready()`。
+
+该函数的规则（`desktop/host/src/local_server.rs`、`desktop/host/src/local_server/admission.rs`）：
+
+- 先对 `127.0.0.1:18790` 做 TCP 探测，再取 `/health` 与 `/ready` 两份文档（每份最大 4 KiB），要求两边 `version` 一致。
+- 只有连接被明确拒绝（`ConnectionRefused`）时才允许启动，并且只启动与宿主可执行文件同目录的 `aleph-server`，参数为 `--bundled-content-only`。
+- 端口已有监听但文档不兼容，直接报错 `cannot establish compatible local Gateway readiness`，不启动任何进程。
+- 等待就绪的总时限 40 秒，轮询间隔 400 毫秒，单次探测超时 2 秒。
+
+因此更精确的表述是：默认构建的 NSH 只连接；带 `embedded-core` 的构建在本地目标上只会在端口确实空闲时启动随包的 Gateway，不接管、不停止、不重配已有服务。
+
+## 命令行接口
+
+入口在 `desktop/nsh-shell/src/main.rs`，参数只有三种形态，且互斥：
+
+| 调用 | 作用 |
+|---|---|
+| 无参数 | 连接本地目标 `http://127.0.0.1:18790/` |
+| `--connect <origin>` | 连接指定 origin；远程目标应使用 HTTPS |
+| `--autostart-status` | 只读取当前应用的登录项状态并以 JSON 打印，不修改 |
+| `--desktop-ipc-status <socket>` | 经 Unix IPC 读取 Gateway 的 `health`，见 [只读 IPC 状态查询](#只读-ipc-状态查询) |
+
+`--connect` 的校验在 `desktop/nsh-shell/src/shell_host.rs` 的 `HostSettings::from_launch`：
+
+- 长度不超过 2048 字节，不含 ASCII 控制字符和反斜杠。
+- 远程目标必须是不含用户名、密码、query、fragment 的根 origin（路径只能是 `/`）。
+- 凭据端点必须是 HTTPS 或回环 HTTP，否则拒绝（`Native credentials require HTTPS or loopback HTTP`）。
+- 不持久化目标，也不持久化凭据 URL。
+
+## 连接与握手
+
+### Panel 经 WebView 直连 Gateway
+
+当前二进制里，宿主自己不开 Gateway 连接。Panel 在 WebView 里按既有的 `/ws` 路径连接 Gateway，协议探测由 Gateway 侧的 `system.hello` 处理：它挂在 `connect` 之后，协商兼容的次版本并只回报已实现的特性，客户端 major 不匹配时返回 `INVALID_PARAMS`，且不负责准入和身份（`src/gateway/handlers/system_hello.rs`）。各传输的差异见 [Panel 宿主](./panel) 的传输矩阵。
+
+### 未接入主程序的原生连接层
+
+`desktop/nsh-shell/src/` 下还留有 `connection.rs`、`supervisor.rs`、`session.rs`、`runtime.rs` 和 `components/`。它们没有在 `desktop/nsh-shell/src/main.rs` 中以 `mod` 声明，`desktop/nsh-shell/Cargo.toml` 也没有额外的 `[[bin]]` 或 `[lib]`，所以不属于当前编译出来的二进制。这些文件记录了早期（Phase 2）的原生连接设计，数值如下，仅供理解历史，不要当作现状行为：
+
+| 项目 | 值（`desktop/nsh-shell/src/connection.rs`） |
+|---|---|
+| 地址 | `DAEMON_URL = "ws://127.0.0.1:18790"` |
+| 握手 | `system.hello`，`ProtocolVersion { major: 1, minor: 0 }`，客户端名 `aleph-nsh-desktop`，`ui_runtime: "nsh"` |
+| 请求特性 | `EventReplay`、`Snapshot`、`BinaryChannel` |
+| 校验 | 返回的 `protocol.major != 1` 即失败 |
+| 重连 | 起步 2 秒，上限 30 秒，连续失败最多 10 次 |
+| 超时与轮询 | 连接超时 40 秒，轮询 100 毫秒 |
+
+`desktop/nsh-shell/src/supervisor.rs` 里的端口占用分类（`Free`、`DaemonReady`、`DaemonBooting`、`Foreign`）同样未接入；现行实现见下一节。
+
+## 本地服务就绪判定
+
+「端口有响应」不等于「那是 Aleph」。`desktop/host/src/local_server.rs` 把监听者分成四类（`PortOccupant`）：
+
+| 分类 | 判定 | 含义 |
+|---|---|---|
+| `Free` | TCP 连接被拒绝 | 没有监听者；注释特别说明这不证明之后一定能绑定成功 |
+| `DaemonReady` | `/ready` 返回 200 | 看起来是已就绪的 Gateway，但没有二进制身份证明 |
+| `DaemonBooting` | `/ready` 返回 503 | 看起来是启动中的 Gateway，应等待而不是重启 |
+| `Foreign` | 其它状态码，或连接结果未知 | 无法识别，一律失败关闭 |
+
+只有 `Free` 才可能授权启动；`Foreign` 一律报错、不启动（`ensure_ready` 的错误文本为 `no new daemon was launched`）。连接结果未知（既不是成功也不是被拒绝）同样归入 `Foreign`，不会授权启动。严格版本 `ensure_compatible_ready` 在此之上追加了文档兼容检查，见上文。
+
+## 原生集成
+
+以下行为都在 `desktop/nsh-shell/src/main.rs` 与 `desktop/nsh-shell/src/panel_bridge.rs`。
+
+### 窗口与托盘
+
+- 主窗口默认尺寸 1180×800，应用 ID `com.aleph.nsh-shell`（`desktop/nsh-shell/src/shell_host.rs` 的 `APP_ID`）。
+- 点击关闭按钮只隐藏窗口（`close_on_press = Some(false)` 加 `close_window.hide()`），不退出；macOS 另设 `keep_alive_on_close: true`。
+- 托盘菜单三项：`Show Aleph`、`Enable Notifications`、`Quit Aleph`。
+
+### 全局热键
+
+默认热键 `mod+shift+a`，用于显示或隐藏主窗口。环境变量 `ALEPH_SHELL_HOTKEY` 可改写，设为 `disabled` 则不注册。热键无效或被系统拒绝时只打日志，不影响启动。
+
+### 通知
+
+Panel 通过桥发出 `Notify` 消息；宿主在窗口不处于「可见且聚焦」时才请求系统通知，且仅在系统权限为 `Granted` 时展示。标题必须非空且不超过 256 字节，正文不超过 2048 字节（`shared/protocol/src/panel_shell.rs` 的 `valid_notification`）。待发队列容量为 1，队列满时丢弃并打日志。点击通知（标识 `aleph-panel-chat`）会显示并聚焦窗口，然后打开 Chat。系统通知权限不是产品功能开关，宿主不提供关闭通知功能的开关（`docs/reference/DESKTOP_SHELL.md`）。
+
+### 深链与 URL scheme
+
+宿主注册 `aleph` URL scheme（`.url_schemes(["aleph"])`）。`desktop/nsh-shell/src/panel_bridge.rs` 用 `next_url_scheme_open` 接收系统打开事件，当前只识别精确等于 `aleph://open` 的 URL，处理为「让 Panel 打开 Chat」；其它 `aleph://` URL 会被忽略。
+
+打开 Chat 的流程是文档绑定的：宿主先发 `Probe`，Panel 回复带 32 位小写十六进制 `document` 标识的 `Ready`，之后宿主发 `OpenChat`，等待 `ChatOpened`，2 秒内没有确认就放弃，不重放动作。
+
+> **已知限制：** 把深链路由到 Chat 以外的具体视图还没有实现。`docs/reference/DESKTOP_SHELL.md` 的 follow-ups 记录了「Panel 侧尚无处理程序」这一缺口，该条是针对旧壳写的；对 NSH，上述代码行为是权威描述。
+
+### 凭据
+
+`desktop/nsh-shell/src/credentials.rs` 为 Panel 提供设备凭据的本机存取，后端是 `aleph_client::DeviceCredentialStore`，按 Gateway 地址分库；默认目标的 Gateway 地址是 `ws://127.0.0.1:18790/ws`。Panel 通过桥发起的 `CredentialCall` 只有三种操作：`Load`、`Save`（带 `lease_id` 和 `DeviceConnectCredential`）、`Delete`（带 `lease_id`）；回复为 `Loaded`、`Saved`、`Deleted { existed }` 或 `Failed { error }`，错误只有 `Unavailable`、`Rejected`、`Malformed` 三种（`shared/protocol/src/panel_shell.rs`）。页面导航或重载时，宿主会使现有凭据租约失效（`CredentialService::invalidate`）。
+
+### 登录项
+
+`desktop/nsh-shell/src/autostart.rs` 只读取「当前应用」的登录项状态，不是服务端自启，也没有写入入口。状态取值为 `Enabled`、`Disabled`、`RequiresApproval`、`Unavailable { reason }`、`Failed`。非 macOS 平台一律返回 `Unavailable { reason: UnsupportedPlatform }`。
+
+macOS 上读的是 `SMAppService::mainAppService().status()`，并先做身份校验：进程必须运行在 `.app` 包里（否则 `NotAppBundle`），包标识必须等于 `APP_ID` 且可执行文件落在 `Contents/MacOS` 下（否则 `IdentityMismatch`），系统需提供 `SMAppService`（macOS 13 起，否则 `ApiUnavailable`）。
+
+## 只读 IPC 状态查询
+
+`--desktop-ipc-status <socket>` 经 Unix domain socket 读取一次 Gateway 的 `health`，不打开 Panel，也不回退到 WebSocket（`desktop/nsh-shell/src/ipc_status.rs`）。
+
+- 参数必须只有这一组，且 socket 路径是绝对路径；与 QA 配置同时出现会被拒绝。
+- 握手使用 `ProtocolVersion { major: 1, minor: 0 }`、客户端名 `aleph-nsh-shell`、`ui_runtime: "nsh"`、空特性列表。
+- `health` 调用超时 5 秒，关闭连接超时 2 秒；响应必须是 `status == "healthy"` 且 `timestamp` 非空，否则失败。
+- 非 Unix 平台直接报 `Desktop IPC is unavailable on this platform`。
+
+被查询的 Gateway 需要用 `--desktop-ipc <socket>` 预先启动，见 [Panel 宿主](./panel) 的传输矩阵。
+
+## 平台支持现状
+
+按 `docs/reference/DESKTOP_SHELL.md` 如实记录（对应代码仓 VERSION 26.9.1）：
+
+| 平台 | 现状 |
+|---|---|
+| macOS | 常驻窗口、托盘、热键、`aleph://open`、通知和窗口位置有本地证据（回执 `docs/superpowers/runs/2026-11-21-phase10-closeout.md`）；多屏拓扑仍未测试 |
+| Linux | 有入口代码（`desktop/nsh-shell/src/platform.rs` 的 Linux 分支），尚无验收结论 |
+| Windows | 有入口代码，尚无验收结论；Desktop IPC 的 Named Pipe 版本未做 |
+
+这不是全面发布：目前没有默认桌面切换、没有宿主侧 daemon supervisor 迁移、没有发布分发，Windows 与 Linux 的 NSH 验收以及旧壳的移除都还没有发生。
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 与 `docs/research/NSH_PROTOCOL_V1.md`（NSH 作为目标宿主与协议），迁移路线见 `docs/superpowers/plans/2026-11-22-nsh-panel-migration-roadmap.md`（三平台、逐面替换证明、真实的 14 天双轨期，之后才移除旧壳）；当前实现见 `desktop/nsh-shell/src/main.rs`。
+
+## 历史：旧桌面壳的 daemon 托管
+
+旧桌面壳（Tauri v2 应用，`desktop/shell/`）的设计是「应用即安装包」：随包带 `aleph-server`，由壳自带的 daemon supervisor 启动、探活并在崩溃后重启，还内置托盘、自动更新、深链、热键、菜单和通知（`docs/reference/DESKTOP_SHELL.md` 的 Daemon lifecycle 与 Build & release 章节，源码见 `desktop/shell/src/daemon.rs`）。
+
+这个形态已被 NSH 取代：NSH 不接管 Gateway 生命周期，只连接已存在的 Gateway。旧壳是过渡期遗留，最终会删除；删除前其发布流水线（`.github/workflows/aleph-app-release.yml`）仍在构建它。
+
+两者的差别：
+
+| 维度 | 旧桌面壳（历史） | NSH（目标） |
+|---|---|---|
+| Gateway 生命周期 | 壳自带 supervisor，启动并接管 `aleph-server` | 默认只连接；`embedded-core` 构建仅在端口空闲时启动随包 Gateway |
+| 发布 | 发布流水线构建 | 暂无发布流水线 |
+| 自动更新、macOS 应用菜单、服务控制 | 有 | 未实现（`desktop/nsh-shell/src/` 中没有对应模块） |
+
+延伸阅读：[Panel 宿主](./panel)。

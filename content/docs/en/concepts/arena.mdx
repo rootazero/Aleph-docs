@@ -88,7 +88,7 @@ pub struct Environment { /* serialized external view */ }
 - Parameterized SQL queries (no injection risk)
 - Locks use the `unwrap_or_else(|e| e.into_inner())` pattern
 - All queries bind with `params![]`
-- `cluster.file.write` no longer has a check-then-write TOCTOU
+- `file.write` no longer has a check-then-write TOCTOU
 
 ---
 
@@ -145,7 +145,7 @@ pub struct Environment { /* serialized external view */ }
 
 - Live fleet feed
 - Node identity persistence (`last_seen_at` on the connect verdict)
-- Cluster write R8 complete (previously half-done; `cluster.file.write` no longer has a TOCTOU)
+- Cluster write R8 complete (previously half-done; `file.write` no longer has a TOCTOU)
 
 ### Dreaming / Insights Association
 

@@ -80,7 +80,7 @@ pub struct InProcessActorSessionService {
 
 **Location**: `src/session/in_process.rs`
 
-Each `SessionActor` (defined in `src/session/actor.rs`) replays events from SQLite on startup, maintains in-memory state (`src/session/state.rs`), and processes commands until shutdown. Per-actor state lives in `src/session/state.rs`; event types live in `src/session/events.rs`.
+Each `SessionActor` (defined in `src/session/actor.rs`) replays events from SQLite on startup, tracks its head sequence (`head_seq`) and the broadcaster / observer handles, and processes commands until shutdown. Folding the event log into read-side state lives in `src/session/reduction.rs` and `src/session/projection.rs`; event types live in `src/session/events.rs`.
 
 ---
 
@@ -166,32 +166,20 @@ A Harness that crashed mid-turn will surface as a `TurnStarted` with no matching
 | Idle timeout | 30 minutes |
 | Grace period for shutdown | 5 seconds |
 
-**Integration test**: `tests/session_wake_recovery.rs`
+**Tests**: `wake_writes_session_woken_with_prior_head` and `concurrent_wake_and_emit_keeps_session_woken_first` in `src/session/in_process.rs`
 
 ---
 
 ## Gateway RPC Relationship
 
-Gateway `session.*` RPC methods remain on `SessionManager` (`src/gateway/session_manager/`). A dual-write shim (`src/session/shim.rs`) mirrors each `SessionManager` append into `SessionService` so `session_events` stays populated in parallel with the legacy `messages` table.
+Gateway `session.*` RPC methods still sit on `SessionManager` (`src/gateway/session_manager/mod.rs`), which is now a compatibility layer: agent execution (`agent_loop`) no longer reads or writes `SessionManager` directly and goes through `SessionService`, and messages are materialized from `session_events` by `MessageProjector` (`src/gateway/session_projector.rs`). The earlier dual-write shim that mirrored every `SessionManager` append into `SessionService` was removed as dead code (commit `db2e5865c`, "session: remove dead dual-write shim").
 
 ```
-Gateway RPC (session.append, session.get, etc.)
-        │
-        ▼
-┌─────────────────┐     ┌──────────────────┐
-│  SessionManager │────►│  Legacy messages │
-│                 │     │  table           │
-└────────┬────────┘     └──────────────────┘
-         │
-         │ dual-write shim (src/session/shim.rs)
-         ▼
-┌─────────────────┐     ┌──────────────────┐
-│  SessionService │────►│  session_events  │
-│                 │     │  table           │
-└─────────────────┘     └──────────────────┘
+agent_loop / AgentHarness ──► SessionService ──► session_events table
+                                    │
+                                    ▼ (read side)
+Gateway RPC (session.append, session.get, …) ──► SessionManager ◄── MessageProjector
 ```
-
-A future phase will migrate Gateway RPC directly to `SessionService` and remove the shim.
 
 ---
 
@@ -201,7 +189,7 @@ A future phase will migrate Gateway RPC directly to `SessionService` and remove 
 |----------|--------|-------|
 | `AgentHarness` | Ready | Uses `SessionService` exclusively for history read/write |
 | `SubagentTool` | Ready | Uses `SessionService` for ephemeral child sessions |
-| Gateway `session.*` RPC | On `SessionManager` | Dual-write shim mirrors to `SessionService` |
+| Gateway `session.*` RPC | On `SessionManager` | Compatibility layer; messages materialized from `session_events` by `MessageProjector` |
 | Memory / Dream / other | Read-only adoption | `SessionService::get_events` available; adoption on case-by-case basis |
 
 ---
@@ -213,12 +201,11 @@ A future phase will migrate Gateway RPC directly to `SessionService` and remove 
 | `src/session/service.rs` | `SessionService` trait definition |
 | `src/session/in_process.rs` | `InProcessActorSessionService` implementation |
 | `src/session/actor.rs` | `SessionActor` — per-session tokio task |
-| `src/session/state.rs` | Per-actor in-memory state |
+| `src/session/reduction.rs` | Pure reduction of the event log (`RunDisposition`, `RunProgress`, dangling-call detection) |
 | `src/session/events.rs` | `SessionEvent` enum and helper types |
 | `src/session/store.rs` | SQLite schema and `SessionEventStore` trait |
 | `src/session/projection.rs` | `project_messages` and other read-side projections |
-| `src/session/shim.rs` | Dual-write shim from `SessionManager` to `SessionService` |
-| `tests/session_wake_recovery.rs` | Crash recovery integration test |
+| `src/session/in_process.rs` (`#[cfg(test)]`) | `wake()` / crash-recovery tests |
 
 ---
 

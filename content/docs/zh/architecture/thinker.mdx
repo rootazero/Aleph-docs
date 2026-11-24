@@ -18,16 +18,16 @@ description: "36 层的提示组装（19 Stable / 17 Dynamic）、缓存区分�
 | `PromptBuilder` | `prompt_builder/` | 为子代理与主循环路径构建系统提示 |
 | `PromptPipeline` | `prompt_pipeline.rs` | 基于有序层列表的可组合提示组装引擎 |
 | `PromptLayer` | `prompt_layer.rs` | 单个层的 trait；声明 priority / paths / stability |
-| `PromptConfig` | `prompt_builder.rs` | 用户可调的提示开关（`language`、`extra_files`、…） |
+| `PromptConfig` | `prompt_builder/` | 用户可调的提示开关（`language`、`extra_files`、…） |
 | `InteractionManifest` | `interaction.rs` | 频道能力感知（paradigm + capabilities + constraints） |
 | `SecurityContext` | `security_context.rs` | 策略驱动的权限 |
 | `ContextAggregator` | `context.rs` | 把 interaction + security 调和为 `ResolvedContext` |
 | `PromptMode` | `prompt_mode.rs` | `Full` / `Compact` / `Minimal` 模式过滤 |
 | `IdentityFiles` | `identity_files.rs` | 已加载的 `SOUL.md` / `IDENTITY.md` / `AGENTS.md` / `TOOLS.md` / `HEARTBEAT.md` |
 | `SoulManifest` | `soul.rs` | `SOUL.md` 结构化解析器（供 `identity.get` 预览使用） |
-| `MemoryContextProvider` | `memory_context_provider.rs` | 记忆信封 + 取向 + 召回消息构造器 |
+| `MemoryContextProvider` | `memory_context_provider/` | 记忆信封 + 取向 + 召回消息构造器 |
 | `UnifiedMessage` / `ProviderDelta` | `src/providers/message.rs` | LLM 无关的消息 + 流式增量 |
-| `MessageAssembler` | `src/providers/message_assembler.rs` | 单一 reducer，拥有组装中的消息并实时剥离内联 `<think>` |
+| `MessageAssembler` | `src/gateway/message_assembly/assembler.rs` | 单一 reducer，对一次 run 的流式可见文本做归约；实时剥离推理 / 记忆包装（唯一消费者：执行引擎的 event drain） |
 
 ---
 

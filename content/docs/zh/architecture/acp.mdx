@@ -133,7 +133,7 @@ User ──> Aleph ──> AcpAdapterManager ──> External CLI
 |-------|---------|
 | Adapter CRUD | `acp.create`、`acp.delete`、`acp.get`、`acp.list`、`acp.update` |
 | Adapter 预设 | `acp.presets`、`acp.presets_meta`、`acp.test`、`acp.set_enabled` |
-| 会话 | `acp.sessions_list`、`acp.sessions_cancel`、`acp.sessions_shutdown` |
+| 会话 | `acp.sessions.list`、`acp.sessions.cancel`、`acp.sessions.shutdown` |
 
 完整注册位于 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs::register_acp_handlers`（同一文件里的 `register_cron_handlers` / `register_heartbeat_handlers` 同源）。
 

@@ -1,0 +1,153 @@
+---
+title: "Plugin UI"
+description: "Whether a plugin can ship UI, what kind of UI, and who renders and authorizes it: Panel tabs, the capability UI surface, and the planned hybrid plugin UI"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+This page answers the three questions plugin authors ask most: can a plugin ship UI, what kind of UI, and where are the boundaries.
+
+## Positioning
+
+Plugin UI lives inside the [Panel](./panel). There is exactly one source of product UI; desktop hosts only adapt platforms and protocols, and Core remains the single authority for business state and authorization (redline R2, `docs/reference/REDLINES.md`; the host "hosts the webview only; no business UI" per `docs/reference/DESKTOP_SHELL.md`). A plugin contributes UI by extending the Panel, not by injecting code into the host process.
+
+Two current-state channels in the code relate to plugin UI:
+
+| Channel | Purpose | Entry point |
+|---|---|---|
+| Plugin Panel tab | A plugin declares a tab; Core publishes its immutable assets; the Panel loads them on demand | `src/extension/panel_publication/mod.rs` |
+| Capability UI surface | A display/input capability held by Core; the Panel renders it and acknowledges each frame | `src/capability/ui_surface.rs` |
+
+<Callout type="warn" title="Not compiled into the default Panel">
+
+All Panel-side code that loads plugin tabs or renders the capability UI surface lives in `interfaces/webchat/src/panel/`, and the whole module is compiled only under the opt-in feature `panel-modular` (`#[cfg(feature = "panel-modular")]` in `interfaces/webchat/src/lib.rs`; in `interfaces/webchat/Cargo.toml` the default feature is `legacy-terminal`, and `panel-modular` requires `--no-default-features`). A default Panel build does not load plugin tabs. The Gateway and Core sides — publication, the asset route, and the UI surface methods — are not feature-gated.
+
+</Callout>
+
+## Current state: plugin Panel tabs
+
+### Manifest declaration
+
+A plugin manifest declares a tab through the optional `panel` field (`PanelUiManifest` in `src/extension/manifest/types.rs`). Its fields:
+
+| Field | Meaning |
+|---|---|
+| `tab_id`, `label`, `icon`, `order` | Tab identity and presentation |
+| `entry` | Path of the entry module |
+| `api_major` | Panel UI API major version; must currently equal `PANEL_UI_API_MAJOR = 1` (`shared/protocol/src/panel.rs`) |
+| `permissions` | Requested permissions |
+| `asset_integrity` | Integrity of the entry asset, formatted as `sha256-` followed by a base64 digest |
+
+Validation failures return prefixed error codes: `panel.invalid_identity`, `panel.invalid_presentation`, `panel.incompatible_api`, `panel.invalid_entry`, `panel.invalid_integrity` (`src/extension/manifest/types.rs`).
+
+Community plugins may only request permissions from a fixed allowlist (`supported_community_permission` in `shared/protocol/src/panel.rs`): `pty.list`, `pty.spawn`, `pty.attach`, `pty.input`, `pty.resize`, `pty.close`, `config.get`, `events.subscribe:pty.screen`, `events.subscribe:pty.exit`, `sessions.list`.
+
+### Publication chain
+
+```
+manifest panel field
+  -> admission (admission.rs): read and verify the entry file off-lock
+  -> publication store (PanelAssetPublicationStore): commit an immutable generation
+  -> capability snapshot (PanelUiCapabilitySnapshot): filtered by visibility scope
+  -> authenticated Gateway route /tabs/{*entry}: deliver module bytes
+  -> Panel: discover the snapshot, load modules on demand
+```
+
+- Admission (`src/extension/panel_publication/admission.rs`): the entry path is canonicalized, then rejected if it escapes the root (`panel.asset_outside_root`), is not a regular file, exceeds the limit (`panel.asset_entry_limit`), or fails integrity (`panel.asset_integrity_mismatch`). `ENTRY_LIMIT` is 4 MiB per entry; `GENERATION_LIMIT` is 64 MiB per generation.
+- Publication store (`src/extension/panel_publication/mod.rs`): an asset identity `PanelAssetIdentity` is `plugin_id`, `plugin_version`, `tab_id`, and `source_revision`. A replacement whose revision is not greater than the current one is rejected (`Stale`); a committed generation never changes. A declaration is published only if its origin is `Community`, its trust is `Trusted`, its status is enabled, its `public_base` is `./tabs/`, and its entry sits under `./tabs/<plugin_id>/<version>/`.
+- Asset route (`src/gateway/server/panel_asset_route.rs`): mounts `/tabs`, `/tabs/`, and `/tabs/{*entry}` as a separate authenticated HTTP ingress. It is mounted even before a Core manager exists; in that case requests are refused rather than falling back to the SPA page (`src/gateway/server/mod.rs`).
+- Panel side (`interfaces/webchat/src/panel/`): `discovery.rs` discovers the capability snapshot per connection, `source.rs` holds immutable snapshots only, `loader.rs` loads modules in the browser, and `sdk.rs` is the narrow SDK handed to modules.
+
+### Trust boundary
+
+A plugin module receives only a narrow SDK ABI and never touches the Panel's internal `DashboardState` or Shell context. The header of `interfaces/webchat/src/panel/sdk.rs` states the limit of that guarantee: same-origin code is trusted, verified code and is **not** sandboxed by these permission checks.
+
+<Callout type="info" title="Security implication">
+
+The permission allowlist constrains what the SDK will call, not what the module can do. A community plugin tab is loaded only because publication already marked it `Trusted` and its integrity check passed. Do not treat a plugin tab as an isolated sandbox.
+
+</Callout>
+
+## Current state: the capability UI surface
+
+### Descriptor and operations
+
+`src/capability/ui.rs` defines the typed UI capability contract: namespace `UI_NAMESPACE = "aleph/ui"`, capability ID `surface` under `aleph/ui`, kind `CapabilityKind::Ui`, lifetime `LifetimeScope::Runtime`, owner `OwnerRef::Runtime`, and a Callable facet. The invocation schema allows exactly two operations:
+
+```text
+{ "operation": "display", "text": "..." }
+{ "operation": "input" }
+```
+
+The error type `UiError` has the variants `Closed`, `InvalidInput`, `Poisoned`, `Unavailable`, `StaleAttachment`, `QueueFull`, `Busy`, `RenderFailed`, `Timeout`, and `Cancelled`.
+
+### Core-owned transport
+
+`UiSurface` in `src/capability/ui_surface.rs` is a server-owned surface that renders one frame at a time:
+
+| Method | Behavior |
+|---|---|
+| `display` | Sends one text frame; rejects text over `MAX_UI_TEXT_BYTES`; returns `StaleAttachment` for the wrong connection |
+| `ack` | Accepts the Panel's render acknowledgement; `rendered = false` yields `RenderFailed` |
+| `submit_input` | Enqueues an input event; returns `QueueFull` once the queue reaches `MAX_UI_QUEUE` |
+| `input` | Pops one input event from the queue |
+| `close` | Closes the surface |
+
+Protocol constants live in `shared/protocol/src/capability.rs`: `MAX_UI_TEXT_BYTES = 65_536`, `MAX_UI_KEY_BYTES = 256`, `MAX_UI_QUEUE = 128`, `UI_ACK_TIMEOUT_MS = 5_000`. An attachment is identified by `UiAttachment { surface_id, mount_generation }`; `UiInputEvent` has only `KeyDown { key }` and `MouseDown { x, y, button }`.
+
+### Gateway methods
+
+The Gateway owns only JSON-RPC and caller/session checks; the surface, pending acknowledgements, and the input queue stay in Core (`src/gateway/capability_ui.rs`). The methods are `capabilities.ui.attach`, `capabilities.ui.invoke`, `capabilities.ui.ack`, `capabilities.ui.submit_input`, and `capabilities.ui.detach` (`src/gateway/method_visibility.rs`); display frames are pushed on the topic `capabilities.ui.display`. The Panel renders them in `interfaces/webchat/src/panel/capability_surface.rs`, which is likewise gated by `panel-modular`.
+
+For the capability model itself, see [Capability system](../concepts/capability-system).
+
+## Planned: hybrid plugin UI
+
+> **Status: planned** — blueprint is ADR-003 in `docs/research/NSH_ADR-001~009.md` (2026-11 snapshot; the file states it defines the target architecture and does not describe what the repository already has); current implementation: `src/extension/panel_publication/mod.rs` and `src/capability/ui_surface.rs`.
+
+ADR-003 splits a plugin into two parts: a server-side Core part, and a desktop UI module (UI manifest, TSX modules, view definitions) that runs in the NSH Runtime and connects through the UI Bridge and the client. Key points:
+
+- Capability declarations in the UI manifest are **requests**, not grants; the server authorizes every side effect.
+- The two parts are linked by `plugin_id`, version, and API version; the UI degrades when the Core part is missing.
+- Acceptance criteria: no bypass of the capability kernel, resources released on uninstall, incompatible versions rejected.
+
+## Planned: boundaries of restricted TSX
+
+> **Status: planned** — blueprint is ADR-005 in `docs/research/NSH_ADR-001~009.md` (2026-11 snapshot); current implementation: `interfaces/webchat/src/panel/sdk.rs` (trusted same-origin code, not sandboxed).
+
+ADR-005 specifies that plugin views run as restricted TSX inside an isolated view container.
+
+| Allowed | Forbidden |
+|---|---|
+| Rendering views inside the container | Shell, process, filesystem, or network access |
+| Using allowlisted native components | Registering arbitrary Rust native components |
+| Interacting through a limited UI Bridge | Touching global windows and layout, reading other views' state |
+| Reading task context | Self-granting capabilities, changing policy/approval/trust, injecting prompts, tool schemas, or event handlers |
+
+Why the restriction: trust has three tiers (Trusted UI, Generated UI, and Untrusted UI, which is prohibited), and every view carries an owner, scope, quota, and expiry and is cleaned up when destroyed. The ADR stresses that a TSX sandbox does not make native components safe by itself, and approvals are re-verified by the server.
+
+## Planned: dynamic UI distribution
+
+> **Status: planned** — blueprint is ADR-009 in `docs/research/NSH_ADR-001~009.md` (2026-11 snapshot; ADR status Proposed); current implementation: `src/extension/panel_publication/admission.rs`.
+
+ADR-009 requires UI to ship as immutable, verifiable artifacts. Artifact metadata includes `package_id`, `package_version`, `ui_api_version`, `minimum_host_version`, `entry`, `content_digest`, `signature`, `component_requirements`, `capability_requirements`, and `resource_limits`. The host keeps a content-addressed cache and can roll back to a previously verified artifact, but never rolls back server-side data automatically. The signing and trust model is ADR-008 in the same file.
+
+## Division of responsibilities between the Panel and the host
+
+| Responsibility | Owner | Current-state anchor |
+|---|---|---|
+| Rendering plugin tabs and the capability UI surface | Panel | `interfaces/webchat/src/panel/shell.rs` |
+| Publishing plugin assets, holding UI surface state | Core | `src/extension/panel_publication/mod.rs`, `src/capability/ui_surface.rs` |
+| Authenticated asset delivery, relaying UI methods | Gateway | `src/gateway/server/panel_asset_route.rs`, `src/gateway/capability_ui.rs` |
+| Authorizing side effects | Core | `docs/reference/REDLINES.md` (R2) |
+| Tray menu, global hotkey, system notifications | NSH host | `desktop/nsh-shell/src/main.rs` |
+| Credential storage | NSH host (the Panel requests it via `CredentialCall`) | `desktop/nsh-shell/src/credentials.rs`, `shared/protocol/src/panel_shell.rs` |
+| Window container that hosts the Panel | NSH host | `desktop/nsh-shell/src/shell_host.rs` |
+
+Host-side details are on the [desktop hosts overview](./overview).
+
+## History: removal of the standalone UI handler
+
+A synchronous legacy UI handler and an in-memory display/input stub used to sit beside `src/capability/ui.rs`. The 2026-11-20 severed-wire audit found that no production path ever registered that handler, so it was removed together with the stub (audit record `review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`, CUI-02). Since then the only UI capability path is `src/capability/ui_surface.rs` plus the Gateway's `src/gateway/capability_ui.rs`.
+
+The plugin Panel tab publication chain (`src/extension/panel_publication/`) is not a superseded legacy model; it coexists with the capability UI surface as a second channel.

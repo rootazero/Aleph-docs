@@ -40,7 +40,7 @@ Install one or more plugins from a base64-encoded zip archive.
 
 **Response:** `{ "installedNames": [] }` (the handler does not enumerate extracted names; use `plugins.list` to refresh).
 
-### plugins.unload
+### plugins.uninstall
 
 Unload a previously loaded plugin and remove its directory. The runtime is torn down BEFORE the directory is deleted so a `services.stop` or transient MCP server can still run on shutdown.
 
@@ -50,25 +50,25 @@ Unload a previously loaded plugin and remove its directory. The runtime is torn 
 
 **Response:** `{ "ok": true }`.
 
-### plugins.load
+### plugin.reload
 
-Parse a manifest from a directory and load the plugin into the runtime (Node.js / WASM).
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `path` | string | yes | Path to the plugin directory containing `aleph.plugin.json` or `package.json` with an `aleph` field |
-
-**Response:** `{ "pluginId": "<id>", "name": "<name>", "kind": "Mcp|Wasm|Static" }`.
-
-### plugins.unload
-
-Reverse of `plugins.load`: unregisters the plugin from the runtime. Tools and hooks may still appear in the registry; use `plugins.unload` to remove the directory.
+Reload an installed plugin's manifest and runtime; this is not a first-time load from an arbitrary directory.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `pluginId` | string | yes | Plugin id |
+| `pluginId` | string | yes | Installed plugin id |
 
-**Response:** `{ "ok": true }`.
+**Response:** `{ "ok": true, "pluginId", "status" }`.
+
+### plugins.disable (keep installed)
+
+To stop the runtime without deleting its directory, use `plugins.disable`, not the old load/unload names. It creates the `.disabled` marker and tears down the runtime; use `plugins.enable` to restore discovery.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Plugin id |
+
+**Response:** `{ "ok": true }`. Use `plugins.uninstall` to remove the installation directory instead.
 
 ### plugins.enable
 
@@ -159,13 +159,13 @@ Same shape as `plugins.uninstall` (legacy plural form is also available).
 
 Same shapes as `plugins.enable` / `plugins.disable`. **Response:** `{ "ok": true }`.
 
-### plugin.load / plugin.unload / plugin.reload
+### plugin.reload (runtime reload)
 
-| Method | Parameter | Description |
-|--------|-----------|-------------|
-| `plugin.load` | `path` | Parse and load a plugin from a directory; returns `{ "pluginId", "name", "kind" }` |
-| `plugin.unload` | `pluginId` | Unload a runtime plugin; returns `{ "ok": true }` |
-| `plugin.reload` | `pluginId` | Hot-reload: re-parse manifest, re-register capabilities; returns `{ "ok": true, "pluginId" }` |
+The current census exposes `plugin.reload` for runtime reload; use `plugin.install` for initial installation, `plugins.disable` to disable, and `plugin.uninstall` to remove. These are distinct operations.
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| `plugin.reload` | `pluginId` | Reload an installed plugin; returns `{ "ok": true, "pluginId", "status" }` |
 
 ### plugin.callTool / plugin.executeCommand
 

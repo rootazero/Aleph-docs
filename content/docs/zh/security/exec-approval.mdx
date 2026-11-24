@@ -27,7 +27,7 @@ Aleph 的执行审批系统是一个 **action-aware** 的人机回环门：每�
 **源位置：**
 - 强制点：`src/tools/scoped/`（`dispatch.rs`、`builder.rs`、`traits.rs`）
 - Action-aware 门：`src/sandbox/exec_approval/`（`gate.rs`、`action.rs`、
-  `session_memory.rs`、`denial_ledger.rs`）
+  `grants.rs`、`denial_ledger.rs`）
 - Exec tier：`src/config/types/policies/exec_tier.rs`
 - Pending / resolve 配对：`src/exec/manager.rs`（`ExecApprovalManager`）
 - 渲染助手：`src/exec/parser.rs::analyze_shell_command`（仅渲染）
@@ -55,16 +55,21 @@ ApprovalGate (action-aware)
    │
    ├── grant_fingerprint(tool, 规范化参数)
    │       │
-   │       ├── 在 session_memory 命中？──► Allow（cached）
+   │       ├── 在 grant store 命中？──► Allow（cached）
    │       │
        └── 否则：
            渲染 ApprovalAction（命令 / op=delete path=…），
            通过 ApprovalRequester 路由给人类
            │
            ├── AllowOnce  ─► 这次调用
-           ├── AllowSession ─► 这次 + 同指纹的未来调用（按 fingerprint 缓存）
-           ├── AllowAlways ─► 由 clamp_decision 收紧到 AllowSession
-           │                  （没有持久 allowlist —— 此按钮永远不渲染）
+           ├── AllowSession ─► 这次 + 同指纹的未来调用（GrantScope::Session，
+           │                  进程内、按 SessionKey 记账）
+           ├── AllowAlways ─► 持久授权（GrantScope::Always，落到
+           │                  ~/.aleph/approval-grants.json）
+           │                  只有 operator 层级且该门不是硬底线时，
+           │                  for_confirm_gate 才会把这个档位放进卡片；
+           │                  回答时由 clamp_decision 按本次请求的
+           │                  allowed_decisions 收窄
            ├── Deny <reason> ─► 拒绝；reason 渲染回模型
            └── Timeout ─► 拒绝（不写入 ledger）
 ```
@@ -204,7 +209,7 @@ pub enum ApprovalDecisionType {
 
 所有审批都通过 WebSocket JSON-RPC 路由：
 
-- Panel → `exec.approval.list` / `exec.approval.resolve {outcome, reason}`
+- Panel → `exec.approvals.pending` / `exec.approval.resolve {outcome, reason}`
   RPC；
 - 频道（Telegram / Discord / iMessage）→ 同一组 RPC，UI 渲染为按钮；
 - 集群节点 → 反向 RPC（`exec.approval.resolve` 也接受可选 `reason`
@@ -294,7 +299,7 @@ Panel 卡片，调度 team 的用户就是看着它的操作员。
 写 `ToolCallApproved` / `ToolCallDenied` session 事件）。通过 session
 service 查，与产生该决策的 run 的其它事件一起。
 
-**不要再去查** `src/exec/approval/storage.rs` 或 `audit.rs` —— 它们与
+**不要再去查** `src/exec/approval/` 下的 `storage.rs` 或 `audit.rs` —— 它们与
 `aleph-server audit` CLI 在 2026-07-14 一起删除了：三个 SQLite 表
 （`~/.aleph/approval_audit.db`）的**唯一**写入者是测试 helper，让
 操作员跑 `audit` 得到 0，得出"什么都没发生"的结论，而真正的 trail

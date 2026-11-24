@@ -3,12 +3,11 @@ title: "事件系统"
 description: "具有 EventBus、类型化事件、过滤器和处理程序的事件驱动架构。通过异步事件传递解耦子系统。"
 ---
 
-`event` 模块实现一个事件驱动架构，解耦 Aleph 的子系统。模块之间不是直接方法调用，而是组件将事件发布到总线并订阅它们关心的事件。`src/event/` 包含两个不同但相关的总线：
+`event` 模块实现一个事件驱动架构，解耦 Aleph 的子系统。模块之间不是直接方法调用，而是组件将事件发布到总线并订阅它们关心的事件。`src/event/` 只提供一条进程级总线：
 
-- **`EventBus`**（`src/event/bus.rs`）—— 每智能体内 tokio `broadcast` 通道；通过 `EventBus::new()` / `EventBus::with_buffer_size` / `EventBus::with_config` 创建，可选连上一个 `GlobalBus` 做跨智能体聚合。**它不是单例**。
-- **`GlobalBus`**（`src/event/global_bus.rs`）—— 进程级**单例**，由 `once_cell::sync::Lazy` 守门，通过 `GlobalBus::global()` 访问；聚合多个 `EventBus` 的事件，并按 `EventFilter` 路由回调。
+- **`GlobalBus`**（`src/event/global_bus.rs`）—— 进程级**单例**，由 `once_cell::sync::Lazy` 守门，通过 `GlobalBus::global()` 访问。生产者通过 `GlobalBus::broadcast(agent_id, session_id, event)` 广播；订阅者通过 `subscribe_async` + `EventFilter` 挂载。每 agent 一份的 `EventBus`（src/event/bus.rs）已在 2026-08 severed-wire 审计中移除。
 
-`AlephEvent`（`src/event/types.rs`）是两类总线共用的载荷类型；`#[serde(tag = "type", content = "data")]` 让它直接可 JSON 化。
+`AlephEvent`（`src/event/types.rs`）是共用载荷类型；`#[serde(tag = "type", content = "data")]` 让它直接可 JSON 化。
 
 ## 设计理念
 
@@ -18,35 +17,28 @@ description: "具有 EventBus、类型化事件、过滤器和处理程序的事
 2. **可观察性** — 每个重要动作都会产生一个事件，可以被记录、审计或流式传输到客户端
 3. **可扩展性** — 新功能可以订阅现有事件而无需修改发布者
 
-`EventBus` 默认 buffer 为 1024 条；保留历史 `MAX_HISTORY_SIZE = 10000`。`GlobalBus` 默认 buffer 同样为 1024。所有事件处理都是异步且非阻塞的。
+`GlobalBus` 默认 buffer 为 1024 条（`DEFAULT_BUFFER_SIZE`）。它没有历史回放 ring —— `subscribe_broadcast()` 是有损的（`RecvError::Lagged(n)`），滞后后的订阅者必须重新读取权威状态。所有事件处理都是异步且非阻塞的。
 
 ---
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────┐
-│           GlobalBus (单例, Lazy)          │
-│  ┌─────────────┐  ┌──────────────────┐ │
-│  │ broadcast   │  │  Subscription    │ │
-│  │ (GlobalEvt) │  │  Registry        │ │
-│  └─────────────┘  └──────────────────┘ │
-│       ▲                                │
-│       │ 自动广播 (当 EventBus 设置时)     │
-│       │                                │
-│ ┌────────────────────────────────────┐ │
-│ │ EventBus (每个智能体一份, 非单例)    │ │
-│ │  broadcast(TimestampedEvent)        │ │
-│ │  + history ring                     │ │
-│ └────────────────────────────────────┘ │
-│       │                           ▲     │
-│       │ publish(AlephEvent)       │ recv│
-│       ▼                           │     │
-│ ┌──────────┐              ┌────────────┐
-│ │ Publisher │              │  Handler   │
-│ │ (任意    │              │ (impl       │
-│ │ 模块)    │              │ EventHandler│
-│ └──────────┘              └────────────┘
+┌──────────────────────────────────────────┐
+│          GlobalBus (单例, Lazy)          │
+│  ┌──────────────┐  ┌───────────────────┐ │
+│  │  broadcast   │  │  Subscription map │ │
+│  │  channel     │  │  (EventFilter)    │ │
+│  └──────────────┘  └───────────────────┘ │
+│       ▲                 ▲                 │
+│       │ broadcast()     │ subscribe_async │
+│       │                 │                 │
+│  ┌──────────┐    ┌─────────────────────┐  │
+│  │ Publisher│    │  Handler            │  │
+│  │ (任意    │    │  (impl EventHandler │  │
+│  │ 模块)    │    │  或 closure)        │  │
+│  └──────────┘    └─────────────────────┘  │
+└──────────────────────────────────────────┘
 ```
 
 ---
@@ -71,30 +63,6 @@ let sub_id = bus.subscribe(
 
 `GlobalBus::broadcast(agent_id, session_id, event)` 负责把事件加上 `source_agent_id` / `source_session_id` / `timestamp` / `sequence` 后分发给匹配 filter 的订阅者。
 
-### EventBus（每智能体一份）
-
-```rust
-use alephcore::event::{EventBus, AlephEvent};
-
-let bus = EventBus::with_buffer_size(2048);
-bus.publish(AlephEvent::SessionCreated(
-    SessionInfo {
-        id: session_id.clone(),
-        parent_id: None,
-        agent_id: "main".into(),
-        model: "gpt-4-turbo".into(),
-        created_at: chrono::Utc::now().timestamp_millis(),
-    }
-)).await;
-```
-
-`EventBus`：
-
-- 维护一个 tokio `broadcast::Sender<TimestampedEvent>`，可选 buffer 容量（默认 1024）
-- 把每条事件包装成 `TimestampedEvent { event, timestamp, sequence }` —— sequence 由 `EventBus` 内单调 `AtomicU64` 自增
-- 历史 ring 上限 `MAX_HISTORY_SIZE = 10000`，可通过 `EventBusConfig { buffer_size, enable_history, max_history_size }` 关闭或调小
-- 可选连接 `GlobalBus`（设 `agent_id` / `session_id` 后）；连接时事件自动通过 `GlobalBus::broadcast` 广播
-
 ### EventHandler Trait
 
 ```rust
@@ -116,7 +84,7 @@ pub trait EventHandler: Send + Sync {
 - WebSocket 处理程序转发到连接的客户端
 - 内存处理程序更新知识图谱
 
-注意：trait **不是** `EventHandler<E: Event>` 泛型 —— 接收方签名是 `&AlephEvent`，订阅通过 `subscriptions() -> Vec<EventType>` 声明。`EventContext`（`src/event/handler.rs`）携带 `bus: EventBus` / `abort_signal: Arc<AtomicBool>` / `session_id: Arc<RwLock<Option<String>>>`。
+注意：trait **不是** `EventHandler<E: Event>` 泛型 —— 接收方签名是 `&AlephEvent`，订阅通过 `subscriptions() -> Vec<EventType>` 声明。`EventContext`（`src/event/handler.rs`）现在是空标记结构体 —— 之前的 `bus` / `abort_signal` / `session_id` 字段已在 2026-08 severed-wire 审计中移除，`EventHandlerRegistry` 也随之移除（无生产调用方）。启动路径直接通过 `GlobalBus::global().subscribe_async(filter, |ev| handler.handle(&ev.event, &ctx))` 接线。
 
 ### EventFilter
 
@@ -167,26 +135,27 @@ let filter = EventFilter::all();   // 等价于 EventFilter::new(vec![EventType:
 
 ### 事件排序与时间戳
 
-每个事件都被 `TimestampedEvent` 包装：
+`GlobalEvent`（`src/event/global_bus.rs`）包装每条广播事件：
 
 ```rust
-pub struct TimestampedEvent {
+pub struct GlobalEvent {
+    pub source_agent_id: String,
+    pub source_session_id: String,
     pub event: AlephEvent,
     pub timestamp: i64,   // chrono::Utc::now().timestamp_millis()
-    pub sequence: u64,    // 由 EventBus 的 AtomicU64 自增
+    pub sequence: u64,    // 由 GlobalBus 自增
 }
 ```
 
-`EventBus` 内置历史 ring（`Arc<RwLock<Vec<TimestampedEvent>>>`），新订阅者可回放；`GlobalEvent`（`src/event/global_bus.rs`）再叠加一层 `source_agent_id` / `source_session_id` / 自己的 `sequence`，序列号用于排序保证。
+`GlobalBus` 没有历史回放 ring —— `broadcast` 通道有界且有损（`RecvError::Lagged(n)`）。滞后后订阅者必须重新读取权威状态，不能假设连续。`GlobalEvent` 的 `sequence` 用于跨 agent 投递的确定性排序。
 
 ---
 
 ## 使用示例
 
 ```rust
-use alephcore::event::{EventBus, EventHandler, EventContext, EventType, AlephEvent, HandlerError};
+use alephcore::event::{GlobalBus, EventFilter, EventHandler, EventContext, EventType, AlephEvent, HandlerError};
 use async_trait::async_trait;
-use std::sync::Arc;
 
 struct MemoryLogger;
 
@@ -208,20 +177,41 @@ impl EventHandler for MemoryLogger {
     }
 }
 
-let bus = EventBus::new();
-let mut registry = EventHandlerRegistry::new();
-registry.register(Arc::new(MemoryLogger));
-let _handles = registry.start(EventContext::new(bus.clone())).await;
+let handler = std::sync::Arc::new(MemoryLogger);
+let filter = EventFilter::new(handler.subscriptions());
+let ctx = EventContext::new();
+GlobalBus::global()
+    .subscribe_async(filter, move |global_event| {
+        let handler = handler.clone();
+        let event = global_event.event;
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handler.handle(&event, &ctx).await {
+                tracing::warn!(error = %e, "MemoryLogger handle error");
+            }
+        });
+    })
+    .await;
 ```
+
+---
+
+## 历史：每 agent EventBus
+
+2026-08 severed-wire 审计前，`src/event/` 提供两条总线：
+
+- **`EventBus`**（src/event/bus.rs）—— 每 agent 一份的 tokio `broadcast` 通道，`EventBus::new()` / `with_buffer_size` / `with_config` 创建，包装为 `TimestampedEvent { event, timestamp, sequence }`，历史 ring 上限 `MAX_HISTORY_SIZE = 10000`，可选连接 `GlobalBus`。
+- **`GlobalBus`** —— 进程级单例（保留至今）。
+
+审计发现 `EventBus` 与 `EventHandlerRegistry`（`Vec<Arc<dyn EventHandler>>` + `start`/`stop` 生命周期）均无生产调用方，一并移除；`EventContext` 的 `bus` / `abort_signal` / `session_id` 字段同时移除。启动路径改为直接 `GlobalBus::global().subscribe_async(filter, |ev| handler.handle(&ev.event, &ctx))`（见 `src/bin/aleph-server/commands/start/mod.rs`）。
 
 ---
 
 ## 代码位置
 
 - `src/event/mod.rs` — 模块入口，重新导出
-- `src/event/bus.rs` — `EventBus`（每智能体）+ `EventBusConfig` + `EventSubscriber`
 - `src/event/global_bus.rs` — `GlobalBus` 单例 + `GlobalEvent` + `Subscription` + `SubscriptionId`
-- `src/event/handler.rs` — `EventHandler` trait + `EventHandlerRegistry` + `EventContext`
+- `src/event/handler.rs` — `EventHandler` trait + `EventContext`
 - `src/event/filter.rs` — `EventFilter` 结构体
 - `src/event/types.rs` — `AlephEvent` + `EventType` + 各事件载荷
 

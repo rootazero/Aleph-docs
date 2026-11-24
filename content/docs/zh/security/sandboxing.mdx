@@ -19,7 +19,7 @@ pub trait Sandbox: Send + Sync + 'static {
 ```
 
 生产装配的 `Arc<dyn Sandbox>` 指向 `WorkspaceSandbox`
-（`src/sandbox/workspace.rs`），它拥有三件事：
+（`src/sandbox/workspace/mod.rs`），它拥有三件事：
 
 1. **工作空间供应** —— 首次执行时物化
    `~/.aleph/workspaces/{hash(session_id)}/`，保持会话生命周期，后续调用
@@ -45,7 +45,7 @@ OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 三级
 
 **源位置：**
 - Trait + re-export + 测试 helper：`src/sandbox/mod.rs`
-- 六步管道：`src/sandbox/workspace.rs`
+- 六步管道：`src/sandbox/workspace/mod.rs`
 - 命令策略层：`src/sandbox/command_policy/`（`rules.rs`、
   `normalize.rs`、`hooks.rs`）
 - 能力：`src/sandbox/capabilities.rs`（`SandboxCapabilities` +
@@ -73,7 +73,7 @@ OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 三级
 workspace_root / session_key_to_filename(session_id)
 ```
 
-`session_key_to_filename`（`src/sandbox/workspace.rs:114`）对
+`session_key_to_filename`（`src/sandbox/workspace/path.rs:74`）对
 JSON-serialized `SessionId` 做 SHA-256，截断到 16 字节（32 个 hex 字符）——
 路径短且跨每个 `SessionKey` 变体安全。
 
@@ -86,7 +86,7 @@ JSON-serialized `SessionId` 做 SHA-256，截断到 16 字节（32 个 hex 字�
 
 ## 六步 `execute` 管道
 
-`WorkspaceSandbox::execute`（`src/sandbox/workspace.rs:124`）实现 spec §8
+`WorkspaceSandbox::execute`（`src/sandbox/workspace/mod.rs:206`）实现 spec §8
 管道：
 
 1. **Session resolve** —— `self.for_session(&cmd.session_id)` →
@@ -108,7 +108,7 @@ JSON-serialized `SessionId` 做 SHA-256，截断到 16 字节（32 个 hex 字�
    timeout, max_output_bytes)`。默认 60 秒超时、1 MiB 输出预算（stdout
    + stderr 分割）。两者都可以在 `WorkspaceSandbox` 上通过
    `with_timeout` / `with_max_output_bytes` 覆盖。`cmd.timeout` >
-   `capabilities.timeout_secs` > 配置的默认。
+   `SandboxCapabilities.timeout_secs` > 配置的默认。
 6. **Audit** —— `tracing::info!(target: "capability_ledger", …)` 记录
    `session_id`、`program`、`caps`、`exit_code`、`signal`、`duration_ms`。
    这是 capability-ledger 钩子；下游 tracing 订阅者可以下沉到想要的
@@ -249,7 +249,7 @@ execution sub-cgroup 并应用：
 `SandboxCapabilities.timeout_secs` 是 `SandboxConfig.default_timeout_seconds`
 的 per-call 覆盖，作为 `WorkspaceSandbox::execute` 的 wall-clock 超时。
 优先级，最具体的优先：显式 `SandboxCommand.timeout` >
-`capabilities.timeout_secs` > 配置的默认。`capabilities.timeout_secs` 是
+`SandboxCapabilities.timeout_secs` > 配置的默认。`SandboxCapabilities.timeout_secs` 是
 **唯一**的 timeout 载体 —— 内部 `ProcessPolicy` 不再有 `timeout_secs`
 字段。
 
@@ -360,12 +360,12 @@ hard-filter，模仿 clawshell 的 DLP `[[patterns]]` 引擎，但专门用于 s
 沙箱栈在每个 seam 都可测，无需真实子进程或 OS 沙箱：
 
 - **Fake OS driver** —— 实现 `OsSandboxDriverTrait`，统计 `run` 调用，
-  返回 canned `SandboxOutput`。被 `src/sandbox/workspace.rs` 单元测试与
+  返回 canned `SandboxOutput`。被 `src/sandbox/workspace/mod.rs` 单元测试与
   集成测试使用。
 - **Fake approval requester** —— 实现 `ApprovalRequester`，把结果 box
   给 `ApprovalGate::new(cfg, Some(Box::new(requester)))`。单元测试用它
   驱动步骤 3 的每个分支（approve / deny / cached）。
-- **`MockSandbox`**（`src/sandbox/mod.rs:50`，`#[cfg(test)]`）—— 记录
+- **`MockSandbox`**（`src/sandbox/mod.rs:89`，`#[cfg(test)]`）—— 记录
   每个 `SandboxCommand` 并返回 canned `SandboxOutput`。被 exec-class 工具
   （`bash_exec`、`code_exec`）用来断言它们走沙箱 seam。
 - **集成** —— `tests/sandbox_capability_approval.rs` 用 fake driver + fake

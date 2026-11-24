@@ -1,61 +1,43 @@
 ---
-title: "协议"
-description: "WebSocket JSON-RPC 2.0 protocol"
+title: "Legacy WebSocket Endpoint (/ws)"
+description: "The Gateway's historical compatibility endpoint: JSON-RPC 2.0 over WebSocket, the connect handshake, upgrade gates, and the login wall. New clients should use Protocol v1."
 ---
 
-The Aleph Gateway uses JSON-RPC 2.0 over a single WebSocket for every RPC, event, and connection handshake.
+import { Callout } from "fumadocs-ui/components/callout";
+
+<Callout type="warn">
+`/ws` is a historical compatibility endpoint, not the way to attach a new client. New clients and the NSH desktop host should use [Protocol v1](./protocol-v1): length-prefixed frames, the `system.hello` handshake, and the Desktop IPC / Web v1 entrances. The Panel runs inside the NSH host through a WebView, and the host owns the connection. This page describes the current state of `/ws` for maintaining older clients and for troubleshooting.
+</Callout>
+
+`/ws` carries JSON-RPC 2.0 in WebSocket Text messages: every RPC, event, and connection handshake shares one connection, and message boundaries come from WebSocket itself, with no length prefix. A Binary message is logged as a warning and ignored (`src/gateway/server/connection/mod.rs`).
 
 ## Endpoint
 
-```
+```text
 ws://127.0.0.1:18790/ws          # default bind, loopback
 wss://<host>:<port>/ws           # once native TLS is enabled
 ```
 
-- The default bind is `127.0.0.1:18790` (see `GatewayServerConfig::default` in `src/gateway/config.rs`); a loopback connection is an implicit `operator` — zero-config single-host use.
-- A non-loopback bind requires one of the [TLS tiers](#tls-tiers) or it refuses to start.
-- Browser cross-origin / DNS-rebinding attacks are blocked at the `/ws` upgrade by `src/gateway/origin_policy.rs`.
+- The default bind is `127.0.0.1:18790` (`src/gateway/config.rs`); a loopback client is an implicit `operator`.
+- The `/ws` route is mounted in `src/gateway/server/mod.rs`; the upgrade handler is `ws_upgrade_handler` in `src/gateway/server/connection/upgrade.rs`.
+- A non-loopback bind must enable TLS, a trusted proxy, or `allow_insecure_remote`; otherwise `check_network_exposure` (`src/gateway/server/mod.rs`) makes the process refuse to start.
 
 ## Session init (`connect` handshake)
 
-The **first frame** on every `/ws` connection must be `connect` (see the "Session-init invariant" branch in `src/gateway/server/handler.rs`; any other first frame gets `AUTH_REQUIRED` and the socket is closed):
+The **first frame** after the connection opens must be `connect`; any other first frame gets `AUTH_REQUIRED` (`First request must be 'connect'`) and the connection is closed (`src/gateway/server/connection/mod.rs`).
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "method": "connect",
-  "params": {
-    "token": "aleph-<uuid>"
-  }
+  "params": {}
 }
 ```
 
-A remote connection presents one of three credentials to satisfy `connect` (priority order is `src/gateway/handlers/connect.rs::resolve_connect_auth`); missing or invalid ⇒ falls into the [login wall](#session-and-rate-limits):
+A loopback connection may omit credentials. For remote connections, the credential resolution order is `resolve_connect_auth` in `src/gateway/handlers/connect.rs`; the accepted fields are `device_token`, `bootstrap_ticket` (together with `device_id`), and the legacy shared `token`. The differences between the three credentials, their lifetimes, and revocation are in [Authentication](./auth).
 
-```json
-// 1) Loopback: omit `params` entirely — always operator.
-// 2) Paired device: long-lived device token.
-{
-  "method": "connect",
-  "params": { "device_token": "aleph-dt-<uuid>", "device_id": "panel-1" }
-}
-
-// 3) First-time pairing: trade a single-use bootstrap ticket
-//    for a fresh device token (returned in the response).
-{
-  "method": "connect",
-  "params": { "bootstrap_ticket": "aleph-bt-<uuid>", "device_id": "panel-1" }
-}
-
-// 4) Legacy shared Gateway token (forward-compat only).
-{
-  "method": "connect",
-  "params": { "token": "aleph-<uuid>" }
-}
-```
-
-On success `handle_connect` returns the session baseline and `server::handler` overlays the authorization verdict:
+On success, `handle_connect` supplies the baseline fields and the connection layer overlays the authorization verdict:
 
 ```json
 {
@@ -71,154 +53,67 @@ On success `handle_connect` returns the session baseline and `server::handler` o
 }
 ```
 
-- When `bootstrap_ticket` is accepted, the response carries `device_token` — the Panel persists it and replays it on every reconnect.
-- A rejected remote `connect` is recorded in the security audit log (`AuditEventType::AuthFailure`), bounded by the `Auth`-scope rate limiter (≤10/60s/IP by default).
-- Full comparison of the three credentials, TTLs, and revocation paths: see [Authentication](/docs/en/gateway/auth).
+The `state_version` and `keepalive` values are examples. On `/ws`, `system.hello` is only a version probe after `connect`: it neither admits the connection nor sets identity. See [Protocol v1](./protocol-v1#handshake-systemhello).
 
-## TLS tiers
+## Upgrade gates: TLS, origin, and connection caps
 
-Remote connections are gated by a **boot gate** and a **per-connect gate**; an upstream trusted-proxy is layered on top via `trusted_proxy`, which restores the real client IP.
+Before the HTTP request is upgraded to WebSocket, `ws_upgrade_handler` checks, in order:
 
-| Layer | Where | Behaviour |
-|-------|-------|-----------|
-| **Boot gate (`check_network_exposure`)** | `src/gateway/server/mod.rs` | A non-loopback bind with `tls` / `trusted_proxy` / `allow_insecure_remote` all unset ⇒ process refuses to start. |
-| **Per-connect gate (`refuse_insecure_remote`)** | `ws_upgrade_handler` in `src/gateway/server/handler.rs` | A non-loopback client on an unencrypted leg ⇒ WS upgrade returns `426 Upgrade Required`. |
-| **Trusted proxy (`trusted_proxy`)** | `[gateway] trusted_proxy.{enabled, trusted_ips}` (default `enabled=false`, `trusted_ips=["127.0.0.1","::1"]`) | Only when the connection's peer ∈ `trusted_ips`: take the last entry of `X-Forwarded-For` as the real client, and treat the leg as encrypted when `X-Forwarded-Proto: https`. Untrusted peers' forwarding headers are ignored (spoof-safe). |
+| Check | Failure response | Code |
+|-------|------------------|------|
+| Non-loopback and connection not encrypted (`refuse_insecure_remote`) | `426`, `TLS required for remote connections` | `src/gateway/server/connection/upgrade.rs` |
+| Origin policy (cross-origin and DNS rebinding) | `403`, `origin not allowed` | `src/gateway/origin_policy.rs` |
+| Global connection count reached `max_connections` | `503`, `Connection limit reached` | `src/gateway/server/connection/upgrade.rs` |
+| Per-IP connection count reached `max_connections_per_ip` | `503`, `Per-IP connection limit reached` | `src/gateway/server/connection/upgrade.rs` |
 
-`trusted_proxy` only restores XFF — it can **never** flip `is_loopback`: loopback is loopback regardless of the header. The full schema and the three recommended TLS tiers (self-signed, trusted-proxy, operator-cert) live in [Authentication / Remote TLS](/docs/en/gateway/auth#remote-transport-encryption).
+- `max_connections` defaults to 100 and `max_connections_per_ip` to 64, both in `src/gateway/config.rs`; loopback is exempt from the per-IP cap, and `0` disables it.
+- Behind a trusted proxy, the real client address and whether the leg is encrypted are resolved by `resolve_client` in `src/gateway/trusted_proxy.rs`. `trusted_ips` accepts single IPs only, not CIDR ranges (entries that fail to parse are dropped with a warning). Forwarded headers are honored only when the peer is in `trusted_ips`.
+- A connection that passes the gates is classified by origin: local is Desktop, anything else is Bot.
 
-## Session and rate limits
+The three TLS setups (self-signed, trusted proxy, bring-your-own certificate) and auditing are covered in [Authentication](./auth) and not repeated here.
 
-After the `/ws` upgrade the server builds a `ConnectionState`:
+## Login wall and flood guard
 
-- **`first_message`** — the first frame must be `connect`; anything else returns `AUTH_REQUIRED` and the socket is closed.
-- **Login wall** — an unauthorized remote connection may only call `connect`; every other method returns `AUTH_REQUIRED`. `UnauthorizedFloodGuard` (`src/gateway/server/flood_guard.rs`) counts strikes under the `Auth` scope; once it trips the socket is closed and a `RateLimited` audit entry is written.
-- **Operator tier** — a successful `connect` (loopback or token-bearing) is `operator`, single-tier, identical authority to local — there is no sub-tier for a Panel.
-- **Per-IP cap** — `[gateway] max_connections_per_ip` (default 64, `0` disables), loopback exempt, counted against the `trusted_proxy`-resolved `client_ip` so the real client is bounded even when many share a reverse-proxy socket.
-- **Rate limiter** — `src/gateway/rate_limiter.rs`, keyed on `(resolved_client_ip, method_scope)`. Loopback is exempt; the identity is a textual IP, not a session token.
+An unauthorized remote connection may only call `connect`:
+
+- Any other method gets `AUTH_REQUIRED` immediately; the predicate is `wall_admits` in `src/gateway/server/connection/auth.rs`.
+- `src/gateway/server/flood_guard.rs` counts login-wall rejections per connection and closes the connection after `MAX_UNAUTHORIZED_STRIKES` (10), so a stale client cannot retry forever.
+- Requests are also throttled per IP and per method scope by `src/gateway/rate_limiter.rs`.
 
 ## Message types
 
-### Request (Client → Gateway)
+Message shapes match [JSON-RPC](../api/jsonrpc); `/ws` adds no extra envelope.
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "method": "namespace.action",
-  "params": { ... }
-}
+{ "jsonrpc": "2.0", "id": "req-1", "method": "health" }
 ```
-
-- `method` follows the `<namespace>.<action>` convention (see "Method namespaces" below).
-- `id` may be a string, number, or `null` (`null` = notification; no response expected).
-
-### Response (Gateway → Client)
-
-Success:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "result": { ... }
-}
+{ "jsonrpc": "2.0", "id": "req-1", "result": { "status": "healthy", "timestamp": "2026-11-24T00:00:00Z" } }
 ```
-
-Error:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "error": {
-    "code": -32603,
-    "message": "Internal error",
-    "data": { ... }
-  }
-}
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "session.lifecycle.changed", "data": {} } }
 ```
 
-`error.data` carries only structured fields (e.g. an `idempotency_key` hint, a `receipt_id` user-readable receipt) — the raw error chain is never leaked.
+- The `timestamp` in the response is an example value; the fields are defined in `src/gateway/handlers/health.rs`.
+- An event is a notification without an `id`, with `method` always `"event"`. Subscribe with `events.subscribe`, whose parameter key is `topics` (`src/gateway/handlers/events.rs`). For the event catalog and the full error-code list, see [Event methods](./methods/events) and [JSON-RPC](../api/jsonrpc).
+- The full RPC catalog is in the [Method reference](./methods). Only `/ws` offers the full method surface; Desktop IPC and Web v1 currently admit only `health` and `sessions.list`.
 
-### Event (Gateway → Client)
+## History: from an unversioned protocol to v1
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.token",
-    "data": { ... }
-  }
-}
-```
+| Form | Characteristics | Code |
+|------|-----------------|------|
+| `/ws` + `connect` | The handshake result carries only session fields such as `role`, `state_version`, and `keepalive`: no protocol version and no limit negotiation. Message boundaries rely on WebSocket | `src/gateway/handlers/connect.rs` |
+| `system.hello` probe on `/ws` | A version probe after `connect`; the handler comment calls it a legacy probe, and the `limits` in the response are hints, not enforced | `src/gateway/handlers/system_hello.rs` |
+| Protocol v1: Desktop IPC and Web v1 | Bounded length-prefixed frames, `system.hello` must be the first frame, limits are enforced by the transport; the entrances are read-only for now | `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs` |
 
-A streaming RPC's lifecycle is three events broadcast through the per-connection forwarder in `src/gateway/server/handler.rs`:
-
-```json
-{ "method": "event", "params": { "topic": "stream.start",  "data": { "run_id": "..." } } }
-{ "method": "event", "params": { "topic": "stream.token",  "data": { "text": "..." } } }
-{ "method": "event", "params": { "topic": "stream.end",    "data": { "run_id": "..." } } }
-```
-
-## Method namespaces
-
-Method names are registered in `src/gateway/handlers/mod.rs::register`. Common namespaces:
-
-| Prefix | Examples | Notes |
-|--------|----------|-------|
-| `chat.*` | `chat.send`, `chat.abort`, `chat.history`, `chat.clear` | Panel-facing chat API; `chat.send` wraps `agent.run`. |
-| `session.*` | `session.create`, `session.usage`, `session.compact`, `session.truncate` | Session metadata / compaction / checkpoints. |
-| `agents.*` | `agents.list`, `agents.bindings`, `agents.teams` | Agent lifecycle, bindings, teams. |
-| `config.*` | `config.get`, `config.patch`, `config.schema`, `config.apply` | Hot-reload config CRUD. |
-| `exec.*` | `exec.approvals.*` | Exec approval (action-level; see [Security / Approvals](/docs/en/security/pairing)). |
-| `cron.*` | `cron.list`, `cron.create`, `cron.run`, `cron.toggle` | Scheduled jobs. |
-| `wizard.*` | `wizard.start`, `wizard.next`, `wizard.answer`, `wizard.cancel` | Setup wizard. |
-| `cluster.*` | `cluster.admit_node`, `cluster.deregister`, `environments.list` | Cluster-node admission / deregister. |
-| `gateway.*` | `gateway.ticket.create`, `gateway.token.current`, `gateway.token.rotate`, `gateway.devices.list`, `gateway.devices.revoke`, `gateway.credentials`, `gateway.metrics.lanes` | Gateway-internal surface — bootstrap tickets, shared-token CRUD, paired devices, connection snapshot. |
-| `secrets.*` | `secrets.list`, `secrets.set`, `secrets.delete` | Vault CRUD; the shared token doubles as the vault master key. |
-| `channel.*` | `channel.list`, `channel.send` | Channel aggregation. |
-| `pairing.*` | `pairing.list`, `pairing.approve`, `pairing.reject` | Channel-side unknown-sender approval — **unrelated to device pairing**. |
-| `tools.invoke` | (single method) | Direct tool call, bypasses the LLM loop (E2E / debug only). |
-| `events.*` | `events.subscribe`, `events.unsubscribe`, `events.list` | Event subscription. |
-
-The full directory (hundreds of `gateway.*` and business methods) lives in [Methods Reference](/docs/en/gateway/methods).
-
-## Event subscription
-
-Use `events.subscribe` / `events.unsubscribe` for glob topics:
-
-```json
-{ "method": "events.subscribe",   "params": { "patterns": ["stream.*", "presence.*"] } }
-{ "method": "events.unsubscribe", "params": { "patterns": ["stream.*"] } }
-```
-
-`events.list` returns the active subscriptions on the current connection. A broadcast `Lagged` notifies the affected subscriber and recovers — it does not permanently kill the connection.
-
-## Error codes
-
-`error.code` constants are defined in `src/gateway/protocol.rs`; a few are aliases of the aleph-protocol core set:
-
-| Code | Constant | Description |
-|------|----------|-------------|
-| `-32700` | `PARSE_ERROR` | Parse error |
-| `-32600` | `INVALID_REQUEST` | Invalid request |
-| `-32601` | `METHOD_NOT_FOUND` | Method not found |
-| `-32602` | `INVALID_PARAMS` | Invalid params |
-| `-32603` | `INTERNAL_ERROR` | Internal error |
-| `-32604` | `RESOURCE_NOT_FOUND` | Resource not found |
-| `-32605` | `TIMEOUT_ERROR` | Timeout (also `-32002` as an alias) |
-| `-32000` | `AUTH_REQUIRED` | Connect required (also used when the first frame isn't `connect`) |
-| `-32001` | `AUTH_FAILED` | Invalid credential |
-| `-32002` | `PERMISSION_DENIED` | Permission denied |
-| `-32003` | `TOOL_ERROR` | Tool execution error |
-| `-32004` | `RATE_LIMITED` | Rate limit (data carries `retry_after_ms` / `lockout_remaining_ms`) |
-| `-32030` | `IDEMPOTENCY_KEY_REQUIRED` | Mutating RPC without `idempotency_key` under `require_idempotency_key` |
-| `-32099` | `SERVICE_UNAVAILABLE` | Registered but not wired in this build/mode |
+`/ws` keeps the full RPC surface and `connect` authentication, so older clients need no changes; it has not been removed, but it is no longer where new capabilities land. The parts of v1 that are not implemented yet (event replay, snapshots, a binary channel, backpressure policy) are listed in [the planned section of Protocol v1](./protocol-v1#planned-not-yet-implemented).
 
 ## See also
 
-- [Authentication](/docs/en/gateway/auth) — three credentials, token types, revocation, SSRF / TLS / audit trail
-- [Methods Reference](/docs/en/gateway/methods) — full RPC directory
-- [Architecture / Gateway](/docs/en/architecture/gateway) — internal structure
+- [Protocol v1](./protocol-v1) — current frame format, handshake, and transport matrix
+- [Authentication](./auth) — credentials, TLS, trusted proxy, and auditing
+- [Method reference](./methods) — the full RPC catalog
+- [JSON-RPC](../api/jsonrpc) — message shapes and error codes
+- [Gateway architecture](../architecture/gateway) — internal structure

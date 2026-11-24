@@ -83,7 +83,7 @@ install:
 
 ### Markdown CLI 兼容字段
 
-兼容的 Markdown CLI 读取器还支持 `metadata.requires.bins`、`metadata.aleph.security`、`metadata.aleph.input_hints` 与 Docker 设置，这些字段描述旧的 CLI 执行路径；新写的 SkillSystem 技能应使用上面的顶层字段表达 eligibility 和依赖安装。安全声明无法替代 Aleph 的运行时审批与安装门槛。
+兼容的 Markdown CLI 读取器还支持必需二进制、安全声明、输入提示与 Docker 设置等元数据字段，这些字段描述旧的 CLI 执行路径；新写的 SkillSystem 技能应使用上面的顶层字段表达 eligibility 和依赖安装。安全声明无法替代 Aleph 的运行时审批与安装门槛。
 
 ## 保持正文简洁
 
@@ -91,7 +91,7 @@ install:
 
 1. `SKILL.md` 聚焦路由、规则与标准工作流。
 2. 细节参考资料放在 `references/guide.md` 等文件中。
-3. 适当时把确定性辅助逻辑放入 `scripts/`。
+3. 适当时把确定性辅助逻辑放入 `scripts` 目录。
 4. 让模型通过 `skill_read(skill_id, file_name=...)` 读取支撑文件。
 
 `skill_read` 路径会做目录约束、字节限制并展开 `${ALEPH_SKILL_DIR}` 与内联 shell 片段。技能不应教模型用裸绝对路径或 `cat` 读自己的 Markdown 资源。`skill_read` 返回的绝对 `location` 仅用于执行被引用的脚本，不能绕过技能读取器。

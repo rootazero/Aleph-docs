@@ -35,7 +35,7 @@ https://hub.heyaleph.com/catalog.json
 
 目录层不是多个独立 provider 的并发联邦，安装解析是对 `ExtensionEntry.install_spec` 的直接本地缓存查找。插件市场仍是插件安装后端，并非额外的 Hub 目录槽。
 
-已退出的 MCP 预设 RPC `mcp.list_presets` 与 `mcp.install_preset` 不再是发现入口。MCP 的发现与安装统一收敛到 Hub 目录。
+已退出的 MCP 预设 RPC 不再是发现入口。MCP 的发现与安装统一收敛到 Hub 目录。
 
 ## 已安装状态对账
 
@@ -127,7 +127,6 @@ UI 使用一层薄的 `extensions.*` 门面：
 | `extensions.catalog` | 按 Kind、分类、源 ID 或 name 查询浏览缓存 |
 | `extensions.installed` | 三后端的实时对账 |
 | `extensions.disclosure` | 返回安装前披露与扫描结果 |
-| `extensions.configure` | 校验提交的字段 |
 | `extensions.install` | 完成信任确认、安装、验证并返回 pin |
 | `extensions.toggle` | 启用或禁用本地已安装扩展 |
 | `extensions.uninstall` | 移除本地已安装扩展 |

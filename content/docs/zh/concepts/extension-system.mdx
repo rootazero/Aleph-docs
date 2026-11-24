@@ -47,6 +47,11 @@ ExtensionManager
 
 ## 统一能力注册
 
+> 这是**插件声明层**的注册模型（`src/extension/capability.rs`）。运行时真正的
+> 能力子系统是另一套东西：能力种类、facet、owner generation、fencing token 与
+> 后端租约都在 `src/capability/`。两者不要混淆，见
+> [能力模型](/docs/zh/capabilities/capability-model)。
+
 `CapabilityDeclaration` 在生产中只有六种变体：
 
 ```rust
@@ -121,7 +126,7 @@ Hub 是目录与受信边界，本模块是插件运行时与注册边界。两�
 
 - `src/extension/mod.rs` — 管理器与子系统连接
 - `src/extension/manifest/` — 适配器与归一化清单
-- `src/extension/discovery/` — 候选、作用域与冲突解决
+- `src/discovery/` — 候选、作用域与冲突解决
 - `src/extension/capability.rs` — 声明与层级
 - `src/extension/registrar/` — 注册派发
 - `src/extension/registry/` — 组件注册表

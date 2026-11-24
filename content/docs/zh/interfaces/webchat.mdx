@@ -6,7 +6,9 @@ description: "内置 Web 聊天接口：WebAssembly Panel + 基于 JSON-RPC 2.0 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Steps, Step } from "fumadocs-ui/components/steps";
 
-WebChat 是 Aleph 的内置基于 Web 的聊天接口。它是一个 **WebAssembly Panel**（`interfaces/webchat/`），由 Gateway 的 HTTP 服务器直接提供，与 WebSocket 端点并存。无需外部依赖或第三方 API——Panel 是一个 Leptos 应用，挂载到浏览器 `<body>`，通过与其他 Aleph 客户端相同的 JSON-RPC 2.0 协议与 Gateway 对话。
+WebChat 是 Aleph 的内置基于 Web 的聊天接口。它是一个 **WebAssembly Panel**（`interfaces/webchat/`），由 Gateway 的 HTTP 服务器直接提供，与 WebSocket 端点并存。Panel 是一个 Leptos 应用，挂载到浏览器 `<body>`，通过与其他 Aleph 客户端相同的 JSON-RPC 2.0 协议与 Gateway 对话。
+
+源码入口见 `interfaces/webchat/src/lib.rs`；静态资源服务见 `src/gateway/control_plane/server.rs`。
 
 ## 架构
 
@@ -46,33 +48,30 @@ pub fn main() {
 }
 ```
 
-Panel 是一个单页应用（SPA）。macOS 应用、Tauri 桌面应用与 CLI 使用的同一套 JSON-RPC 协议，由 Gateway 在 `/ws` 端点上对外暴露。
+Panel 是一个单页应用（SPA）。macOS 应用、[桌面宿主](/docs/zh/desktop-hosts/overview)与 CLI 使用的同一套 JSON-RPC 协议，由 Gateway 在 `/ws` 端点上对外暴露。
 
 ## Panel 拓扑
 
-Panel 暴露 **五个顶层内容区**（`PanelMode::Chat`、`Dashboard`、`Memory`、`Agents`、`Teams`），由分区切换器（`src/components/nav_menu.rs`）进入。**Settings**（`PanelMode::Settings`）是一个独立目的地，位于内容分区切换器之外。**Extensions** 与 **More** 可达但不参与主导航：
+`PanelMode` 有 **10 个变体**：Chat、Dashboard、Memory、Agents、Teams、Projects、Terminal、Extensions、Settings、More。主切换器 `ALL_MODES: [PanelMode; 8]` 包含其中八项（不含 Extensions 和 More），Settings 也在切换器内。定义与导航见 `interfaces/webchat/src/components/mode_sidebar.rs`、`interfaces/webchat/src/components/nav_menu.rs`。
 
 | 分区 | 路由 | 用途 |
 |---------|-------|---------|
 | Chat | `/chat` | 主对话界面 |
 | Dashboard | `/dashboard` | 状态、活动与概览 |
-| Memory | `/memory` | 记忆中心——图谱视图和表格视图统一在一个宿主中 |
+| Memory | `/memory` | 记忆中心 |
 | Agents | `/agents` | 浏览和配置智能体 |
-| Teams | `/teams` | 多智能体团队和群聊 |
-| Settings | `/settings` | 配置（独立目的地，非分区） |
+| Teams | `/teams` | 多智能体团队 |
+| Projects | `/projects` | 项目管理 |
+| Terminal | `/terminal` | 操作员终端 |
+| Settings | `/settings` | 配置 |
 
-两个路由可达但不出现在分区切换器中：
+`PanelMode::from_path` 将 `/memory`、`/agents`、`/teams`、`/projects`、`/extensions`、`/dashboard`、`/more`、`/settings`、`/terminal` 映射到对应变体，其余路径回退到 Chat（`interfaces/webchat/src/components/mode_sidebar.rs`）。
 
-- **Extensions**（`/extensions`）—— 扩展商店的启动入口位于 Chat 侧边栏的 advanced-features 区；该路由保留用于直接链接。详见[扩展商店](/docs/zh/concepts/extensions-store)。
-- **More**（`/more`）—— 仅手机端的折叠页（Teams / Agents / Extensions / Wizard / Help）。
+- **Extensions**（`/extensions`）与 **More**（`/more`）可达但不参与主切换器。Extensions 故意省略：启动入口在 Chat 侧边栏的 advanced-features 区、项目管理之下；`label_of` / `icon_of` 保留 Extensions 分支仅供触发按钮使用（`interfaces/webchat/src/components/nav_menu.rs`）。详见[扩展商店](/docs/zh/concepts/extensions-store)。
+- **Terminal** 导航项对所有人显示，但服务端只允许 operator；拒绝由视图解释，避免把“不允许”误解为“不存在”（`interfaces/webchat/src/components/nav_menu.rs`、`interfaces/webchat/src/components/mode_sidebar.rs`、`src/gateway/handlers/pty.rs`）。
+- **More** 是手机端管理分区菜单；桌面不会路由到这里（`interfaces/webchat/src/components/mode_sidebar.rs`）。
 
-因此切换器是 `ALL_MODES = [Chat, Dashboard, Memory, Agents, Teams, Settings]`——共六项，其中内容区的五项构成主工作流。按设备族划分的 UI 位于 `interfaces/webchat/src/platform/{wide,phone,tablet}/`：
-
-- **wide**（桌面 / 宽屏浏览器）—— `platform/wide/views/`，侧栏 + 多列
-- **phone**（iPhone / Android）—— `platform/phone/`，底部 tab + 单列；子视图 `chat`、`memory`、`agents`、`teams`、`dashboard`、`extensions`、`settings`、`more`、`shell`
-- **tablet**（iPad）—— `platform/tablet/mod.rs` 骨架，规划中支持 Stage Manager
-
-> 切换分区只改变面板界面；底层的 Gateway 会话和 WebSocket 连接保持不变，因此下文描述的同一 JSON-RPC 协议适用于全部分区。
+按设备族划分的 UI 位于 `interfaces/webchat/src/platform/wide/`、`interfaces/webchat/src/platform/phone/`；tablet 仍是待补屏幕的骨架，不代表已完成的多标签 UI（`interfaces/webchat/src/platform/tablet/mod.rs`）。
 
 ## 能力
 
@@ -81,17 +80,14 @@ Panel 暴露 **五个顶层内容区**（`PanelMode::Chat`、`Dashboard`、`Memo
 | 文本消息 | 支持 |
 | Markdown 渲染 | 支持（完整 CommonMark） |
 | 代码语法高亮 | 支持 |
-| Mermaid 图表 | 支持 |
 | 实时流式传输 | 支持（Panel live stream） |
 | 图片显示 | 支持（内联） |
-| 文件上传 | 支持 |
+| 文件上传 | 支持（`interfaces/webchat/src/platform/wide/views/chat/state/mod.rs`） |
 | Canvas 交互 | 支持 |
-| 输入中指示器 | 视觉（客户端） |
-| 多标签 UI | 支持（Wide + Phone + Tablet） |
-| 流式协议 | `EditBased` |
-| 最大消息长度 | 无限制 |
+| 多标签 UI | Wide + Phone（tablet 仍为骨架，见上文） |
+| 流式通知 | `stream.response_chunk`（`src/gateway/events/frame.rs`） |
 
-WebChat 在 **WebRich** 交互范式下运行，这使 AI 能够访问包括 Mermaid 图表、canvas 绘图、可折叠部分和流式输出在内的完整能力集。
+**WebRich** 的默认能力集见 `src/thinker/interaction.rs`；这是交互清单，不是 `EditBased` 传输声明。渲染实现见 `interfaces/webchat/src/components/markdown.rs`，Canvas 入口见 `interfaces/webchat/src/api/canvas.rs`。
 
 ## 前置条件
 
@@ -100,10 +96,10 @@ WebChat 在 **WebRich** 交互范式下运行，这使 AI 能够访问包括 Mer
 
 ### 无需额外设置
 
-WebChat 内置在 `gateway` 特性中；只要你能够启动 Aleph 服务器，WebChat 就可用。
+WebChat 资源嵌入 `aleph-server`；二进制目标定义见 `Cargo.toml`，嵌入定义见 `src/gateway/control_plane/assets.rs`。
 
 ```bash
-cargo build --release --features gateway
+cargo build --release -p alephcore --bin aleph-server
 ```
 
 </Step>
@@ -115,7 +111,7 @@ cargo build --release --features gateway
 aleph server start
 ```
 
-服务器默认在 `ws://127.0.0.1:18790` 启动。HTTP 服务器同时提供 WebSocket 端点和 WebChat WASM 包。
+服务器默认在 `ws://127.0.0.1:18790` 启动（`src/gateway/config.rs`）。HTTP 服务器同时提供 WebSocket 端点和 WebChat WASM 包（`src/gateway/control_plane/server.rs`）。
 
 </Step>
 </Steps>
@@ -124,7 +120,7 @@ aleph server start
 
 ### Gateway 配置（隐式）
 
-WebChat 使用 Gateway 的 HTTP 服务器，当 Gateway 运行时始终可用：
+WebChat 使用 Gateway 的 HTTP 服务器。以下绑定与连接数默认值见 `src/gateway/config.rs`：
 
 ```toml
 [gateway]
@@ -135,36 +131,15 @@ max_connections = 100
 
 ### 显式 WebChat 配置
 
-对于高级场景，你可以单独配置 WebChat：
-
-```toml
-[channels.webchat]
-# 启用 WebChat（配置中默认：false，但 HTTP 服务器始终提供静态文件）
-enabled = true
-
-# WebChat HTTP 服务器端口（如果与 Gateway 分开）
-port = 18790
-
-# 跨域嵌入的 CORS 来源
-cors_origins = ["http://localhost:*", "https://your-app.example.com"]
-```
+Panel 由 Gateway 的 ControlPlane 提供，不是独立的 WebChat channel HTTP 服务。静态资源入口见 `src/gateway/control_plane/server.rs`；浏览器来源校验使用 `[gateway]` 的 `allowed_origins`，见 `src/gateway/config.rs`。
 
 ### 静态文件目录
 
-Gateway 从可配置目录提供静态文件：
-
-```rust
-HttpServerConfig {
-    addr: ([127, 0, 0, 1], 18790).into(),
-    static_dir: Some(PathBuf::from("/path/to/webchat/dist")),
-    fallback_file: Some("index.html".to_string()),
-    enable_cors: true,
-}
-```
-
-`fallback_file` 启用 SPA 路由 —— 任何不匹配静态文件的路径都提供 `index.html`，让 Panel 的路由器处理 URL。
+Panel 资源在构建时从 `interfaces/webchat/dist/` 通过 `rust_embed` 嵌入二进制，运行时不读取可配置的磁盘目录（`src/gateway/control_plane/assets.rs`）。无扩展名的未知路径回退到嵌入的 `index.html`，不依赖 `fallback_file` 配置（`src/gateway/control_plane/server.rs`）。
 
 ## WebSocket 协议
+
+旧 `/ws` 是历史兼容入口，目标协议为 [Protocol v1](/docs/zh/gateway/protocol-v1)；入口实现见 `src/gateway/server/connection/web_v1.rs`。
 
 WebChat 使用标准 JSON-RPC 2.0 协议通过 WebSocket 与 Gateway 通信。
 
@@ -174,7 +149,7 @@ WebChat 使用标准 JSON-RPC 2.0 协议通过 WebSocket 与 Gateway 通信。
 const ws = new WebSocket("ws://127.0.0.1:18790/ws");
 ```
 
-如果启用了认证，第一条消息必须是 `connect` 请求：
+旧 `/ws` 入口先发送 `connect` 握手（`src/gateway/handlers/connect.rs`）：
 
 ```json
 {
@@ -195,6 +170,8 @@ const ws = new WebSocket("ws://127.0.0.1:18790/ws");
 ```
 
 ### 发送消息
+
+`agent.run` 的 `message` 是 `input` 的兼容别名；`session_key` 可选（`src/gateway/handlers/agent.rs`）。
 
 ```json
 {
@@ -217,7 +194,7 @@ const ws = new WebSocket("ws://127.0.0.1:18790/ws");
   "jsonrpc": "2.0",
   "id": "sub-001",
   "method": "events.subscribe",
-  "params": { "pattern": "stream.*" }
+  "params": { "topics": ["agent.*", "run.*"] }
 }
 ```
 
@@ -226,46 +203,41 @@ const ws = new WebSocket("ws://127.0.0.1:18790/ws");
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "event",
+  "method": "stream.response_chunk",
   "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-123",
-      "content": "根据当前条件..."
-    }
+    "type": "response_chunk",
+    "run_id": "run-123",
+    "seq": 1,
+    "delta": "Hello",
+    "full_text": "Hello",
+    "content": "Hello",
+    "chunk_index": 0,
+    "is_final": false,
+    "is_intermediate": false
   }
 }
 ```
 
 ### 事件类型
 
-| 主题 | 描述 |
-|-------|-------------|
-| `stream.chunk` | 文本内容块（部分响应） |
-| `stream.tool_start` | 工具执行已开始 |
-| `stream.tool_end` | 工具执行完成 |
-| `agent.started` | Agent 运行已开始 |
-| `agent.completed` | Agent 运行完成 |
-| `agent.error` | Agent 运行遇到错误 |
+订阅使用主题名；流式交付使用 JSON-RPC 通知方法名，两者不可混用。`events.subscribe` 的参数是 `topics` 数组（`src/gateway/handlers/events.rs`）；主题与通知映射见 `src/gateway/events/frame.rs`，通知封装见 `src/gateway/event_bus.rs`。
+
+| 订阅主题 | 通知方法 | 描述 |
+|-------|-------|-------|
+| `agent.response.chunk` | `stream.response_chunk` | 文本增量 |
+| `agent.tool.start` | `stream.tool_start` | 工具执行开始 |
+| `agent.tool.end` | `stream.tool_end` | 工具执行完成 |
+| `run.accepted` | `stream.run_accepted` | 运行已接受 |
+| `agent.run.complete` | `stream.run_complete` | 运行完成 |
+| `agent.run.error` | `stream.run_error` | 运行错误 |
 
 ## 静态文件服务
 
-Gateway 的 HTTP 服务器基于文件扩展名和路径模式处理静态文件请求：
-
-| 模式 | 行为 |
-|---------|----------|
-| `/` | 提供 `index.html`（加载 WASM 包） |
-| `/assets/*`, `/static/*` | 提供静态资源 |
-| `*.html`, `*.css`, `*.js` | 提供匹配文件 |
-| `*.png`, `*.jpg`, `*.svg` | 提供图片文件 |
-| `/favicon.ico` | 提供 favicon |
-| 任何其他路径 | 回退到 `index.html`（SPA 路由） |
-
-文件以适当的 MIME 类型（通过 `mime_guess` 自动检测）和 `Cache-Control: public, max-age=3600` 头提供。
+`/` 提供嵌入的 `index.html`；资源按嵌入路径查找，缺失且含扩展名的路径返回 404，无扩展名路径回退到入口页。响应使用 `Cache-Control: no-cache`，资源支持 ETag 重验证（`src/gateway/control_plane/server.rs`）。
 
 ## 嵌入网站
 
-WebChat 可以使用 iframe 或加载 WebChat JavaScript 包直接嵌入到外部网站中。
+以下示例使用 iframe 加载 Gateway 提供的 Panel（`src/gateway/control_plane/server.rs`）。
 
 ### iframe 嵌入
 
@@ -280,39 +252,24 @@ WebChat 可以使用 iframe 或加载 WebChat JavaScript 包直接嵌入到外�
 
 ### CORS 配置
 
-要允许从你的网站进行跨域访问，请配置 CORS 来源：
-
-```toml
-[channels.webchat]
-cors_origins = [
-  "https://your-website.com",
-  "https://app.your-website.com",
-  "http://localhost:3000"  # 用于开发
-]
-```
-
-支持通配符模式（例如 `http://localhost:*` 匹配任何端口）。
-
-## 认证
-
-当 Gateway 上启用 `require_auth` 时，WebChat 用户必须认证：
-
-1. **基于令牌** — 在 `connect` 请求中传递 bearer 令牌
-2. **设备配对** — 使用配对流程将浏览器注册为受信任设备
-3. **无认证**（默认）— 当 `require_auth` 为 `false` 时，接受所有 WebSocket 连接
+跨来源 WebSocket 升级使用 `[gateway].allowed_origins` 白名单；这不是为独立 WebChat HTTP 服务配置 CORS。默认不要开启 `allow_any_origin`（`src/gateway/config.rs`）。
 
 ```toml
 [gateway]
-require_auth = false  # 设置为 true 用于生产部署
+allowed_origins = ["https://your-website.com", "https://app.your-website.com"]
 ```
 
+## 认证
+
+`connect` 握手区分本机回环授权、设备令牌、配对凭据及历史共享令牌；缺失或无效的凭据不会使远程连接自动获得授权（`src/gateway/handlers/connect.rs`）。不要用旧的 `require_auth = false` 示例作为安全配置。
+
 <Callout type="warn">
-如果你将 Gateway 暴露在网络中（将 `host` 从 `127.0.0.1` 更改为 `0.0.0.0`），强烈建议启用认证。
+远程部署应使用 TLS 并配置可信来源；非回环明文默认被拒绝（`src/gateway/config.rs`）。
 </Callout>
 
 ## 会话管理
 
-WebChat 会话默认使用主会话密钥：
+以下示例使用主会话密钥；`agent.run` 允许显式传入 `session_key`（`src/gateway/handlers/agent.rs`）：
 
 ```
 agent:main:main
@@ -330,37 +287,23 @@ WebChat UI 可以指定自定义会话密钥以支持多个对话：
 }
 ```
 
-会话历史、压缩和持久化与所有其他接口完全相同——由 SQLite 会话存储支持。
+会话持久化由共享会话管理器处理，其 SQLite 连接见 `src/gateway/session_manager/mod.rs`。
 
 ## InteractionManifest
 
-WebChat 使用 **WebRich** 范式，提供最完整的能力集：
+`InteractionManifest` 仍存在于 `src/thinker/interaction.rs`。`src/gateway/channel.rs` 将 `webchat` / `webrich` / `web` / `webhook` 映射为 **WebRich**；以下使用真实构造函数生成范式默认清单；默认能力包括 RichText、CodeHighlight、MultiGroupUI、Streaming、MermaidCharts、ImageInline、Canvas。约束默认 `max_output_chars: None`、`supports_streaming: false`、`prefer_compact: false`，不代表所有浏览器或消息大小都没有限制：
 
 ```rust
-InteractionManifest {
-    paradigm: InteractionParadigm::WebRich,
-    capabilities: {
-        RichText,        // 完整 Markdown 支持
-        CodeHighlight,   // 代码块中的语法高亮
-        MultiGroupUI,    // 标签页、手风琴、可折叠部分
-        Streaming,       // 实时令牌流式传输
-        MermaidCharts,   // Mermaid 图表渲染
-        ImageInline,     // 内联图片显示
-        Canvas,          // 用于绘图/编辑的交互式 canvas
-    },
-    constraints: InteractionConstraints {
-        max_output_chars: None,  // 无限制
-        supports_streaming: true,
-        prefer_compact: false,
-    },
-}
+use alephcore::thinker::interaction::{InteractionManifest, InteractionParadigm};
+
+let manifest = InteractionManifest::new(InteractionParadigm::WebRich);
 ```
 
-这意味着 Agent 可以通过 WebChat 响应时使用其完整的输出格式范围，包括 Mermaid 图表、交互式 canvas 和结构化的多部分布局。
+清单中的 `MermaidCharts` 是范式能力声明；不将它等同于当前 Panel 已实现 Mermaid 渲染。具体渲染能力以 `interfaces/webchat/src/components/markdown.rs` 为准。
 
 ## 健康检查
 
-HTTP 服务器提供健康端点：
+HTTP 服务器提供存活探针（`src/gateway/server/probe.rs`）：
 
 ```bash
 curl http://127.0.0.1:18790/health
@@ -370,12 +313,10 @@ curl http://127.0.0.1:18790/health
 
 ## 故障排除
 
-| 问题 | 解决方案 |
+| 问题 | 检查 |
 |---------|----------|
-| WebChat 页面空白 | 验证 `static_dir` 路径包含构建的 WebChat WASM 包 |
-| WebSocket 连接被拒绝 | 确保 Gateway 正在运行且端口与你的 URL 匹配 |
-| 浏览器控制台中的 CORS 错误 | 将来源添加到 WebChat 配置中的 `cors_origins` |
-| "Authentication required" | 禁用 `require_auth` 或在 `connect` 请求中提供有效令牌 |
-| 流式传输不工作 | 在发送 `agent.run` 之前订阅 `stream.*` 事件 |
-| 静态资源返回 404 | 检查文件是否存在于静态目录中且具有正确的扩展名 |
-| SPA 路由损坏 | 确保 HTTP 服务器配置中的 `fallback_file` 设置为 `"index.html"` |
+| 页面空白 / 资源 404 | 检查运行中的二进制是否嵌入了完整 Panel 构建（`src/gateway/control_plane/assets.rs`） |
+| WebSocket 连接被拒绝 | 核对 Gateway 地址、TLS 与 `allowed_origins`（`src/gateway/config.rs`） |
+| 认证失败 | 检查 `connect` 凭据；不要依赖已过时的 `require_auth` 开关（`src/gateway/handlers/connect.rs`） |
+| 流式传输不工作 | 核对 `events.subscribe` 的 `topics` 及 `stream.response_chunk` 通知处理（`src/gateway/handlers/events.rs`、`src/gateway/events/frame.rs`） |
+| SPA 路由异常 | 无扩展名路径才回退到嵌入入口页（`src/gateway/control_plane/server.rs`） |

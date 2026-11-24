@@ -122,7 +122,7 @@ PluginLoader
 
 插件组件使用 `plugin:component` 限定名，内置组件保持短名。注册表同时保留短名兼容键；短名冲突不会移除任一限定组件，且先注册者保留短名 key。
 
-`CapabilityDeclaration` 是统一的注册模型：
+`CapabilityDeclaration` 是插件层的统一注册模型（声明模型，不等于运行时能力模型——后者在 `src/capability/`，见[能力模型](/docs/zh/capabilities/capability-model)）：
 
 - `Tool`
 - `Hook`
@@ -182,10 +182,10 @@ Watcher 监听清单与组件变更。`reload` 在 load guard 下串行化，并
 
 - `src/extension/mod.rs` — `ExtensionManager`
 - `src/extension/manifest/` — 清单适配与解析
-- `src/extension/discovery/` — 扫描与冲突解决
+- `src/discovery/` — 扫描与冲突解决
 - `src/extension/registry/` — 插件组件注册表
 - `src/extension/loader.rs` — Static / MCP / WASM 加载
-- `src/extension/mcp_config.rs` — `.mcp.json` 解析与限定
+- `src/extension/mcp_config/` — `.mcp.json` 解析与限定
 - `src/extension/hooks/` — 钩子执行与同意
 - `src/extension/runtime/wasm/` — WASM runtime
 - `src/extension/watcher.rs` — 热重载

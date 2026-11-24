@@ -7,12 +7,14 @@ description: "统一扩展门面 RPC 方法(扩展商店)"
 
 七个方法在两次连接中分布:
 
-- `register_extensions_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/extensions.rs:15-58`)——四个生命周期/读方法。
+- `register_extensions_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/extensions.rs`)——四个生命周期/读方法。
 - `register_extensions_install_handlers`(同文件,60-98 行)——三个受信任门控的安装流方法,它们还需要 vault 和 `MarketplaceManager`。
 
 整个命名空间在启动时 `hub_catalog.db` 成功打开时才能连接;若本地缓存无法创建,四个生命周期方法会被跳过并记录警告。安装侧方法另外需要 `MarketplaceManager` 被构造。
 
-之前版本中描述的两个 `sources.*` 方法(`extensions.sources.list` / `refresh`)在 26.6.22+ Hub 收敛中**被撤回**——目录源现在是由 `AlephHubCatalog` 持有的内部概念,操作员通过捆绑同步循环和 `extensions.catalog` 视图达成相同效果。
+## 历史:`sources.*` 方法已撤回
+
+之前版本中描述的两个 `sources.*` 方法(列表与刷新)已在 26.6.22+ Hub 收敛中移除,现在不在 census 中——目录源是由 `AlephHubCatalog` 持有的内部概念,操作员通过捆绑同步循环和 `extensions.catalog` 视图达成相同效果。
 
 ## 目录条目形态
 
@@ -130,7 +132,7 @@ description: "统一扩展门面 RPC 方法(扩展商店)"
 **响应:** `{ "ok": true }`。
 
 按 kind 行为:
-- `local:mcp:<id>`——`mcp.start_server` / `mcp.stop_server`
+- `local:mcp:<id>`——内部调用 `McpManagerHandle::start_server` / `stop_server`(Rust 方法,不是 Gateway RPC)
 - `local:plugin:<id>`——`ExtensionManager::set_plugin_enabled`(同步内存注册表,然后重新检查服务状态)
 - `local:skill:<id>`——`SkillSystem::update_config` 带 `SetEnabled(enabled)`
 
@@ -145,7 +147,7 @@ description: "统一扩展门面 RPC 方法(扩展商店)"
 **响应:** `{ "ok": true }`。
 
 按 kind 行为:
-- `local:mcp:<id>`——`mcp.remove_server`
+- `local:mcp:<id>`——内部调用 `McpManagerHandle::remove_server`(Rust 方法,不是 Gateway RPC)
 - `local:plugin:<id>`——运行时下线 + `remove_dir_all` 插件目录(路径穿越保护镜像 `plugins::handlers::manage::is_safe_plugin_name`;`..` 或 `/` 之类的相对组件会被拒绝)
 - `local:skill:<id>`——`SkillSystem::remove_skill`
 
@@ -161,7 +163,7 @@ description: "统一扩展门面 RPC 方法(扩展商店)"
 | `Plugin` | `plugin.*` / `plugins.*` | `ExtensionManager` + `MarketplaceManager` |
 | `Mcp` | `mcp.*` / `mcp_config.*` | `McpManagerActor` + `McpManagerHandle` |
 
-对后端的修改(如 `mcp.add`)会在 Panel 下次重新获取 `extensions.installed` 时被反映出来(总线也会发出 `tools.changed`)。
+对后端的修改(如通过 `mcp_config.create` 新增 MCP 服务器)会在 Panel 下次重新获取 `extensions.installed` 时被反映出来(总线也会发出 `tools.changed`)。
 
 ## 能力 ledger
 

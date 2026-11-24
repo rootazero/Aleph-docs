@@ -1,0 +1,176 @@
+---
+title: "槽位与替换"
+description: "槽位模型、契约版本与替换机制：Aleph 里什么是槽位、谁能替换什么、失败时如何失败。"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+本页回答三个问题：Aleph 里的「槽位」（slot）是什么形状、契约版本在哪里把关、以及「替换」今天实际能做到哪一步。槽位身份与 Hook@1 契约住在 `crates/aleph-slot-api/`，运行时能力模型住在 `src/capability/`。
+
+<Callout type="warn" title="先分清现状与规划">
+  蓝图 `docs/research/aleph_modularization_plan.md` 第 2～4 节描述的三层模型、槽位目录、用户可配置的替换与回退语义**都还没有实现**。凡是来自这份蓝图的内容，本页都单独标成「状态：规划中」；其余段落逐条给出源码锚点。能力本身的描述符、所有权与租约语义见 [Capability 模型](./capability-model)。
+</Callout>
+
+## 槽位是什么
+
+一个「槽位」= 一个**结构单位**：hook 绑定到它，描述符声明它，契约版本说明这份实现是按哪一版契约写的。三者都在 `crates/aleph-slot-api/src/slot.rs`。
+
+### 槽位身份
+
+`crates/aleph-slot-api/src/slot.rs` 定义了三个核心类型：
+
+- `SlotId(pub String)` —— 槽位标识。模块注释写得很直接：「The slot is the structural unit a hook is bound to. A slot id is just a string used to correlate facts; it does not parse any privileged syntax, encode a grant, or imply ownership.」
+- `ContractVersion(pub u32)` —— 这份 hook 实现是按哪一版契约写的。
+- `HookDescriptor` —— 一个 hook 实现的类型化描述符，字段是 `id`、`slot`、`event`、`kind`、`priority`、`contract_version`，并且带 `deny_unknown_fields`。
+
+`SlotId` 与 `ContractVersion` 被明确标注为 **correlation newtypes**：它们不授予权威、不解析任何特权 ID 语法、也不授权或拒绝任何事情。文件头的 Authority 一节写明：「The new types are expressible for any plugin — being expressible is not a grant.」
+
+### 槽位不等于授权
+
+授权在别处。`crates/aleph-slot-api/src/capability.rs` 里的 `CapabilityId{namespace, name}` 只是一个命名空间标识；`Service{relation, target}` 是**纯关系边**——不带数据、不可调用，`ServiceRelation` 只有 `Requires` / `Provides` / `Conflicts` 三个 snake_case 变体。
+
+`src/capability/descriptor.rs` 的 `CapabilityDescriptor` 把这套东西组合成运行时描述符：它带 `kind`（`CapabilityKind`）、`schema`（`SchemaRef`，版本 + SHA-256 指纹）、`revision`（`CapabilityRevision`）、`lifetime`、`visibility`、`owner`、`services`、`metadata` 与 `facets`。描述符只描述，不授予权限。
+
+## 契约与契约版本
+
+### 版本闸门
+
+在册的契约版本只有一个：协议侧的 `HOOK_CONTRACT_VERSION`，定义在 `shared/protocol/src/hook.rs`，值为 `1`。
+
+`ContractVersion` **不是** `HOOK_CONTRACT_VERSION` 的别名——它是一个独立 newtype，`crates/aleph-slot-api/src/slot.rs` 明确说「This crate does not publish a `CURRENT` alias; callers spell `ContractVersion(HOOK_CONTRACT_VERSION)` directly.」
+
+闸门是 `validate_hook_request(descriptor, envelope)`，它按固定顺序做三件事：
+
+1. 描述符的 contract_version 字段必须等于协议的 `HOOK_CONTRACT_VERSION`，否则返回错误文本 `hook descriptor contract version {} does not match protocol {}`；
+2. 描述符的 event 字段必须等于 `envelope.event.event_tag()`，否则返回 `hook descriptor event {:?} does not match envelope event tag {:?}`；
+3. 信封本身交回协议侧的 `validate_envelope` 复验——直接构造出来的、版本字段不对或事实非法（空 `session_id`、turn-id 矩阵不对、生命周期上下文 ID 不匹配）的信封在这一步被拒。
+
+闸门在 `Hook::execute` 之前跑，所以不合法的描述符到不了实现。`Hook` trait 只有 `descriptor()` 与 `execute()` 两个方法，且 `execute` 没有默认实现——缺实现是编译期错误，不是运行期空操作。返回的 `HookResponse` 在协议 `validate_response` 接受之前同样不可信。
+
+`crates/aleph-slot-api/src/slot.rs` 的文件头还划了一条重要边界：wire 契约只有 `HookEventTag`（七个变体）；旧的 24 变体 `HookEvent` 保留在 `crates/aleph-slot-api/src/hooks.rs` 里服务既有的 hooks.json / JSON-RPC 表面，**不作为新契约的 wire tag**，两者混用是 wire 形状错误，在 serde 阶段就被拒。
+
+### 契约 crate 与生产代码的关系
+
+`crates/aleph-slot-api/src/slot.rs` 的文件头写明：这个模块是 **NEW pure contract**，不是旧 Core `HookContext` / `HookResult` / `HookConfig` / hook executor 的迁移；运行时分发路径、权限闸、租约与 grant 策略仍住在 `alephcore` 里，并且继续拥有那批旧类型。新 trait 的生产接线被划给 P0.5 / P2。
+
+今天的状态可以分成两层：
+
+- **类型层已经在生产里**。`alephcore` 单向依赖 `aleph-slot-api`（根 `Cargo.toml` 的 workspace 成员与依赖声明），`src/tools/`、`src/tool_metadata/types/`、`src/builtin_tools/`、`src/providers/`、`src/search/`、`src/browser/`、`src/gateway/`、`src/memory/runtime/` 等处都引用 `aleph_slot_api`。例如 `src/tool_metadata/types/mod.rs` 明确把 metadata 类型的真值源指向 `aleph_slot_api::metadata`，自己只做再导出。
+- **槽位身份层还没接线**。`SlotId`、`ContractVersion`、`HookDescriptor`、`validate_hook_request` 这四个符号在 `src/`、`shared/`、`interfaces/`、`desktop/` 下**没有任何引用**——它们目前只存在于 `crates/aleph-slot-api/src/slot.rs` 及其测试里。
+
+## 契约 crate 覆盖的能力面
+
+`crates/aleph-slot-api/src/lib.rs` 导出的模块就是契约覆盖面。每个模块都有生产代码或测试在用：
+
+| 模块 | 主要内容 |
+|---|---|
+| `crates/aleph-slot-api/src/ai.rs` | `ToolChoice`、`SystemPromptPart`、`RequestPayload`、`ThinkLevel`、`AiProviderContract` |
+| `crates/aleph-slot-api/src/ai_delta.rs` | `ProviderDelta`、`DeltaSink`、`NoopSink`、`collect_response_deltas` |
+| `crates/aleph-slot-api/src/ai_message.rs` | `UnifiedMessage`、`CacheControl`、`EphemeralTtl`、`ContentBlock`、`transform_messages`、`normalize_tool_pairs` |
+| `crates/aleph-slot-api/src/ai_reasoning.rs` | `ThinkingOrigin`、`ReasoningReplay`、`canonicalize_model_id`、`EndpointClass`、`detect_endpoint_class`、`strips_prior_turn_thinking` |
+| `crates/aleph-slot-api/src/ai_response.rs` | `ProviderResponse`、`NativeToolCall`、`StopReason`、`TokenCost`、`TokenUsage` |
+| `crates/aleph-slot-api/src/approval.rs` | `ApprovalDecisionType`、`ApprovalRequest`、`ApprovalOutcome`、`ApprovalResponse`、`GrantScope`、`ApprovalAction`、`AuthorizationResult`、`RenderedApproval` |
+| `crates/aleph-slot-api/src/cancellation.rs` | `CancellationToken` |
+| `crates/aleph-slot-api/src/channel.rs` | `ChannelId` / `ConversationId` / `UserId` / `MessageId`、`Channel`、`ChannelFactory`、`ChannelConfig`、`ChannelCapabilities`、`InboundMessage` / `OutboundMessage`、`StreamProtocol`、`ChannelHealth` |
+| `crates/aleph-slot-api/src/concurrency.rs` | `ConcurrencyClaim`、`ExclusiveScope`、`claims_conflict`、`batch_parallelizable`、`partition_parallel_groups`、`normalize_path` |
+| `crates/aleph-slot-api/src/descriptor.rs` | `SCHEMA_VERSION`、`ToolCapabilityDescriptor`、`DescriptorError`、`ToolCallIdentity`、`ReplayContractFingerprint`、`canonicalize_services` |
+| `crates/aleph-slot-api/src/embedding.rs` | `EmbeddingProvider` |
+| `crates/aleph-slot-api/src/error.rs` | `AlephError`、`AlephException`、`ErrorClass`、`Result` |
+| `crates/aleph-slot-api/src/error_kind.rs` | `ToolErrorKind`、`classify_error_str`、`classify_tool_error`、`CROSS_BATCH_REFUSED_CAUSE` |
+| `crates/aleph-slot-api/src/handler.rs` | `ToolHandler`、`McpServerFilter` |
+| `crates/aleph-slot-api/src/hooks.rs` | legacy 24 变体 `HookEvent`、`HookKind`、`HookPriority`、`HookAction`、`MatchSubject` |
+| `crates/aleph-slot-api/src/metadata.rs` | `ToolCategory`、`ToolDefinition`、`ToolSafetyLevel`、`ToolPriority`、`ToolSource`、`ToolSourceType`、`ChannelType`、`UnifiedTool` |
+| `crates/aleph-slot-api/src/search.rs` | `SearchOptions`、`SearchResult`、`SearchCapabilities`、`SearchProvider`、`Recency`、`MAX_SEARCH_RESULTS`（值 100） |
+| `crates/aleph-slot-api/src/text.rs` | `truncate_text` |
+| `crates/aleph-slot-api/src/tool.rs` | `ToolError`、`RefusedBy`、`ToolDefinition`、`ToolDefinitionMetadata`、`ToolOutput`、`ToolImage`、`to_metadata_form` |
+| `crates/aleph-slot-api/src/webhook.rs` | `WebhookHandler`、`WEBHOOK_ROUTE_PREFIX`（值 `/webhook`） |
+| `crates/aleph-slot-api/src/browser/` | 浏览器契约：`contract.rs`、`effect.rs`、`engine.rs`、`error.rs`、`operations.rs`、`recording.rs`、`routes.rs`、`text.rs`、`types.rs` |
+
+## 三层模型与槽位目录
+
+> **状态：规划中** — 蓝图 `docs/research/aleph_modularization_plan.md` §2 三层模型、§3 槽位目录。
+
+蓝图把能力分成三层：L1 内核（不可替换）、L2 默认模块、L3 替换面。它给出一张数据槽位表和一张行为槽位表，槽位 ID 形如：
+
+```text
+数据槽位（蓝图 §3.1）
+  provider.<name>   tool.<name>      search.provider   browser.driver
+  channel.<type>    memory.embedding memory.recall      skill.<name>
+  agent.<name>      prompt.<layer>
+
+行为槽位（蓝图 §3.2，契约统一为 Hook@1）
+  tool.pre          tool.post         prompt.assembly
+  context.compaction turn.continue    memory.ingest_filter
+  session.lifecycle
+```
+
+每张表还标注了基数语义（单基数 / 多基数 / 链式）。蓝图把「行为槽位契约统一为 Hook@1」作为前提——这与 `crates/aleph-slot-api/src/slot.rs` 的方向一致，但那张目录本身以及对应的解析器都还不存在。
+
+现状里最接近的东西是三样，但都不是槽位目录：
+
+- 能力主分类是 `src/capability/descriptor.rs` 的 `CapabilityKind`（12 个变体），它是**分类**，不是可替换位；
+- provider 侧有 `ProviderId` 与 `ProviderState`（`src/capability/provider.rs`），它描述一个后端的生命周期，不是槽位；
+- 行为侧的注册表是 `src/extension/hooks/registry.rs`，它是 legacy hook 的注册表，wire 上仍是 24 变体 `HookEvent`。
+
+## 替换机制
+
+> **状态：规划中** — 蓝图 `docs/research/aleph_modularization_plan.md` §4 替换机制（§4.1 用户配置、§4.2 解析顺序、§4.3 生效与热换）。
+
+蓝图的形态是：
+
+- 用户配置段 `[slots."<slot-id>"]`，键包括 `use`（取值形如 `builtin:` / `native:` / `wasm:` / `mcp:` / `plugin:`）、`mode`（替换 / 前插 / 后接 / 禁用）与 `fallback`；
+- 解析顺序五级：会话级覆盖 > 项目级 `.aleph/config.toml` > 用户级 `~/.aleph/config.toml` > 插件清单 claims > 内置；同一层里两个声明认领同一个单基数槽位时 **fail-closed**，进 `Conflicted`；
+- 生效路径是 `SlotResolver` → `SlotPlan`（纯值），工具类槽位走 `ToolHandlerRegistry::replace` / `register` / `unregister`，行为槽位走 HookRegistry，进程级槽位走 `CapabilitySlot<T>`；每次应用在所有权树里登记新的 owner generation，旧租约经租约复核失效；配置热换走 `config::live_apply` 的 `slots` 分支。
+
+今天真实存在的是其中一小块：`src/tools/registry.rs` 的 `ToolHandlerRegistry::replace(descriptor, handler)` 已经实现「一次原子替换 handler 与描述符」，语义与蓝图一致——已持有旧 handler 的调用方继续拿稳定的 `Arc`，之后的 `resolve` 看到新的，名字从未注册过则返回 `ToolError::NotFound`。但它是**注册表内部操作**：调用方是插件加载与工具注册路径，不是用户配置。
+
+`SlotResolver`、`SlotPlan`、`[slots.*]` 配置段、`config::live_apply` 的 `slots` 分支在代码里都不存在。
+
+## 今天能替换什么
+
+现状里真正存在的替换只有四类：
+
+1. **工具实现**：`src/tools/registry.rs` 的 `ToolHandlerRegistry::register` / `replace` / `unregister`。注册表用 `src/capability/versioned_registry.rs` 的不可变发布原语——`transact` 原子发布并广播，订阅者看到变更。
+2. **注册表快照替换**：`src/capability/facade.rs` 的 `CapabilityChange` 有 `Registered` / `Replaced` / `Unregistered` / `Invalidated` 四个变体，`CapabilityChangeStream::invalidate_and_resync` 在 owner generation 推进时发出 `Invalidated` 并保留最后一个已提交游标，订阅者重同步而不是从零重来。
+3. **provider 替换靠代失效**：`src/capability/provider.rs` 的 `ProviderLifecycle` 在**新的 start 开始时**分配新 generation，因此旧代租约在重启期间无效、在替换之后**依然无效**；`src/capability/facade.rs` 的 `ResolveError::StaleProvider` 就是「租约签发后 provider 被停止或替换」这一情形的显式表达。
+4. **用户配置驱动的换后端**：`src/config/types/tools.rs` 的 `McpServerConfig` 描述一个客户端侧 MCP 服务器条目（`command`、`args`、`env`、`cwd`、`requires_runtime`、`timeout_seconds`、`enabled`），用户在 `config.toml` 里换一个 MCP 服务器就是今天唯一由用户驱动的「换后端」。网关侧的暴露名单在 `src/gateway/mcp_face/config.rs` 的 `McpFaceConfig`：它的 `expose` 是白名单且可热生效，`enabled` 只在启动挂载路由时生效。
+
+另外还有两条「明确不做」的配置边界，同样在 `src/config/types/tools.rs`：tool_service.default_timeout_seconds 是非默认值、tool_service.per_tool_seconds 是非空，都在解析配置时直接被拒，错误文本分别是 `tool_service.default_timeout_seconds is not supported until ToolService consumes it` 与 `tool_service.per_tool_seconds is not supported until ToolService consumes it`。这些字段是留给 ToolService 消费的预留位——配了会报错，而不是被静默忽略。
+
+诊断侧的替换观测是纯观测。`src/capability/diagnostic_control.rs` 的 `replacement_count`、`applied_replacement_count`、`last_replacement_registry_cursor`、`last_replacement_tool_ids` 四个字段，源码注释写明它们没有 dispatcher / resolver / session 路径读取，也不持久——没有恢复游标、没有日志、没有重放。
+
+## 回退与失败语义
+
+现状是 **fail-closed**，没有回退：
+
+- `validate_hook_request`（`crates/aleph-slot-api/src/slot.rs`）三闸任一不过就拒；
+- `src/capability/policy.rs` 的 `PolicyEngine` 定义了三闸（可见性 / 主体 / 权威），每个方法都 fail-closed，任一闸拒绝即整个请求被拒——但它的 `resolve` 在源码注释里被明确标为**生产未挂载**，活路径是 facade 自己的绑定、主体与生命周期检查；
+- 租约失效后 `src/capability/facade.rs` 的 `ResolveError::StaleOwner` / `StaleProvider` 会拒绝后续使用；
+- `src/capability/special.rs` 的 special 能力分发前会检查记录是否仍是当前的一条，用以挡住 ABA / 生命周期边界的陈旧捕获。
+
+> **状态：规划中** — 蓝图 `docs/research/aleph_modularization_plan.md` §4.4 回退与失败语义。
+
+蓝图给出的回退表是：
+
+- **解析期失败**（解析不出可用实现）回退到内置实现；
+- **调用期失败**不回退，错误原样返回给模型——半途换实现会掩盖问题；
+- 记忆嵌入这一类槽位**永不回退**；
+- 显式声明不回退的槽位在解析期也不回退；
+- 显式声明回退到内置的槽位在调用期可以回退，但必须标出它是由内置实现的，并记一条审计事件——不允许静默回退。
+
+现状里没有任何一条对应物：没有内置实现的标记位，也没有回退审计事件。
+
+## 规划中与现状对照表
+
+| 蓝图条目 | 蓝图位置 | 现状里最接近的东西 | 状态 |
+|---|---|---|---|
+| 三层模型（L1 内核 / L2 默认模块 / L3 替换面） | §2 | `src/capability/descriptor.rs` 的 `CapabilityKind` / `CapabilityDescriptor`；`src/capability/ownership.rs` 的 owner 与租约边界。没有「可替换面」的划分 | 规划中 |
+| 数据槽位目录 | §3.1 | `src/capability/descriptor.rs` 的 `CapabilityId` / `CapabilityKind`；`src/capability/provider.rs` 的 `ProviderId` / `ProviderState`。没有槽位 ID 目录 | 规划中 |
+| 行为槽位目录（契约统一 Hook@1） | §3.2 | `crates/aleph-slot-api/src/slot.rs` 的 `Hook` / `HookDescriptor` / `validate_hook_request`；`src/extension/hooks/registry.rs` 是 legacy hook 注册表 | 规划中（契约已写好，未接线） |
+| 槽位解析与 `SlotPlan` | §4.2 | 无 | 规划中 |
+| 工具热换 | §4.3 | `src/tools/registry.rs` 的 `ToolHandlerRegistry::replace` 已有原子替换语义，但只被内部注册路径使用 | 部分落地 |
+| 应用时登记新 owner generation | §4.3 | `src/capability/ownership.rs` 的所有权树与租约复核；`src/capability/provider.rs` 的 generation 失效 | 部分落地 |
+| 配置热换的 `slots` 分支 | §4.3 | 无 | 规划中 |
+| 解析期 / 调用期回退语义 | §4.4 | 一律 fail-closed，没有内置回退，也没有回退审计 | 规划中 |
+| 契约主版本号 | §4.5 | `shared/protocol/src/hook.rs` 的 `HOOK_CONTRACT_VERSION`（值 1）；`crates/aleph-slot-api/src/slot.rs` 的 `ContractVersion` 不是它的别名 | 部分落地 |
+| 能力授权（授予 / 撤销槽位） | §5.2 | `crates/aleph-slot-api/src/approval.rs` 的 `GrantScope` / `AuthorizationResult` 是审批面；`src/extension/plugin_trust.rs` 是加载信任，不是能力授权 | 规划中 |

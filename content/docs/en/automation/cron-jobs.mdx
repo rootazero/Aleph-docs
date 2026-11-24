@@ -113,28 +113,19 @@ See [cron.* RPC methods](/docs/en/gateway/methods/cron) for the full API specifi
 
 ### Via Configuration
 
-Jobs can also be defined in `config.toml` for declarative management:
+The `[cron]` section of `config.toml` only controls the **scheduler itself** — it does not declare individual jobs:
 
 ```toml
-[[cron.jobs]]
-name = "Morning Briefing"
-schedule = "0 8 * * 1-5"
-agent_id = "main"
-prompt = "Good morning. Give me a briefing: weather, calendar, priority tasks."
-timezone = "America/New_York"
-tags = ["daily", "briefing"]
-
-[[cron.jobs]]
-name = "Backup Verification"
-schedule = "0 3 * * *"
-agent_id = "main"
-prompt = "Check that last night's backup completed. Report any failures."
-tags = ["maintenance"]
+[cron]
+enabled = true                  # Master switch for the scheduler
+db_path = "~/.aleph/data/tasks.db"  # SQLite store for jobs and run history
+check_interval_secs = 60        # Scheduler tick interval
+max_concurrent_agents = 2       # Max agent sessions running simultaneously
+job_timeout_secs = 900          # Per-job timeout (default 900)
+history_retention_days = 30     # How long run history is kept
 ```
 
-<Callout type="warn">
-Jobs defined in `config.toml` are synced on startup. If a job with the same name already exists in the database, the config version takes precedence and overwrites it.
-</Callout>
+Individual jobs are **runtime state**: create them with the `cron.create` RPC (or the `cron_manage` tool); they live in the SQLite job store, not in `config.toml`. Changing the `[cron]` section only affects scheduler behaviour — it never adds, edits, or removes existing jobs.
 
 ## Managing Jobs
 
@@ -163,12 +154,14 @@ aleph cron status --json
 Jobs can be paused without deleting them. A paused job retains its configuration and history but will not execute on its next scheduled time.
 
 ```json
-// Pause
-{ "method": "cron.pause", "params": { "job_id": "job-uuid-123" } }
+// Pause (disable)
+{ "method": "cron.toggle", "params": { "job_id": "job-uuid-123", "enabled": false } }
 
-// Resume — next_run_at is recalculated from now
-{ "method": "cron.resume", "params": { "job_id": "job-uuid-123" } }
+// Resume (enable) — next_run_at is recalculated from now
+{ "method": "cron.toggle", "params": { "job_id": "job-uuid-123", "enabled": true } }
 ```
+
+When `enabled` is omitted, `cron.toggle` flips the job's current enabled state and returns the new `enabled` value.
 
 ### Manual Trigger
 
@@ -181,8 +174,10 @@ aleph cron run <job-id>
 Or via RPC:
 
 ```json
-{ "method": "cron.trigger", "params": { "job_id": "job-uuid-123" } }
+{ "method": "cron.run", "params": { "job_id": "job-uuid-123" } }
 ```
+
+`cron.run` sets the job's `next_run_at` to the current moment; the job executes on the next scheduler tick (within `check_interval_secs`) and returns `{ "triggered": ..., "status": "queued", "next_run_at_ms": ... }`. The job must be enabled and not already running.
 
 The manual run is tracked separately with `trigger_source: "manual"` so you can distinguish it from scheduled runs in the history.
 
@@ -253,17 +248,16 @@ The retry strategy uses exponential backoff: each retry waits longer than the pr
 
 | Status | Description |
 |--------|-------------|
-| `queued` | Job is queued for execution |
-| `running` | Currently executing |
-| `completed` | Finished successfully |
-| `failed` | Execution failed after all retries |
-| `retrying` | Failed, waiting for next retry attempt |
+| `ok` | Finished successfully |
+| `error` | Execution failed |
+| `skipped` | Skipped this round (e.g. the agent was busy) |
+| `timeout` | Execution timed out |
 
 ## Monitoring
 
 ### Events
 
-Cron job execution emits events that you can subscribe to via the gateway:
+Cron job definitions emit events that you can subscribe to via the gateway:
 
 ```json
 { "method": "events.subscribe", "params": { "patterns": ["cron.*"] } }
@@ -273,9 +267,9 @@ Events emitted:
 
 | Topic | When |
 |-------|------|
-| `cron.triggered` | Job execution starts |
-| `cron.completed` | Job finished successfully |
-| `cron.failed` | Job failed after all retries |
+| `cron.job.changed` | A job was created, updated, deleted, or only changed its run state (`job_id` + `change`) |
+
+Job **execution results** are not part of the event stream: use `cron.runs` to read a job's run history (`status` is one of `ok`, `error`, `skipped`, `timeout`) and `cron.status` for the overall picture (`running`, `last_tick_at_ms`, `job_count`, `enabled_count`).
 
 See [Events](/docs/en/automation/events) for details on subscribing.
 
@@ -289,7 +283,7 @@ The `aleph cron status` command shows a dashboard view of all jobs including las
 2. **Set appropriate timezones** — Cron expressions are evaluated in the job's timezone. A daily summary at "6 PM" should use your local timezone, not UTC.
 3. **Tag for organization** — Use tags like `"daily"`, `"maintenance"`, `"reports"` to filter and manage jobs at scale.
 4. **Chain for workflows** — Instead of one complex prompt, break multi-stage processes into chained jobs with success/failure branches.
-5. **Monitor failures** — Subscribe to `cron.failed` events and set up alerts. A silently failing cron job is worse than no cron job.
+5. **Monitor failures** — Check `cron.runs` regularly for failures (or use `cron.status` for the overall picture) and set up alerts. A silently failing cron job is worse than no cron job.
 6. **Use templates for flexibility** — Prompt templates let you change parameters without recreating the job.
 
 ## See Also

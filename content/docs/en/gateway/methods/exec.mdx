@@ -3,7 +3,7 @@ title: "exec.*"
 description: "Execution approval RPC methods"
 ---
 
-`exec.*` is the approval surface for runtime exec-tier gating. The runtime ships **two real JSON-RPC methods** (`exec.approval.resolve`, `exec.approvals.pending`); the rest of the approval UX — `exec.approval.request`, the approval card, the Ask / Auto / Full switch — lives in the **agent loop** and is reached through `chat.send` or `agent.run`, not over this namespace.
+`exec.*` is the approval surface for runtime exec-tier gating. The runtime ships **two real JSON-RPC methods** (`exec.approval.resolve`, `exec.approvals.pending`); the rest of the approval UX — Triggering an approval card, the approval card, the Ask / Auto / Full switch — lives in the **agent loop** and is reached through `chat.send` or `agent.run`, not over this namespace.
 
 The 26.7.15+ Ask/Auto/Full exec-tier gate fires from `src/tools/scoped/` (the action-aware approval card and the bypass of the slash fast-path, `tools.invoke`, and background continuations). The wiring details live in `docs/superpowers/specs/2026-05-21-gateway-robustness-kit-design.md`; this page only documents the RPC surface.
 
@@ -30,15 +30,15 @@ List every approval still awaiting a decision. Read-only; the card and the tool 
 
 Each `PendingApproval` carries the tool call, the grant scopes the operator can pick, and the original agent session key, so a Panel reload can re-render any in-flight card.
 
-## Methods that are **not** RPC
+## Approval operations that are **not** RPC
 
-The following methods are described in older versions of this page but are **not** registered on the current `aleph-server`:
+These approval UX concepts are not standalone RPCs; registered methods are listed in `src/gateway/method_census.rs`:
 
-| Method | Why it is not an RPC |
+| UX operation | Why it is not an RPC |
 |--------|---------------------|
-| `exec.approval.request` | The model never calls this — the action-aware gate in `src/tools/scoped/` raises the approval card on the event bus when the declared metadata flips. |
-| `exec.approvals.get` | There is no "approval config" to read — grants are in-memory only (once / session), no disk shape. |
-| `exec.approvals.set` | Same reason. There is no config to write. |
+| Triggering an approval card | The model never calls this — the action-aware gate in `src/tools/scoped/` raises the approval card on the event bus when the declared metadata flips. |
+| Reading approval configuration | There is no "approval config" to read — grants are in-memory only (once / session), no disk shape. |
+| Writing approval configuration | Same reason. There is no config to write. |
 
 If a client wants to drive the flow programmatically, the only legal entry points are `exec.approval.resolve` (to answer a card) and `exec.approvals.pending` (to enumerate open cards).
 

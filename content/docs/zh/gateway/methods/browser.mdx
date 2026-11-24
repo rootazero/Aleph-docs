@@ -1,26 +1,25 @@
 ---
 title: "browser.*"
-description: "浏览器自动化 RPC 方法"
+description: "浏览器内建工具与 Gateway 配置接口的区别"
 ---
 
 当前 `aleph-server` 运行时**没有** `browser.*` JSON-RPC 方法。浏览器自动化流水线以**内建工具**(`browser_navigate`、`browser_click`、`browser_type`、`browser_snapshot` 等)实现,由代理循环调用,而不是作为网关 RPC 暴露。`src/gateway/handlers/browser_config.rs` 只导出 `browser_config.*` 配置命名空间;CDP 驱动本身位于 `src/browser/`。
 
-本页面之前描述的 `browser.get`、操作目标、滚动方向、启动模式等,实际描述的是**代理侧工具 API**(`browser_navigate` 参数的形状),而不是网关 RPC。客户端若要使用浏览器自动化,应通过 `chat.send` / `agent.run`,由代理循环分发工具。
 
 ## 方法
 
-下列方法**未被注册**。`browser.*` JSON-RPC 调用会返回 `Method not found`(`-32601`)。
+下表列出代理侧内建工具，**不是 Gateway RPC**。定义见 `src/builtin_tools/browser_tools/`；客户端通过 `chat.send` / `agent.run` 触发代理循环。
 
 | 方法 | 说明 |
 |------|------|
-| `browser.navigate` | (工具) 在当前标签页中导航到 URL |
-| `browser.click` | (工具) 通过选择器、ref 或视口坐标点击元素 |
-| `browser.type` | (工具) 在输入元素中键入文本 |
-| `browser.screenshot` | (工具) 截取页面或特定元素的截图 |
-| `browser.evaluate` | (工具) 执行 JavaScript 表达式并返回结果 |
-| `browser.snapshot` | (工具) 获取页面的 ARIA 无障碍快照 |
+| `browser_navigate` | (工具) 在当前标签页中导航到 URL |
+| `browser_click` | (工具) 通过选择器、ref 或视口坐标点击元素 |
+| `browser_type` | (工具) 在输入元素中键入文本 |
+| `browser_screenshot` | (工具) 截取页面或特定元素的截图 |
+| `browser_evaluate` | (工具) 执行 JavaScript 表达式并返回结果 |
+| `browser_snapshot` | (工具) 获取页面的 ARIA 无障碍快照 |
 
-**仅有的浏览器相关 JSON-RPC 方法**为:
+**配置 RPC 与工具的区别**:
 
 - `browser_config.get` / `browser_config.update`——读写 `[browser]` 配置段(`mode`、`headless`、`cdp_port`)。
 - `browser_navigate`、`browser_click`、`browser_type`、`browser_evaluate`、`browser_snapshot` 由 LLM 通过代理循环分发,不通过 JSON-RPC 暴露。

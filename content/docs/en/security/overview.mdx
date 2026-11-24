@@ -1,292 +1,64 @@
 ---
 title: "Security Overview"
-description: "Defense in depth — network boundary, TLS, execution-approval gate, sandboxing, signed ledger"
+description: "The roles of Gateway authentication, execution approval, sandboxing, and audit."
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
+This page explains how the Gateway identifies callers and how tool permissions, execution approval, sandboxing, and audit govern their actions.
 
 ## Security Architecture
 
-Aleph's security model is built on several layers that operate
-independently. A failure in one layer does not collapse the others.
+| Layer | Responsibility | Implementation |
+|-------|----------------|----------------|
+| Entry points | Check transport, origin, credentials, or the Unix socket peer | `src/gateway/server/connection/`, `src/gateway/origin_policy.rs` |
+| Tool permissions | Apply tool permissions and execution tiers at dispatch | `src/tools/scoped/` |
+| Execution approval | Bind the operator's decision to the specific action, not just the tool name | `src/sandbox/exec_approval/` |
+| Sandbox | Restrict execution by workspace and capability, and apply the platform sandbox | `src/sandbox/workspace/`, `src/sandbox/platforms/` |
+| Audit | Store security events, approval decisions, and signed identity records | `src/security/audit.rs`, `src/tools/scoped/dispatch.rs`, `src/identity/` |
 
-```
-Layer 1 — Network boundary + Gateway credential
-├─ Default loopback bind, zero-config operator
-├─ Remote connection must present one of:
-│   • device token (aleph-dt-*, long-lived)
-│   • bootstrap ticket (aleph-bt-*, 5-min single-use)
-│   • shared Gateway token (aleph-<uuid>, HMAC-hashed)
-├─ Fail closed (per-connect gate)
-└─ Native TLS + TOFU client trust
+## Network Boundaries and Gateway Credentials
 
-Layer 2 — Tool permissions
-├─ ScopedToolService merge (global → agent → channel)
-├─ Exec tier (Ask / Auto / Full) — keyed on ToolFacts metadata
-├─ Explicit [policies.tool_permissions] entries win
-└─ [sandbox.command_policy] hardline floor
+The Gateway listens on loopback by default. Compatibility `/ws` grants implicit `operator` access only to direct loopback clients that omit device credentials. Remote callers need a valid device token, bootstrap ticket, or legacy shared token. Plaintext remote connections are denied by default; use native TLS or a trusted TLS-terminating proxy for the compatibility endpoint. Passing a browser origin check does not authenticate the caller (`src/gateway/config.rs`, `src/gateway/server/mod.rs`, `src/gateway/server/connection/upgrade.rs`, `src/gateway/handlers/connect.rs`).
 
-Layer 3 — Execution approval
-├─ action-aware approval gate (ApprovalAction)
-├─ grant fingerprint keys on canonical args (not the redacted summary)
-├─ 120s timeout ⇒ refusal (not ledgered)
-└─ /deny <reason> routes the reason back to the model
+The default network address does not define trust for every entry point. Desktop IPC verifies the Unix socket peer; Web v1 uses native TLS, same-origin checks, and device sessions. Both expose only a limited set of read-only RPCs (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`). See [Gateway authentication](../gateway/auth) and [IPC protocol](./ipc).
 
-Layer 4 — Sandbox
-├─ WorkspaceSandbox (six-step pipeline)
-├─ Platform-native enforcement:
-│   • macOS — sandbox-exec + Seatbelt
-│   • Linux — bwrap + Landlock + seccomp-bpf + cgroup v2
-│   • Windows — AppContainer + RestrictedToken + JobObject
-├─ [sandbox.command_policy] hardline command filter
-└─ SSRF engine + parse normalisation
+### Remote TLS and Client Trust
 
-Layer 5 — Audit
-├─ session event log (ToolCallApproved / ToolCallDenied)
-└─ per-agent signed ledger (Ed25519 hash chain)
-```
-
-## Network boundary + Gateway token
-
-The trust boundary is the network boundary, gated by a single shared
-**Gateway token**.
-
-| Configuration | Meaning |
-|---------------|---------|
-| `host = "127.0.0.1"` (default) | Only same-machine processes; zero-config operator |
-| `host = "0.0.0.0"` | Remote devices can reach the socket but **must** present a valid credential |
-
-Loopback is always credential-free (`is_loopback` ⇒ operator). A remote
-connection must present one of, in priority order:
-
-1. **Device token** (`aleph-dt-*`) — long-lived, bound to one paired
-   device, SHA-256-hashed at rest.
-2. **Bootstrap ticket** (`aleph-bt-*`) — 5-minute single-use, exchanged
-   during onboarding for a fresh device token.
-3. **Shared Gateway token** (`aleph-<uuid>`) — generated at boot by
-   `SharedTokenManager`, HMAC-hashed, constant-time verified.
-
-A valid credential = full operator authority (identical to local); a
-missing/invalid one is walled (the WS dispatch refuses every method but
-`connect`).
-
-### Remote transport encryption (TLS)
-
-Loopback stays plaintext `ws://` — the zero-config desktop / CLI /
-same-host-proxy hop is unchanged. For a **non-loopback** bind Aleph is now
-fail-closed:
-
-- **Boot gate** (`check_network_exposure`): a config that binds a
-  non-loopback `host` with no native TLS, no trusted proxy, and
-  `allow_insecure_remote = false` **refuses to start** with an actionable
-  error.
-- **Per-connect gate** (`refuse_insecure_remote`): a remote client whose
-  leg is unencrypted is rejected at the WS upgrade with `426 Upgrade
-  Required`.
-
-Three ways to satisfy it:
-
-| Tier | How |
-|------|-----|
-| ① | Same-host Caddy / nginx reverse proxy (recommended; needs a domain) |
-| ② | Native self-signed TLS (no domain; clients go through TOFU) |
-| ③ | Native TLS with operator-provided PEM (domain, no proxy) |
-
-`allow_insecure_remote = true` is the escape hatch — boot gate and
-per-connect gate both stand down, restoring pre-hardening behavior. Only
-for a trusted, isolated LAN.
-
-## Client trust for self-signed TLS (TOFU)
-
-Tier ② client trust for self-signed TLS uses **Trust-on-First-Use (TOFU)**
-(`src/gateway/cert_trust.rs`):
-
-- Shared decision core + pinned TOFU trust store
-  (`~/.aleph/data/security.db`).
-- SHA-256 fingerprint + SAN / Subject parsing.
-- Approval splash page (fingerprint + SAN + TOFU / change warning).
-- Pending-cert state + approve / reject Tauri commands.
-- macOS WKWebView `respondsToSelector` cache invalidation; absolute-URL
-  navigation to the trust-approval page.
-- iOS Keychain trust store + decision mirror (shares decision state with
-  macOS).
-
-A newly-appearing interface IP triggers cert regen (new fingerprint ⇒
-re-trust once); a `sans.txt` sidecar tracks SAN coverage so churn stays
-minimal.
+The Gateway can load a supplied certificate or generate a self-signed one. Transport encryption and caller authorization are separate checks. With a self-signed certificate, the client must still trust it. NSH requires HTTPS for remote `--connect` targets (`src/gateway/tls.rs`, `src/gateway/server/connection/upgrade.rs`, `desktop/nsh-shell/src/main.rs`, `shared/client/src/connection_target.rs`).
 
 ## Pairing
 
-Aleph now distinguishes two pairing flows:
+### Device Pairing
 
-### Device pairing (remote Panel / phone / CLI)
+`gateway.ticket.create` creates a single-use bootstrap ticket. Compatibility `/ws` exchanges it through `connect.bootstrap_ticket` for a device token to use on reconnect. Web v1 requires the ticket to be bound to a principal. Use `gateway.devices.revoke` to revoke one device; rotating the shared token revokes Panel device credentials (`src/gateway/handlers/gateway_ticket.rs`, `src/gateway/handlers/connect.rs`, `src/gateway/security/device_token_manager.rs`, `src/gateway/server/connection/web_v1.rs`, `src/gateway/handlers/gateway_devices.rs`, `src/gateway/handlers/gateway_token.rs`).
 
-1. The remote Panel, in Settings → Security → "Pair new device", calls
-   `gateway.ticket.create` to mint a bootstrap ticket (`aleph-bt-*`).
-2. The URL is **resolved server-side** (`gateway.ticket.create` returns
-   `urls`, from `tls::discover_interface_ips`) — a Panel building it from
-   its own `window.location` would emit `http://127.0.0.1:<port>/…`
-   whenever the operator generates the ticket from the local desktop App.
-3. The Panel submits the ticket as `connect.bootstrap_ticket`; the
-   handshake exchanges it for a fresh `device_token` (`aleph-dt-*`) that
-   the Panel persists for subsequent reconnects.
-4. Revocation: `gateway.token.rotate` (regenerates the shared token,
-   revokes every paired device, closes every remote socket) or
-   `gateway.devices.revoke {device_id}` (drops just that device's live
-   sessions back to the login wall, then closes their sockets with WS
-   4001 `device_revoked`).
+### Channel Sender Pairing
 
-Headless cores use `aleph-server pair` to mint a ticket directly (opens
-the 0600 `security.db`, WAL — the daemon need not be running).
-`aleph-server bootstrap-token` prints the shared Gateway token for
-recovery.
+Pairing an unknown channel sender does not grant a Gateway device identity. A separate store manages pairing codes. Operators inspect requests with `pairing.list`, then handle them with `pairing.approve` or `pairing.reject` (`src/gateway/pairing_store.rs`, `src/gateway/handlers/pairing.rs`).
 
-### Channel sender pairing (Telegram / Discord / iMessage unknown sender)
+## Tool Permissions
 
-A lighter flow: a **6-character alphanumeric code** in the **single** inbox
-pairing store (`src/gateway/pairing_store.rs`), approved via the RPC
-`pairing.list` / `pairing.approve` (not the `aleph pairing approve` CLI).
+`ScopedToolService` combines global, agent, and channel tool permissions. Dispatch considers explicit `allow`, `ask`, and `deny` rules alongside the execution tier. `ToolFacts` supplies metadata such as whether the tool is idempotent or requires approval. The sandbox command policy rejects prohibited commands regardless of Gateway authentication (`src/tools/scoped/`, `src/sandbox/command_policy/`).
 
-`[routing] pairing_code_expiry_secs` controls expiry (default 24 h,
-`0` = never).
+## Execution Approval Gate
 
-### How the two flows differ
+The Panel lets an operator allow or deny a pending sensitive call and sends the decision through `exec.approval.resolve` (`interfaces/webchat/src/components/approval_card.rs`, `interfaces/webchat/src/api/exec_approval.rs`, `src/gateway/handlers/exec_approvals.rs`). The gate uses `ApprovalAction` to bind approval to the tool and original normalized arguments. The redacted summary displayed to the operator does not determine the grant fingerprint (`src/sandbox/exec_approval/action.rs`).
 
-- **Device**: long-lived credential (`device_token`), individually
-  revocable, never placed in a URL / QR (only the single-use bootstrap
-  ticket travels through those channels).
-- **Channel sender**: short-lived authorization (inbound router pairing
-  store), managed through RPC.
+## Sandboxing
 
-## Tool permissions
-
-Limiting *what an agent may do* (as opposed to *who may connect*) is the
-job of **`ScopedToolService`** (`src/tools/scoped/`). It does not read
-`IdentityContext`; it merges a `ToolPermissionsConfig` across three tiers
-(**global → agent → channel**, most-restrictive wins). This is orthogonal
-to connection trust.
-
-Three compositions happen at the same chokepoint, in this order:
-
-1. **`[policies.tool_permissions]`** — per-tool `allow` / `ask` / `deny`,
-   exact name or glob. An explicit entry beats the tier.
-2. **Exec tier** (`Ask` / `Auto` / `Full`) — reads `ToolFacts`
-   `{idempotent, requires_approval}`, **not** tool names. Default is
-   fail-closed: a tool Aleph has never heard of is non-idempotent, hence
-   `Ask` tier holds.
-3. **`[sandbox.command_policy]`** — the hardline command floor, which no
-   tier and no permission entry can lower.
-
-`Deny` hides the tool from the model *and* refuses the call; `Ask` routes
-to the approval gate.
-
-## Execution approval gate
-
-The action-aware approval gate (`src/sandbox/exec_approval/`):
-
-- Sees the **actual call** (`ApprovalAction`), not the tool name.
-- Grant fingerprint = `grant_fingerprint(tool, canonical args)` — uses
-  the **raw canonical args**, not the redacted summary (redaction would
-  collapse distinct secrets to one placeholder, letting one grant cover
-  another).
-- Decisions: `AllowOnce` / `AllowSession` / `AllowAlways` (`AllowAlways`
-  is clamped to `AllowSession` by `ExecApprovalManager::clamp_decision` —
-  no persistent allowlist exists).
-- 120 s timeout ⇒ **refusal** (`ApprovalOutcome::is_approved` excludes
-  `Timeout`), not written to the denial ledger.
-- `/deny <reason>` (channels) or `exec.approval.resolve {reason}` (RPC)
-  carries the human's reason via `ExecApprovalRecord.deny_reason` →
-  `ResolvedDecision` → `ApprovalResponse`; the dispatch gate renders it
-  verbatim as `The user said: "…"` (display layer; the ledger still keys
-  on the fingerprint).
-
-## Sandbox
-
-`WorkspaceSandbox` (`src/sandbox/workspace.rs`) is the one seam between
-exec-class tools and the OS, with a **six-step** pipeline:
-
-1. **Session resolve** — lazy create `~/.aleph/workspaces/<session_hash>/`.
-2. **cwd validate** — `canonicalize` + `starts_with(&ws.cwd)`; a symlink
-   cannot escape (BUG-3 hardening).
-3. **Capability check** — `SandboxCapabilities::is_within`; out-of-baseline
-   requests go through `ApprovalGate`, with per-session grant caching.
-4. **Profile generate** — platform-native (SBPL / bwrap args / AppContainer
-   profile).
-5. **Run** — through `OsSandboxDriver`; default 60 s wall-clock + 1 MiB
-   output budget.
-6. **Audit** — `tracing::info!` to the `capability_ledger` target.
-
-The command-policy layer (`src/sandbox/command_policy/`) runs **before**
-the OS sandbox: a deterministic hard-filter covering fork bombs, `rm -rf
-/` / `rm -rf //` / `/.`, `dd of=/dev/...`, `mkfs`, shadow-copy deletion,
-`powershell -EncodedCommand` (decoded before matching), Windows raw-disk
-writes, and more.
-
-Platform support:
-
-| OS | Enforcement |
-|----|-------------|
-| macOS | `sandbox-exec` + Seatbelt profile + AllowHosts via managed proxy |
-| Linux | bwrap + Landlock (≥ 5.13) + seccomp-bpf + cgroup v2 resource limits |
-| Windows | AppContainer (preferred) → RestrictedToken + Low IL → baseline JobObject (three-tier soft-degrade) |
-
-Linux/Windows `NetworkPolicy::AllowHosts` flows through a netns→UDS→
-loopback bridge (Linux, Phase B) or AppContainer capability SIDs
-(Windows) — a raw `AllowHosts` on those OSes still hard-fails with a
-readable rejection message.
+`WorkspaceSandbox` constrains execution by workspace and capability. The command policy filters explicitly prohibited commands before execution; approval cannot bypass it. Platform implementations live in `src/sandbox/platforms/macos/`, `src/sandbox/platforms/linux/`, and `src/sandbox/platforms/windows/`. See [Sandboxing](./sandboxing) for platform mechanisms and limitations (`src/sandbox/workspace/`, `src/sandbox/command_policy/`).
 
 ## Audit
 
-The **session event log** is the live trail for approval decisions
-(`tools/scoped/dispatch.rs::record_approval_decision` writes
-`ToolCallApproved` / `ToolCallDenied`). Query it through the session
-service alongside every other event of the run that produced it.
+- Security audit records include remote authentication failures and unauthorized request floods on compatibility WS (`src/security/audit.rs`, `src/gateway/server/connection/mod.rs`).
+- Tool dispatch can record `ToolCallApproved` and `ToolCallDenied` as session events (`src/tools/scoped/dispatch.rs`).
+- An agent's signed ledger links actions to its identity with Ed25519 signatures and a hash chain (`src/identity/`).
 
-The **signed agent ledger** (`src/identity/`, landed 2026-07-25,
-hardened 2026-07-26) answers *who, provably*:
+## Cross-Process State Protection
 
-- Each agent holds an Ed25519 keypair (public half + fingerprint in
-  `security.db`, private half in the encrypted vault).
-- Every **mutating** tool call, every refusal, every approval decision is
-  appended to that agent's own hash-chained, **signed** chain.
-- `agent_identity` (tool, operator-gated) and `aleph-server identity`
-  (CLI, read-only, daemon-independent) read it.
+Aleph protects service startup with an instance lock. Vault and JSON files have separate atomic write paths, and SQLite uses a shared safe-open helper. The CLI uses `CommandPolicy` to distinguish commands that need no lock, acquire a lock, or can use administrative IPC (`src/utils/instance_lock.rs`, `src/utils/vault_io.rs`, `src/utils/atomic_io.rs`, `src/utils/sqlite_open.rs`, `src/cli/policy.rs`).
 
-A delegated sub-agent is its own principal in the signed-ledger model —
-not a line on its parent's chain. It holds its own Ed25519 key and signs
-its own work. The acting role is injected by `AllowlistToolService`, which
-the spawner builds from the child's `AgentDef`.
+## See Also
 
-## Cross-process safety guarantees (Spec C)
-
-The original `.shared_token` corruption incident had a structural cause:
-nothing prevented two `aleph-server` processes from writing the same
-`~/.aleph/data/` files. Spec C closes that gap with four layered
-protections:
-
-- **Singleton lock**: `aleph-server start` acquires
-  `~/.aleph/data/aleph.lock` via `flock()` in `main()` before any other
-  state. A second `start` exits cleanly with code 64 + a stderr diagnostic
-  naming the holder PID.
-- **Vault writes**: every write to `secrets.vault` goes through
-  `vault_io::VaultIo`, combining an fcntl exclusive lock with
-  `tempfile + persist` for atomicity.
-- **JSON state writes**: `acp_sessions.json` and equivalent files use
-  `atomic_io::write_atomic`.
-- **SQLite connections**: every connection under `~/.aleph/data/` is
-  opened via `open_sqlite_safe`, setting `journal_mode=WAL`,
-  `busy_timeout=5000`, `synchronous=NORMAL`.
-- **CLI dispatch**: every CLI subcommand declares a `CommandPolicy`
-  (NoLock / LockOnly / LockOrIpc) and routes through `with_policy` or
-  `run_no_lock`. When the server holds the singleton lock, write
-  subcommands forward to `/v1/admin/*` IPC endpoints (token rotation
-  self-heals via a single 401 retry).
-
-## See also
-
-- [Execution Approval](/docs/en/security/exec-approval) — `exec_tier` + the
-  action-aware approval gate
-- [Pairing](/docs/en/security/pairing) — device and channel-sender trust
-  establishment
-- [Sandboxing](/docs/en/security/sandboxing) — OS-level isolation
-- [IPC](/docs/en/security/ipc) — WebSocket control plane + JSON-RPC
+- [Execution approval](./exec-approval): approval gates and decisions.
+- [Pairing](./pairing): the difference between devices and channel senders.
+- [IPC protocol](./ipc): entry points and origin checks.

@@ -138,15 +138,15 @@ Telegram 接口被拆分为 `src/gateway/interfaces/telegram/` 下一组职责�
 | `access.rs` | 粗粒度 DM/群组预过滤（`AccessController`）——只丢弃明显应丢弃的流量 |
 | `approval.rs` | `TelegramChannelApprovalCapability`（交互式审批按钮） |
 | `chunking.rs` | 长消息分片 |
-| `delivery.rs` | 出站发送流水线 + 速率限制处理 |
+| `delivery.rs` | 出站发送流水线 + 速率限制处理（含 sticker 发送） |
 | `error_cooldown.rs` | 每会话错误冷却 + 输入中断路器 |
-| `handlers.rs` | bot 派发 handler（命令、回调、文本） |
+| `handlers.rs` | bot 派发 handler（命令、回调、文本、sticker 接收） |
 | `mention.rs` | `@mention` 解析 / 剥离 |
 | `offset.rs` | 持久化轮询 offset 跟踪器（与 iMessage BlueBubbles 共享） |
 | `polling.rs` | 长轮询循环 |
 | `reaction_handler.rs` | 处理状态反应（👀 / 👍 / 👎） |
-| `sticker.rs` | sticker 处理 |
-| `streaming/` | `EditBased` 流式（lane tracker、orchestrator、telegram event emitter） |
+| `token_fingerprint.rs` | bot token 指纹（用于去重与日志脱敏） |
+| `streaming/` | `EditBased` 流式（lane tracker、orchestrator、reasoning extractor、status controller、telegram event emitter） |
 
 适配器**不拥有**配对状态。它把未知发送者交给入站路由；路由才是 access / pairing / allowlist 决策的**单一来源**（参见[接口概览](/docs/interfaces/overview)）。
 

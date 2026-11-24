@@ -19,7 +19,7 @@ description: "计划任务管理 RPC 方法"
 | [`cron.runs`](#cronruns) | 读取任务的执行历史 |
 | [`cron.toggle`](#crontoggle) | 启用 / 禁用任务 |
 
-> 历史别名 `cron.trigger` / `cron.pause` / `cron.resume` 已并入 `cron.run` 与 `cron.toggle`；未注册独立的 pause / resume RPC。
+> 手动运行使用 `cron.run`；启停使用 `cron.toggle`，显式传入 `job_id` 与 `enabled`。见 `src/gateway/handlers/cron/real.rs`。
 
 ## 计划类型（`schedule_kind`）
 

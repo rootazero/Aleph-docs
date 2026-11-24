@@ -19,7 +19,7 @@ description: "Scheduled job management RPC methods"
 | [`cron.runs`](#cronruns) | Read execution history |
 | [`cron.toggle`](#crontoggle) | Enable / disable a job |
 
-> Historical aliases `cron.trigger` / `cron.pause` / `cron.resume` have been folded into `cron.run` and `cron.toggle`; no separate pause / resume RPCs are registered.
+> Use `cron.run` for a manual run and `cron.toggle` with explicit `job_id` and `enabled` for enable/disable. See `src/gateway/handlers/cron/real.rs`.
 
 ## Schedule Kinds (`schedule_kind`)
 

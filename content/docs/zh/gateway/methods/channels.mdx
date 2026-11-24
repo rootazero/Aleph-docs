@@ -5,7 +5,7 @@ description: "通信频道管理 RPC 方法"
 
 `channels.*` 是对 `ChannelRegistry` 的运行时接口。方法在两次连接中分布:
 
-- `register_channel_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/session.rs:202-303`)——核心生命周期方法(`channels.list/status`、`channel.start/stop/pairing_data/send/create/delete/health`、`channels.dead_letters`、`channels.redrive_dead_letters`、`channels.set_agent`)。
+- `register_channel_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/session.rs`)——核心生命周期方法(`channels.list/status`、`channel.start/stop/pairing_data/send/create/delete/health`、`channels.set_agent`)。
 - `start/mod.rs:2431-2466`——频道配对方法(`channel.pairing.list/approve/reject/approved/revoke`)。
 - Discord Control-Plane 面板方法(`discord.validate_token`、`discord.list_guilds`、`discord.list_channels`、`discord.audit_permissions`)与其他频道处理器一起注册。
 
@@ -107,25 +107,29 @@ description: "通信频道管理 RPC 方法"
 
 **响应(所有):** `{ "channels": [ ...ChannelHealthResponse... ], "summary": { "total", "healthy", "stale", "degraded" } }`。
 
-### channels.dead_letters
+### channel_outbox: dead_letters
 
-`channels.list` 中 `dead_lettered` 计数的按需详情。列出重试预算耗尽后被死信的出站投递。
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `limit` | number | 否 | 默认为 50,上限 500 |
-
-**响应:** `{ "dead_letters": [ ...{channel, to, text_preview (≤ 200 字符), attachments, attempts, last_error, created_at, died_at, age_secs}... ], "count" }`。未连接持久投递存储时返回 `{ "dead_letters": [], "count": 0, "store": false }`。
-
-### channels.redrive_dead_letters
-
-死信跟踪的恢复半部分:将死信的投递移回活动出站队列,以便在传输恢复后再次投递。结构上安全——每个死信都是可重试的瞬时失败。
+这是内建工具 `channel_outbox`,**不是 Gateway RPC 方法**。使用 `action: "dead_letters"` 查看耗尽重试预算或因其他安全原因停止投递的出站消息。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `channel` | string | 否 | 将恢复限定到一个传输 |
+| `action` | string | 是 | `dead_letters` |
+| `channel_id` | string | 否 | 限定通道,省略为全部 |
+| `limit` | number | 否 | 默认 10,上限 25 |
 
-**响应:** 成功时 `{ "redriven": N }`;未连接持久存储时返回 `{ "redriven": 0, "store": false }`。
+**输出:** `message`、`durable_queue`、`dead_letters`。条目含 `channel_id`、`conversation_id`、`preview`(最多 200 字符)、`attempts`、`last_error`、`reason`、`redrivable`、`age_secs`。未配置持久队列时 `durable_queue` 为 `false`。
+
+### channel_outbox: redrive
+
+同一内建工具的恢复操作,**不是 Gateway RPC 方法**。使用 `action: "redrive"` 把可安全重放的死信移回出站队列;并非所有死信都能重放。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `action` | string | 是 | `redrive` |
+| `channel_id` | string | 否 | 限定通道 |
+| `confirm_redrive` | boolean | 否 | 只有 `true` 才真正重放;省略仅预览 |
+
+**输出:** `message`、`durable_queue` 及适用的 `redriven`、`skipped_queue_full`、`skipped_not_replay_safe` 等字段。先检查预览,确认目标后再重放。
 
 ### channels.set_agent
 

@@ -27,7 +27,7 @@ Aleph 的代理不是一个简单的请求-响应聊天机器人。它是一个�
      （模型显式 stop → 完成）
 ```
 
-> 历史上的 OTAF（Observe–Think–Act–Feedback）已退役——`src/agent_loop/` 在 Harness 迁移期间（第 6/7 阶段）被删除。Harness 现在只承载 Think→Act 轮次，**不参与任何推理**（R10「笨循环」）。
+> 历史上的 OTAF（Observe–Think–Act–Feedback）已退役——旧的 agent-loop 模块目录在 Harness 迁移期间（第 6/7 阶段）被删除。Harness 现在只承载 Think→Act 轮次，**不参与任何推理**（R10「笨循环」）；Agent 运行时现由 `AgentRuntime`（`src/agents/runtime.rs`）承载。
 
 ### Think
 

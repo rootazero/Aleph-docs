@@ -13,7 +13,7 @@ description: "System logs and diagnostics RPC methods"
 | [`logs.setLevel`](#logssetlevel) | Set the global log level |
 | [`logs.getDirectory`](#logsgetdirectory) | Return the absolute path of the log directory |
 
-> Historical aliases such as `logs.list` / `logs.get` / `logs.tail` / `logs.levels` / `logs.set_level` are not RPCs; only the three endpoints above are exposed at runtime.
+> This namespace exposes the three endpoints above; use `daemon.logs` to read recent logs. See `src/gateway/handlers/logs.rs` and `src/gateway/handlers/daemon_control.rs`.
 
 ### logs.getLevel
 

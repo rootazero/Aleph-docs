@@ -1,260 +1,849 @@
 ---
 title: "方法参考"
-description: "所有网关 RPC 方法命名空间概览"
+description: "Gateway 方法全集与 Open / Admin 分类"
 ---
 
-Aleph 网关通过命名空间的 JSON-RPC 2.0 方法暴露其功能。每个命名空间对相关操作进行分组，每个方法都遵循相同的请求 / 响应约定。命名空间注册位置见 [`src/gateway/handlers/mod.rs`](../../../reference/GATEWAY.md) 与 `src/bin/aleph-server/commands/start/builder/handlers/` 下的 boot 路径。
+本页用于查找 Gateway 方法名、角色分类与已有分册。
 
-## 请求格式
+## 方法册是什么
 
-所有 RPC 请求都使用 JSON-RPC 2.0 信封：
+`src/gateway/method_census.rs` 的 `RPC_METHOD_CENSUS` 是测试中的静态审计表，不是运行期发现接口：它逐项记录注册方法与 `Class::Open` / `Class::Admin`，并用测试比对注册点与运行期判定。下列全部方法名及分类直接取自该表；用途列只解释名称，不替代参数与行为契约。运行期分类权威是 `src/gateway/method_admin.rs`。
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "method": "namespace.method",
-  "params": { ... }
-}
+## 命名空间
+
+索引按代码中实际存在的首段前缀分组。`agent` / `agents`、`session` / `sessions`、`channel` / `channels` 是不同前缀，不合并成虚构方法名。无点号的方法单列。来源：`src/gateway/method_census.rs`。
+
+## Open 与 Admin
+
+`Open` 表示角色门控不要求 operator，并不免除认证、会话所有权、资源策略或传输入口限制；`Admin` 要求 operator。已认证 member 调用 Admin 方法时返回 `AUTH_REQUIRED`（-32000）及下列消息。见 `src/gateway/method_admin.rs`、`src/gateway/server/connection/dispatch.rs` 与 `shared/protocol/src/jsonrpc.rs`。
+
+```text
+Not authorized: this method requires operator privileges
 ```
 
-- `id` 可以是字符串、数字或 `null`（`null` 表示通知）
-- `method` 遵循 `namespace.action` 命名约定
-- `params` 是每个方法的可选 JSON 对象
+本地核对某个方法时，在代码仓查表及判定函数，例如：
 
-## 响应格式
-
-**成功：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "result": { ... }
-}
+```bash
+rg -n '"chat.send"' src/gateway/method_census.rs
+rg -n 'method_requires_admin|MEMBER_CARVE_OUTS|ADMIN_PREFIXES' src/gateway/method_admin.rs
 ```
 
-**错误：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "error": {
-    "code": -32601,
-    "message": "Method not found",
-    "data": null
-  }
-}
-```
+## 方法索引
 
-## 错误代码
+所有表格的名称与分类锚点：`src/gateway/method_census.rs`。分册链接是相关主题入口，不表示分册已覆盖每个方法；“—”表示尚无对应分册。本页不承诺所有传输都开放所有方法，入口限制见 `src/gateway/server/connection/local_ipc.rs` 与 [Protocol v1](../protocol-v1)。
 
-| 代码 | 名称 | 说明 |
-|------|------|-------------|
-| -32700 | Parse error | 格式错误的 JSON |
-| -32600 | Invalid Request | 缺少必填字段 |
-| -32601 | Method not found | 未知方法名 |
-| -32602 | Invalid params | 错误或缺少参数 |
-| -32603 | Internal error | 服务器端故障 |
-| -32000 | Auth required | 未提供凭据 |
-| -32001 | Auth failed | 令牌或签名无效 |
-| -32002 | Permission denied | 权限不足 |
-| -32003 | Rate limited | 请求过多 |
-| -32004 | Resource not found | 请求的实体不存在 |
-| -32005 | Timeout | 操作超时 |
-| -32006 | Tool error | 工具执行失败 |
+### acp
 
-## 方法命名空间
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `acp.create` | Admin | acp：创建 | — |
+| `acp.delete` | Admin | acp：删除 | — |
+| `acp.get` | Admin | acp：读取 | — |
+| `acp.list` | Admin | acp：列出 | — |
+| `acp.presets` | Admin | acp：列出预设 | — |
+| `acp.presets_meta` | Admin | acp：读取预设元数据 | — |
+| `acp.sessions.cancel` | Admin | acp：取消（`sessions`） | — |
+| `acp.sessions.list` | Admin | acp：列出（`sessions`） | — |
+| `acp.sessions.shutdown` | Admin | acp：关闭（`sessions`） | — |
+| `acp.set_enabled` | Admin | acp：设置启用状态 | — |
+| `acp.test` | Admin | acp：测试 | — |
+| `acp.update` | Admin | acp：更新 | — |
 
-下表按主题归类命名空间。具体方法签名与示例见各子页面。
+### activity
 
-### 代理执行
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `activity.stats` | Open | activity：读取统计 | [runs](./runs) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `agent.*` | `run` / `status` / `cancel` / `list` | 代理执行控制（详见 [agent.*](./agent)） |
-| `chat.*` | `send` / `abort` / `history` / `clear` / `rewind` / `context_estimate` | 聊天接口（`chat.send` 与 `agent.run` 共享同一执行适配器） |
-| `run.*` | 来自 `events.*` 的流式 `stream.*` 主题 | run 生命周期事件（`run.accepted` 等） |
+### agent
 
-### 配置
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `agent.cancel` | Open | 执行：取消 | [agent](./agent) |
+| `agent.list` | Open | 执行：列出 | [agent](./agent) |
+| `agent.resume` | Open | 执行：恢复 | [agent](./agent) |
+| `agent.run` | Open | 执行：运行 | [agent](./agent) |
+| `agent.status` | Open | 执行：查询状态 | [agent](./agent) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `config.*` | `schema` / `get` / `patch` / `reload` / `path` / `validate` / `get_full_config` / `reload_with_subsystems` / `get_tool_permissions` / `update_tool_permissions` | 运行时配置（详见 [config.*](./config)） |
-| `behavior_config.*` | `get` / `update` | 代理行为设置 |
-| `browser_config.*` | `get` / `update` | 浏览器自动化设置 |
-| `execution_config.*` | `get` / `update` | 执行设置 |
-| `fetch_config.*` | `get` / `update` / `test` | Web 抓取设置 |
-| `general_config.*` | `get` / `update` | 常规设置 |
-| `generation_config.*` | `get` / `update` | 生成设置 |
-| `memory_config.*` | `get` / `update` | 记忆系统设置 |
-| `rerank_config.*` | `get` / `update` / `test` | 重排序器配置 |
-| `route_config.*` | `get` / `update` | 路由设置 |
-| `routing_rules.*` | `list` / `get` / `create` / `update` / `delete` / `move` | 任务路由规则 |
-| `search_config.*` | `get` / `update` / `test` / `deleteBackend` | 搜索后端配置 |
-| `security_config.*` | `get` / `update` / `list_devices` / `revoke_device` | 安全设置 |
+### agents
 
-### 身份
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `agents.bindings` | Admin | Agent 管理：查询绑定 | [agent](./agent) |
+| `agents.create` | Admin | Agent 管理：创建 | [agent](./agent) |
+| `agents.delete` | Admin | Agent 管理：删除 | [agent](./agent) |
+| `agents.files.delete` | Admin | Agent 管理：删除（`files`） | [agent](./agent) |
+| `agents.files.get` | Admin | Agent 管理：读取（`files`） | [agent](./agent) |
+| `agents.files.list` | Admin | Agent 管理：列出（`files`） | [agent](./agent) |
+| `agents.files.set` | Admin | Agent 管理：设置（`files`） | [agent](./agent) |
+| `agents.get` | Open | Agent 管理：读取 | [agent](./agent) |
+| `agents.list` | Open | Agent 管理：列出 | [agent](./agent) |
+| `agents.set_default` | Admin | Agent 管理：设置默认项 | [agent](./agent) |
+| `agents.teams` | Admin | Agent 管理：列出团队 | [agent](./agent) |
+| `agents.tools_schema` | Admin | Agent 管理：读取工具 Schema | [agent](./agent) |
+| `agents.update` | Admin | Agent 管理：更新 | [agent](./agent) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `identity.*` | `get` / `set` / `clear` / `list` | 身份 / soul 文件管理（详见 [identity.*](./identity)） |
+### artifacts
 
-### 调度与服务
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `artifacts.list` | Open | 产物：列出 | [workspace](./workspace) |
+| `artifacts.read_text` | Open | 产物：读取文本 | [workspace](./workspace) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `cron.*` | `list` / `get` / `create` / `update` / `delete` / `status` / `run` / `runs` / `toggle` | 计划任务（详见 [cron.*](./cron)） |
-| `heartbeat.*` | `list` / `get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` | 心跳探测任务 |
-| `services.*` | `start` / `stop` / `list` / `status` | 后台服务（详见 [services.*](./services)） |
-| `daemon.*` | `status` / `shutdown` / `logs` | 网关守护进程控制（详见 [daemon.*](./daemon)） |
-| `logs.*` | `getLevel` / `setLevel` / `getDirectory` | 日志管理（详见 [logs.*](./logs)） |
+### behavior_config
 
-### 事件
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `behavior_config.get` | Admin | behavior_config：读取 | [config](./config) |
+| `behavior_config.update` | Admin | behavior_config：更新 | [config](./config) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `events.*` | `subscribe` / `unsubscribe` / `list` | 主题订阅（详见 [events.*](./events)） |
-| `event` | （通知） | 投递的事件帧 `{topic, data, timestamp}` |
-| `trace.*` | `list` / `get` / `by_runs` | 跟踪回放（需要 state.db，否则返回 `SERVICE_UNAVAILABLE`） |
-| `activity.*` | `stats` | 活动统计 |
+### browser
 
-### Memory & 知识
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `browser.viewer.grant.issue` | Open | 浏览器查看器：签发（viewer / grant） | [browser](./browser) |
+| `browser.viewer.grant.revoke` | Open | 浏览器查看器：撤销（viewer / grant） | [browser](./browser) |
+| `browser.viewer.resource.decide` | Open | 浏览器查看器：裁决（viewer / resource） | [browser](./browser) |
+| `browser.viewer.resource.list` | Open | 浏览器查看器：列出（viewer / resource） | [browser](./browser) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `memory.*` | `search` / `delete` / `clear` / `listFacts` / `clearFacts` / `stats` / `compress` / `reembed` / `reembed.cancel` / `retrieve_with_trace` / `appList` / `list_corrections` / `trace` | 记忆系统 |
-| `graph.*` | `query` / `node_detail` / `search` / `update_note` / `rename_note` / `delete_note` | 知识图谱 |
+### browser_config
 
-### 代理、文件、工具
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `browser_config.get` | Admin | browser_config：读取 | [config](./config) |
+| `browser_config.update` | Admin | browser_config：更新 | [config](./config) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `agents.*` | `list` / `get` / `create` / `update` / `delete` / `set_default` / `files.list` / `files.get` / `files.set` / `files.delete` / `tools_schema` / `teams` / `bindings` | 代理 CRUD 和文件管理 |
-| `tools.*` | `catalog` / `effective` / `invoke` / `cancel_call` / `in_flight` | 工具可见性与调用 |
-| `commands.*` | `list` / `execute` | 命令发现与执行 |
+### bundled
 
-### 技能、插件、扩展
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `bundled.sync` | Admin | bundled：同步 | [plugins](./plugins) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `skills.*` | `status` / `update` / `install_dep` / `remove` / `install` | 技能管理 |
-| `bundled.sync` | — | 内置技能同步 |
-| `plugin.*` | `list` / `install` / `installFromZip` / `uninstall` / `update` / `enable` / `disable` / `load` / `unload` / `reload` / `callTool` / `executeCommand` | 插件生命周期（规范命名空间） |
-| `plugins.*` | `list` / `install` / `installFromZip` / `uninstall` / `enable` / `disable` / `load` / `unload` / `callTool` / `executeCommand` | 插件生命周期（遗留命名空间，保留兼容） |
-| `plugin.marketplace.*` | `list` / `add` / `update` / `remove` / `install` | 插件市场 |
-| `extensions.*` | `catalog` / `installed` / `toggle` / `uninstall` / `disclosure` / `configure` / `install` | 统一扩展商店门面 |
+### canvas
 
-### Providers / Generation / Embedding
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `canvas.apply` | Open | 画布：应用操作 | [workspace](./workspace) |
+| `canvas.asset.get` | Open | 画布：读取（`asset`） | [workspace](./workspace) |
+| `canvas.asset.put` | Open | 画布：写入（`asset`） | [workspace](./workspace) |
+| `canvas.create` | Open | 画布：创建 | [workspace](./workspace) |
+| `canvas.delete` | Open | 画布：删除 | [workspace](./workspace) |
+| `canvas.get` | Open | 画布：读取 | [workspace](./workspace) |
+| `canvas.list` | Open | 画布：列出 | [workspace](./workspace) |
+| `canvas.selection.set` | Open | 画布：设置（`selection`） | [workspace](./workspace) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `needsSetup` / `healthcheck` / `modelsRefresh` / `catalog` / `oauthLogin` / `oauthLogout` / `oauthStatus` | AI provider 管理 |
-| `generation_providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `voices` / `list_presets` | 媒体生成 provider |
-| `embedding_providers.*` | `list` / `get` / `add` / `update` / `remove` / `setActive` / `test` / `presets` | 嵌入 provider |
+### capabilities
 
-### MCP / ACP
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `capabilities.describe` | Open | 能力：读取描述 | — |
+| `capabilities.terminal.invoke` | Admin | 能力：调用（`terminal`） | — |
+| `capabilities.ui.ack` | Open | 能力：确认（`ui`） | — |
+| `capabilities.ui.attach` | Open | 能力：挂载（`ui`） | — |
+| `capabilities.ui.detach` | Open | 能力：卸载（`ui`） | — |
+| `capabilities.ui.invoke` | Open | 能力：调用（`ui`） | — |
+| `capabilities.ui.submit_input` | Open | 能力：提交输入（`ui`） | — |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `mcp.*` | `list_pending_approvals` / `respond_approval` / `cancel_approval` | MCP 审批处理 |
-| `mcp_config.*` | `list` / `get` / `create` / `update` / `delete` / `migrate_unified_to_actor` | MCP 服务器配置 |
-| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown` | ACP 工具链配置 |
+### channel
 
-### Channels / Sessions
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `channel.create` | Admin | 渠道：创建 | [channels](./channels) |
+| `channel.delete` | Admin | 渠道：删除 | [channels](./channels) |
+| `channel.pairing.approve` | Admin | 渠道：批准（`pairing`） | [channels](./channels) |
+| `channel.pairing.approved` | Admin | 渠道：查询已批准项（`pairing`） | [channels](./channels) |
+| `channel.pairing.list` | Admin | 渠道：列出（`pairing`） | [channels](./channels) |
+| `channel.pairing.reject` | Admin | 渠道：拒绝（`pairing`） | [channels](./channels) |
+| `channel.pairing.revoke` | Admin | 渠道：撤销（`pairing`） | [channels](./channels) |
+| `channel.pairing_data` | Admin | 渠道：读取配对数据 | [channels](./channels) |
+| `channel.send` | Admin | 渠道：发送 | [channels](./channels) |
+| `channel.start` | Admin | 渠道：启动 | [channels](./channels) |
+| `channel.stop` | Admin | 渠道：停止 | [channels](./channels) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `channel.*` | `start` / `stop` / `pairing_data` / `send` / `create` / `delete` / `list` / `status` / `health` / `dead_letters` / `redrive_dead_letters` | 单个 channel 操作 |
-| `channels.*` | `list` / `status` / `set_agent` | channel 列表与状态 |
-| `sessions.*` | `list` / `history` / `reset` / `delete` / `new` / `set_topic` / `patch` / `preview` / `compaction.list` / `compaction.restore` / `compaction.branch` | 会话生命周期（复数命名空间） |
-| `session.*` | `usage` / `compact` / `truncate` | 会话操作（单数命名空间，部分需 SessionStore） |
+### channels
 
-### Teams / Group Chat / Subagent
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `channels.list` | Admin | 渠道：列出 | [channels](./channels) |
+| `channels.set_agent` | Admin | 渠道：设置 Agent | [channels](./channels) |
+| `channels.status` | Admin | 渠道：查询状态 | [channels](./channels) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `teams.*` | `create` / `get` / `list` / `rename` / `disband` / `delete` / `chat.send` / `chat.cancel` / `chat.thread` / `chat.history` / `create_task` / `update_task` / `list_tasks` / `task.trace` / `snapshot.*` / `workflow.*` / `acp_member.*` / `usage` | 团队管理 |
-| `group_chat.*` | `start` / `continue` / `mention` / `end` / `list` / `history` | 多代理群聊 |
-| `subagent.tree` | — | 子代理树快照 |
-| `a2a_delegate` / `a2a_*` | — | A2A 子代理工具 |
+### chat
 
-### Runtimes / Workspace / Projects
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `chat.abort` | Open | 聊天：中止 | [chat](./chat) |
+| `chat.clear` | Open | 聊天：清空 | [chat](./chat) |
+| `chat.context_estimate` | Open | 聊天：估算上下文 | [chat](./chat) |
+| `chat.history` | Open | 聊天：读取历史 | [chat](./chat) |
+| `chat.rewind` | Open | 聊天：回退 | [chat](./chat) |
+| `chat.send` | Open | 聊天：发送 | [chat](./chat) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `runtimes.*` | `list` / `refresh` / `install` | 运行时能力管理 |
-| `workspace.*` | `create` / `list` / `get` / `update` / `archive` | 工作空间隔离 |
-| `projects.*` | `list` / `add` / `create_blank` / `remove` / `touch` / `get` | 项目目录 |
-| `agents.bindings` | — | agent ↔ channel 绑定 |
+### clarification
 
-### Wizard / Hooks
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `clarification.pending` | Open | clarification：查询待处理项 | [agent](./agent) |
+| `clarification.resolve` | Open | clarification：处理 | [agent](./agent) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `wizard.*` | `start` / `next` / `answer` / `cancel` / `status` | 多步配置向导（无对应 CLI 子命令） |
-| `hooks.*` | `list` / `registry` / `add` / `remove` / `reload` / `events` | `~/.aleph/hooks.json` 管理 |
+### cluster
 
-### 网关侧 / 系统
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `cluster.deregister` | Admin | cluster：注销 | [teams](./teams) |
+| `cluster.enroll` | Admin | cluster：登记 | [teams](./teams) |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `health` | — | 健康检查 |
-| `echo` | — | 回声测试 |
-| `version` | — | 服务器版本 |
-| `system.info` | — | 系统指标（CPU、内存、磁盘、uptime） |
-| `request.state` | — | 请求级状态读写 |
-| `gateway.identity.get` | — | 网关侧实例标识 |
-| `gateway.metrics.lanes` | — | LaneManager 信号量指标 |
-| `gateway.metrics.run_concurrency` | — | AgentRunManager 并发指标 |
-| `gateway.credentials` | — | 网关凭证信息 |
-| `gateway.ticket.*` / `gateway.token.*` / `gateway.devices.*` | — | 配对与凭据管理 |
-| `pty.*` | `spawn` / `input` / `resize` / `close` / `list` | 嵌入式交互终端 |
+### commands
 
-### 其它
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `commands.list` | Open | commands：列出 | — |
 
-| 命名空间 | 方法 | 说明 |
-|-----------|---------|-------------|
-| `auth.*` / `pairing.*` / `devices.*` | `connect` / `approve` / `reject` / `list` / `revoke` / `show_token` / `reset_token` / `list_sessions` / `revoke_session` | 认证与设备管理 |
-| `secrets.*` | `list` / `set` / `delete` / `verify` / `providers` | 密钥库管理 |
-| `exec_approvals.*` | `request` / `resolve` / `pending` | exec 审批 |
-| `clarification.*` | `resolve` / `pending` | `ask_user` 澄清回合 |
-| `fs.*` | `home_dir` / `list_dir` / `create_dir` / `read_file` / `allowed_roots` | 沙箱 fs 操作 |
-| `insights.tools` | — | 记忆工具内省（需要 MemoryBackend） |
-| `dreaming.run_now` | — | 主动触发 dreaming |
+### config
 
-## 占位符与状态码
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `config.get` | Admin | 配置：读取 | [config](./config) |
+| `config.get_tool_permissions` | Open | 配置：读取工具权限 | [config](./config) |
+| `config.patch` | Admin | 配置：局部更新 | [config](./config) |
+| `config.path` | Admin | 配置：读取路径 | [config](./config) |
+| `config.reload` | Admin | 配置：重新加载 | [config](./config) |
+| `config.schema` | Admin | 配置：读取 Schema | [config](./config) |
+| `config.update_tool_permissions` | Admin | 配置：更新工具权限 | [config](./config) |
+| `config.validate` | Admin | 配置：校验 | [config](./config) |
 
-`HandlerRegistry::new()` 在 `src/gateway/handlers/mod.rs` 中预注册一组方法以保证 `METHOD_NOT_FOUND` 的确定性：
+### connect
 
-- **已就绪**——`health` / `echo` / `version` / `system.info` / `request.state` / `config.schema` / `logs.getLevel` / `logs.setLevel` / `logs.getDirectory` / `services.*` / `pty.*` / `plugins.*` / `plugin.*` / `hooks.*` / `mcp.list_pending_approvals` / `mcp.respond_approval` / `mcp.cancel_approval` / `skills.*` / `bundled.sync` / `daemon.logs`
-- **Stub（待 boot 路径覆盖）**——`cron.*` / `heartbeat.*` / `chat.send` / `chat.abort` / `chat.history` / `chat.clear` / `session.usage` / `session.compact` / `session.truncate` / `workspace.*` / `channels.set_agent` / `agents.bindings` / `groups_*` / `daemon.status` / `daemon.shutdown` / `teams.*` / `agents.*` / `runtimes.*` / `tools.*` / `insights.tools` / `gateway.identity.get` / `gateway.metrics.*` / `gateway.credentials` / `trace.*` / `wizard.*`
-- **未注册（METHOD_NOT_FOUND）**——`identity.get` / `identity.set` / `identity.clear` / `identity.list`（必须经 `register_identity_handlers` 注入）；`graph.*`（必须经 `register_graph_handlers` 注入）
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `connect` | Open | connect：建立连接 | — |
 
-Stub 在启动后的第一个请求前由 `register_*_handlers`（`src/bin/aleph-server/commands/start/builder/handlers/`）覆盖。
+### context
 
-## 常见模式
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `context.breakdown` | Open | context：查看上下文分解 | [chat](./chat) |
 
-### 分页
+### cron
 
-返回列表的方法接受可选的 `limit` 与 `offset` 参数（实现因方法而异；详见各子页面）：
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `cron.create` | Admin | 定时任务：创建 | [cron](./cron) |
+| `cron.delete` | Admin | 定时任务：删除 | [cron](./cron) |
+| `cron.get` | Admin | 定时任务：读取 | [cron](./cron) |
+| `cron.list` | Admin | 定时任务：列出 | [cron](./cron) |
+| `cron.run` | Admin | 定时任务：运行 | [cron](./cron) |
+| `cron.runs` | Admin | 定时任务：列出运行 | [cron](./cron) |
+| `cron.status` | Admin | 定时任务：查询状态 | [cron](./cron) |
+| `cron.toggle` | Admin | 定时任务：切换启用状态 | [cron](./cron) |
+| `cron.update` | Admin | 定时任务：更新 | [cron](./cron) |
 
-```json
-{ "jsonrpc": "2.0", "id": 1, "method": "cron.list", "params": { "limit": 20, "offset": 0 } }
-```
+### daemon
 
-### 流式事件
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `daemon.logs` | Admin | 守护进程：读取日志 | [daemon](./daemon) |
+| `daemon.shutdown` | Admin | 守护进程：关闭 | [daemon](./daemon) |
+| `daemon.status` | Admin | 守护进程：查询状态 | [daemon](./daemon) |
 
-`agent.run` 与 `chat.send` 触发 `stream.*` 与 `agent.*` 主题事件。订阅示例：
+### diagnostics
 
-```json
-{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*"] } }
-{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Hello" } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "content": "Hi!" } } }
-```
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `diagnostics.run` | Admin | diagnostics：运行 | — |
 
-详见 [events.*](./events)。
+### discord
 
-## 另请参阅
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `discord.audit_permissions` | Admin | discord：审计权限 | [channels](./channels) |
+| `discord.list_channels` | Admin | discord：列出渠道 | [channels](./channels) |
+| `discord.list_guilds` | Admin | discord：列出服务器 | [channels](./channels) |
+| `discord.validate_token` | Admin | discord：校验令牌 | [channels](./channels) |
 
-- [协议](../protocol)——JSON-RPC 2.0 传输细节
-- [认证](../auth)——令牌管理和设备配对
+### dreaming
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `dreaming.list_insights` | Open | dreaming：列出洞察 | [memory](./memory) |
+| `dreaming.run_now` | Admin | dreaming：立即运行 | [memory](./memory) |
+
+### echo
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `echo` | Open | echo：回显 | — |
+
+### embedding_providers
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `embedding_providers.add` | Admin | embedding_providers：添加 | [providers](./providers) |
+| `embedding_providers.get` | Admin | embedding_providers：读取 | [providers](./providers) |
+| `embedding_providers.list` | Admin | embedding_providers：列出 | [providers](./providers) |
+| `embedding_providers.presets` | Admin | embedding_providers：列出预设 | [providers](./providers) |
+| `embedding_providers.remove` | Admin | embedding_providers：移除 | [providers](./providers) |
+| `embedding_providers.setActive` | Admin | embedding_providers：设置活动项 | [providers](./providers) |
+| `embedding_providers.test` | Admin | embedding_providers：测试 | [providers](./providers) |
+| `embedding_providers.update` | Admin | embedding_providers：更新 | [providers](./providers) |
+
+### environments
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `environments.list` | Admin | environments：列出 | [teams](./teams) |
+
+### exec
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `exec.approval.resolve` | Open | 执行审批：处理（`approval`） | [exec](./exec) |
+| `exec.approvals.pending` | Open | 执行审批：查询待处理项（`approvals`） | [exec](./exec) |
+| `exec.grant.revoke` | Open | 执行审批：撤销（`grant`） | [exec](./exec) |
+| `exec.grants.list` | Open | 执行审批：列出（`grants`） | [exec](./exec) |
+
+### execution_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `execution_config.get` | Admin | execution_config：读取 | [config](./config) |
+| `execution_config.update` | Admin | execution_config：更新 | [config](./config) |
+
+### extensions
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `extensions.catalog` | Admin | 扩展：查询目录 | [extensions](./extensions) |
+| `extensions.disclosure` | Admin | 扩展：读取披露信息 | [extensions](./extensions) |
+| `extensions.install` | Admin | 扩展：安装 | [extensions](./extensions) |
+| `extensions.installed` | Admin | 扩展：列出已安装项 | [extensions](./extensions) |
+| `extensions.toggle` | Admin | 扩展：切换启用状态 | [extensions](./extensions) |
+| `extensions.uninstall` | Admin | 扩展：卸载 | [extensions](./extensions) |
+
+### fetch_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `fetch_config.get` | Admin | fetch_config：读取 | [config](./config) |
+| `fetch_config.test` | Admin | fetch_config：测试 | [config](./config) |
+| `fetch_config.update` | Admin | fetch_config：更新 | [config](./config) |
+
+### fs
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `fs.allowed_roots` | Open | fs：读取允许的根目录 | [workspace](./workspace) |
+| `fs.create_dir` | Open | fs：创建目录 | [workspace](./workspace) |
+| `fs.home_dir` | Open | fs：读取主目录 | [workspace](./workspace) |
+| `fs.list_dir` | Open | fs：列出目录 | [workspace](./workspace) |
+| `fs.read_file` | Open | fs：读取文件 | [workspace](./workspace) |
+
+### gateway
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `gateway.credentials` | Admin | 网关：读取凭据 | — |
+| `gateway.devices.list` | Admin | 网关：列出（`devices`） | — |
+| `gateway.devices.revoke` | Admin | 网关：撤销（`devices`） | — |
+| `gateway.flow.reload` | Admin | 网关：重新加载（`flow`） | — |
+| `gateway.identity.get` | Admin | 网关：读取（`identity`） | — |
+| `gateway.metrics.lanes` | Admin | 网关：读取执行通道（`metrics`） | — |
+| `gateway.metrics.run_concurrency` | Open | 网关：读取运行并发（`metrics`） | — |
+| `gateway.metrics.subagent_concurrency` | Admin | 网关：读取子 Agent 并发（`metrics`） | — |
+| `gateway.ticket.create` | Admin | 网关：创建（`ticket`） | — |
+| `gateway.ticket.list` | Admin | 网关：列出（`ticket`） | — |
+| `gateway.ticket.revoke` | Admin | 网关：撤销（`ticket`） | — |
+| `gateway.token.current` | Admin | 网关：读取当前项（`token`） | — |
+| `gateway.token.rotate` | Admin | 网关：轮换（`token`） | — |
+
+### general_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `general_config.get` | Admin | general_config：读取 | [config](./config) |
+| `general_config.update` | Admin | general_config：更新 | [config](./config) |
+
+### generation_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `generation_config.get` | Admin | generation_config：读取 | [config](./config) |
+| `generation_config.update` | Admin | generation_config：更新 | [config](./config) |
+
+### generation_providers
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `generation_providers.create` | Admin | generation_providers：创建 | [providers](./providers) |
+| `generation_providers.delete` | Admin | generation_providers：删除 | [providers](./providers) |
+| `generation_providers.get` | Admin | generation_providers：读取 | [providers](./providers) |
+| `generation_providers.list` | Admin | generation_providers：列出 | [providers](./providers) |
+| `generation_providers.list_presets` | Admin | generation_providers：列出预设 | [providers](./providers) |
+| `generation_providers.setDefault` | Admin | generation_providers：设置默认项 | [providers](./providers) |
+| `generation_providers.test` | Admin | generation_providers：测试 | [providers](./providers) |
+| `generation_providers.update` | Admin | generation_providers：更新 | [providers](./providers) |
+| `generation_providers.voices` | Admin | generation_providers：列出声音 | [providers](./providers) |
+
+### goal
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `goal.list` | Open | goal：列出 | [graph](./graph) |
+
+### graph
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `graph.delete_note` | Open | 图谱：删除笔记 | [graph](./graph) |
+| `graph.node_detail` | Open | 图谱：读取节点详情 | [graph](./graph) |
+| `graph.query` | Open | 图谱：查询 | [graph](./graph) |
+| `graph.rename_note` | Open | 图谱：重命名笔记 | [graph](./graph) |
+| `graph.search` | Open | 图谱：搜索 | [graph](./graph) |
+| `graph.update_note` | Open | 图谱：更新笔记 | [graph](./graph) |
+
+### group_chat
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `group_chat.continue` | Open | 群聊：继续 | [group_chat](./group_chat) |
+| `group_chat.end` | Open | 群聊：结束 | [group_chat](./group_chat) |
+| `group_chat.history` | Open | 群聊：读取历史 | [group_chat](./group_chat) |
+| `group_chat.list` | Open | 群聊：列出 | [group_chat](./group_chat) |
+| `group_chat.mention` | Open | 群聊：提及 | [group_chat](./group_chat) |
+| `group_chat.start` | Open | 群聊：启动 | [group_chat](./group_chat) |
+
+### health
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `health` | Open | health：检查健康 | — |
+
+### heartbeat
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `heartbeat.create` | Admin | 心跳：创建 | [heartbeat](./heartbeat) |
+| `heartbeat.delete` | Admin | 心跳：删除 | [heartbeat](./heartbeat) |
+| `heartbeat.get` | Open | 心跳：读取 | [heartbeat](./heartbeat) |
+| `heartbeat.list` | Open | 心跳：列出 | [heartbeat](./heartbeat) |
+| `heartbeat.runs` | Open | 心跳：列出运行 | [heartbeat](./heartbeat) |
+| `heartbeat.toggle` | Admin | 心跳：切换启用状态 | [heartbeat](./heartbeat) |
+| `heartbeat.update` | Admin | 心跳：更新 | [heartbeat](./heartbeat) |
+| `heartbeat.wake` | Admin | 心跳：唤醒 | [heartbeat](./heartbeat) |
+
+### hooks
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `hooks.add` | Admin | hooks：添加 | — |
+| `hooks.events` | Admin | hooks：读取事件 | — |
+| `hooks.list` | Admin | hooks：列出 | — |
+| `hooks.registry` | Admin | hooks：读取注册表 | — |
+| `hooks.reload` | Admin | hooks：重新加载 | — |
+| `hooks.remove` | Admin | hooks：移除 | — |
+
+### identity
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `identity.clear` | Admin | 身份：清空 | [identity](./identity) |
+| `identity.get` | Admin | 身份：读取 | [identity](./identity) |
+| `identity.list` | Admin | 身份：列出 | [identity](./identity) |
+| `identity.set` | Admin | 身份：设置 | [identity](./identity) |
+
+### insights
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `insights.tools` | Open | insights：列出工具 | [memory](./memory) |
+
+### logs
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `logs.getDirectory` | Admin | logs：读取目录 | [logs](./logs) |
+| `logs.getLevel` | Admin | logs：读取级别 | [logs](./logs) |
+| `logs.setLevel` | Admin | logs：设置级别 | [logs](./logs) |
+
+### loop
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `loop.list` | Open | loop：列出 | [arena](./arena) |
+
+### mcp
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `mcp.cancel_approval` | Admin | mcp：取消审批 | [mcp](./mcp) |
+| `mcp.list` | Admin | mcp：列出 | [mcp](./mcp) |
+| `mcp.list_pending_approvals` | Admin | mcp：列出待审批项 | [mcp](./mcp) |
+| `mcp.respond_approval` | Admin | mcp：答复审批 | [mcp](./mcp) |
+
+### mcp_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `mcp_config.create` | Admin | mcp_config：创建 | [config](./config) |
+| `mcp_config.delete` | Admin | mcp_config：删除 | [config](./config) |
+| `mcp_config.get` | Admin | mcp_config：读取 | [config](./config) |
+| `mcp_config.list` | Admin | mcp_config：列出 | [config](./config) |
+| `mcp_config.update` | Admin | mcp_config：更新 | [config](./config) |
+
+### memory
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `memory.compress` | Admin | 记忆：压缩 | [memory](./memory) |
+| `memory.curated.list` | Open | 记忆：列出（`curated`） | [memory](./memory) |
+| `memory.curated.remove` | Open | 记忆：移除（`curated`） | [memory](./memory) |
+| `memory.curated.replace` | Open | 记忆：替换（`curated`） | [memory](./memory) |
+| `memory.delete` | Open | 记忆：删除 | [memory](./memory) |
+| `memory.listFacts` | Open | 记忆：列出事实 | [memory](./memory) |
+| `memory.list_corrections` | Open | 记忆：列出修正 | [memory](./memory) |
+| `memory.reembed` | Admin | 记忆：重建嵌入 | [memory](./memory) |
+| `memory.reembed.cancel` | Admin | 记忆：取消（`reembed`） | [memory](./memory) |
+| `memory.retrieve_with_trace` | Open | 记忆：检索并返回跟踪 | [memory](./memory) |
+| `memory.search` | Open | 记忆：搜索 | [memory](./memory) |
+| `memory.sessions.get` | Open | 记忆：读取（`sessions`） | [memory](./memory) |
+| `memory.sessions.list` | Open | 记忆：列出（`sessions`） | [memory](./memory) |
+| `memory.sessions.search` | Open | 记忆：搜索（`sessions`） | [memory](./memory) |
+| `memory.sessions.update_compression` | Open | 记忆：更新压缩配置（`sessions`） | [memory](./memory) |
+| `memory.stats` | Open | 记忆：读取统计 | [memory](./memory) |
+| `memory.trace` | Open | 记忆：读取跟踪 | [memory](./memory) |
+
+### memory_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `memory_config.get` | Admin | memory_config：读取 | [config](./config) |
+| `memory_config.update` | Admin | memory_config：更新 | [config](./config) |
+
+### panel
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `panel.capabilities.snapshot` | Open | panel：读取快照（`capabilities`） | — |
+| `panel.project.select` | Open | panel：选择（`project`） | — |
+
+### plugin
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `plugin.install` | Admin | plugin：安装 | [plugins](./plugins) |
+| `plugin.marketplace.add` | Admin | plugin：添加（`marketplace`） | [plugins](./plugins) |
+| `plugin.marketplace.browse` | Admin | plugin：浏览（`marketplace`） | [plugins](./plugins) |
+| `plugin.marketplace.install` | Admin | plugin：安装（`marketplace`） | [plugins](./plugins) |
+| `plugin.marketplace.list` | Admin | plugin：列出（`marketplace`） | [plugins](./plugins) |
+| `plugin.marketplace.remove` | Admin | plugin：移除（`marketplace`） | [plugins](./plugins) |
+| `plugin.marketplace.update` | Admin | plugin：更新（`marketplace`） | [plugins](./plugins) |
+| `plugin.reload` | Admin | plugin：重新加载 | [plugins](./plugins) |
+| `plugin.uninstall` | Admin | plugin：卸载 | [plugins](./plugins) |
+| `plugin.update` | Admin | plugin：更新 | [plugins](./plugins) |
+
+### plugins
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `plugins.callTool` | Admin | plugins：调用工具 | [plugins](./plugins) |
+| `plugins.disable` | Admin | plugins：禁用 | [plugins](./plugins) |
+| `plugins.enable` | Admin | plugins：启用 | [plugins](./plugins) |
+| `plugins.install` | Admin | plugins：安装 | [plugins](./plugins) |
+| `plugins.installFromZip` | Admin | plugins：从 ZIP 安装 | [plugins](./plugins) |
+| `plugins.list` | Admin | plugins：列出 | [plugins](./plugins) |
+| `plugins.uninstall` | Admin | plugins：卸载 | [plugins](./plugins) |
+
+### projects
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `projects.add` | Open | 项目：添加 | [workspace](./workspace) |
+| `projects.archive` | Open | 项目：归档 | [workspace](./workspace) |
+| `projects.bind_workspace` | Open | 项目：绑定工作区 | [workspace](./workspace) |
+| `projects.channel.bind` | Admin | 项目：绑定（`channel`） | [workspace](./workspace) |
+| `projects.channel.list` | Open | 项目：列出（`channel`） | [workspace](./workspace) |
+| `projects.channel.unbind` | Admin | 项目：解除绑定（`channel`） | [workspace](./workspace) |
+| `projects.create` | Open | 项目：创建 | [workspace](./workspace) |
+| `projects.create_blank` | Open | 项目：创建空白项 | [workspace](./workspace) |
+| `projects.get` | Open | 项目：读取 | [workspace](./workspace) |
+| `projects.list` | Open | 项目：列出 | [workspace](./workspace) |
+| `projects.member.add` | Open | 项目：添加（`member`） | [workspace](./workspace) |
+| `projects.member.list` | Open | 项目：列出（`member`） | [workspace](./workspace) |
+| `projects.member.remove` | Open | 项目：移除（`member`） | [workspace](./workspace) |
+| `projects.remove` | Open | 项目：移除 | [workspace](./workspace) |
+| `projects.rename` | Open | 项目：重命名 | [workspace](./workspace) |
+| `projects.room_session` | Open | 项目：读取房间会话 | [workspace](./workspace) |
+| `projects.touch` | Open | 项目：更新访问时间 | [workspace](./workspace) |
+| `projects.workspace.list` | Open | 项目：列出（`workspace`） | [workspace](./workspace) |
+| `projects.workspace.read` | Open | 项目：读取（`workspace`） | [workspace](./workspace) |
+
+### providers
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `providers.catalog` | Admin | 模型提供方：查询目录 | [providers](./providers) |
+| `providers.create` | Admin | 模型提供方：创建 | [providers](./providers) |
+| `providers.delete` | Admin | 模型提供方：删除 | [providers](./providers) |
+| `providers.get` | Admin | 模型提供方：读取 | [providers](./providers) |
+| `providers.healthcheck` | Admin | 模型提供方：健康检查 | [providers](./providers) |
+| `providers.list` | Admin | 模型提供方：列出 | [providers](./providers) |
+| `providers.modelsRefresh` | Admin | 模型提供方：刷新模型 | [providers](./providers) |
+| `providers.oauthLogin` | Admin | 模型提供方：OAuth 登录 | [providers](./providers) |
+| `providers.oauthLogout` | Admin | 模型提供方：OAuth 登出 | [providers](./providers) |
+| `providers.oauthStatus` | Admin | 模型提供方：读取 OAuth 状态 | [providers](./providers) |
+| `providers.setDefault` | Admin | 模型提供方：设置默认项 | [providers](./providers) |
+| `providers.test` | Admin | 模型提供方：测试 | [providers](./providers) |
+| `providers.update` | Admin | 模型提供方：更新 | [providers](./providers) |
+
+### pty
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `pty.attach` | Admin | pty：挂载 | — |
+| `pty.close` | Admin | pty：关闭 | — |
+| `pty.input` | Admin | pty：输入 | — |
+| `pty.list` | Admin | pty：列出 | — |
+| `pty.resize` | Admin | pty：调整尺寸 | — |
+| `pty.spawn` | Admin | pty：创建实例 | — |
+
+### request
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `request.state` | Open | request：读取状态 | [events](./events) |
+
+### rerank_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `rerank_config.get` | Admin | rerank_config：读取 | [config](./config) |
+| `rerank_config.test` | Admin | rerank_config：测试 | [config](./config) |
+| `rerank_config.update` | Admin | rerank_config：更新 | [config](./config) |
+
+### runtimes
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `runtimes.install` | Admin | runtimes：安装 | — |
+| `runtimes.list` | Admin | runtimes：列出 | — |
+| `runtimes.refresh` | Admin | runtimes：刷新 | — |
+
+### search_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `search_config.deleteBackend` | Admin | search_config：删除后端 | [config](./config) |
+| `search_config.get` | Admin | search_config：读取 | [config](./config) |
+| `search_config.test` | Admin | search_config：测试 | [config](./config) |
+| `search_config.update` | Admin | search_config：更新 | [config](./config) |
+
+### secrets
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `secrets.delete` | Admin | secrets：删除 | — |
+| `secrets.list` | Admin | secrets：列出 | — |
+| `secrets.providers` | Admin | secrets：列出提供方 | — |
+| `secrets.set` | Admin | secrets：设置 | — |
+| `secrets.verify` | Admin | secrets：验证 | — |
+
+### security
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `security.audit.query` | Admin | security：查询（`audit`） | — |
+
+### security_config
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `security_config.get` | Admin | security_config：读取 | [config](./config) |
+| `security_config.update` | Admin | security_config：更新 | [config](./config) |
+
+### services
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `services.list` | Admin | 服务：列出 | [services](./services) |
+| `services.start` | Admin | 服务：启动 | [services](./services) |
+| `services.status` | Admin | 服务：查询状态 | [services](./services) |
+| `services.stop` | Admin | 服务：停止 | [services](./services) |
+
+### session
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `session.compact` | Open | 会话：压缩 | [session](./session) |
+| `session.create` | Open | 会话：创建 | [session](./session) |
+| `session.export_html` | Open | 会话：导出 HTML | [session](./session) |
+| `session.truncate` | Open | 会话：截断 | [session](./session) |
+| `session.usage` | Open | 会话：读取用量 | [session](./session) |
+
+### sessions
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `sessions.compaction.branch` | Open | 会话：创建分支（`compaction`） | [session](./session) |
+| `sessions.compaction.list` | Open | 会话：列出（`compaction`） | [session](./session) |
+| `sessions.compaction.restore` | Open | 会话：恢复（`compaction`） | [session](./session) |
+| `sessions.delete` | Open | 会话：删除 | [session](./session) |
+| `sessions.history` | Open | 会话：读取历史 | [session](./session) |
+| `sessions.list` | Open | 会话：列出 | [session](./session) |
+| `sessions.new` | Open | 会话：新建 | [session](./session) |
+| `sessions.patch` | Open | 会话：局部更新 | [session](./session) |
+| `sessions.preview` | Open | 会话：预览 | [session](./session) |
+| `sessions.reset` | Open | 会话：重置 | [session](./session) |
+| `sessions.set_project_root` | Open | 会话：设置项目根目录 | [session](./session) |
+| `sessions.set_topic` | Open | 会话：设置主题 | [session](./session) |
+
+### skills
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `skills.install` | Admin | 技能：安装 | [skills](./skills) |
+| `skills.install_dep` | Admin | 技能：安装依赖 | [skills](./skills) |
+| `skills.remove` | Admin | 技能：移除 | [skills](./skills) |
+| `skills.status` | Admin | 技能：查询状态 | [skills](./skills) |
+| `skills.update` | Admin | 技能：更新 | [skills](./skills) |
+
+### spend
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `spend.query` | Admin | spend：查询 | — |
+
+### subagent
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `subagent.tree` | Open | subagent：读取树 | [agent](./agent) |
+
+### system
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `system.hello` | Open | 系统：协商协议 | — |
+| `system.info` | Open | 系统：读取信息 | — |
+
+### teams
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `teams.acp_member.add` | Open | 团队：添加（`acp_member`） | [teams](./teams) |
+| `teams.acp_member.list` | Open | 团队：列出（`acp_member`） | [teams](./teams) |
+| `teams.acp_member.remove` | Open | 团队：移除（`acp_member`） | [teams](./teams) |
+| `teams.add_task_comment` | Open | 团队：添加任务评论 | [teams](./teams) |
+| `teams.chat.cancel` | Open | 团队：取消（`chat`） | [teams](./teams) |
+| `teams.chat.history` | Open | 团队：读取历史（`chat`） | [teams](./teams) |
+| `teams.chat.send` | Open | 团队：发送（`chat`） | [teams](./teams) |
+| `teams.chat.thread` | Open | 团队：读取线程（`chat`） | [teams](./teams) |
+| `teams.create` | Open | 团队：创建 | [teams](./teams) |
+| `teams.create_task` | Open | 团队：创建任务 | [teams](./teams) |
+| `teams.delete` | Open | 团队：删除 | [teams](./teams) |
+| `teams.disband` | Open | 团队：解散 | [teams](./teams) |
+| `teams.get` | Open | 团队：读取 | [teams](./teams) |
+| `teams.list` | Open | 团队：列出 | [teams](./teams) |
+| `teams.list_task_comments` | Open | 团队：列出任务评论 | [teams](./teams) |
+| `teams.list_task_events` | Open | 团队：列出任务事件 | [teams](./teams) |
+| `teams.list_task_runs` | Open | 团队：列出任务运行 | [teams](./teams) |
+| `teams.list_tasks` | Open | 团队：列出任务 | [teams](./teams) |
+| `teams.list_templates` | Open | 团队：列出模板 | [teams](./teams) |
+| `teams.rename` | Open | 团队：重命名 | [teams](./teams) |
+| `teams.snapshot.create` | Open | 团队：创建（`snapshot`） | [teams](./teams) |
+| `teams.snapshot.delete` | Open | 团队：删除（`snapshot`） | [teams](./teams) |
+| `teams.snapshot.get` | Open | 团队：读取（`snapshot`） | [teams](./teams) |
+| `teams.snapshot.list` | Open | 团队：列出（`snapshot`） | [teams](./teams) |
+| `teams.snapshot.restore` | Open | 团队：恢复（`snapshot`） | [teams](./teams) |
+| `teams.task.journal.get` | Open | 团队：读取（task / journal） | [teams](./teams) |
+| `teams.task.journal.list` | Open | 团队：列出（task / journal） | [teams](./teams) |
+| `teams.task.pause` | Open | 团队：暂停（`task`） | [teams](./teams) |
+| `teams.task.resume` | Open | 团队：恢复（`task`） | [teams](./teams) |
+| `teams.task.retry` | Open | 团队：重试（`task`） | [teams](./teams) |
+| `teams.task.skip` | Open | 团队：跳过（`task`） | [teams](./teams) |
+| `teams.task.trace` | Open | 团队：读取跟踪（`task`） | [teams](./teams) |
+| `teams.update_task` | Open | 团队：更新任务 | [teams](./teams) |
+| `teams.usage` | Open | 团队：读取用量 | [teams](./teams) |
+| `teams.workflow.approve_step` | Open | 团队：批准步骤（`workflow`） | [teams](./teams) |
+| `teams.workflow.reject_step` | Open | 团队：reject step（`workflow`） | [teams](./teams) |
+
+### telecom
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `telecom.approval.pending` | Admin | telecom：查询待处理项（`approval`） | [channels](./channels) |
+| `telecom.approval.request` | Admin | telecom：发起请求（`approval`） | [channels](./channels) |
+| `telecom.approval.resolve` | Admin | telecom：处理（`approval`） | [channels](./channels) |
+| `telecom.approval.review` | Admin | telecom：审查（`approval`） | [channels](./channels) |
+
+### tools
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `tools.cancel_call` | Admin | 工具：取消调用 | [tools](./tools) |
+| `tools.catalog` | Admin | 工具：查询目录 | [tools](./tools) |
+| `tools.effective` | Admin | 工具：读取生效配置 | [tools](./tools) |
+| `tools.in_flight` | Admin | 工具：读取进行中调用 | [tools](./tools) |
+| `tools.invoke` | Open | 工具：调用 | [tools](./tools) |
+
+### trace
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `trace.by_runs` | Open | trace：按运行查询 | [runs](./runs) |
+| `trace.get` | Admin | trace：读取 | [runs](./runs) |
+| `trace.list` | Admin | trace：列出 | [runs](./runs) |
+| `trace.tool_output` | Open | trace：读取工具输出 | [runs](./runs) |
+
+### users
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `users.create` | Admin | 用户：创建 | [identity](./identity) |
+| `users.get` | Admin | 用户：读取 | [identity](./identity) |
+| `users.list` | Open | 用户：列出 | [identity](./identity) |
+| `users.me` | Open | 用户：读取当前用户 | [identity](./identity) |
+| `users.update` | Admin | 用户：更新 | [identity](./identity) |
+
+### version
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `version` | Open | version：读取版本 | — |
+
+### voice
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `voice.format` | Open | voice：格式化 | — |
+| `voice.record_start` | Open | voice：开始录音 | — |
+| `voice.record_stop` | Open | voice：停止录音 | — |
+| `voice.stream.audio` | Open | voice：处理音频（`stream`） | — |
+| `voice.stream.start` | Open | voice：启动（`stream`） | — |
+| `voice.stream.stop` | Open | voice：停止（`stream`） | — |
+| `voice.synthesize` | Open | voice：合成 | — |
+| `voice.transcribe` | Open | voice：转录 | — |
+
+### wizard
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `wizard.answer` | Admin | wizard：回答 | [wizard](./wizard) |
+| `wizard.cancel` | Admin | wizard：取消 | [wizard](./wizard) |
+| `wizard.next` | Admin | wizard：下一步 | [wizard](./wizard) |
+| `wizard.start` | Admin | wizard：启动 | [wizard](./wizard) |
+| `wizard.status` | Admin | wizard：查询状态 | [wizard](./wizard) |
+
+### workspace
+
+| 方法名 | 分类 | 用途（名称释义） | 分册 |
+|---|---|---|---|
+| `workspace.archive` | Admin | 工作区：归档 | [workspace](./workspace) |
+| `workspace.create` | Admin | 工作区：创建 | [workspace](./workspace) |
+| `workspace.get` | Admin | 工作区：读取 | [workspace](./workspace) |
+| `workspace.list` | Admin | 工作区：列出 | [workspace](./workspace) |
+| `workspace.unarchive` | Admin | 工作区：取消归档 | [workspace](./workspace) |
+| `workspace.update` | Admin | 工作区：更新 | [workspace](./workspace) |
+
+## 与旧索引的关系
+
+[JSON-RPC 协议](../../api/jsonrpc) 现在只说明消息信封、错误码与通知；方法索引统一维护在本页，并以 `src/gateway/method_census.rs` 为准。

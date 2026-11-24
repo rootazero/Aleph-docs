@@ -45,7 +45,7 @@ iMessage 是一个频道类型、两种传输：
 
 | 传输 | 入站 | 出站 | 平台边界 |
 | --- | --- | --- | --- |
-| Local | macOS `chat.db` 轮询 | AppleScript | 仅 macOS，需要 Full Disk Access 与 Automation；不能发送 tapback，`reactions` 为 false |
+| Local | macOS chat.db 轮询 | AppleScript | 仅 macOS，需要 Full Disk Access 与 Automation；不能发送 tapback，`reactions` 为 false |
 | BlueBubbles | REST + webhook，可选 catch-up poll | BlueBubbles REST | 任意操作系统；支持附件、回复、reaction；reaction 需要 private-api，编辑和删除不声明支持 |
 
 本地 iMessage 轮询会把 add-tapback 转成带 `MessageMeta::Reaction` 的入站上下文，并过滤 remove-tapback；因此“模型能看到用户新增 reaction”不表示本地传输能发送 reaction。BlueBubbles 的 reaction 还会校验 tapback 名称和 private-api 能力。

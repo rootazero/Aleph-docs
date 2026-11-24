@@ -19,7 +19,7 @@ List every session. Internal `task` and `ephemeral` sessions are filtered out so
 |-----------|------|----------|-------------|
 | `agent_id` | string | no | Filter by agent id |
 
-**Response:** `{ "sessions": [ ...SessionInfo... ], "count": N }`. Each row carries `key`, `agent_id`, `session_type`, `message_count`, `created_at` (RFC3339), `last_active_at` (RFC3339), `updated_at` (Unix epoch seconds — drives the Panel's sort), `topic` (resolved: `topic` → `identity_meta.custom.topic` → non-leaked `derived_title`), `status`, `state`, `label`, `input_tokens`, `output_tokens`, `model`, `model_provider`, `parent_session_key`, `compaction_count`, `channel` (origin: `telegram` / `discord` / `gui:chat` / `null`), `project_root`, `exec_tier` (per-session override or `null`), `mode` (per-session override or `null`).
+**Response:** `{ "sessions": [ ...SessionInfo... ], "count": N }`. Each row carries `key`, `agent_id`, `session_type`, `message_count`, `created_at` (RFC3339), `last_active_at` (RFC3339), `updated_at` (Unix epoch seconds — drives the Panel's sort), `topic` (resolved: `topic` → `identity_meta` → `custom` → `topic` → non-leaked `derived_title`), `status`, `state`, `label`, `input_tokens`, `output_tokens`, `model`, `model_provider`, `parent_session_key`, `compaction_count`, `channel` (origin: `telegram` / `discord` / `gui:chat` / `null`), `project_root`, `exec_tier` (per-session override or `null`), `mode` (per-session override or `null`).
 
 ### sessions.history
 
@@ -85,7 +85,7 @@ Patch session metadata. Executes validation in-band: an `exec_tier` or `session_
 | `status` | string | no | New status |
 | `model` | string | no | New model id |
 | `model_provider` | string | no | New provider name |
-| `metadata` | object | no | `identity_meta.custom` patch — `exec_tier` / `session_mode` validated here |
+| `metadata` | object | no | `identity_meta` → `custom` patch — `exec_tier` / `session_mode` validated here |
 
 **Response:** `{ "session_key", "updated" }`.
 

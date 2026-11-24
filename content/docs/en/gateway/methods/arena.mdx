@@ -3,9 +3,9 @@ title: "arena.*"
 description: "Evaluation and benchmarking RPC methods"
 ---
 
-The `arena.*` namespace is **not registered** on any current `aleph-server` build. The source tree has no `arena` handler module, no `registry.register("arena.*", ...)` calls, and no `src/arena/` module — the runtime returns `Method not found` (code `-32601`) for every `arena.*` method.
+The `arena.*` namespace is **not registered** on any current `aleph-server` build. The source tree has no `arena` handler module, no `registry.register("arena.*", ...)` calls, and no `arena` module — the runtime returns `Method not found` (code `-32601`) for every `arena.*` method.
 
-The 26.7.x changelog has no entries for this namespace, and the original evaluation-arena concept (`src/arena/`, arena benchmark tasks, arena leaderboard) is not in the current build.
+The 26.7.x changelog has no entries for this namespace, and the original evaluation-arena concept (arena benchmark tasks, arena leaderboard) is not in the current build.
 
 ## Methods
 

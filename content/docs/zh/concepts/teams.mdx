@@ -68,7 +68,7 @@ tools_denied = ["file_write"]
 
 - 团队生命周期：`teams.create`、`teams.get`、`teams.list`、`teams.rename`、`teams.disband`、`teams.delete`、`teams.list_templates`
 - 任务：`teams.create_task`、`teams.update_task`、`teams.list_tasks`、`teams.list_task_runs`、`teams.list_task_comments`、`teams.list_task_events`、`teams.add_task_comment`，加上 `teams.task.pause`、`teams.task.resume`、`teams.task.retry`、`teams.task.skip`、`teams.task.trace`、`teams.task.journal.get`、`teams.task.journal.list`
-- 工作流：`teams.workflow.export_canvas`、`teams.workflow.import_canvas`、`teams.workflow.approve_step`、`teams.workflow.reject_step`、`teams.workflow.retry_step`
+- 工作流：`teams.workflow.approve_step`、`teams.workflow.reject_step`
 - 对话：`teams.chat.send`、`teams.chat.cancel`、`teams.chat.history`、`teams.chat.thread`
 - 快照：`teams.snapshot.create`、`teams.snapshot.list`、`teams.snapshot.get`、`teams.snapshot.restore`、`teams.snapshot.delete`
 - ACP 成员：`teams.acp_member.add`、`teams.acp_member.remove`、`teams.acp_member.list`
@@ -76,7 +76,7 @@ tools_denied = ["file_write"]
 
 `team_task_control`（暂停/恢复/重试/跳过/取消）、`task_exit_journal`、`team_workflow_canvas`、`team_snapshot` 等操作通过内置工具提供给代理。LLM 自身审批通过 `task_review`；管理员通过上述 RPC 处理任务级别控制。
 
-不存在 `teams.run` RPC，也不存在 `sequential | parallel | hierarchical` 协调模式。并行来自任务 DAG、dispatcher 限制与群聊扇出。
+没有单独的团队运行 RPC，也没有 `sequential | parallel | hierarchical` 协调模式。并行来自任务 DAG、dispatcher 限制与群聊扇出。
 
 ## 另请参阅
 

@@ -41,7 +41,7 @@ The answer is a strict separation of concerns across four numbered layers:
               │                       │                       │
     ┌─────────┴──────────┐  ┌────────┴────────┐  ┌──────────┴─────────┐
     │  Native (Muscles)  │  │   MCP (Tools)   │  │  Skills (Expertise) │
-    │  Desktop Bridge    │  │  Playwright,    │  │  PPT Expert,       │
+    │  Desktop Layer     │  │  Playwright,    │  │  PPT Expert,       │
     │  Shell, OCR        │  │  Google Maps    │  │  Code Review       │
     └────────────────────┘  └─────────────────┘  └────────────────────┘
               │                       │                       │
@@ -55,7 +55,7 @@ The Rust Core is Aleph's soul. It is responsible for exactly three things and no
 
 | Responsibility | Description |
 |----------------|-------------|
-| **Reasoning** | Decide what to do next. The Core orchestrates the [Harness](./harness) (Observe-Think-Act-Feedback), invokes LLM providers, and runs the [Prompt System](./prompt-system) for goal-oriented execution. |
+| **Reasoning** | Decide what to do next. The Core orchestrates the [Harness](./harness) (Observe-Think-Act-Feedback), invokes LLM providers, and runs the [Prompt System](../concepts/prompt-system) for goal-oriented execution. |
 | **State Management** | Maintain conversation context, task graphs, [session keys](./routing), and the [memory system](./memory). |
 | **Routing** | Dispatch work to the correct execution system -- native tools, MCP servers, or skill plugins -- based on task requirements. |
 
@@ -64,15 +64,17 @@ The Rust Core is Aleph's soul. It is responsible for exactly three things and no
 The Core never renders UI, never calls platform-specific APIs (AppKit, Vision, CoreGraphics), and never bundles heavy third-party libraries for niche functionality. These are architectural redlines (R1, R3) that keep the Core lightweight and portable.
 
 ```rust
-// The Core defines capability contracts as traits.
-// Physical implementations live in the Desktop Bridge.
-//
-// Example: the Core can request a screenshot, but the
-// actual CGWindowListCreateImage call happens in Tauri.
-pub trait DesktopCapability: Send + Sync {
-    async fn screenshot(&self, region: Option<ScreenRegion>) -> Result<Vec<u8>>;
+// The Core depends only on capability contracts (traits). The physical
+// implementations live in desktop/{macos,linux,windows} and are built per
+// target OS in src/executor/builtin_registry/builder/constructor/mod.rs,
+// then injected into the desktop tool as Arc<dyn aleph_desktop::DesktopPlatform>.
+// Example (desktop/shared/src/traits/screen.rs):
+#[async_trait]
+pub trait ScreenCapability: Send + Sync {
+    async fn screenshot(&self, region: Option<ScreenRegion>) -> Result<Screenshot>;
     async fn click(&self, x: f64, y: f64, button: MouseButton) -> Result<()>;
     async fn type_text(&self, text: &str) -> Result<()>;
+    // ...
 }
 ```
 
@@ -82,16 +84,23 @@ Aleph presents two faces to the world. Both are pure I/O layers -- they convert 
 
 ### Face 1: Unified Panel (Leptos/WASM)
 
-A single Leptos codebase compiled to WASM serves as the UI across all platforms:
+A single Leptos codebase (`interfaces/webchat`) compiled to WASM serves as the UI across all platforms. The Panel assets are statically embedded into `aleph-server` through `rust_embed` (`src/gateway/control_plane/assets.rs`) and are not read from disk at runtime.
 
 | Platform | Host | Notes |
 |----------|------|-------|
 | Web | Browser | Served by the Aleph server |
-| macOS | Tauri shell | Menu-bar-first, Halo floating window |
-| Windows | Tauri shell | System tray integration |
-| Linux | Tauri shell | Standard desktop window |
+| macOS / Windows / Linux | Desktop host `desktop/nsh-shell` (NSH) | Window container + WebView loading the same Panel |
 
-The native shell (Tauri) provides only the window container, system tray, and native animations. All complex UI -- settings pages, conversation views, debug panels -- lives in the WASM layer (redline R2).
+The desktop host is a **thin host**: it provides only the window container and native integrations (tray, summon hotkey, the `aleph://` URL scheme, notifications, device-credential storage). All complex UI -- settings pages, conversation views, debug panels -- lives in the WASM layer (redline R2). NSH hosts the same Panel, not a second business UI (`docs/reference/DESKTOP_SHELL.md`). The host **connects** to an existing Gateway; it does not start, stop, or reconfigure a service (help text in `desktop/nsh-shell/src/main.rs`). The one exception is the `embedded-core` feature, which is off by default: when enabled, it launches the sibling `aleph-server` binary only if `127.0.0.1:18790` refuses connections (`desktop/host/src/local_server.rs`). NSH has no release pipeline yet; per-platform acceptance status is tracked in `docs/reference/DESKTOP_SHELL.md`.
+
+How the desktop-side directories divide the work (the capability layer is detailed under "Limb 1" below):
+
+| Layer | Directory | Runtime | Responsibility |
+|-------|-----------|---------|----------------|
+| Face 1 · desktop host | `desktop/nsh-shell/` | Rust, crate `aleph-nsh-shell`, built on nsh 0.6.0 | Window, tray, hotkey, URL scheme, notifications, credentials; connects to the Gateway |
+| Face 1 · local admission | `desktop/host/` | Rust, crate `aleph-desktop-host` | Probes and admits the local Gateway under `embedded-core` |
+| Limb 1 · capability contract | `desktop/shared/` | Rust, crate `aleph-desktop` (compiled into `aleph-server`) | `DesktopPlatform` and `*Capability` traits, Swift helper client |
+| Limb 1 · platform implementations | `desktop/{macos,linux,windows}/` | Rust, compiled into `aleph-server`; macOS also has the Swift helper `desktop/macos/bridge/` | Per-platform screen, input, AX, permission, media, and PIM implementations |
 
 ### Face 2: Social Bot Gateway
 
@@ -109,17 +118,18 @@ Limbs are how Aleph acts on the world. There are three categories, ordered by pr
 
 ### Limb 1: Native Capabilities (The Muscles)
 
-Direct system control through the [Desktop Bridge](./desktop-bridge) and shell execution:
+Direct system control through the desktop capability layer and shell execution. The capability layer is an **in-process library**, not a separate process: traits and shared types live in `desktop/shared`, platform implementations live in `desktop/{macos,linux,windows}`, and all of it is compiled into and runs inside `aleph-server` (`Cargo.toml` pulls in the matching crate per target OS).
 
 | Capability | Implementation | Protocol |
 |------------|---------------|----------|
-| Screenshots / OCR | Desktop Bridge (Tauri) | UDS JSON-RPC |
-| Mouse / Keyboard | Desktop Bridge (Tauri) | UDS JSON-RPC |
-| Window Management | Desktop Bridge (Tauri) | UDS JSON-RPC |
-| Canvas Overlay | Desktop Bridge (Tauri) | UDS JSON-RPC |
-| Shell Commands | Built-in Exec system | Direct |
+| Screenshots / OCR | `ScreenCapability`; macOS goes through the Swift helper `screen.*`, other platforms use `NativeScreen` | In-process call (macOS helper: JSON-RPC 2.0 over stdio) |
+| Mouse / Keyboard | `ScreenCapability`; macOS targeted input goes through helper `input.*` | In-process call (macOS helper: JSON-RPC 2.0 over stdio) |
+| Window Management | `ScreenCapability` (`window_list` / `focus_window` / `move_window`) | In-process call |
+| Accessibility tree (AX) | `AccessibilityCapability`; macOS helper `ax.*`, Windows UI Automation, Linux AT-SPI2 | In-process call (macOS helper: JSON-RPC 2.0 over stdio) |
+| Personal info (PIM) | `PimCapability`; macOS goes through helper `pim.*` | In-process call (macOS helper: JSON-RPC 2.0 over stdio) |
+| Shell Commands | Built-in Exec system (`src/exec/`) | Direct |
 
-The Desktop Bridge runs as a separate Tauri process. The Core communicates with it over a Unix Domain Socket using JSON-RPC 2.0, maintaining the Brain-Limb separation principle.
+Only some macOS capabilities are delegated to the Swift helper `aleph-bridge` (source in `desktop/macos/bridge/`): the Core sends JSON-RPC 2.0 requests over stdio through the `SwiftBridge` client (`desktop/shared/src/bridge/client.rs`), with the protocol defined in `shared/protocol/src/desktop_bridge/`. `aleph-server` owns this channel; it does not pass through the desktop host. Lifecycle, timeouts, and the method list are covered in [Desktop Bridge](./desktop-bridge).
 
 ### Limb 2: MCP (The External Tools)
 
@@ -153,7 +163,7 @@ Every interaction between the Core and its Faces or Limbs travels through one of
 | Nerve | Channel | Protocol | Purpose |
 |-------|---------|----------|---------|
 | **N1** | Core -- UI | WebSocket + JSON-RPC | Drive the Unified Panel. Bidirectional: the UI sends user input, the Core streams responses and events. |
-| **N2** | Core -- Desktop Bridge | UDS + JSON-RPC 2.0 | Drive desktop control. One request-response per connection over `~/.aleph/run/desktop-bridge.sock`. |
+| **N2** | Core -- Desktop Layer | In-process trait calls; macOS helper: JSON-RPC 2.0 over stdio | Drive desktop control. The capability layer runs inside the Core process; only the macOS helper is a separate subprocess, see [Desktop Bridge](./desktop-bridge). |
 | **N3** | Core -- Gateway | gRPC / NATS | Drive social bots. High-throughput, supports fan-out for multi-channel delivery. |
 | **N4** | Core -- MCP | JSON-RPC over stdio/SSE | Drive external tools. Standard MCP transport, one server per tool domain. |
 
@@ -168,9 +178,11 @@ Every interaction between the Core and its Faces or Limbs travels through one of
 │  ────────────────   Why: UI needs live token streaming,             │
 │                     event-driven updates, low latency               │
 │                                                                      │
-│  N2 (UDS/IPC)       Best for: local high-frequency control          │
-│  ────────────────   Why: Desktop Bridge is co-located,              │
-│                     UDS avoids TCP overhead, sub-ms latency         │
+│  N2 (in-process)    Best for: local capability calls                │
+│  ────────────────   Why: the Desktop Layer runs inside the          │
+│                     Core process, so trait calls need no            │
+│                     serialization; only the macOS helper            │
+│                     speaks JSON-RPC over stdio                      │
 │                                                                      │
 │  N3 (gRPC/NATS)     Best for: structured service-to-service        │
 │  ────────────────   Why: Gateway may run on different host,         │
@@ -189,8 +201,8 @@ The 1-2-3-4 model is enforced by seven architectural redlines. Violations are no
 
 | Redline | Rule | Consequence |
 |---------|------|-------------|
-| **R1** | Brain-Limb Separation | `core/src` never imports platform APIs. The Core defines traits; the Desktop Bridge implements them. |
-| **R2** | Single Source of UI Truth | Tauri shell has no business-logic UI. All complex views are in Leptos/WASM. |
+| **R1** | Brain-Limb Separation | `src` never calls platform APIs directly. The Core defines traits; the desktop capability layer (`desktop/{macos,linux,windows}`) implements them. |
+| **R2** | Single Source of UI Truth | The native desktop host (`desktop/nsh-shell`) has no business-logic UI. All complex views are in Leptos/WASM. |
 | **R3** | Core Minimalism | No heavy third-party crates for niche functionality. Prefer Skills or MCP. |
 | **R4** | I/O-Only Interfaces | Faces never persist data, retrieve memories, or plan tasks. |
 | **R5** | Menu Bar First | macOS defaults to menu-bar mode with Halo overlay. Full windows only when needed. |
@@ -215,9 +227,9 @@ Here is how a user message flows through the 1-2-3-4 model:
    │  → LLM decides: "take a screenshot, then OCR it"
    │
    ▼
-4. Core dispatches to Desktop Bridge (Limb 1, Nerve N2)
-   │  → UDS JSON-RPC: desktop.screenshot → base64 image
-   │  → UDS JSON-RPC: desktop.ocr → extracted text
+4. Core dispatches to the desktop capability layer (Limb 1, Nerve N2)
+   │  → ScreenCapability::screenshot → screenshot
+   │  → ScreenCapability::ocr → extracted text
    │
    ▼
 5. Core continues reasoning with OCR results
@@ -239,6 +251,7 @@ Each layer of the 1-2-3-4 model maps to specific directories in the codebase:
 
 ```
 aleph/
+├── Cargo.toml / justfile / CHANGELOG.md / config.search.example.toml
 ├── src/                         # 1. CORE (Brain)
 │   ├── harness/                 #    Reasoning: Observe-Think-Act-Feedback
 │   ├── thinker/                 #    Reasoning: LLM interaction (incl. graph_topology layer)
@@ -255,16 +268,19 @@ aleph/
 │   ├── mcp/                     #    4. NERVE N4 (MCP client)
 │   ├── tools/                   #    3. LIMB (Tool definitions)
 │   ├── builtin_tools/           #    3. LIMB 1 (Native tools)
+│   ├── executor/                #    3. LIMB 1 (composition root: injects the desktop platform per target OS)
 │   ├── extension/               #    3. LIMB 3 (Plugin runtime)
 │   ├── loop_graph/              #    Layered on top: governance topology (NOT part of 1-2-3-4)
 │   ├── looping/ goal/ strategy/ #    Long-task subsystems (loop / goal / strategy)
 │   └── hub/                     #    Aleph Hub single source
 ├── desktop/
-│   ├── shell/                   #    3. LIMB 1 (Tauri desktop shell)
-│   │   ├── macos/               #       macOS native bridge (Swift)
-│   │   ├── linux/ windows/      #       Linux / Windows native bridge
-│   │   └── shared/              #       DesktopCapability trait + IPC protocol
-│   └── shared/                  #    4. NERVE N2 shared bridge client
+│   ├── nsh-shell/               #    2. FACE 1 host (aleph-nsh-shell, NSH 0.6.0)
+│   ├── host/                    #    aleph-desktop-host: local Gateway admission (embedded-core)
+│   ├── shared/                  #    3. LIMB 1: DesktopPlatform + *Capability traits
+│   ├── macos/                   #    3. LIMB 1: macOS platform implementation
+│   │   └── bridge/              #       Swift helper (aleph-bridge, stdio JSON-RPC)
+│   ├── linux/                   #    3. LIMB 1: Linux platform implementation
+│   └── windows/                 #    3. LIMB 1: Windows platform implementation
 ├── interfaces/
 │   ├── cli/                     #    2. FACE 1 (CLI client)
 │   ├── tui/                     #    2. FACE 1 (TUI client)
@@ -274,6 +290,8 @@ aleph/
 ├── shared/                      #    Cross-crate shared (protocol / logging / ui_logic / client)
 └── plugins/                     #    Plugin examples + SDK
 ```
+
+The `desktop/shell/` directory that still exists in the repository is the legacy host kept for the transition. It will be removed, and this site no longer documents it.
 
 ## Design Philosophy
 
@@ -292,7 +310,7 @@ This is not microservices for the sake of it. It is a pragmatic separation that 
 
 ### 1-2-3-4 Still Stable
 
-1 core (`alephcore`), 2 faces (CLI / TUI / WebChat Panel + desktop shell), 3 limbs (gateway, harness, toolchain), 4 nerves (event bus, memory, profile, state machine).
+1 core (`alephcore`), 2 faces (CLI / TUI / WebChat Panel + the NSH desktop host), 3 limbs (gateway, harness, toolchain), 4 nerves (event bus, memory, profile, state machine).
 
 ### `loop_graph` Layered on Top of 1
 

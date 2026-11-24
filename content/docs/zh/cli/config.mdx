@@ -52,9 +52,11 @@ excluded_tools = ["dangerous_tool"]
 | `device_name` | string | 向服务器显示的人类可读名称 |
 | `auth_token` | string? | 保存的认证令牌 |
 | `default_session` | string? | 未提供 `--session` 时使用的会话密钥 |
-| `manifest.tool_categories` | string[] | 此客户端支持的工具类别 |
-| `manifest.specific_tools` | string[] | 要包含的特定工具 |
-| `manifest.excluded_tools` | string[] | 从此客户端排除的工具 |
+| `[manifest]` 段的 `tool_categories` | string[] | 此客户端支持的工具类别 |
+| `[manifest]` 段的 `specific_tools` | string[] | 要包含的特定工具 |
+| `[manifest]` 段的 `excluded_tools` | string[] | 从此客户端排除的工具 |
+
+`[manifest]` 段的三个键目前是**预留**的：它们保留在配置结构和线格式上，但协议里"告诉服务端本界面能渲染哪些工具"的那次握手从未启用。
 
 ---
 
@@ -82,7 +84,7 @@ aleph-server config get agent.main.model --json
 
 | 参数 | 必需 | 说明 |
 |----------|----------|-------------|
-| `<PATH>` | 否 | 点分隔的配置路径（例如 `general.language`） |
+| `<PATH>` | 否 | 点分隔的配置路径（例如 `general` 段下的 `language` 键） |
 
 | 标志 | 默认值 | 说明 |
 |------|---------|-------------|

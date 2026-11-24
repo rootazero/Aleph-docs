@@ -153,7 +153,7 @@ for (hop, provider_id) in candidates.iter().enumerate() {
 ## Deepgram 适配
 
 - **`/v1/listen`** delta 正常化（cloud + WhisperLiveKit 共享 delta 格式——WhisperLiveKit 暴露了 Deepgram 兼容端点）
-- **`build_transcriber` factory**：按 `voice.provider` 选 adapter；`unknown` 字段值默认 fallback 到 Deepgram dialect
+- **`build_transcriber` factory**：按 `[voice.streaming]` 表里的 `provider` 键选 adapter；`unknown` 字段值默认 fallback 到 Deepgram dialect
 - **ASR-VAD 对话回合切分**：Deepgram 自带 `UtteranceEnd` 信号，与 Panel VAD 互校验（Panel VAD 权威；`utterance_end` 字段只作 advisory）
 - **interim 噪声**：`UTF-8 替换字符 U+FFFD` 在 interim 上被丢弃，committed 上保留（流式解码常见的多字节字符半写入）
 
@@ -233,7 +233,7 @@ ASR 转写信号**直接接到上下文聚合**，不只落到聊天流：
 
 ---
 
-## 本地 sidecar（`crates/aleph-voice`）
+## 本地 provider（`src/gateway/voice/local_provider.rs`）
 
 26.7.x 起 Aleph **没有**自带的语音模型本地服务（违反 R3 轻依赖 —— 一个 `sherpa-onnx` 就几 MB，加 WhisperLiveKit 部署更重）。用户用 BYO 模式跑 mlx-audio 等 OpenAI 兼容服务，`[voice.local]` 配置：
 
@@ -267,7 +267,7 @@ pub struct PtySession {
 }
 ```
 
-`PtyManager` 是 process-global 单例（`OnceLock<PtyManager>`），最多 64 个并发会话，FIFO 淘汰最老 + 10 min TTL 兜底；`pty.output` 帧 base64 推上 `events.subscribe("pty.output")`，`pty.exit` 推 `pty.exit`。**与 voice 无关** —— 这是终端嵌入（Hermes 时代就有的 `pty_bridge.py` 移植），语音栈只借用 `portable-pty` 这个 crate（`src/gateway/pty/` 与 `src/gateway/voice/` 平级）。
+`PtyManager` 是 process-global 单例（`OnceLock<PtyManager>`），最多 64 个并发会话，FIFO 淘汰最老 + 10 min TTL 兜底；`pty.screen` 帧（有界差分）推上 `events.subscribe("pty.screen")`，`pty.exit` 推 `pty.exit`。**与 voice 无关** —— 这是终端嵌入能力（早期 Hermes 时代用 Python 实现的同一个东西，现在已用 Rust 重写），语音栈只借用 `portable-pty` 这个 crate（`src/gateway/pty/` 与 `src/gateway/voice/` 平级）。
 
 ---
 
@@ -286,15 +286,23 @@ pub struct PtySession {
 
 ## API 客户端
 
-```ts
-// interfaces/webchat/src/api/typed/voice.ts
-const stream = await voice.stream.start({ language: "en", sample_rate: 16000 });
-voice.stream.audio({ stream_id: stream.stream_id, frame: pcm_s16le });
-voice.stream.on("delta", (d: TranscriptDelta) => { /* render */ });
-await voice.stream.stop({ stream_id: stream.stream_id });
+Panel 端在 `interfaces/webchat/src/platform/wide/views/voice/mod.rs` 里直接通过 `rpc_call` 调 voice RPC：
+
+```rust
+// interfaces/webchat/src/platform/wide/views/voice/mod.rs
+let resp = dash
+    .rpc_call(
+        "voice.stream.start",
+        serde_json::json!({ "language": Option::<String>::None }),
+    )
+    .await;
+// 每帧：
+dash.rpc_call("voice.stream.audio", serde_json::json!({ "stream_id": id, "pcm_base64": b64 })).await;
+// 结束时：
+dash.rpc_call("voice.stream.stop", serde_json::json!({ "stream_id": id })).await;
 ```
 
-类型 `TranscriptDelta` 由 `aleph_protocol::voice_text` 提供（共享给 Panel 端 caption reducer 与 voice.format 抛光 pass，两边不会对 `committed` / `interim` 字段的语义起分歧）。
+delta 文本类型由 `aleph_protocol::voice_text` 提供（共享给 Panel 端 caption reducer 与 voice.format 抛光 pass，两边不会对 `committed` / `interim` 字段的语义起分歧）。
 
 ---
 
@@ -314,9 +322,8 @@ await voice.stream.stop({ stream_id: stream.stream_id });
 - `src/gateway/pty/{mod,session,manager}.rs` — 嵌入式终端（与 voice 平级，**非** voice 内部）
 - `src/gateway/handlers/voice.rs` — voice 全部 RPC（~620 行）
 - `src/config/types/voice_local.rs` — `[voice]` / `[voice.streaming]` / `[voice.format]` 配置 + `normalize_voice_local`（填 default / disable 时清理）
-- `crates/aleph-voice` — 本地语音 sidecar（sherpa-onnx 后端 + Ogg/Opus 封装 + manifest 模型声明，**但** Aleph **不**默认 ship 它）
 - `interfaces/webchat/src/platform/wide/views/voice/{audio,caption_state,level,machine,mod,orb,sentence,vad,wav,voice_playback}.rs` — 10 个 Panel 子模块
-- `interfaces/webchat/src/api/typed/voice.ts` — Panel 端类型化 RPC 客户端
+- `interfaces/webchat/src/platform/wide/views/voice/mod.rs` — Panel 端 voice RPC 客户端（`voice.stream.*` / `voice.synthesize` 经 `rpc_call`）
 
 ---
 

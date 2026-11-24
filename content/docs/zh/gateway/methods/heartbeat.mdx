@@ -3,7 +3,7 @@ title: "heartbeat.*"
 description: "心跳任务 RPC 方法"
 ---
 
-`heartbeat.*` 是守护进程侧心跳调度器的生命周期接口。八个方法通过 `register_heartbeat_handlers` 在服务器启动(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:142-196`)构造了 `SharedHeartbeatService` 后注册;若服务未构造(例如没有调度器的模拟模式),JSON-RPC 方法不存在,调用返回 `Method not found`。
+`heartbeat.*` 是守护进程侧心跳调度器的生命周期接口。八个方法通过 `register_heartbeat_handlers` 在服务器启动(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs`)构造了 `SharedHeartbeatService` 后注册;若服务未构造(例如没有调度器的模拟模式),JSON-RPC 方法不存在,调用返回 `Method not found`。
 
 源码中每个方法都有两个变体:一个由 `HeartbeatService` 支持的真实处理器,一个返回固定空响应的 `_stub`。启动时仅连接真实处理器。
 

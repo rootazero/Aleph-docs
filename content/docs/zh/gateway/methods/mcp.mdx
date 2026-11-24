@@ -17,23 +17,25 @@ description: "MCP 服务器管理 RPC 方法"
 
 **响应:** `{ "servers": [ ...ServerInfo... ] }`。每个 `ServerInfo` 包含来自 MCP actor 的实时 `pid`、`uptime_seconds` 和 `restart_count`。
 
-### mcp.add
+### mcp_config.create
 
-新增 MCP 服务器配置。
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `config` | object | 是 | 完整的 `McpManagerConfig` 行——参见 [Config 字段](#config-字段) |
-
-**响应:** 成功时 `{ "ok": true }`;否则返回 `INTERNAL_ERROR` 和 actor 的错误信息。
-
-### mcp.update
-
-更新已存在的 MCP 服务器(upsert 语义)。先删除旧的,再加新的;失败时若有旧配置则回滚。
+新增 MCP 服务器配置。参数与处理逻辑见 `src/gateway/handlers/mcp_config.rs`。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `config` | object | 是 | 新的 `McpManagerConfig` 行 |
+| `name` | string | 是 | 显示名，用于派生服务器 id；重复 id 被拒绝 |
+| `config` | object | 是 | `McpServerConfigJson`，见 [Config 字段](#config-字段) |
+
+**响应:** 成功时 `{ "ok": true }`。
+
+### mcp_config.update
+
+更新已有服务器并重启。参数与处理逻辑见 `src/gateway/handlers/mcp_config.rs`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 已有服务器 id |
+| `config` | object | 是 | `McpServerConfigJson` |
 
 **响应:** 成功时 `{ "ok": true }`。
 
@@ -140,23 +142,17 @@ description: "MCP 服务器管理 RPC 方法"
 
 ## Config 字段
 
-`mcp.add` 和 `mcp.update` 接受完整的 `McpManagerConfig` 行:
+`mcp_config.create` 与 `mcp_config.update` 的 `config` 参数是 `McpServerConfigJson`，定义见 `src/gateway/handlers/mcp_config.rs`。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `id` | string | 是 | 唯一服务器 id |
-| `name` | string | 是 | 显示名 |
-| `transport` | string | 是 | `stdio` / `http` / `sse`(默认 `stdio`) |
-| `command` | string | 仅 stdio | stdio 传输要运行的命令 |
-| `args` | string[] | 否 | stdio 命令的参数 |
-| `url` | string | http / sse | 端点 URL |
-| `env` | object | 否 | stdio 进程的环境变量 |
-| `requires_runtime` | string | 否 | `node` / `python` / `bun` 等 |
-| `auto_start` | boolean | 否 | 默认 `true` |
-| `timeout_seconds` | number | 否 | 单请求超时 |
-| `tool_filter` | object | 否 | 对外公布工具的可选 allow/deny 过滤 |
-
-actor 会对一个 `McpStdio` 安装的 `command` 在磁盘上缺失做静默 no-op(自 26.6.23 起)。
+| `command` | string | 是 | stdio 命令 |
+| `args` | string[] | 否 | 命令参数，默认空 |
+| `env` | object | 否 | 环境变量；敏感值写入 vault |
+| `cwd` | string | 否 | 工作目录 |
+| `requires_runtime` | string | 否 | 所需运行时 |
+| `timeout_seconds` | number | 否 | 请求超时秒数 |
+| `enabled` | boolean | 否 | 创建时默认 true |
 
 ## `mcp_config.*`(设置页 CRUD)
 

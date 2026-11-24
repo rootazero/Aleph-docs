@@ -19,60 +19,46 @@ pub trait ToolService: Send + Sync + 'static {
     /// Execute a tool by name with JSON input.
     async fn execute(&self, name: &str, input: Value) -> Result<ToolOutput, ToolError>;
 
-    /// List all currently available tools.
+    /// List the tools currently shown to the model.
     async fn list(&self) -> Vec<ToolDefinition>;
+
+    /// Every tool the model may legitimately call: `list()` plus the deferred
+    /// tier (hidden from the tool array, still executable). Defaults to `list()`.
+    async fn dispatchable_list(&self) -> Vec<ToolDefinition> { self.list().await }
 
     /// Get the definition for a single tool.
     async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+
+    /* … schema-cache and refresh-signal methods … */
 }
 ```
 
 **Location**: `src/tools/service.rs`
 
-The façade is constructed at startup by `build_tool_service()` in `src/tools/facade.rs`. It wires a decorator chain of middleware layers around a `CoreDispatch`, which routes calls to the actual tool handlers. The returned `Arc<dyn ToolService>` is what the agent loop holds; the shared `Arc<ToolRegistry>` is threaded into `McpClient` and `ExtensionManager` so that dynamic tool registration extends the same registry.
+The production implementation is `ScopedToolService` (`src/tools/scoped/mod.rs`), which the gateway builds around a `LoopToolRegistry` (plus the optional `SubagentTool` and hook executor). `NullToolService` (`src/tools/null.rs`) is only a fail-closed fallback for `AgentHarnessRunner.tool_service` that production never reaches: it replaced the earlier `build_tool_service` decorator chain, which was unreachable because the gateway always overrode it. The registry holding the real handlers is `ToolHandlerRegistry` (`src/tools/registry.rs`); `McpClient` and `ExtensionManager` register into it so dynamic tool registration extends the same registry.
 
 ---
 
-## Middleware Stack
+## Scoped Execution Pipeline
 
-Every tool call flows through a five-layer middleware stack, outer to inner:
+> **History.** Earlier revisions of this page described a five-layer decorator stack (`ExecAuditLayer` → `PermissionLayer` → `ContextRuleLayer` → `TimeoutLayer` → `CoreDispatch`) in a `middleware/` directory under `src/tools/`, built by `build_tool_service()` in a `facade.rs` file beside it. That stack no longer exists in the source tree; its responsibilities live in the single `ScopedToolService` described here.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  ExecAuditLayer                                         │
-│  • Traces tool calls (start / ok / err)                 │
-│  • Records latency_ms in ToolOutput metadata            │
-├─────────────────────────────────────────────────────────┤
-│  PermissionLayer                                        │
-│  • SmartFilter classification: Allow / Confirm / Deny   │
-│  • ApprovalGate confirmation for dangerous tools        │
-│  • Swappable at runtime via set_smart_filter            │
-├─────────────────────────────────────────────────────────┤
-│  ContextRuleLayer                                       │
-│  • ContextRule evaluation: Allow / Deny / Rewrite       │
-│  • Empty by default; rules wired via set_rules          │
-├─────────────────────────────────────────────────────────┤
-│  TimeoutLayer                                           │
-│  • Default timeout + per-tool overrides from config     │
-│  • Emits ToolError::Timeout on elapsed                  │
-├─────────────────────────────────────────────────────────┤
-│  CoreDispatch → ToolRegistry                            │
-│  • ArcSwap-backed snapshot for lock-free reads          │
-│  • Routes to BuiltinHandler / McpHandler / ExtHandler   │
-└─────────────────────────────────────────────────────────┘
-```
+`ScopedToolService` is split by concern (`src/tools/scoped/`):
 
-**Location**: `src/tools/middleware/`
+| File | Responsibility |
+|------|----------------|
+| `src/tools/scoped/builder.rs` | `new` + every `with_*` setter and small shape helpers |
+| `src/tools/scoped/gate_chain.rs` | The ordered rule chain that decides — and **names** — what gates a call (`GateRule`) |
+| `src/tools/scoped/dispatch.rs` | The execute pipeline: confirmation gate, `BeforeToolCall` hooks, timeout, retry, Layer 2 result budget, `AfterToolCall` hooks, error sanitization |
+| `src/tools/scoped/artifact_harvest.rs` | Settles `_media` tool output into the artifact store |
+| `src/tools/scoped/ledger.rs` | What the signed operation ledger records at this chokepoint |
+| `src/tools/scoped/traits.rs` | Public extension points (`ToolDefinitionRewriter`, `CapabilityConstraintContextSource`) |
 
-Each layer implements `ToolService` and wraps the next layer, so `execute()` delegates inward and `list()`/`describe()` pass through transparently. The stack is immutable after construction except for the `PermissionLayer` and `ContextRuleLayer` setters, which atomically swap their policies via `ArcSwap`.
+The service is a read-only adapter over the registry: it does not modify the underlying registry, and `list()` / `describe()` are projections of the registered capability descriptors.
 
-### CoreDispatch
+### Handler registry
 
-At the bottom of the stack, `CoreDispatch` holds an `Arc<ToolRegistry>` and routes `execute` / `list` / `describe` through the registry's `ArcSwap` snapshot. The snapshot is released *before* awaiting the handler so that concurrent `register`/`unregister` calls never block an in-flight execution.
-
-**Location**: `src/tools/dispatch.rs`
-
----
+`ToolHandlerRegistry` (`src/tools/registry.rs`) is the single runtime source of truth for a Tool capability: each entry pairs a `ToolHandler` with its `ToolCapabilityDescriptor`, and both are written in one atomic `ArcSwap` swap so a subscriber never observes a half-registered tool. Every register / replace / unregister advances a registry-wide monotonic `revision`; the revision is stored on the entry's descriptor and returned in change events and `RegistrationHandle`s, so a stale handle can never remove a newer entry. The model-visible `ToolDefinition` is a projection of the descriptor, not a second source.
 
 ## AlephTool Trait
 
@@ -502,36 +488,24 @@ MCP tools are discovered at startup via the `list_tools` RPC call, wrapped in `M
 
 ## Tool Filtering
 
-The `PermissionLayer` controls which tools the LLM sees and which require user confirmation via the `SmartFilter` trait surface:
+Which tools the model sees and which ones stop for a human is decided inside `ScopedToolService` (`src/tools/scoped/`), not by a swappable filter trait. Three inputs feed the decision:
 
 ```rust
-pub trait SmartFilter: Send + Sync {
-    /// Classify a tool invocation into Allow / Confirm / Deny.
-    fn classify(&self, name: &str, input: &Value) -> Classification;
-}
+pub enum PermissionAction { Allow, Deny, Ask }   // src/extension/types/agents.rs
 
-pub enum Classification {
-    Allow,
-    Confirm { reason: String },
-    Deny { reason: String },
+pub struct ToolPermissionsConfig {               // src/config/types/policies/tool_permissions.rs
+    pub default: PermissionAction,                // defaults to Allow
+    pub overrides: HashMap<String, PermissionAction>,  // exact tool name or glob, e.g. "*_delete" = "ask"
 }
 ```
 
-The production implementation (`LayeredPermissionResolver` in `src/tools/middleware/permission/resolver.rs`) consults the merged global + per-agent `ToolPermissionsConfig`. The filter and approver can be swapped at runtime via `PermissionLayer::set_smart_filter()` and `set_approver()`.
+`effective_permission` (`src/config/types/policies/exec_tier.rs`) is the single composition point: a tier verdict of `Deny` (the `Plan` tier) wins first, then an explicit `overrides` entry, then `default` combined with the tier's verdict via `restrictive_min`. `ScopedToolService::permission_for` — the loop's enforcement chokepoint — and every gateway surface that asks the same question ahead of the loop call it, so none can drift into its own precedence.
 
-### Legacy ToolFilter (still supported)
+### Gate chain (`GateRule`)
 
-```rust
-pub struct ToolFilter {
-    pub allowed: Option<HashSet<String>>,  // Whitelist (if set)
-    pub blocked: HashSet<String>,           // Always excluded
-    pub require_confirmation: HashSet<String>,
-}
-```
+When a call must stop, `src/tools/scoped/gate_chain.rs` names **which rule** stopped it (`GateRule::id()` is the stable token used by logs, the signed ledger, and tests). `ScopedToolService::confirmation_rule` returns the first matching rule, ordered so a reason never misleads the reader about what would change the outcome: `PolicyDeny` (refuses) → `SideQuestion` → `ToolDeclared` (a tool's own confirmation floor, e.g. an MCP server's `destructiveHint`) → `GateRemoval` / `DestructiveArguments` → `PolicyAsk` → `TierRaised`. `OperatorRequired`, `PlanMode`, and `HookRequested` are decided outside that function (caller role, planning tier, a `BeforeToolCall` hook answering `Ask`) but live in the same enum so the trail can name them.
 
-Glob patterns are supported in the `allowed` list (e.g., `memory_*` matches all memory tools).
-
-Tool filtering interacts with the security system: even if a tool passes the filter, the `PolicyEngine` checks the `IdentityContext` to ensure the session's role permits the tool call. Guest sessions can only call tools listed in their `GuestScope.allowed_tools`.
+Tool filtering interacts with the security system: even if a tool passes the gate chain, the session's identity is checked — guest sessions can only call tools listed in their `GuestScope.allowed_tools` (`shared/protocol/src/auth.rs`, exact names, no wildcards).
 
 ---
 
@@ -588,7 +562,7 @@ Extension tools are qualified as `ext__{plugin_id}__{tool_name}` in the registry
 
 `src/tools/concurrency.rs` introduces the resource-claim three-state (`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`) — the Act stage partitions by claim and dispatches **intra-group** concurrently / **inter-group** serially.
 
-### `tools.defer_mcp_tools` / `enable_tool_search`
+### `defer_mcp_tools` (the `[tools]` config key) / `enable_tool_search`
 
 26.7.7+ progressive tool disclosure — non-core tool schemas collapse to name + description; `tool_search` meta-tool loads on demand.
 

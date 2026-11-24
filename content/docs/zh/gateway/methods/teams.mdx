@@ -5,7 +5,7 @@ description: "团队与多代理编排 RPC 方法"
 
 `teams.*` 是每团队的 CRUD + 协调面。大约三十个方法分布在两次注册中:
 
-- `register_teams_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:207-552`)——仅依赖 store 的处理器,只要 `team_store` 构造了就一直注册。
+- `register_teams_handlers`(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs`)——仅依赖 store 的处理器,只要 `team_store` 构造了就一直注册。
 - 两个在 `agent_init/mod.rs` 中手动连线的 `teams.chat.send` 和 `teams.chat.cancel`——仅在 team store 存在时注册,因为它们需要 `GatewayContext` + 执行路径来驱动 leader 运行和中止 fan-out 树。
 
 团队的工作线程是持久的(`CoordTask` 看板 + `team_messages`);实时对话气泡(leader / member 叙述)在事件总线上以 `team.<id>.*` 流式传输,不作为 `teams.*` RPC 可查询。重载后,Panel 显示持久记录(任务 + 交付物),而非实时叙述。
@@ -237,3 +237,105 @@ hydrate 团队的持久工作线程:`CoordTask` 和它们的提交工件按时�
 | 方法 | 参数 | 说明 |
 |------|------|------|
 | `teams.task.journal.get` | `task_id` | `{ "journal": CoordTaskJournal_or_null }` |
+| `teams.task.journal.list` | `team_id` | `{ "journals": [ ...CoordTaskJournal... ] }`(最新在前) |
+
+#### teams.task.pause / resume / retry / skip
+
+管理员上下文的任务控制(处理器见 `src/gateway/handlers/teams/workflow.rs`)。评审上下文的任务改用 `teams.workflow.{approve,reject}_step`。
+
+- `teams.task.pause` — 仅允许从 `pending` / `blocked` / `unsatisfiable` 暂停;对已是 `paused` 的任务幂等返回 `paused`;其他状态(包括 `in_progress` 与 `waiting_review`)返回 `INVALID_PARAMS`。暂停时会把 `paused_from` 标记显式写为 `null`,避免上一轮暂停→重试遗留的标记把这次暂停误还原。调度器不会认领 `paused` 任务。
+- `teams.task.resume` — 仅允许从 `paused` 恢复。若元数据里的 `paused_from` 标记指向 `waiting_review`,则还原为 `waiting_review`,否则还原为 `pending`;同一次写入清除该标记。
+- `teams.task.retry` — 除 `in_progress`(返回 `INVALID_PARAMS`,需先取消)外任何状态都可重试:状态置为 `pending`、清空 `result`、重新装填自动重试预算,并用真实持有者(而非空串)释放遗留的锁。历史运行记录保留。
+- `teams.task.skip` — 管理员跳过,对状态没有前置要求,不需要已完成的运行;任务置为 `skipped`,下游依赖随之解除阻塞。
+
+四者都只接收 `task_id`。响应:`{ "status": "paused" | "pending" | "skipped" }`(`resume` 返回被还原后的状态,即 `pending` 或 `waiting_review`)。他人团队的任务与不存在的任务不可区分。
+
+### 工作流
+
+#### teams.workflow.approve_step / reject_step / teams.task.retry
+
+评审上下文的工作流步骤评审(`src/gateway/handlers/teams/workflow.rs`)。最新一次运行会被盖上评审结论,任务随后转为 `completed` / `failed`。仅当任务当前状态允许评审(已经有运行产出)时才受理,否则返回 `INVALID_PARAMS`;任务已处于目标终态时幂等返回,不重复写入。`comment`(非空白时)会作为任务评论写入,作者为 `reviewer_id`,缺省为 `review:<kind>`。
+
+`reviewer_kind` 必须是 `user` / `lead_agent` / `auto` 之一,缺省为 `user`。
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `teams.workflow.approve_step` | `task_id`, `reviewer_kind?`, `reviewer_id?`, `comment?`, `grounding?` | `{ "status": "completed" }`。任务带有 `require_grounding: true` 时必须提供 `grounding` 度量(`kind` 取 `exit_code` / `numeric` / `line_count`),否则返回 `grounding_required` 的 `INVALID_PARAMS` |
+| `teams.workflow.reject_step` | `task_id`, `reviewer_kind?`, `reviewer_id?`, `comment?` | `{ "status": "failed" }`。评论只进入任务评论线程(供重做的成员阅读),**不会**写入任务 `result` |
+| `teams.task.retry` | `task_id` | 管理员任务控制:重置自动重试预算并清空 `result`,不是工作流评审方法 |
+
+
+#### team_workflow_canvas: export / import
+
+以内建工具 `team_workflow_canvas` 导出/导入 Obsidian JSON Canvas 1.0 **，不是 Gateway RPC 方法**。工具实现见 `src/builtin_tools/team/workflow_canvas.rs`,底层转换在 `src/teams/workflow_canvas.rs`,画布文档类型为 `aleph_protocol::json_canvas::Document`。
+
+工具参数(`action` 取 `export` 或 `import`):
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `action` | string | 是 | `export` 或 `import` |
+| `team_id` | string | 是 | 团队 id;团队不可达时报「team not found」 |
+| `status` | string | 否 | 仅 `export`:与 `teams.list_tasks` 相同的完整 10 变体词表,未知值直接报错 |
+| `canvas` | object | `import` 必填 | 要落地的 JSON Canvas 文档 |
+| `dry_run` | boolean | 否 | 仅 `import`:只返回计划,不写入(默认 `false`) |
+
+代码里没有 `owner` 过滤参数。
+
+**导出结果:** `{ "team_id", "canvas": { ...Document... }, "node_count", "edge_count" }`。
+
+**导入结果(dry_run):** `{ "team_id", "created", "dry_run": true, "tasks": [ ...{subject, description, blocked_by, metadata}... ] }`,其中 `created` 是计划任务数。
+
+**导入结果(正式):** `{ "team_id", "created", "dry_run": false, "tasks": [ ...{id, subject}... ] }`。每个文本节点成为一个任务,每条边成为 `blocked_by`;实现会做拓扑遍历,先延后本批次内尚未创建的阻塞者,并把画布节点 id 改写为真实任务 id;存在环或无法解析的依赖时整体报错。
+
+### ACP 成员
+
+外部编码 CLI 会话(Claude Code、Codex 等)作为一等团队成员接入。调度器会把归属于 ACP 成员的任务经 ACP 适配器池派发,而不是进程内的代理注册表(处理器见 `src/gateway/handlers/teams/workflow.rs`)。
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `teams.acp_member.add` | `team_id`, `harness_id`, `cwd`, `session_name?`, `role`(默认 `acp-worker`) | 对 (team, harness, cwd, name) 幂等;返回 `{ "member": { ...NewTeamMember::for_acp_session... } }`。其 `agent_id` 即后续任务 `owner` 所用的值 |
+| `teams.acp_member.remove` | `team_id`, `agent_id` | 返回 `{ "success": true }`。只移除 ACP 成员行,池中底层 ACP 会话**不会**被终止(其他团队可能仍在引用;需要终止请用 `acp.sessions.shutdown`)。非 ACP 成员返回 `INVALID_PARAMS`(请改用 `teams.remove_member`),不存在的成员返回 `RESOURCE_NOT_FOUND` |
+| `teams.acp_member.list` | `team_id` | `{ "members": [ ...仅 ACP 成员... ] }`(过滤 `kind == TeamMemberKind::AcpSession`) |
+
+### 用量
+
+#### teams.usage
+
+按团队聚合 provider token 用量,数据来自 `task_traces` 中 `event_kind = 'provider_usage'` 的事件(网关执行引擎已写入这些事件),按团队当前成员的 `agent_id` 汇总(`src/resilience/database/traces.rs` 的 `aggregate_usage_by_agents`)。没有用量的成员不会出现在 `per_agent` 中。这里刻意**不**计算成本——token 是事实,成本属于费率策略。需要 `state.db`,未接入时该 RPC 不会注册。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `team_id` | string | 是 | 团队 id |
+| `since` | number | 否 | 下界,epoch 秒(缺省:不限) |
+| `until` | number | 否 | 上界,epoch 秒(缺省:不限) |
+
+**响应:** `{ "team_id", "since", "until", "member_count", "total": { "call_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens", "cache_hit_ratio" }, "per_agent": [ ...AgentUsageTotal... ] }`。
+
+
+#### teams.list_templates
+
+列出可用的团队模板(内置 + 用户目录)。实例化本身走 `team_from_template` 内建工具,因此重依赖不会在网关里重复接线。
+
+**请求:** 无参数。
+
+**响应:** `{ "templates": [ ...{name, description, default_goal, leader_id, leader_role, member_count, task_count}... ] }`。
+
+### 快照
+
+与内建工具 `team_snapshot` 对应,使面板和外部调用方无需经过 tool-invoke 即可访问快照存储。五个处理器共用同一套底层函数,因此行为、dry-run 默认值和依赖边还原语义与该工具一致(处理器见 `src/gateway/handlers/teams/snapshot.rs`)。
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `teams.snapshot.create` | `team_id`, `tag?`, `note?` | `{ ...捕获结果... }` |
+| `teams.snapshot.list` | `team_id?` | `{ "snapshots": [ ...SnapshotMeta... ] }`(最新在前);不带 `team_id` 时只返回调用方可见团队的快照 |
+| `teams.snapshot.get` | `snapshot_id` | `{ "meta", "payload" }`,不存在(或不可见)时返回 `RESOURCE_NOT_FOUND` |
+| `teams.snapshot.restore` | `snapshot_id`, `apply`(默认 `false`,即 dry-run) | `{ ...SnapshotDiff... }`(两种模式都返回 diff;`apply=true` 时同时还原依赖边) |
+| `teams.snapshot.delete` | `snapshot_id` | `{ "snapshot_id", "existed": <bool> }`(幂等;不可见的快照同样返回 `existed: false`) |
+
+快照处理器仅在启动时构造了 `SqliteSnapshotStore` 的情况下才会注册(`src/bin/aleph-server/commands/start/builder/handlers/agents.rs`);否则这些 RPC 不存在,调用方仍可通过 `team_snapshot` 内建工具操作快照。
+
+## 另见
+
+- [方法参考](/docs/zh/gateway/methods) -- 当前已注册的全部命名空间
+- [架构:团队](/docs/zh/architecture/teams) -- 团队编排模型
+- [group_chat.*](/docs/zh/gateway/methods/group_chat) -- 更底层的群聊会话原语

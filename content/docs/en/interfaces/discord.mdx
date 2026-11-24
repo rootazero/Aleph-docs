@@ -65,7 +65,7 @@ The **Message Content Intent** is a privileged intent. Without it, the bot canno
 
 Navigate to **OAuth2 > URL Generator**:
 
-1. Under **Scopes**, select `bot` and `applications.commands`
+1. Under **Scopes**, select `bot` and the slash-commands scope (named applications.commands in the Developer Portal)
 2. Under **Bot Permissions**, select:
    - **Send Messages** (required)
    - **View Channel** (required)
@@ -292,7 +292,7 @@ When `slash_commands_enabled` is `true` and `application_id` is set, Aleph can r
 - `/help` — Show available commands
 
 <Callout type="info">
-Slash command registration requires the `applications.commands` OAuth2 scope. Global commands may take up to an hour to propagate; guild-specific commands are instant.
+Slash command registration requires Discord's slash-commands OAuth2 scope (named applications.commands in the Developer Portal). Global commands may take up to an hour to propagate; guild-specific commands are instant.
 </Callout>
 
 ## Interactive Approval Buttons
@@ -340,6 +340,6 @@ guild_members = false      # GUILD_MEMBERS intent (privileged)
 | Bot ignores messages in a channel | Check `allowed_guilds` and `allowed_channels`; verify the bot has View Channel permission |
 | Bot responds to every message | Set `respond_to_mentions = true` or use a `command_prefix` |
 | "Failed to create Discord client" | Verify the bot token is valid and long enough (59+ characters) |
-| Slash commands do not appear | Ensure `application_id` is set and the bot was invited with `applications.commands` scope |
+| Slash commands do not appear | Ensure the bot was invited with the slash-commands OAuth2 scope (named applications.commands in the Developer Portal) |
 | Permission audit shows Red | Use the audit's `fix_suggestions` to grant missing permissions in Server Settings |
 | Attachments fail to send | Check that the bot has the **Attach Files** permission in the target channel |

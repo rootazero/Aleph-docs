@@ -192,7 +192,7 @@ The `MemoryFact` aggregate root ensures that:
 
 ### Intent Context (does not exist)
 
-> **No standalone "intent detection" bounded context exists in the Aleph source**: `src/intent/` does not exist, and `AggregatedIntent` / `IntentSignal` return zero matches across the source tree. R7 explicitly lists "intent-detection rule engines" as usurping the LLM — intent classification is covered naturally by a single LLM inference call (R7 + R9). The only related runtime-config shell, `src/config/types/smart_flow.rs::IntentDetectionConfig`, has fallen into `INERT_SECTIONS` per `src/config/reload_impact.rs` and no longer drives runtime classification.
+> **No standalone "intent detection" bounded context exists in the Aleph source**: the source tree has no intent module directory, and `AggregatedIntent` / `IntentSignal` return zero matches across the source tree. R7 explicitly lists "intent-detection rule engines" as usurping the LLM — intent classification is covered naturally by a single LLM inference call (R7 + R9). The only related runtime-config shell, `IntentDetectionConfig`, was removed from the source tree on 2026-08-01 together with its smart_flow config-type file; today `src/config/dead_keys.rs` reports the config keys that parse but reach no consumer, while `INERT_SECTIONS` in `src/config/reload_impact.rs` has been empty since 2026-08-16.
 
 ### POE Context (Retired)
 
@@ -226,7 +226,7 @@ The bounded contexts interact through well-defined interfaces, not direct depend
 ```
 
 - **Harness ↔ teams/dispatcher**: the Act stage of Harness calls dispatcher; dispatcher returns the bucketed parallel-result back to Harness. Both are constrained by R10's "Dumb Loop" and never classify intent.
-- **teams/dispatcher ↔ Memory**: dispatcher queries Memory for relevant context during execution (`src/memory/retrieval.rs`).
+- **teams/dispatcher ↔ Memory**: the dispatcher does not retrieve memories itself — it assembles deterministic context with `build_handoff_context` (task instruction, team strategy, inbox summary, retry recovery log; `src/teams/dispatcher/handoff.rs`, `src/teams/context.rs`); memory retrieval runs in the member agent's `memory_search` tool, backed by `NoteFactRetrieval` in `src/memory/note_retrieval/`.
 - **Harness → Thinker / PromptLayer**: the Think stage of the Think→Act loop calls the Thinker; the verdict is the model's natural output, not middleware output (R10's "Don't #5").
 - **Harness / Memory → dreaming**: every successful turn enters the dreaming pipeline (`src/memory/dreaming/`), which promotes skills under SkillOpt discipline; the promoted skills enrich Memory facts and give the next Think call denser context.
 

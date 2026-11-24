@@ -8,9 +8,9 @@ description: "编译时嵌入的官方技能 / 插件 / 模板，启动时按版
 ## 设计理念
 
 1. **自包含分发** — 官方内容与二进制一起发布，运行时**不联网**，离线 / 防火墙后也能完成安装。
-2. **版本感知更新** — 仅当 `manifest.bundled_version < BUNDLED_VERSION` 才重新提取，重复启动零代价。
+2. **版本感知更新** — 仅当 `bundled_version < BUNDLED_VERSION` 才重新提取，重复启动零代价。
 3. **用户内容保护** — `SkillOrigin::User / Local / Github` 在提取时被跳过，永远不会被二进制覆盖。
-4. **幂等** — 部分失败不更新 `manifest.bundled_version`，下次启动自动重试。
+4. **幂等** — 部分失败不更新 `bundled_version`，下次启动自动重试。
 5. **零网络** — `bundled.sync` RPC（CLI / 工具 / Hub 按钮）只把磁盘上已嵌入的内容与 `~/.aleph/bundled/` 对账。
 
 ---
@@ -51,12 +51,12 @@ pub const OFFICIAL_PLUGINS_REPO: &str = "https://github.com/rootazero/Aleph-plug
 ## 提取流程（`src/bundled/extractor.rs`）
 
 1. **读 manifest** — `~/.aleph/bundled/manifest.json`；不存在则新建空 manifest。
-2. **首轮 bootstrap** — manifest 为空时调 `sync_official_now(SyncKind::All)`，把官方仓库最新 `main` 拉下来，**`skills` 写成功且 `plugins` 失败也视为部分成功**，留下 `manifest.bundled_version` 与嵌入版本对齐。
-3. **版本比较** — `manifest.bundled_version == BUNDLED_VERSION` 跳过重新提取（节省时间）；否则进入 4。
+2. **首轮 bootstrap** — manifest 为空时调 `sync_official_now(SyncKind::All)`，把官方仓库最新 `main` 拉下来，**`skills` 写成功且 `plugins` 失败也视为部分成功**，留下 `bundled_version` 与嵌入版本对齐。
+3. **版本比较** — `bundled_version == BUNDLED_VERSION` 跳过重新提取（节省时间）；否则进入 4。
 4. **目录 swap** —
    - **skills**：逐个 `include_dir!` 子目录写到 `~/.aleph/bundled/skills/<name>/`；`SkillOrigin::User / Local / Github` 跳过（**`Official` 才覆盖**）。
    - **plugins**：用 `swap_dir_into_place`（`temp → remove-if-exists → rename`）把临时目录原子替换 `~/.aleph/bundled/plugins/cache/aleph-official/`。Unix 上 `ENOTEMPTY` / Windows 上 `AlreadyExists` 都被吃掉。
-5. **更新 manifest** — 全成功后写 `manifest.bundled_version = BUNDLED_VERSION`；部分失败**不写**（下次启动自动重试）。
+5. **更新 manifest** — 全成功后写 `bundled_version = BUNDLED_VERSION`；部分失败**不写**（下次启动自动重试）。
 
 `sync_official_with_urls` 是可注入 URL 的纯函数变体（接收 `skills_url` / `plugins_url`），让测试可以挂本地 git 仓库，避开网络。
 

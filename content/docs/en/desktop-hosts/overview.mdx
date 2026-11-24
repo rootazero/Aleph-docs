@@ -1,0 +1,177 @@
+---
+title: "Desktop Host"
+description: "NSH, the target desktop host for Aleph: what it is, how it connects to the Gateway, which native integrations it provides, and where platform support stands"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+This page answers two questions: what Aleph's desktop app actually is, and how it works alongside the Gateway.
+
+## What the desktop host is
+
+The desktop host is a thin native shell. It provides only system-level integration: a window container, a tray, a global hotkey, notifications, credential storage and read-only login-item status. All product UI lives in the [Panel](./panel); the host holds no chat or session projection (module comment in `desktop/nsh-shell/src/shell_host.rs`: `The native shell hosts the canonical Panel; it owns no chat projection.`). This is red line R2: product UI has a single source of truth.
+
+The target form of the desktop host is NSH: crate `aleph-nsh-shell`, in `desktop/nsh-shell/`, built on nsh 0.6.0 (`nsh-core`, `nsh-base` and `nsh-engine` are all pinned to `=0.6.0` in `desktop/nsh-shell/Cargo.toml`). NSH hosts the same Leptos/WASM Panel, not a second business UI (`docs/reference/DESKTOP_SHELL.md`).
+
+<Callout type="warn" title="Transition note">
+The repository still contains an older desktop shell (`desktop/shell/`). It is a transitional leftover that will be removed, and this site no longer documents its architecture. The release pipeline currently still builds the old shell, and NSH has no release pipeline of its own; see [Building](../development/building).
+</Callout>
+
+## Process model
+
+NSH is a standalone process whose window hosts a WebView that loads the Panel. The Panel address comes from the connection target: `http://127.0.0.1:18790/` for the local target, or the root of the given origin for a remote one (`ConnectionTarget::panel_url` in `shared/client/src/connection_target.rs`).
+
+### It connects to an existing Gateway
+
+The usage text of `aleph-nsh-shell --help` states the host's semantics (`desktop/nsh-shell/src/main.rs`):
+
+```text
+Usage: aleph-nsh-shell [--connect <origin> | --autostart-status | --desktop-ipc-status <socket>]
+
+Connects to an existing Gateway; does not start, stop or reconfigure a service.
+Use HTTPS for a remote origin. No target or credential URL is persisted.
+```
+
+In other words, the host's native root owns window callbacks and tasks, not the Gateway's lifetime. `docs/reference/DESKTOP_SHELL.md` says the same: NSH uses an existing Gateway, and no daemon-supervisor migration has happened.
+
+### Embedded startup (the `embedded-core` feature)
+
+There is one compile-time exception. `desktop/nsh-shell/Cargo.toml` defines the feature `embedded-core` (it depends on `aleph-desktop-host` with `gateway-admission`), which is off by default. When it is enabled and the connection target is local (`ConnectionTarget::Local`, not a QA launch), `acquires_local_server` in `desktop/nsh-shell/src/shell_host.rs` is true, and `desktop/nsh-shell/src/main.rs` calls `aleph_desktop_host::local_server::ensure_compatible_ready()` before opening the window.
+
+The rules of that function (`desktop/host/src/local_server.rs`, `desktop/host/src/local_server/admission.rs`):
+
+- It probes `127.0.0.1:18790` over TCP, then fetches the `/health` and `/ready` documents (at most 4 KiB each) and requires both to report the same `version`.
+- Only an explicit connection refusal (`ConnectionRefused`) permits a launch, and only of the `aleph-server` that sits next to the host executable, with the argument `--bundled-content-only`.
+- If something is listening but its documents are not compatible, it fails with `cannot establish compatible local Gateway readiness` and starts nothing.
+- The wait for readiness is capped at 40 seconds, polled every 400 ms, with a 2-second timeout per probe.
+
+So the precise statement is: a default NSH build only connects; a build with `embedded-core` starts the bundled Gateway on a local target only when the port is really free, and never takes over, stops or reconfigures an existing service.
+
+## Command-line interface
+
+The entry point is `desktop/nsh-shell/src/main.rs`. There are three argument forms, mutually exclusive:
+
+| Invocation | Effect |
+|---|---|
+| no arguments | Connect to the local target `http://127.0.0.1:18790/` |
+| `--connect <origin>` | Connect to the given origin; use HTTPS for a remote one |
+| `--autostart-status` | Read the current app's login-item status and print it as JSON, without changing it |
+| `--desktop-ipc-status <socket>` | Read the Gateway's `health` over Unix IPC; see [Read-only IPC status query](#read-only-ipc-status-query) |
+
+`--connect` is validated by `HostSettings::from_launch` in `desktop/nsh-shell/src/shell_host.rs`:
+
+- At most 2048 bytes, with no ASCII control characters or backslashes.
+- A remote target must be a root origin with no username, password, query or fragment (the path may only be `/`).
+- The credential endpoint must be HTTPS or loopback HTTP, otherwise it is refused (`Native credentials require HTTPS or loopback HTTP`).
+- Neither the target nor a credential URL is persisted.
+
+## Connection and handshake
+
+### The Panel talks to the Gateway from the WebView
+
+In the current binary the host does not open a Gateway connection of its own. The Panel connects from inside the WebView over the existing `/ws` path. Protocol probing is handled on the Gateway side by `system.hello`: it follows `connect`, negotiates a compatible minor version and advertises only implemented features, returns `INVALID_PARAMS` when the client's major version does not match, and neither admits the connection nor sets its identity (`src/gateway/handlers/system_hello.rs`). The transport differences are in the transport matrix on the [Panel host](./panel) page.
+
+### The native connection layer that is not wired in
+
+`desktop/nsh-shell/src/` also holds `connection.rs`, `supervisor.rs`, `session.rs`, `runtime.rs` and `components/`. None of them is declared with `mod` in `desktop/nsh-shell/src/main.rs`, and `desktop/nsh-shell/Cargo.toml` has no extra `[[bin]]` or `[lib]`, so they are not part of the compiled binary. They record an early (Phase 2) native connection design. The values are listed below for historical understanding only; do not treat them as current behavior:
+
+| Item | Value (`desktop/nsh-shell/src/connection.rs`) |
+|---|---|
+| Address | `DAEMON_URL = "ws://127.0.0.1:18790"` |
+| Handshake | `system.hello`, `ProtocolVersion { major: 1, minor: 0 }`, client name `aleph-nsh-desktop`, `ui_runtime: "nsh"` |
+| Requested features | `EventReplay`, `Snapshot`, `BinaryChannel` |
+| Validation | fail when the returned `protocol.major != 1` |
+| Reconnect | start at 2 s, cap at 30 s, at most 10 consecutive failures |
+| Timeout and polling | 40 s connection timeout, 100 ms poll interval |
+
+The port-occupant classification in `desktop/nsh-shell/src/supervisor.rs` (`Free`, `DaemonReady`, `DaemonBooting`, `Foreign`) is likewise not wired in; the live implementation is described in the next section.
+
+## Local service readiness
+
+"The port answers" does not mean "that is Aleph". `desktop/host/src/local_server.rs` sorts whatever holds the port into four classes (`PortOccupant`):
+
+| Class | Rule | Meaning |
+|---|---|---|
+| `Free` | The TCP connection is refused | No listener; the source comment notes this does not prove a later bind will succeed |
+| `DaemonReady` | `/ready` returns 200 | Looks like a ready Gateway, with no binary-identity proof |
+| `DaemonBooting` | `/ready` returns 503 | Looks like a Gateway that is still booting; wait instead of relaunching |
+| `Foreign` | Any other status, or an unknown connection outcome | Unrecognized; always fail closed |
+
+Only `Free` can authorize a launch; `Foreign` is always an error and nothing is started (the `ensure_ready` error text says `no new daemon was launched`). An unknown connection outcome (neither success nor refusal) also counts as `Foreign` and never authorizes a launch. The strict `ensure_compatible_ready` adds the document-compatibility check on top, as described above.
+
+## Native integration
+
+The behavior below lives in `desktop/nsh-shell/src/main.rs` and `desktop/nsh-shell/src/panel_bridge.rs`.
+
+### Window and tray
+
+- The main window is 1180x800 by default, with app ID `com.aleph.nsh-shell` (`APP_ID` in `desktop/nsh-shell/src/shell_host.rs`).
+- The close button only hides the window (`close_on_press = Some(false)` plus `close_window.hide()`); it does not quit. macOS additionally sets `keep_alive_on_close: true`.
+- The tray menu has three items: `Show Aleph`, `Enable Notifications` and `Quit Aleph`.
+
+### Global hotkey
+
+The default hotkey is `mod+shift+a`, which shows or hides the main window. The environment variable `ALEPH_SHELL_HOTKEY` overrides it, and `disabled` skips registration. An invalid hotkey or a refusal by the OS is only logged and does not affect startup.
+
+### Notifications
+
+The Panel sends a `Notify` message through the bridge. The host requests an OS notification only when the window is not both visible and focused, and shows it only if the OS permission is `Granted`. The title must be non-empty and at most 256 bytes, and the body at most 2048 bytes (`valid_notification` in `shared/protocol/src/panel_shell.rs`). The pending queue holds one item; when it is full the message is dropped and logged. Pressing a notification (identifier `aleph-panel-chat`) shows and focuses the window and then opens Chat. OS notification permission is not a product feature switch, and the host provides no switch that disables the notification feature (`docs/reference/DESKTOP_SHELL.md`).
+
+### Deep links and the URL scheme
+
+The host registers the `aleph` URL scheme (`.url_schemes(["aleph"])`). `desktop/nsh-shell/src/panel_bridge.rs` receives OS open events through `next_url_scheme_open`. Today it recognizes only a URL exactly equal to `aleph://open`, which it handles as "ask the Panel to open Chat"; any other `aleph://` URL is ignored.
+
+Opening Chat is document-bound. The host first sends `Probe`, the Panel answers `Ready` with a 32-character lowercase hex `document` identifier, then the host sends `OpenChat` and waits for `ChatOpened`. If there is no confirmation within 2 seconds the host gives up and does not replay the action.
+
+> **Known limitation:** routing a deep link to a specific view other than Chat is not implemented. The follow-ups in `docs/reference/DESKTOP_SHELL.md` record the gap as "the Panel has no handler yet"; that entry was written for the old shell, so for NSH the code behavior above is authoritative.
+
+### Credentials
+
+`desktop/nsh-shell/src/credentials.rs` gives the Panel local access to device credentials. The backend is `aleph_client::DeviceCredentialStore`, keyed by Gateway address; for the default target the Gateway address is `ws://127.0.0.1:18790/ws`. A `CredentialCall` sent by the Panel through the bridge has exactly three operations: `Load`, `Save` (with a `lease_id` and a `DeviceConnectCredential`) and `Delete` (with a `lease_id`). Replies are `Loaded`, `Saved`, `Deleted { existed }` or `Failed { error }`, and the only errors are `Unavailable`, `Rejected` and `Malformed` (`shared/protocol/src/panel_shell.rs`). When the page navigates or reloads, the host invalidates the existing credential lease (`CredentialService::invalidate`).
+
+### Login item
+
+`desktop/nsh-shell/src/autostart.rs` only reads the login-item status of the current application. It is not server autostart and has no write path. The statuses are `Enabled`, `Disabled`, `RequiresApproval`, `Unavailable { reason }` and `Failed`. Every non-macOS platform returns `Unavailable { reason: UnsupportedPlatform }`.
+
+On macOS it reads `SMAppService::mainAppService().status()` after an identity check: the process must run inside an `.app` bundle (otherwise `NotAppBundle`), the bundle identifier must equal `APP_ID` and the executable must sit under `Contents/MacOS` (otherwise `IdentityMismatch`), and the system must provide `SMAppService` (macOS 13 and later, otherwise `ApiUnavailable`).
+
+## Read-only IPC status query
+
+`--desktop-ipc-status <socket>` reads the Gateway's `health` once over a Unix domain socket. It does not open the Panel and does not fall back to WebSocket (`desktop/nsh-shell/src/ipc_status.rs`).
+
+- The arguments must be exactly this pair, and the socket path must be absolute; combining it with QA configuration is refused.
+- The handshake uses `ProtocolVersion { major: 1, minor: 0 }`, client name `aleph-nsh-shell`, `ui_runtime: "nsh"` and an empty feature list.
+- The `health` call times out after 5 seconds and closing the connection after 2 seconds; the response must have `status == "healthy"` and a non-empty `timestamp`, otherwise the query fails.
+- On non-Unix platforms it fails immediately with `Desktop IPC is unavailable on this platform`.
+
+The Gateway being queried must have been started beforehand with `--desktop-ipc <socket>`; see the transport matrix on the [Panel host](./panel) page.
+
+## Platform support status
+
+Recorded as `docs/reference/DESKTOP_SHELL.md` states it (matching code repository VERSION 26.9.1):
+
+| Platform | Status |
+|---|---|
+| macOS | The resident window, tray, hotkey, `aleph://open`, notifications and window placement have local evidence (receipt `docs/superpowers/runs/2026-11-21-phase10-closeout.md`); multi-display topology is still untested |
+| Linux | Entry code exists (the Linux branch in `desktop/nsh-shell/src/platform.rs`); no acceptance conclusion yet |
+| Windows | Entry code exists; no acceptance conclusion yet; the Named Pipe variant of Desktop IPC is not done |
+
+This is not a general release: there is no default desktop switch, no host-side daemon-supervisor migration and no release distribution, and neither the Windows and Linux NSH acceptance nor the removal of the old shell has happened.
+
+> **Status: planned** — the blueprints are `docs/research/NSH_ADR-001~009.md` and `docs/research/NSH_PROTOCOL_V1.md` (NSH as the target host, and its protocol). The migration roadmap is `docs/superpowers/plans/2026-11-22-nsh-panel-migration-roadmap.md` (three platforms, per-surface replacement proof and a real 14-day dual track before the old shell is removed). For the current implementation see `desktop/nsh-shell/src/main.rs`.
+
+## History: the old shell's daemon hosting
+
+The old desktop shell (a Tauri v2 app, `desktop/shell/`) was designed as "the app is the installer": it bundled `aleph-server`, and its own daemon supervisor started it, probed it and restarted it after a crash. It also carried a tray, auto-update, deep links, a hotkey, menus and notifications (the Daemon lifecycle and Build & release chapters of `docs/reference/DESKTOP_SHELL.md`; source in `desktop/shell/src/daemon.rs`).
+
+NSH has replaced that shape: it does not take over the Gateway lifecycle and only connects to an existing Gateway. The old shell is a transitional leftover that will be removed; until then its release pipeline (`.github/workflows/aleph-app-release.yml`) still builds it.
+
+How the two differ:
+
+| Aspect | Old desktop shell (history) | NSH (target) |
+|---|---|---|
+| Gateway lifecycle | Own supervisor starts and takes over `aleph-server` | Connects only by default; an `embedded-core` build starts the bundled Gateway only when the port is free |
+| Release | Built by the release pipeline | No release pipeline yet |
+| Auto-update, macOS app menu, service control | Present | Not implemented (no matching module in `desktop/nsh-shell/src/`) |
+
+Further reading: [Panel host](./panel).

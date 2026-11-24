@@ -1,0 +1,193 @@
+---
+title: "信任与后端"
+description: "能力后端由谁提供、插件凭什么被信任：加载信任与能力授权两条轴、WASM 与进程插件的约束、插件 UI 的同源信任。"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+本页回答两个问题：一个能力**由谁实现**（后端），以及一段第三方代码**凭什么被允许跑起来**（信任）。现状代码分布在 `src/capability/`（后端与提供者）、`src/extension/`（插件运行时与信任策略）、`crates/aleph-slot-api/src/approval.rs`（审批面）。
+
+<Callout type="warn" title="信任有两条轴，只有一条存在">
+  蓝图 `docs/research/aleph_modularization_plan.md` §5.2 定义了两个信任轴：**加载信任**（现有）与**能力授权**（新增）。今天只有加载信任这一条真的在跑；能力授权、槽位替换的授权模型都还不存在。本页凡属蓝图内容都标成「状态：规划中」。后端分类见 [槽位与替换](./slots-and-replacement)，描述符与所有权见 [Capability 模型](./capability-model)。
+</Callout>
+
+## 后端是什么
+
+### 现状：能力后端与它们的来源
+
+后端在代码里的最小接口只有两个方法。`src/capability/backend.rs`：
+
+```rust
+pub trait CapabilityBackend: Send + Sync {
+    fn lookup(&self, id: &CapabilityId) -> Option<CapabilityDescriptor>;
+    fn enumerate(&self, scope: &Scope) -> Vec<CapabilityDescriptor>;
+}
+```
+
+同文件里 `TOOL_NAMESPACE` 是 Tool 能力的命名空间（`aleph/tools`），`LegacyCapabilityHandler` 是非 Tool 能力的可调用边界（一个 trait）：`invoke(input: Value) -> Result<Value, LegacyCapabilityDispatchError>`，错误只有 `InvalidInput` / `Execution` / `NotFound` 三种，每种带一条消息。
+
+后端**从哪里来**，在 `src/capability/facade.rs` 的 `BackendSourceEvidence` 里有四元证据：`Tool`（canonical entry 租约 + provider generation）、`Provider`（provider id + generation）、`MemoryResource`（`Weak<MemoryRuntime>`）、`Special`（捕获到的 special 条目 + generation）。今天真正落地的后端适配器是：
+
+- `src/capability/backend.rs` 的 `ToolBackendAdapter`——包住工具注册表，把工具翻译成能力描述符；
+- `src/capability/provider_backend.rs` 的 `ProviderBackendAdapter`——包住 `ProviderRegistry`；
+- `src/capability/special.rs` 的 special 能力注册表；
+- `src/capability/tool_adapters.rs` 的 canonical 适配器注册（例如终端能力的 `TERMINAL_ADAPTER_ID`）。
+
+provider 侧的激活是显式的。`src/capability/provider_registry.rs` 的 `ProviderRegistry` / `ProviderRegistration` / `ProviderActivator`，以及 `ActivationError` 的四个变体 `Rejected`（provider owner 拒绝激活）、`Failed`、`Unknown`、`NotVisible`——被拒绝是一种结果，不是静默降级。
+
+### 规划中：六种后端
+
+> **状态：规划中** — 蓝图 `docs/research/aleph_modularization_plan.md` §5.1 后端。
+
+蓝图把后端分成六类，每一类有自己的隔离方式与默认权限：
+
+| 后端 | 隔离方式 | 默认权限 |
+|---|---|---|
+| 内置 | 宿主进程 | 内核授予 |
+| 原生（自定义发行版编译期链接） | 宿主进程 | 等同内置 |
+| WASM | 沙箱 + `WasmCapabilityKernel` | 零能力，逐项授权 |
+| MCP | 独立进程 + 协议边界 | 进程权限受沙箱档位约束 |
+| 命令 | 一次性子进程 | 受沙箱档位约束，stdin 传 JSON、stdout 回 JSON |
+| 插件 | 由组件的实际后端决定 | 取组件后端的权限，再与两条信任轴取交集 |
+
+蓝图附了三条硬规则：
+
+1. 第三方代码**不能**在运行时以原生形式加载——不支持动态库插件，因为 Rust 没有稳定 ABI，而且那会把已经建好的隔离整个绕过去；
+2. 不在 Aleph 进程里嵌入 JS 引擎——进程内没有隔离边界，JS/TS 插件走命令、MCP 或 WASM；
+3. 被替换的工具**保留**原有准入、并发声明与审批策略，替换实现不能借替换的机会把自己的权限声明得比原槽位更宽。
+
+概念上的总纲在 `docs/research/Everything-externally-composable-is-a-Capability.md` §三：**插件是装配机制，能力才是语义**。
+
+## 信任的两个轴
+
+### 加载信任
+
+加载信任回答的是「这段代码能不能跑」。它今天就存在，实现在 `src/extension/plugin_trust.rs` 的 `OwnerTrustPolicy`：
+
+```rust
+pub struct OwnerTrustPolicy {
+    allowlist: HashSet<String>,  // 允许从非受信来源加载的插件 id
+    enforce: bool,              // true 时对 Workspace / Global / ClaudeCache 强制白名单
+}
+```
+
+它的 API 是 `permissive()`（全放行）、`restrictive(allowlist)`（只放行白名单）、`trust(id)`、`untrust(id)`、`allowlist()`、`allows(plugin_id, origin)`。判定规则在 `allows` 里：`Bundled`（Aleph 内置）与 `Config`（operator 显式加入）来源**恒信任**；`Workspace`（项目 `.aleph/` 目录）、`Global`（`~/.aleph/` 目录）、`ClaudeCache`（Claude Code 缓存目录）三个来源需要白名单条目。`enforce` 为 `false` 时直接全部放行，`Default` 实现返回 `permissive()`。
+
+信任判定发生在**插件挂载时、按插件 id 逐个进行**（`src/extension/lifecycle.rs` 的 `admit`：先问 owner trust，再问 operator 在 `plugins.toml` 里的持久偏好）——一个 `false` 判决就是阻止一个插件静默注册它的能力，拒绝会落成插件行上的 `blocked` 状态。
+
+### 能力授权
+
+> **状态：规划中** — 蓝图 `docs/research/aleph_modularization_plan.md` §5.2 两个信任轴。
+
+能力授权回答的是「它能拿到哪些超出增补的权力」。蓝图给的设计是：始终默认拒绝，**不受加载信任的 enforce 开关影响**，授权存在 `plugins.toml` 的插件条目上并与插件内容哈希绑定。
+
+需要能力授权的操作（逐插件、逐项）：认领单基数槽位或替换内置实现、替换 prompt 的可替换层、把 hook 优先级提到高档、WASM 的能力与主机白名单、命令与 sidecar 后端超出沙箱默认档的文件与网络权限。
+
+不需要授权的操作：新增工具、技能、命令、MCP server，以及低优先级段的观察者与拦截器 hook（改写后的输入一定重新过闸，所以这类 hook 无法借改写绕过审批）。
+
+授权方式是交互确认或 `aleph plugin grant <id> <item>`，撤销用 `aleph plugin revoke <id> <item>`。插件更新后内容哈希变化，高权限授权失效、需要重新授权，纯增补能力不受影响。无人值守、没有审批通道时一律不授权，槽位保持内置实现——这与「hook 请求确认但没有审批通道就自动拒绝」的做法一致。每次授权、撤销与授权失效都写审计日志。
+
+现状里这条轴**不存在**。`crates/aleph-slot-api/src/approval.rs` 的 `GrantScope` / `AuthorizationResult` 是审批面（面向具体操作），不是按插件的授权账本；`src/extension/plugin_trust.rs` 是加载信任，两者是不同的东西。
+
+## 插件运行时与约束
+
+### WASM 插件
+
+WASM 是今天唯一真正被沙箱隔离的第三方代码运行时。它的能力声明在 `src/extension/runtime/wasm/capabilities.rs`：
+
+```rust
+pub struct WasmCapabilities {
+    pub workspace: Option<WorkspaceCapability>,
+    pub http: Option<HttpCapability>,
+    pub secrets: Option<SecretsCapability>,
+}
+```
+
+三个槽全是 `Option`，没声明就没有：`WorkspaceCapability{allowed_prefixes}`（工作区路径前缀）、`HttpCapability{allowlist, credentials, rate_limit, timeout_secs, max_request_bytes, max_response_bytes}`（默认超时 30 秒）、`SecretsCapability{allowed_patterns}`。
+
+资源上限在 `src/extension/runtime/wasm/limits.rs` 的 `WasmResourceLimits`，默认值是内存 10 MB、燃料 1000 万次、超时 60 秒、HTTP 调用上限 50 次、日志上限 1000 条、单条日志上限 4096 字节。
+
+执行时的闸门在 `src/extension/runtime/wasm/capability_kernel.rs`：每次宿主调用都过闸，能力检查**默认拒绝**，越界时返回 `CapabilityError`（`NotDeclared` / `NotAllowed` / `RateLimited` / `ResourceExhausted` / `PathTraversal`），凭据由宿主侧注入、插件看不到明文。清单侧，`src/extension/runtime/wasm/mod.rs` 解析能力时按零权限起步（源码注释：`default = zero permissions`），并安装默认的全拒绝解析器。
+
+### MCP 与静态插件
+
+`src/extension/types/plugins.rs` 的 `PluginKind` 只有三种：`Wasm`（`.wasm`）、`Mcp`（`.mcp.json`，走 Aleph 自己的 MCP 客户端体系）、`Static`（markdown 内容）。MCP 插件因此不是「新进程里跑的插件」，而是**客户端侧配置**：`src/config/types/tools.rs` 的 `McpServerConfig` 描述一个服务器条目（`command`、`args`、`env`、`cwd`、`requires_runtime`、`timeout_seconds`、`enabled`），用户在 `config.toml` 里写它。网关侧的暴露名单在 `src/gateway/mcp_face/config.rs` 的 `McpFaceConfig`：`expose` 是白名单且可热生效，`enabled` 只在启动挂载路由时生效。
+
+### 第三方 Rust 插件
+
+> **状态：规划中** — ADR（已接受）`docs/research/NSH_ADR-001~009.md` §ADR-004 第三方 Rust 插件采用 WASM / 独立进程。
+
+ADR-004 的决策表是：官方内置能力静态编译，允许；第三方 WASM 走受限 WASM 运行时，默认优先；第三方进程插件走独立进程加受控 IPC，按需允许；**任意 Rust 动态库在宿主进程内动态加载，不作为通用插件机制**。
+
+WASM 侧的约束是：只能通过宿主 API 访问文件、网络、浏览器、工具等资源；默认没有宿主文件系统与网络访问；通过能力授权拿到精确资源范围；设置内存、燃料、时间、并发与句柄限制；运行时崩溃或插件 Trap 不得导致宿主崩溃。
+
+进程侧的约束是：独立进程、独立工作目录与受控环境变量；使用经认证的 IPC；配置 CPU、内存、进程数、消息大小与超时限制；崩溃重启必须有退避与熔断，不能无限重启；不能因为是独立进程就默认拥有任意用户文件权限。
+
+现状：`src/extension/types/plugins.rs` 的 `PluginKind` 里**没有**进程类插件——今天的插件只有 WASM、MCP 与静态三种。
+
+## 插件信任的现状
+
+### 信任策略
+
+见上文「加载信任」。这里补充来源分类：`src/extension/types/plugins.rs` 的 `PluginOrigin` 有 `Config`、`Workspace`、`Global`、`Bundled`、`ClaudeCache` 五个变体，其中 `ClaudeCache` 的 serde 拼写是 `claude_cache`。
+
+### 信任声明与强制开关
+
+信任的**声明**存在插件配置文件里。`src/extension/plugin_state.rs`：
+
+- 配置文件名常量 `PLUGINS_CONFIG_FILE` 是 `plugins.toml`，落在数据目录下；
+- `PluginTrustConfig{enforce: bool}` 默认 `false`——源码注释解释了原因：默认开启会在升级后悄悄停掉用户已装的插件；
+- `PluginEntryConfig` 的 `trusted` 字段逐条记录信任；
+- `PluginsConfig::owner_trust_policy()` 是策略的真正来源：`enforce` 为 `false` 时返回宽松策略，`true` 时用 `trusted == Some(true)` 的条目构造白名单。
+
+`src/extension/plugin_ops.rs` 提供 `set_trusted` 与 `set_trust_enforced`，`src/builtin_tools/plugin_manage.rs` 的内置工具把四个动作暴露给模型：`trust_status`、`trust`、`untrust`、`trust_enforce`。
+
+### 信任不是停止
+
+`trust` 与 `untrust` 改的是**加载闸**，不是运行中的进程。`src/builtin_tools/plugin_manage.rs` 的文案写得很直白：撤销信任后插件「will be refused at the next load; if it is running now, that does not stop it — use action='disable' for that.」；源码注释也点明「it is a load gate — `disable` is the verb that stops one now」。
+
+同样，`trust` 在强制开关关闭时其实不改变任何行为——文案会补一句「owner trust is not currently enforced, so this changes nothing until you enable it with action='trust_enforce'」。
+
+### 清单权限
+
+插件清单里声明的权限在 `src/extension/manifest/types.rs` 的 `PluginPermission`：`Network`、`Filesystem(FilesystemAccess)`（读、写、全量）、`Env`、`Shell`、`Background`、`Custom(String)`。它们的稳定拼写是 `network`、`filesystem:read`、`filesystem:write`、`filesystem`、`env`、`shell`、`background`，自定义项直接用原字符串。
+
+权限不足的**不是**挂载失败。`src/extension/registrar/api.rs` 里，插件行注册成功后，插件声明的每一项能力都要过权限检查；被拒的能力会被收集起来，写成一条 `Warn` 级诊断（源码日志文本 `capability refused at mount`），插件行本身照常注册。也就是说：拒绝会留下可见的诊断，而不是让插件整行消失。
+
+## 面板 UI 的同源信任
+
+插件自带的 UI 面板走的是**同源**路径，不是沙箱路径。`interfaces/webchat/src/panel/sdk.rs` 的文件头注释写明：「Same-origin code is trusted/verified code, not sandboxed by these permission checks.」
+
+这条路径的组成是：面板模块由 `interfaces/webchat/panel_loader.js` 动态导入（带完整性校验的版本会先校验摘要），`interfaces/webchat/index.html` 提供的加载桥接负责拉起它，`src/gateway/server/panel_asset_route.rs` 在同一个网关路由器上挂出面板资源路由，`src/gateway/server/mod.rs` 用控制面回退同源提供 Panel SPA。
+
+因此**同源不等于可信**：完整性校验与准入仍然要做。`src/extension/panel_publication/admission.rs` 的 `prepare(records, policy: &OwnerTrustPolicy)` 负责这一步，单个条目上限 4 MiB、单次发布总量上限 64 MiB，越界时给出 `panel.asset_entry_limit` / `panel.asset_generation_limit` / `panel.asset_outside_root` / `panel.asset_integrity_mismatch` 这类错误码。面板清单在 `src/extension/manifest/types.rs` 的 `PanelUiManifest`，带 `tab_id`、`entry`、`api_major`、`permissions`、`asset_integrity`，其 `validate()` 的错误码是 `panel.invalid_identity` / `panel.invalid_presentation` / `panel.incompatible_api` / `panel.invalid_entry` / `panel.invalid_integrity`。
+
+> **状态：规划中** — ADR（已接受）`docs/research/NSH_ADR-001~009.md` §ADR-005 Agent 动态 UI 采用 Restricted TSX。
+
+ADR-005 规定 Agent 生成的动态 UI 只能在隔离视图容器与受限运行时里跑，禁止任意 shell、进程、文件系统与网络访问，禁止直接授予自身能力，禁止修改审批状态或插件信任等级，并按来源分三档信任：正式插件 UI（仍受宿主 API 权限约束）、Agent 生成的临时 UI（最小组件集与最严格的资源限制）、来源或完整性无法验证的 UI（禁止执行）。这一层今天还没有对应实现。
+
+### 能力 UI 表面不是插件 UI
+
+容易混淆的两件事：`src/capability/ui.rs` 的能力 UI 表面与 `src/extension/panel_publication/` 的插件 UI 是两条不同的路。
+
+能力 UI 表面在 `src/capability/ui.rs`：命名空间常量 `UI_NAMESPACE` 的值是 `aleph/ui`，描述符的 `kind` 是 `CapabilityKind::Ui`，交互是**受控通道**——`src/gateway/capability_ui.rs` 提供挂载、调用、确认、提交输入与卸载五个动作，失败时返回 `UiError`（`Closed` / `InvalidInput` / `Poisoned` / `Unavailable` / `StaleAttachment` / `QueueFull` / `Busy` / `RenderFailed` / `Timeout` / `Cancelled`）。
+
+插件 UI 则是同源代码，走完整性校验与发布准入。**同源意味着它不在这些权限检查的沙箱里**——它的安全边界来自完整性校验、准入限额与清单声明，而不是来自运行时隔离。
+
+## 信任决策表
+
+| 场景 | 判定 | 依据 |
+|---|---|---|
+| 内置插件（`Bundled` 来源） | 恒信任 | `src/extension/plugin_trust.rs` 的 `allows` |
+| operator 写进配置的插件（`Config` 来源） | 恒信任 | 同上 |
+| 工作区 / 全局目录里的插件，强制开关关闭 | 放行（默认宽松） | `src/extension/plugin_state.rs` 的 `owner_trust_policy` |
+| 工作区 / 全局目录里的插件，强制开关开启且在白名单 | 放行 | 同上（白名单由 `trusted` 字段构成） |
+| 工作区 / 全局目录里的插件，强制开关开启但不在白名单 | 拒绝加载 | `src/extension/plugin_trust.rs` 的 `allows` |
+| Claude 缓存目录里的插件 | 与工作区 / 全局同级，需要白名单 | `src/extension/types/plugins.rs` 的 `PluginOrigin` |
+| 撤销信任 | 只影响下一次加载，不停止正在运行的插件 | `src/builtin_tools/plugin_manage.rs` 的文案 |
+| 插件清单请求了超出权限的能力 | 该能力不挂载，插件行留下 `Warn` 诊断 | `src/extension/registrar/api.rs` |
+| WASM 插件调用未声明的能力 | 拒绝 | `src/extension/runtime/wasm/capability_kernel.rs` |
+| 插件面板资源超限或完整性不符 | 拒绝发布 | `src/extension/panel_publication/admission.rs` |
+| 插件 UI 里的代码 | 同源执行，靠完整性校验与准入限额兜底 | `interfaces/webchat/src/panel/sdk.rs` 的注释 |
+| 任意 Rust 动态库插件 | 不支持（决策已接受，尚未实现进程类插件） | `docs/research/NSH_ADR-001~009.md` §ADR-004 |
+| 能力授权（按插件授予超出增补的权力） | 规划中 | 蓝图 `docs/research/aleph_modularization_plan.md` §5.2 |

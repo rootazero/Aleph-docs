@@ -3,27 +3,25 @@ title: "runs.*"
 description: "Run lifecycle and queue RPC methods"
 ---
 
-There is **no `runs.*` JSON-RPC namespace** in the current `aleph-server` runtime. `registry.register("runs.*", ...)` is never called, no `runs` handler module exists, and the methods documented in the previous version of this page (`run.wait`, `run.queue_message`) are not part of the gateway protocol.
+The runtime has no `runs.*` JSON-RPC namespace and no dedicated run-wait or message-queue RPC. See `src/gateway/method_census.rs`.
 
 The functionality the previous page implied — waiting for a run to settle, or pushing a message into a live run — is exposed under different names:
 
-- **Run state**: `chat.send` / `chat.abort` / `agent.run` / `agent.cancel`. A subscriber to the `agent.*` topic on the event bus sees `agent.started`, `agent.completed`, `agent.error`, and the per-turn `stream.agent_trace` events.
+- **Run state**: `chat.send` / `chat.abort` / `agent.run` / `agent.cancel`. A subscriber to the `agent.*` topic on the event bus sees `agent.started`, `agent.run.complete`, `agent.run.error`, and the per-turn `stream.agent_trace` events (defined in `src/gateway/events/frame.rs`).
 - **In-run steering**: incoming `Steer` messages on the originating channel (default) are injected into the live event log and consumed at the next turn boundary. The bus handles fan-out; there is no separate "queue" RPC.
 - **HITL approval** for a run: the `exec.approval.resolve` and `clarification.resolve` RPCs (one-card-per-prompt) are the only legal in-run interaction surface.
-
-The previous version of this page described `run.wait` and `run.queue_message` as if they were real. They are not, and writing client code against them will return `Method not found` (`-32601`).
 
 ## What exists
 
 The closest analogues on the wire:
 
-- `agents.*` — the per-run lifecycle RPCs (start, status, cancel, abort) under `/docs/en/gateway/methods/agent`.
+- `agent.*` — the per-run lifecycle RPCs (start, status, cancel, resume) under `/docs/en/gateway/methods/agent`.
 - `subagent.tree` — snapshot the live background sub-agent tree (`{ "nodes": [...], "count": N }`).
 - `chat.send` — start a chat turn; the response carries a `run_id` you can correlate against the event bus.
 
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
-- [agent.*](/docs/en/gateway/methods/agent) -- Run lifecycle (start / status / cancel / abort)
+- [agent.*](/docs/en/gateway/methods/agent) -- Run lifecycle (start / status / cancel / resume)
 - [chat.*](/docs/en/gateway/methods/chat) -- Chat turn transport and the `run_id` it returns
 - [events.subscribe](/docs/en/gateway/methods/events) -- Subscribe to `agent.*` / `stream.*` topics for live run state

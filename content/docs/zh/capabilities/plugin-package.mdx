@@ -1,0 +1,72 @@
+---
+title: "插件包与清单"
+description: "查阅插件目录的清单格式、归一化字段与加载边界，并区分现行格式和包格式蓝图。"
+---
+
+本页说明插件目录怎样声明元数据与资源、Aleph 如何读取这些声明，以及哪些包格式还在规划中。
+
+## 插件目录与加载边界
+
+插件以目录为加载单位：清单描述插件及其组件，入口文件等资源位于插件目录内。目录不一定有清单；没有匹配的清单时，读取器可以尝试自动发现（`src/extension/manifest/adapter.rs`、`src/extension/manifest/mod.rs`、`src/extension/manifest/types.rs`）。
+
+清单解析、注册和执行是不同环节：清单适配器提供解析结果，`PluginRegistry` 保存插件注册项，而 WASM 执行由 `WasmRuntime` 提供。解析成功不等于插件已获准加载（`src/extension/manifest/adapter.rs`、`src/extension/lifecycle.rs`、`src/extension/registry/mod.rs`、`src/extension/runtime/mod.rs`）。安装位置、生命周期与使用方法见[扩展](../concepts/extensions)；插件 RPC 入口见[插件方法](../gateway/methods/plugins)。
+
+## 现行清单格式
+
+新包优先使用 `.claude-plugin/plugin.toml`。目录元数据读取器按下列顺序查找；已选中的文件解析出错时，不会跳到下一个候选（`src/extension/manifest/mod.rs`）。
+
+| 候选 | 用途与源码 |
+|---|---|
+| `.claude-plugin/plugin.toml` | 首选的 Claude Code 风格 TOML（`src/extension/manifest/cc_plugin_toml.rs`）。 |
+| `.claude-plugin/plugin.json` | 只读兼容 Claude Code 清单（`src/extension/manifest/cc_plugin_json.rs`）。 |
+| `aleph.plugin.toml` | 已弃用的 Aleph 原生 TOML，会产生迁移警告。`parse_aleph_plugin_toml` 和 `parse_aleph_plugin_toml_sync` 读取文件，再交给 `parse_aleph_plugin_toml_content`（`src/extension/manifest/mod.rs`、`src/extension/manifest/toml_types.rs`）。 |
+
+`ALEPH_PLUGIN_MANIFEST` 仍定义为 `aleph.plugin.json`，但它不在当前目录元数据读取器的候选列表里。现行原生 TOML 的文件名用点号：`aleph.plugin.toml`，不应从 Rust 解析函数的下划线推断磁盘文件名（`src/extension/manifest/mod.rs`、`src/extension/manifest/toml_types.rs`）。
+
+下表是解析后的 `PluginManifest` 字段，不是可直接照抄的清单键。储存在 Rust 结构里的字段不一定有同名的文件键，也不代表相应功能会被注册（`src/extension/manifest/types.rs`、`src/extension/manifest/declared_sections.rs`）。
+
+| 用途 | 归一化字段 |
+|---|---|
+| 身份与入口 | `id`、`name`、可选的 `version` 与 `description`、`kind`、相对入口 `entry`；`root_dir` 由解析设置，不序列化。 |
+| 配置与权限 | `config_schema`、`config_ui_hints`、`permissions`。 |
+| V2 声明 | `tools_v2`、`hooks_v2`、`commands_v2`、`services_v2`、`prompt_v2`、`capabilities_v2`。 |
+| WASM 约束 | `wasm_capabilities`、`wasm_resource_limits`。 |
+| 其他可选声明 | `aleph_extensions`、`panel`（`Option<PanelUiManifest>`）、`memory_manifest`（归一化的内存扩展段）。 |
+
+## Panel 声明
+
+`panel` 是显式可选声明，不从插件的通用 `entry` 推导（`src/extension/manifest/types.rs`）。
+
+| `PanelUiManifest` 字段 | 含义 |
+|---|---|
+| `tab_id`、`label`、`icon`、`order` | 标签页标识、显示名称、图标与顺序。 |
+| `entry` | 标签页的相对模块入口。 |
+| `api_major` | 必须匹配 `PANEL_UI_API_MAJOR`，当前是 `1`。 |
+| `permissions` | 请求的 Panel 权限，按社区权限集合校验。 |
+| `asset_integrity` | 入口的 SHA-256 完整性值：`sha256-` 加 Base64 摘要。 |
+
+字段与校验见 `src/extension/manifest/types.rs`、`shared/protocol/src/panel.rs`。声明本身不发布标签页：admission 先有界读取并核对入口（每入口 4 MiB、每代 64 MiB），Core 提交不可变发布代，Gateway 经鉴权的 `/tabs/{*entry}` 提供资源；Panel 从同源获取并加载 ES 模块，只向模块交付窄 SDK（`src/extension/panel_publication/admission.rs`、`src/extension/panel_publication/mod.rs`、`src/gateway/server/panel_asset_route.rs`、`interfaces/webchat/panel_loader.js`、`interfaces/webchat/src/panel/sdk.rs`）。发布与宿主细节见[插件 UI](../desktop-hosts/plugin-ui)。
+
+## 配置、权限与来源信任
+
+| 检查点 | 作用 | 源码 |
+|---|---|---|
+| 配置结构 | `config_schema` 用 JSON Schema 描述配置，`ConfigUiHint` 提供字段显示提示。`validate_config_schema_declaration` 检查 schema 声明，`validate_config_against_schema` 按 schema 检查配置值。 | `src/extension/manifest/types.rs`、`src/extension/manifest/config_validation.rs` |
+| 权限与声明转换 | `PluginPermission` 表达插件权限。`declared_capabilities` 将清单段转换成能力声明；例如缺少 `background` 权限时跳过已声明的后台服务。 | `src/extension/manifest/types.rs`、`src/extension/manifest/declared_sections.rs` |
+| 来源准入 | `OwnerTrustPolicy` 判断插件 ID 与来源是否允许加载。在限制模式下，`Bundled` 与 `Config` 可通过；`Workspace`、`Global` 与 `ClaudeCache` 需要 ID 在允许列表。生命周期在检查启用状态之前应用此策略。 | `src/extension/plugin_trust.rs`、`src/extension/lifecycle.rs` |
+
+## Claude Code 与 pi 兼容性
+
+现行 Claude Code 兼容从 `.claude-plugin/plugin.toml` 和 `.claude-plugin/plugin.json` 读取清单，而不是把 `package.json` 当作这两个解析器的入口。TOML 的 `[aleph]` 与 JSON 的 `aleph` 对象可提供 Aleph 专用声明，解析后可填充 `AlephExtensions` 及其他归一化字段（`src/extension/manifest/cc_plugin_toml.rs`、`src/extension/manifest/cc_plugin_json.rs`、`src/extension/manifest/declared_sections.rs`）。
+
+> **状态：规划中** — `docs/research/aleph_modularization_plan.md` §10 规划更完整的 Claude Code 钩子翻译，以及 pi 的 npm 资源导入和兼容 sidecar。现有清单解析不代表这些功能已交付，也不代表兼容插件可以绕过准入或授权。
+
+## 发行、市场与可观测性
+
+目前插件市场支持 GitHub 与本地来源，安装逻辑由市场安装器处理（`src/extension/marketplace/mod.rs`、`src/extension/marketplace/github_source.rs`、`src/extension/marketplace/local_source.rs`、`src/extension/marketplace/installer.rs`）。市场使用与管理见[扩展](../concepts/extensions)和[插件方法](../gateway/methods/plugins)。
+
+> **状态：规划中** — `docs/research/aleph_modularization_plan.md` §9 规划默认及自定义发行版的装配机制；§11 规划槽位提供者、回退原因与授权状态等统一诊断。不要把市场安装成功当作这些诊断功能的可用证明。
+
+## 包格式蓝图
+
+> **状态：规划中** — `docs/research/aleph_modularization_plan.md` §12 用带连字符的 `aleph-plugin.toml` 展示包契约版本、组件（`components`）、槽位认领（`claims`）及钩子（`hooks`）的规划语义。该示例不是现行文件名或可用模板；现行解析入口以 `src/extension/manifest/mod.rs` 和 `src/extension/manifest/toml_types.rs` 为准。

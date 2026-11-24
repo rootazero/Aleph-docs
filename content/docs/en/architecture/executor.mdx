@@ -21,7 +21,7 @@ Harness loop (harness::agent::loop_graph / harness::agent::think)
      │
      ▼
 ToolService (scoped tool stack: src/tools/scoped/builder.rs)
-     │   Adapter: src/tools/adapters/registry_adapter
+     │   Adapter: src/tools/adapters/registry_adapter.rs
      │   Exposes Arc<dyn ToolService> as a LoopTool
      │
      ▼
@@ -75,7 +75,7 @@ pub trait ToolRegistry: Send + Sync {
 }
 ```
 
-The production implementor is `BuiltinToolRegistry` (`src/executor/builtin_registry/registry/`). `src/tools/adapters/registry_adapter::RegistryToolAdapter` wraps any `ToolRegistry` implementor as a `LoopTool`, and the gateway's `ScopedToolService` exposes it to the harness. The handle accessors let the execution engine hand workspace- and session-scoped context to tools without threading it through every call signature.
+The production implementor is `BuiltinToolRegistry` (`src/executor/builtin_registry/registry/`). `src/tools/adapters/registry_adapter.rs::RegistryToolAdapter` wraps any `ToolRegistry` implementor as a `LoopTool`, and the gateway's `ScopedToolService` exposes it to the harness. The handle accessors let the execution engine hand workspace- and session-scoped context to tools without threading it through every call signature.
 
 ---
 
@@ -110,7 +110,7 @@ Public types (`src/executor/builtin_registry/definitions.rs` + `groups.rs`):
 | `get_builtin_tool_names()` | List every registered name |
 | `create_tool_boxed()` | Type-erased tool factory |
 
-Tests (`tests/gateway_feature_gate.rs::BuiltinToolRegistry::test_resolve_plugin_handler_*`) verify that plugin tools resolve through the `plugin:<plugin_id>:<name>` direct fast path and stay in sync via `ExtensionManager::sync_runtime_snapshots`.
+Tests (`test_resolve_plugin_handler_*` in `src/executor/builtin_registry/mod.rs`) verify that plugin tools resolve through the `plugin:<plugin_id>:<name>` direct fast path and stay in sync via `ExtensionManager::sync_runtime_snapshots`.
 
 ---
 
@@ -142,17 +142,24 @@ pub struct UnifiedTool {
 
 ---
 
-## Public result types (`src/executor/types.rs`)
+## Public surface (`src/executor/mod.rs`)
+
+The executor module exports the registry and its trait; there is no separate result/context type layer (the old `ExecutionResult` / `ToolCallRecord` / `ExecutionContext` / `ExecutorError` family no longer exists — tool results are `serde_json::Value`, errors are `AlephError`).
 
 ```rust
-pub struct ExecutionResult { content, tool_calls, task_results, execution_time_ms, success, error }
-pub struct ToolCallRecord { tool_name, parameters, result, success, execution_time_ms }
-pub struct TaskExecutionResult { task_id, description, success, output, error, execution_time_ms }
-pub struct ExecutionContext { app_context, window_title, session_id, stream }
-pub enum ExecutorError { ExecutionFailed, ToolError, TaskFailed { task_id, error }, Timeout, Cancelled }
+pub use builtin_registry::{
+    create_tool_boxed, BuiltinToolConfig, BuiltinToolRegistry,
+    BUILTIN_TOOL_DEFINITIONS, TOOL_CATEGORIES,
+};
+pub use tool_registry::ToolRegistry;
+pub const TOOLS_OUTSIDE_DEFINITIONS: &[&str];   // subagent, tool_search
+pub const REGISTRY_ONLY_TOOL_NAMES: &[&str];    // registered but not in BUILTIN_TOOL_DEFINITIONS
+pub fn is_builtin_tool_name(name: &str) -> bool;
 ```
 
-`ExecutionResult.task_results` carries per-task outcomes for multi-task plans (`TaskExecutionResult`) — it's a data structure, not an independent scheduler. `TerminateReason::DiminishingReturns` in `src/orchestrator/summary_format.rs` is a **stop-reason label** the loop emits when output plateaus; the hard-stop detector was deleted under R10, and the loop is bounded by `max_iterations`, the tool-loop verifier, and the model's own stop instead.
+`ToolRegistry` (`src/executor/tool_registry.rs`) is the dispatch seam: `get_tool(name) -> Option<&UnifiedTool>`, `execute_tool(name, arguments) -> Result<Value>`, `execute_plugin_tool_with_authority` (rejects by default; only controlled plugin runtimes override it), plus the optional handle accessors described above.
+
+Loop-exit causes are not an executor type: they are `TerminateReason` in `src/orchestrator/dispatch.rs`. `TerminateReason::DiminishingReturns` is a **retired signal** kept only for i18n and summary back-compat — the hard-stop detector was deleted under R10, and the loop is bounded by `max_iterations`, the tool-loop verifier, the consecutive-failure cap, and the model's own stop instead.
 
 ---
 

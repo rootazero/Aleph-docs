@@ -33,3 +33,7 @@ next-env.d.ts
 # local working files
 /.claude
 /.pi
+
+# python
+__pycache__/
+*.pyc

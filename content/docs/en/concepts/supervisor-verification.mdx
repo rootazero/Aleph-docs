@@ -7,7 +7,7 @@ The `gateway/pty` and `verification` modules split external process control and 
 
 ## Design Philosophy
 
-1. **PTY-embedded terminal** — `gateway/pty/` wraps a local shell / `cmd.exe` via `portable-pty`; output is pushed over the WebSocket `pty.output` / `pty.exit` topics (no second port).
+1. **PTY-embedded terminal** — `gateway/pty/` wraps a local shell / `cmd.exe` via `portable-pty`; output is pushed over the WebSocket `pty.screen` / `pty.exit` topics (no second port).
 2. **Turn-level verification** — `verification::VerifierChain` runs between Think and Act with `StopHookVerifier` (shell hooks), `ToolLoopVerifier` (death-loop watchdog), `ExtensionStopHookVerifier` (`HookEvent::Stop` extension hooks), `ScratchpadGoalVerifier` (block stop while the execution list has unchecked items), and `MutationEvidenceVerifier` (a one-shot nudge when a file mutation has no post-edit evidence).
 3. **Read-only shell hook** — `ShellStopHook` runs an external command; exit 0/2/3 = pass/block/halt; everything else (other exit codes, timeouts, signals, shell metacharacters) maps to `Error`, leaving fail-open vs fail-closed to the caller.
 
@@ -23,7 +23,7 @@ pty/
 └── handler (in gateway/handlers/pty.rs)
 ```
 
-`PtySession::spawn(opts)` builds a `portable_pty::native_pty_system()` session, clones the writer / reader / killer halves, and pushes base64 `pty.output` frames onto the gateway event bus; `PtyManager` is a process-global singleton (`OnceLock`), and concurrent `pty.spawn` calls that overflow the 64-session cap evict the oldest entry. The RPCs are `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list`; the streaming `pty.output` / `pty.exit` events are delivered via `events.subscribe("pty.*")`.
+`PtySession::spawn(opts)` builds a `portable_pty::native_pty_system()` session, clones the writer / reader / killer halves, and pushes `pty.screen` frames (diffs of the rendered terminal) onto the gateway event bus; `PtyManager` is a process-global singleton (`OnceLock`), and concurrent `pty.spawn` calls that overflow the 64-session cap evict the oldest entry. The RPCs are `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list`; the streaming `pty.screen` / `pty.exit` events are delivered via `events.subscribe("pty.*")`.
 
 ---
 
@@ -155,7 +155,7 @@ A `VerifyStopHook` Rust struct (a P0-era LLM-based verifier candidate) was never
 
 26.7.20+ (see `git log`): the `DiminishingReturnsDetector` hard stop was removed wholesale from `src/context/budget/`, alongside its `StopDiminishing` directive, the `TurnMetrics` type, `src/thinker/nudges.rs::GRACE_NUDGE_DIMINISHING`, the `after_turn` consumer in `src/harness/agent/think.rs`, and the `GraceReason::Diminishing` grace-turn path.
 
-`src/harness/tests/budget.rs:280` is blunt about why: "R10 '5 don'ts' #3 — the loop must make no completion judgement of its own". In practice: `ToolLoopVerifier` (`repeat_threshold = 5` consecutive identical tool calls), `max_iterations`, the consecutive-failure watchdog, and the model's own judgement are what now decide a stop — never a middleware heuristic. The ratchet sits at **5,055 lines** today (`CEILING` in `src/harness/tests/budget.rs:335`); the code is the authority — every doc number is just a copy of `CEILING`.
+`src/harness/tests/budget.rs:313` is blunt about why: "R10 '5 don'ts' #3 — the loop must make no completion judgement of its own". In practice: `ToolLoopVerifier` (`repeat_threshold = 5` consecutive identical tool calls), `max_iterations`, the consecutive-failure watchdog, and the model's own judgement are what now decide a stop — never a middleware heuristic. The ratchet sits at **5,535 lines** today (`CEILING` in `src/harness/tests/budget.rs:795`); the code is the authority — every doc number is just a copy of `CEILING`.
 
 ### Turn-Level Verifier Chain
 

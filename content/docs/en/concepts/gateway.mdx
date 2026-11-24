@@ -54,10 +54,10 @@ impl WebSocketHandler {
 
 **Methods:**
 - `session.create` — Create a new session
-- `session.send` — Send a message
-- `session.history` — Get conversation history
-- `session.clear` — Clear session context
-- `tool.call` — Invoke a tool directly
+- `chat.send` — Send a message (wraps `agent.run`)
+- `chat.history` — Get conversation history (session listing and history also exist as `sessions.list` / `sessions.history`)
+- `chat.clear` — Clear a session's chat history (use `sessions.reset` for a full reset)
+- `tools.invoke` — Invoke a tool directly
 
 ### SessionManager
 
@@ -183,14 +183,14 @@ Per-session and per-user rate limits prevent abuse.
 
 - `src/gateway/` — Module root
 - `src/gateway/handlers/` — WebSocket and HTTP handlers
-- `src/gateway/session/` — Session management
+- `src/gateway/session_manager/` — Session management
 - `src/gateway/execution_engine/` — Agent execution loop
 - `src/gateway/interfaces/` — Platform adapters (Discord, Telegram, CLI, TUI)
-- `src/gateway/routing/` — Message routing
+- `src/gateway/router.rs` — Message routing
 
 ## See Also
 
-- [Session Management](./session-service) — Session lifecycle
+- [Session Management](../architecture/session-service) — Session lifecycle
 - [Event System](./event-system) — Event distribution
 - [Thinker](./thinker) — Prompt construction
 
@@ -212,7 +212,7 @@ Per-session and per-user rate limits prevent abuse.
 
 ### Dead-Letter and Re-Drive
 
-26.7.17+: `channel.dead_letters` collects undelivered messages; `channel.redrive_dead_letters` re-drives them.
+26.7.17+: the delivery queue keeps permanently-failed outbound messages as dead letters and can re-drive them. Inspecting and re-driving dead letters is **not a Gateway RPC method**; it is the built-in tool `channel_outbox` (ops `status` / `dead_letters` / `redrive`; `redrive` only replays when `confirm_redrive: true` is passed, otherwise it returns a preview). The former `channels.dead_letters` / `channels.redrive_dead_letters` RPCs were removed because no client ever called them; `channels.list` still reports the count of permanently-undelivered pushes.
 
 ### Self-Signed TLS + TOFU
 

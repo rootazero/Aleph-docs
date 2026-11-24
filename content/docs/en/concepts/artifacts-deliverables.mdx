@@ -103,7 +103,7 @@ artifact_store.put(session_key, ArtifactOrigin::Deliverable, spec).await?;
 |--------|---------|
 | `artifacts.list` | list all artifacts of current session (optional origin filter) |
 | `artifacts.read_text` | read text blob (**512 KB cap**, UTF-8 boundary trim, **read-only route** — must not enter Mutate lane) |
-| `artifacts.publish` | write a `Deliverable` (only callable by `artifact_publish` tool) |
+| `session.export_html` | export the session transcript as self-contained HTML (see the next section) |
 
 **Gateway capability byte route** (`src/gateway/server/artifact_route.rs`):
 
@@ -131,12 +131,12 @@ The capability is in the path (`/artifact/{cap}/{id}/{filename}`), **never in a 
 - `files.rs`: project tree folded into a secondary section of the artifact pane
 - `preview.rs`: in-pane text preview (without leaving the session)
 
-`interfaces/webchat/src/api/typed/artifacts.ts` provides a typed client:
+`interfaces/webchat/src/api/artifacts.rs` provides the Panel-side typed RPC client (`ArtifactsApi`):
 
-```ts
-const list = await artifacts.list({ session_key, origin_filter: "deliverable" });
-const text = await artifacts.read_text({ session_key, id });
-const artifact = await artifacts.publish({ session_key, name, mime_type, content_base64 });
+```rust
+let items = ArtifactsApi::list(&state, session_key).await?;
+let preview = ArtifactsApi::read_text(&state, session_key, id).await?;
+let exported = ArtifactsApi::export_html(&state, session_key).await?;
 ```
 
 ## Session HTML Export
@@ -144,7 +144,7 @@ const artifact = await artifacts.publish({ session_key, name, mime_type, content
 `src/export/` (`collect.rs`, `document.rs`, `export.css`, `markdown.rs`, `mod.rs`, `page.rs`, `session_html.rs`) provides:
 
 - **`session.export_html`** — export session transcript as self-contained HTML (self-contained CSS)
-- **`session.export_markdown`** — pure-function markdown export (for downstream scripts)
+- **`render_markdown`** (`markdown.rs`) — renders message markdown text to HTML (internal to the export document; not an RPC)
 - **`export.css`** — styles for exported docs (aligned with Panel theme)
 - `collect_artifacts` / `render_document_html` / `page.rs` — artifact byte inlining (two-layer budget: `MAX_INLINE_ARTIFACT_BYTES = 4 MiB` / `MAX_INLINE_TOTAL_BYTES = 24 MiB`)
 
@@ -174,7 +174,7 @@ pub enum ArtifactError {
 - `src/gateway/handlers/artifacts.rs` — 3 RPCs (~650 lines)
 - `src/gateway/server/artifact_route.rs` — `ArtifactRouteState` + `artifact_routes()` + capability decoding (prevents cap holders from enumerating other people's ids)
 - `interfaces/webchat/src/components/artifacts/{mod,deliverable,files,preview,row}.rs` — Panel 5 submodules
-- `interfaces/webchat/src/api/artifacts.ts` — Panel-side typed RPC client
+- `interfaces/webchat/src/api/artifacts.rs` — Panel-side typed RPC client
 
 ## Key Constraints & Contracts
 

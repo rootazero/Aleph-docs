@@ -144,7 +144,7 @@ The schema is versioned with migration utilities in `migration.rs`. Key indexes:
 
 - `src/resilience/mod.rs` — Module overview
 - `src/resilience/types.rs` — Core types (AgentTask, TaskTrace, etc.)
-- `src/resilience/database/state_database.rs` — SQLite CRUD operations
+- `src/resilience/database/state_database/` — SQLite CRUD operations
 - `src/resilience/database/migration.rs` — Schema versioning
 
 ## See Also
@@ -159,7 +159,7 @@ The schema is versioned with migration utilities in `migration.rs`. Key indexes:
 
 ### Guardian Judge Payload Masks Secrets
 
-26.7.21+: `GuardianApprovalRequester` (the LLM judge in `src/approval/guardian_requester.rs`) runs the action description it sends to the judge LLM through `SecretMasker` (`src/exec/masker`) — both the summary and every parsed command segment pass through the same masker, so the redacted summary cannot leak what the per-segment `raw` text (built from the original argv by the shell parser) still carries (bearer tokens, URL basic-auth, generic password assignments). A circuit breaker escalates straight to the human without a judge call after sustained provider failures.
+26.7.21+: `GuardianApprovalRequester` (the LLM judge in `src/approval/guardian_requester.rs`) runs the action description it sends to the judge LLM through `SecretMasker` (`src/exec/masker.rs`) — both the summary and every parsed command segment pass through the same masker, so the redacted summary cannot leak what the per-segment `raw` text (built from the original argv by the shell parser) still carries (bearer tokens, URL basic-auth, generic password assignments). A circuit breaker escalates straight to the human without a judge call after sustained provider failures.
 
 ### Heartbeat Refuses Dangerous Tools
 

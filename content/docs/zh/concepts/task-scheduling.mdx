@@ -102,7 +102,7 @@ pub trait Clock: Send + Sync + 'static {
 
 ### RPC（实化）
 
-所有在 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` 注册的 `cron.*` RPC 都由真实 handler 承载（`src/gateway/handlers/cron/real.rs`）。早期占位的 `*_stub` 实现（位于 `src/gateway/handlers/cron/stubs.rs`）已不再走热路径：
+所有在 `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` 注册的 `cron.*` RPC 都由真实 handler 承载（`src/gateway/handlers/cron/real.rs`）。早期占位的 `*_stub` 实现已在 2026-08-17 审计（`sw-gateway-batch1-F01`）中拆除；`src/gateway/handlers/cron/real.rs` 的真实 handler 现在是唯一表面：
 
 | 方法 | Handler |
 |---|---|
@@ -192,7 +192,7 @@ impl HeartbeatService {
 - `targets` —— 投递目标类型定义（频道、webhook）。
 - `active_hours` —— 作业的静默时段与活跃时段门控。
 - `retry_hint` —— 重试策略原语（transient 与 permanent 分类）。
-- `reaper` —— 周期调用 `cron.reap_history` / `heartbeat.reap_history`，让 `cron_runs` / 心跳历史行不会无界增长。
+- `reaper` —— 周期运行 `CronHistoryReaper` / `HeartbeatHistoryReaper`（`tasks::shared::reaper`），让 `cron_runs` / 心跳历史行不会无界增长。
 
 ---
 
@@ -236,7 +236,6 @@ impl HeartbeatService {
 - `src/tasks/shared/clock.rs` —— `Clock` trait + `SystemClock` + `FakeClock`
 - `src/tasks/shared/schedule.rs` —— 纯调度计算
 - `src/tasks/shared/delivery.rs` —— `DeliveryEngine` 等
-- `src/tasks/shared/store.rs` —— SQLite 辅助
 - `src/tasks/shared/targets.rs` —— 投递目标类型
 - `src/tasks/shared/active_hours.rs` —— 活跃时段门控
 - `src/tasks/shared/retry_hint.rs` —— 重试分类
@@ -244,7 +243,6 @@ impl HeartbeatService {
 
 **RPC：**
 - `src/gateway/handlers/cron/real.rs` —— 真实的 `cron.*` handler
-- `src/gateway/handlers/cron/stubs.rs` —— 旧 stub（保留为回归测试，不再分派）
 - `src/gateway/handlers/heartbeat.rs` —— 真实的 `heartbeat.*` handler（同文件包含旧 `*_stub` 定义，作为回归测试）
 - `src/bin/aleph-server/commands/start/builder/handlers/agents.rs` —— 在网关注册 `cron.*` 与 `heartbeat.*`
 

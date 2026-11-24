@@ -18,8 +18,8 @@ import { Callout } from "fumadocs-ui/components/callout";
 | **设备配对** | 远程桌面 / 手机 / CLI 客户端 | `aleph-bt-*` 启动票换取 `aleph-dt-*` 设备 token |
 | **频道发送者配对** | Telegram / Discord / iMessage 未知发送者 | 6 字符字母数字代码（inbound router 单源存储） |
 
-两者都通过 **RPC** 管理（`pairing.list` / `pairing.approve` /
-`pairing.reject` / `gateway.ticket.create`），不是 CLI 命令。
+两者都通过 **RPC** 管理（`channel.pairing.list` / `channel.pairing.approve` /
+`channel.pairing.reject` / `gateway.ticket.create`），不是 CLI 命令。
 
 **源位置：**
 - 设备票 + token 管理：`src/gateway/security/device_token_manager.rs`
@@ -96,7 +96,7 @@ Aleph 是一个自托管的 AI 助手，可以访问你的文件、shell 和在�
 ### 设备 token —— `aleph-dt-*`
 
 成功交换启动票后，握手返回一个 `aleph-dt-*` 设备 token。Panel 把它
-持久化并在每次重连时作为 `connect.device_token` 提交。
+持久化并在每次重连时作为 `connect` 握手的 `device_token` 参数提交。
 
 设备 token：
 
@@ -155,7 +155,7 @@ aleph-server bootstrap-token
   │                                │   "Telegram 上的新发送者"     │
   │                                │   "代码: MRKV52"             │
   │                                │                              │
-  │                                │◄── pairing.approve ──────────│
+  │                                │◄── channel.pairing.approve ──│
   │                                │    { channel, code }          │
   │                                │                              │
   │◄── "你已验证!" ────────────────│                              │
@@ -184,9 +184,9 @@ fn generate_code() -> String {
 
 ```bash
 # 通过 aleph-server gateway call 调用 RPC
-aleph-server gateway call -p '{"channel":"telegram"}' pairing.list
-aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.approve
-aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.reject
+aleph-server gateway call -p '{"channel":"telegram"}' channel.pairing.list
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' channel.pairing.approve
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' channel.pairing.reject
 ```
 
 或通过 Panel Settings → Pairing UI。**没有** `aleph pairing approve`
@@ -199,7 +199,7 @@ CLI 命令 —— 这一切都通过 RPC。
 | 凭证 | `aleph-dt-*` 设备 token（长生命周期） | 频道发送者 ID（inbound router 存储） |
 | 引入凭证 | `aleph-bt-*` 启动票（5 min TTL，单次） | 6 字符字母数字代码 |
 | 持久化位置 | `devices` 表（Panel 类型） | `pairing_requests` 表 |
-| 撤销粒度 | 单台设备（`gateway.devices.revoke`） | 频道发送者（`pairing.reject` 或 `pairing.revoke`） |
+| 撤销粒度 | 单台设备（`gateway.devices.revoke`） | 频道发送者（`channel.pairing.reject` 或 `channel.pairing.revoke`） |
 | 携带者 | WS `/ws` connect 握手（`device_token` 参数） | 入站消息 |
 | 共享 secret | 共享 Gateway token 仅作恢复（不进 URL/QR） | —— |
 
@@ -210,8 +210,8 @@ CLI 命令 —— 这一切都通过 RPC。
 `device_token_manager` 生成：
 
 - 启动票：`uuid` + TTL 戳；
-- 设备 token：`uuid` + SHA-256（明文存 `devices.public_key` 旁的 hash，
-  SHA-256-at-rest）。
+- 设备 token：`uuid` + SHA-256（hash 存 `tokens` 表的 `token_hash` 列，
+  SHA-256-at-rest；`devices` 表的 `public_key` 列只存设备公钥材料，不存 token）。
 
 ### 共享 Gateway token
 

@@ -1,26 +1,25 @@
 ---
 title: "browser.*"
-description: "Browser automation RPC methods"
+description: "Browser tools versus Gateway configuration RPCs"
 ---
 
 There is **no `browser.*` JSON-RPC method** in the current `aleph-server` runtime. The browser automation pipeline is implemented as **builtin tools** (`browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, etc.) consumed by the agent loop, not as gateway RPCs. `src/gateway/handlers/browser_config.rs` exposes only the configuration namespace `browser_config.*`; the CDP driver itself lives in `src/browser/`.
 
-The `browser.get` method, plus the action targets, scroll directions, and launch modes documented in the previous version of this page, describe the **agent-side tool API** (the shape of `browser_navigate` arguments), not a gateway RPC. A client that wants browser automation goes through `chat.send` / `agent.run`, where the agent loop dispatches the tool.
 
 ## Methods
 
-The methods below are **not** registered. A `browser.*` JSON-RPC call returns `Method not found` (`-32601`).
+The table lists agent-side built-in tools, **not Gateway RPCs**. See `src/builtin_tools/browser_tools/`; clients invoke the agent loop through `chat.send` / `agent.run`.
 
 | Method | Description |
 |--------|-------------|
-| `browser.navigate` | (Tool) Navigate the current tab to a URL. |
-| `browser.click` | (Tool) Click an element by selector, ref, or viewport coordinates. |
-| `browser.type` | (Tool) Type text into an input element. |
-| `browser.screenshot` | (Tool) Capture a screenshot of the page or a specific element. |
-| `browser.evaluate` | (Tool) Execute a JavaScript expression and return the result. |
-| `browser.snapshot` | (Tool) Take an ARIA accessibility snapshot of the page. |
+| `browser_navigate` | (Tool) Navigate the current tab to a URL. |
+| `browser_click` | (Tool) Click an element by selector, ref, or viewport coordinates. |
+| `browser_type` | (Tool) Type text into an input element. |
+| `browser_screenshot` | (Tool) Capture a screenshot of the page or a specific element. |
+| `browser_evaluate` | (Tool) Execute a JavaScript expression and return the result. |
+| `browser_snapshot` | (Tool) Take an ARIA accessibility snapshot of the page. |
 
-The **only browser-related JSON-RPC methods** are:
+**Configuration RPCs versus tools**:
 
 - `browser_config.get` / `browser_config.update` — read or write the `[browser]` config section (`mode`, `headless`, `cdp_port`).
 - `browser_navigate`, `browser_click`, `browser_type`, `browser_evaluate`, `browser_snapshot` are dispatched by the LLM via the agent loop, not over the JSON-RPC surface.

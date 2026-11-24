@@ -57,7 +57,7 @@ pub struct WorkflowDef {
 
 pub enum WorkflowStepKind {
     #[default]
-    Agent,    // 运行 step.agent 与 step.prompt（默认；缺省 kind 字段的旧模板照常反序列化）
+    Agent,    // 运行 agent 字段指定的代理与 prompt（默认；缺省 kind 字段的旧模板照常反序列化）
     Clarify,  // 暂停运行、向用户提问题（prompt 即问题；choices 是菜单）；不跑 agent
 }
 
@@ -67,7 +67,7 @@ pub struct WorkflowStepDef {
     pub agent: String,                                 // 编译为 coord_task.owner；clarify 步骤忽略
     pub prompt: String,                                // {input} 占位；clarify 时是问题
     #[serde(default)]
-    pub depends_on: Vec<String>,                       // 编译为 coord_task.blocked_by
+    pub depends_on: Vec<String>,                       // 编译为 coord_task 的 blocked_by
     #[serde(default, skip_serializing_if = "WorkflowStepKind::is_agent")]
     pub kind: WorkflowStepKind,                        // Agent（默认） | Clarify
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,7 +87,7 @@ pub struct WorkflowStepDef {
 
 ### 实例化（`src/workflow/compile.rs`）
 
-编译器把每个 `WorkflowStepDef` 映射为 `step.agent` 拥有的 `coord_task`，`step.depends_on` 映射为 `coord_task.blocked_by`。任务被标记为 `{"managed_by": "dispatcher"}`，由 dispatcher 的自主循环拾取：
+编译器把每个 `WorkflowStepDef` 映射为 `agent` 字段所指代理拥有的 `coord_task`，`depends_on` 映射为 coord_task 的 `blocked_by`。任务被标记为 `{"managed_by": "dispatcher"}`，由 dispatcher 的自主循环拾取：
 
 ```rust
 pub async fn materialize(
@@ -242,7 +242,7 @@ pub fn accept(name: &str) -> Result<PathBuf>;  // 将草稿提升为活动状态
 ┌─────────────────────────────────────────────────────┐
 │ TeamDispatcher（src/teams/dispatcher/）              │
 │   • 拾取待处理任务                                    │
-│   • 对 agent 步骤：路由到 step.agent                  │
+│   • 对 agent 步骤：路由到 agent 字段指定的代理        │
 │   • 对 clarify 步骤：CLARIFY_OWNER 停放              │
 │   • 从上游输出构建交接上下文                          │
 │   • 使用 Tokio 并发执行                              │

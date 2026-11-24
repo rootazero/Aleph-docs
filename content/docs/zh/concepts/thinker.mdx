@@ -201,42 +201,19 @@ impl PromptPipeline {
 }
 ```
 
-`ProviderRenderStyle` 三种（`xml` / `fenced` / `inline`）按 provider 决定每层的包裹（Anthropic XML 标签 / OpenAI fenced code / Ollama 平文本），由 `PromptPipeline::render_section(layer, ctx, style)` 选。
+每个 layer 通过 `PromptLayer::inject(&mut String, &LayerInput)` 自行把内容写入共享输出缓冲；已无独立的按 provider 包裹的分发点。XML 转义 / 包裹助手在 `src/thinker/xml_util.rs`（`escape_xml` / `escape_xml_attr` / `push_text_element` / `push_block_with_attrs`）。
 
 ---
 
-## 流式状态机
+## 历史：流式状态机
 
-`thinker::streaming` 提供 per-token 状态机 `BlockState`：
-
-```rust
-pub struct BlockState {
-    pub buffer: String,
-    pub current_block: Option<BlockType>,
-}
-
-impl BlockState {
-    pub fn feed(&mut self, token: &str) -> Vec<BlockEvent> { /* ... */ }
-}
-```
-
-`BlockType` 五种：`Text` / `ToolCall` / `Code` / `Thinking` / `Image`。`BlockState::feed` 收到 token 后解析并产出 `BlockEvent`（进入新块 / 当前块继续 / 当前块结束）。Panel 端用 `BlockState` 渲染两阶段字幕（详见 `interfaces/webchat/src/views/chat/state/streaming.rs`）。
+早期 `thinker::streaming` 模块提供 per-token `BlockState` 状态机（`BlockType`：`Text` / `ToolCall` / `Code` / `Thinking` / `Image`；`BlockEvent`：进入新块 / 继续 / 结束），供 Panel 在流式回复期间渲染两阶段字幕。该模块及其流式渲染器已移除——现已无 per-token 字幕状态机。
 
 ---
 
-## provider-specific 渲染
+## 历史：provider-specific 渲染
 
-不同 provider 对 prompt 的解析方式不同 —— 同一段内容对 Anthropic 是 XML，对 OpenAI 是 fenced code，对 Ollama 是平文本。`PromptLayer::render` 返回纯文本（**不**带 `<example>` / ` ``` ` 包裹），**包裹**由 `PromptPipeline::render_section` 按 `ProviderRenderStyle` 决定：
-
-```rust
-pub enum ProviderRenderStyle { Xml, Fenced, Inline }
-```
-
-- **Anthropic / XML**：每层包成 `<section name="<layer_name>">…</section>`，子内容**不**做二次转义
-- **OpenAI / Fenced**：每层包成 `` ```<layer_name>\n…\n``` ``，子内容里的 ``` 需要再转义
-- **Ollama / Inline**：每层直接平文本，加一行 `--- <layer_name> ---` 标题
-
-`style_for_provider(provider_name)` 在 pipeline 装配时调一次，结果缓存到 pipeline 结构里。
+早期 `ProviderRenderStyle` 枚举（`Xml` / `Fenced` / `Inline`）按 provider 选择每层包裹，配一个 `render_section` 分发点和 `style_for_provider(provider_name)` 助手在装配时缓存选择。该渲染模型已移除：每个 `PromptLayer` 现通过 `inject(&mut String, &LayerInput)` 自行包裹，使用 `src/thinker/xml_util.rs` 的共享助手；已无按 provider 的包裹样式。
 
 ---
 
@@ -246,16 +223,14 @@ pub enum ProviderRenderStyle { Xml, Fenced, Inline }
 - `src/thinker/prompt_pipeline.rs` — `PromptPipeline` 与 layer 拼装
 - `src/thinker/prompt_contract.rs` — `reachable_layers` / `scaffold_bytes_ratchet` / `whitelist_disabled`
 - `src/thinker/prompt_layer.rs` — `PromptLayer` trait + `Box<dyn PromptLayer>` 包装
-- `src/thinker/render_style.rs` — `ProviderRenderStyle` 三态
-- `src/thinker/streaming.rs` — `BlockState` 流式状态机
 - `src/thinker/soul.rs` — soul.md 解析
 - `src/thinker/identity_files.rs` — 身份文件注入
 - `src/thinker/context.rs` — `ThinkerContext` 字段定义
 - `src/thinker/runtime_context.rs` — `RuntimeContextLayer`（priority 1720，唯一动态 SYSTEM 层）
 - `src/thinker/nudges.rs` — 9 个 model-facing 提示词字面量（`MAX_STEPS_HINT` / `MAX_OUTPUT_TOKENS_RESUME_NUDGE` / `INTERRUPTION_NOTE` 等），从 harness 迁出后**集中**在这里供各 layer 引用
 - `src/thinker/security_context.rs` — `SecurityLayer`
-- `src/thinker/curated_memory.rs` — `CuratedMemoryLayer`（拼装 `MemoryEnvelope` 的 stable 段）
-- `src/thinker/recall_context.rs` — `RecallContext` 与 transient tail 拼装
+- `src/thinker/layers/curated_memory.rs` — `CuratedMemoryLayer`（拼装 `MemoryEnvelope` 的 stable 段）
+- `src/orchestrator/harness_bridge/prompt_build.rs` — transient-tail / recall-context 拼装（由 `HarnessDeps::recall_context` 承载，`src/harness/deps.rs`）
 - `src/thinker/project_instructions.rs` — 各种 `*Layer` 散件
 - `src/thinker/xml_util.rs` — XML 转义 / 包裹
 - `src/thinker/interaction.rs` — `InteractionManifest` 频道能力感知
@@ -293,4 +268,4 @@ pub enum ProviderRenderStyle { Xml, Fenced, Inline }
 - [Skill 触发器](/docs/zh/concepts/skill-system) — `skill_instructions` layer 来源
 - [架构 Harness 章节](/docs/zh/architecture/harness) — 层拼装位置
 - [Thinker 源码](https://github.com/rootazero/Aleph/blob/main/src/thinker) — 完整 layer 列表
-- [R10 字节数预算测试](https://github.com/rootazero/Aleph/blob/main/src/harness/tests/budget.rs) — `CEILING = 5055` 共享尺
+- [R10 字节数预算测试](https://github.com/rootazero/Aleph/blob/main/src/harness/tests/budget.rs) — `CEILING = 5535` 共享尺

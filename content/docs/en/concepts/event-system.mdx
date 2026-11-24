@@ -3,12 +3,11 @@ title: "Event System"
 description: Event-driven architecture with EventBus, typed events, filters, and handlers. Decouples subsystems via asynchronous event passing.
 ---
 
-The `event` module implements an event-driven architecture that decouples Aleph's subsystems. Instead of direct method calls between modules, components publish events to buses and subscribe to the events they care about. `src/event/` ships two related but distinct buses:
+The `event` module implements an event-driven architecture that decouples Aleph's subsystems. Instead of direct method calls between modules, components publish events to buses and subscribe to the events they care about. `src/event/` ships a single process-wide bus:
 
-- **`EventBus`** (`src/event/bus.rs`) -- per-agent tokio `broadcast` channel; created via `EventBus::new()` / `EventBus::with_buffer_size` / `EventBus::with_config`. Optionally connects to a `GlobalBus` for cross-agent aggregation. **It is not a singleton.**
-- **`GlobalBus`** (`src/event/global_bus.rs`) -- a process-wide **singleton** guarded by `once_cell::sync::Lazy`, accessed via `GlobalBus::global()`. It aggregates events from multiple `EventBus` instances and routes callbacks through `EventFilter`s.
+- **`GlobalBus`** (`src/event/global_bus.rs`) — a process-wide **singleton** guarded by `once_cell::sync::Lazy`, accessed via `GlobalBus::global()`. Producers broadcast through `GlobalBus::broadcast(agent_id, session_id, event)`; subscribers attach via `subscribe_async` with an `EventFilter`. The per-instance `EventBus` (src/event/bus.rs) was removed in the 2026-08 severed-wire audits.
 
-`AlephEvent` (`src/event/types.rs`) is the shared payload type for both buses; `#[serde(tag = "type", content = "data")]` makes it directly JSON-serializable.
+`AlephEvent` (`src/event/types.rs`) is the shared payload type; `#[serde(tag = "type", content = "data")]` makes it directly JSON-serializable.
 
 ## Design Philosophy
 
@@ -18,36 +17,28 @@ Event-driven architecture provides three benefits in Aleph:
 2. **Observability** — Every significant action produces an event that can be logged, audited, or streamed to clients
 3. **Extensibility** — New features can subscribe to existing events without modifying publishers
 
-`EventBus` defaults to a 1024-slot broadcast buffer; it retains history up to `MAX_HISTORY_SIZE = 10000`. `GlobalBus` also defaults to 1024 slots. All event handling is asynchronous and non-blocking.
+`GlobalBus` defaults to a 1024-slot broadcast buffer (`DEFAULT_BUFFER_SIZE`). It has no history replay ring — `subscribe_broadcast()` is lossy (`RecvError::Lagged(n)`), and a subscriber must re-read authoritative state after a lag. All event handling is asynchronous and non-blocking.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│         GlobalBus (singleton, Lazy)      │
-│  ┌─────────────┐  ┌──────────────────┐ │
-│  │  broadcast  │  │  Subscription    │ │
-│  │  (GlobalEvt)│  │  Registry        │ │
-│  └─────────────┘  └──────────────────┘ │
-│       ▲                                 │
-│       │ auto-broadcast when EventBus    │
-│       │ is connected                    │
-│       │                                 │
-│ ┌──────────────────────────────────────┐│
-│ │ EventBus (per-agent, NOT singleton)  ││
-│ │  broadcast(TimestampedEvent)         ││
-│ │  + history ring                      ││
-│ └──────────────────────────────────────┘│
-│       │                           ▲     │
-│       │ publish(AlephEvent)       │ recv│
-│       ▼                           │     │
-│ ┌──────────┐              ┌─────────────┐
-│ │ Publisher│              │  Handler    │
-│ │ (any     │              │ (impl       │
-│ │ module)  │              │ EventHandler│
-│ └──────────┘              └─────────────┘
+┌──────────────────────────────────────────┐
+│          GlobalBus (singleton, Lazy)      │
+│  ┌──────────────┐  ┌───────────────────┐ │
+│  │  broadcast   │  │  Subscription map │ │
+│  │  channel     │  │  (EventFilter)    │ │
+│  └──────────────┘  └───────────────────┘ │
+│       ▲                 ▲                 │
+│       │ broadcast()     │ subscribe_async │
+│       │                 │                 │
+│  ┌──────────┐    ┌─────────────────────┐  │
+│  │ Publisher│    │  Handler            │  │
+│  │ (any     │    │  (impl EventHandler │  │
+│  │ module)  │    │   or closure)       │  │
+│  └──────────┘    └─────────────────────┘  │
+└──────────────────────────────────────────┘
 ```
 
 ---
@@ -72,30 +63,6 @@ let sub_id = bus.subscribe(
 
 `GlobalBus::broadcast(agent_id, session_id, event)` wraps the event with `source_agent_id` / `source_session_id` / `timestamp` / `sequence` and dispatches it to all subscribers whose filters match.
 
-### EventBus (per-agent)
-
-```rust
-use alephcore::event::{EventBus, AlephEvent, SessionInfo};
-
-let bus = EventBus::with_buffer_size(2048);
-bus.publish(AlephEvent::SessionCreated(
-    SessionInfo {
-        id: session_id.clone(),
-        parent_id: None,
-        agent_id: "main".into(),
-        model: "gpt-4-turbo".into(),
-        created_at: chrono::Utc::now().timestamp_millis(),
-    }
-)).await;
-```
-
-The `EventBus`:
-
-- Holds a tokio `broadcast::Sender<TimestampedEvent>` with a configurable buffer (default 1024)
-- Wraps each published event as `TimestampedEvent { event, timestamp, sequence }`; `sequence` is monotonically incremented by an internal `AtomicU64`
-- Retains history up to `MAX_HISTORY_SIZE = 10000`; configurable via `EventBusConfig { buffer_size, enable_history, max_history_size }`
-- Can optionally connect to a `GlobalBus` (after setting `agent_id` / `session_id`); connected buses auto-broadcast through `GlobalBus::broadcast`
-
 ### EventHandler Trait
 
 ```rust
@@ -117,7 +84,7 @@ Implementors receive `AlephEvent` and may return new events to publish:
 - WebSocket handlers forward to connected clients
 - Memory handlers update the knowledge graph
 
-Note that the trait is **not** generic over `E: Event` -- the receiver signature is `&AlephEvent`, and subscriptions are declared via `subscriptions() -> Vec<EventType>`. `EventContext` (`src/event/handler.rs`) carries `bus: EventBus`, `abort_signal: Arc<AtomicBool>`, and `session_id: Arc<RwLock<Option<String>>>`.
+Note that the trait is **not** generic over `E: Event` -- the receiver signature is `&AlephEvent`, and subscriptions are declared via `subscriptions() -> Vec<EventType>`. `EventContext` (`src/event/handler.rs`) is now an empty marker struct — its previous `bus` / `abort_signal` / `session_id` fields were removed in the 2026-08 severed-wire audits, and `EventHandlerRegistry` was removed with them (no production caller). The boot path wires handlers directly via `GlobalBus::global().subscribe_async(filter, |ev| handler.handle(&ev.event, &ctx))`.
 
 ### EventFilter
 
@@ -168,26 +135,27 @@ let filter = EventFilter::all();   // equivalent to EventFilter::new(vec![EventT
 
 ### Event Ordering and Timestamps
 
-Each event is wrapped in `TimestampedEvent`:
+`GlobalEvent` (`src/event/global_bus.rs`) wraps each broadcast event:
 
 ```rust
-pub struct TimestampedEvent {
+pub struct GlobalEvent {
+    pub source_agent_id: String,
+    pub source_session_id: String,
     pub event: AlephEvent,
     pub timestamp: i64,   // chrono::Utc::now().timestamp_millis()
-    pub sequence: u64,    // monotonically incremented by EventBus's AtomicU64
+    pub sequence: u64,    // monotonically incremented by GlobalBus
 }
 ```
 
-`EventBus` retains an in-process history ring (`Arc<RwLock<Vec<TimestampedEvent>>>`); new subscribers replay from there. `GlobalEvent` (`src/event/global_bus.rs`) adds `source_agent_id` / `source_session_id` and its own `sequence`, giving a deterministic ordering for cross-agent delivery.
+`GlobalBus` has no history replay ring — the `broadcast` channel is bounded and lossy (`RecvError::Lagged(n)`). After a lag, a subscriber must re-read authoritative state rather than assume continuity. `GlobalEvent`'s `sequence` gives a deterministic ordering for cross-agent delivery.
 
 ---
 
 ## Usage Example
 
 ```rust
-use alephcore::event::{EventBus, EventHandler, EventContext, EventType, AlephEvent, HandlerError};
+use alephcore::event::{GlobalBus, EventFilter, EventHandler, EventContext, EventType, AlephEvent, HandlerError};
 use async_trait::async_trait;
-use std::sync::Arc;
 
 struct MemoryLogger;
 
@@ -209,20 +177,41 @@ impl EventHandler for MemoryLogger {
     }
 }
 
-let bus = EventBus::new();
-let mut registry = EventHandlerRegistry::new();
-registry.register(Arc::new(MemoryLogger));
-let _handles = registry.start(EventContext::new(bus.clone())).await;
+let handler = std::sync::Arc::new(MemoryLogger);
+let filter = EventFilter::new(handler.subscriptions());
+let ctx = EventContext::new();
+GlobalBus::global()
+    .subscribe_async(filter, move |global_event| {
+        let handler = handler.clone();
+        let event = global_event.event;
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handler.handle(&event, &ctx).await {
+                tracing::warn!(error = %e, "MemoryLogger handle error");
+            }
+        });
+    })
+    .await;
 ```
+
+---
+
+## History: Per-agent EventBus
+
+Before the 2026-08 severed-wire audits, `src/event/` shipped two buses:
+
+- **`EventBus`** (src/event/bus.rs) — a per-agent tokio `broadcast` channel created via `EventBus::new()` / `with_buffer_size` / `with_config`; it wrapped events as `TimestampedEvent { event, timestamp, sequence }` and retained a history ring up to `MAX_HISTORY_SIZE = 10000`, optionally connecting to `GlobalBus`.
+- **`GlobalBus`** — the process-wide singleton (kept).
+
+The audits found no production caller for `EventBus` or for `EventHandlerRegistry` (a `Vec<Arc<dyn EventHandler>>` plus `start`/`stop` lifecycle), so both were removed; `EventContext` also lost its `bus` / `abort_signal` / `session_id` fields. The boot path now wires handlers directly via `GlobalBus::global().subscribe_async(filter, |ev| handler.handle(&ev.event, &ctx))` (see `src/bin/aleph-server/commands/start/mod.rs`).
 
 ---
 
 ## Code Location
 
 - `src/event/mod.rs` — Module entry point, re-exports
-- `src/event/bus.rs` — `EventBus` (per-agent) + `EventBusConfig` + `EventSubscriber`
 - `src/event/global_bus.rs` — `GlobalBus` singleton + `GlobalEvent` + `Subscription` + `SubscriptionId`
-- `src/event/handler.rs` — `EventHandler` trait + `EventHandlerRegistry` + `EventContext`
+- `src/event/handler.rs` — `EventHandler` trait + `EventContext`
 - `src/event/filter.rs` — `EventFilter` struct
 - `src/event/types.rs` — `AlephEvent` + `EventType` + payload types
 

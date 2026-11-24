@@ -1,556 +1,301 @@
 ---
 title: "Gateway Architecture"
-description: "WebSocket control plane on port 18790, JSON-RPC 2.0 protocol, multi-channel routing, middleware pipeline, event distribution, and connection lifecycle."
+description: "How the Aleph gateway accepts connections, gates callers, dispatches requests, and emits events"
 ---
 
-The Gateway is the single entry point for all communication with Aleph. It runs a WebSocket server on `ws://127.0.0.1:18790/ws`, speaks JSON-RPC 2.0, and routes requests from any connected client -- whether a native macOS app, a Telegram bot, or the terminal CLI -- to the appropriate handler. This page covers the protocol layer, message pipeline, multi-channel routing, the event system that powers real-time streaming, and hardening mechanisms such as self-signed TLS with client-side TOFU and single-source error receipts.
+The Aleph gateway is the control plane between clients and agents, tools, and workflows: it accepts connections, decides who the caller is, routes each request to a handler, and broadcasts internally generated events to the connections that subscribed to their topic. This page describes the shape those mechanisms actually have in the current code. For the wire format see [Protocol v1](../gateway/protocol-v1), for credentials and pairing see [Authentication](../gateway/auth), and for the method catalogue see [Method reference](../gateway/methods/index).
 
-For how sessions are managed once a request arrives, see [Session Service](./session-service). For what happens after routing reaches the agent, see [Agent Harness](./harness).
+## Gateway Responsibilities
 
----
+The gateway process brings three things together:
 
-## Gateway Components
+- **Accepting connections**: the HTTP routing table is assembled in `src/gateway/server/mod.rs:1133`. `/ws` is the WebSocket upgrade entry, `/health`, `/ready`, and `/metrics` are operational probes, and everything else falls through to the control plane (`control_plane`). Panel assets, artifacts, canvas assets, attachments, and a capability-limited browser viewer are merged in as separate routes. The same router also carries the OpenAI-compatible HTTP face (`src/gateway/openai_api/router.rs`): `/v1/models`, `/v1/models/{model_id}`, `/v1/chat/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/health`.
+- **Executing requests**: JSON-RPC 2.0 requests enter the method registry through the middleware chain and land on a concrete handler.
+- **Broadcasting events**: internally generated events enter the bus in `src/gateway/event_bus.rs` and are delivered per topic to the connections that subscribed.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Gateway Server                               │
-│                  ws://127.0.0.1:18790/ws                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐        │
-│  │   Inbound    │     │   Handler    │     │   Outbound   │        │
-│  │   Router     │ ──▶ │   Registry   │ ──▶ │   Emitter    │        │
-│  │              │     │              │     │              │        │
-│  │ • Parse req  │     │ • Route      │     │ • Stream     │        │
-│  │ • Validate   │     │ • Execute    │     │ • Events     │        │
-│  └──────────────┘     └──────────────┘     └──────────────┘        │
-│                                                                     │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐        │
-│  │   Session    │     │    Event     │     │  Channel     │
-│  │   Manager    │     │     Bus      │     │   Registry   │
-│  │              │     │              │     │              │
-│  │ • SQLite     │     │ • Pub/Sub    │     │ • Telegram   │
-│  │ • Compaction │     │ • Topics     │     │ • Discord    │
-│  │ • History    │     │ • Subscribe  │     │ • iMessage   │
-│  └──────────────┘     └──────────────┘     └──────────────┘        │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+## Transport Entries
 
-The Gateway has six core components:
+The three entries share one RPC execution and event dispatch core. They differ in transport, in how they authenticate, and in how much of the method surface they expose.
 
-- **Inbound Router** -- Parses incoming JSON-RPC frames, validates structure, and dispatches to the correct handler
-- **Handler Registry** -- Maps method names (e.g., `agent.run`, `session.list`) to handler functions
-- **Outbound Emitter** -- Sends streaming events and final responses back to the client
-- **Session Manager** -- Persists conversation history in SQLite (`session.*` RPC still uses `SessionManager`; the `session_events` table is the single source of truth, written by the `src/session/` actor)
-- **Event Bus** -- Pub/sub system for real-time event distribution with glob-pattern subscriptions
-- **Channel Registry** (`ChannelRegistry`) -- Tracks active chat integrations (Telegram, Discord, iMessage, ...). The old `InterfaceRegistry` name is no longer used.
+| Entry | Transport | Authentication | Method surface | Limits | Code |
+|-------|-----------|----------------|----------------|--------|------|
+| `/ws` | WebSocket (compatibility entry) | `connect` handshake for a role | Full RPC method set | The state's `max_connections`, plus a per-client-IP concurrency cap with a loopback exemption | `src/gateway/server/connection/upgrade.rs` |
+| Desktop IPC | Unix domain socket | Same user account (`require_same_user`) | Read-only: `system.hello`, `health`, `sessions.list` | `MAX_CONNECTIONS=8`, `WIRE_BUDGET=16 MiB`, `WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | WebSocket over native TLS | Session cookie obtained from `POST /v1/session` | Full RPC method set | `MAX_MESSAGE=1 MiB`, `MAX_SESSIONS=256`, `MAX_SOCKETS=8`, TTL 300s | `src/gateway/server/connection/web_v1.rs` |
 
----
+### Compatibility WebSocket Entry
 
-## JSON-RPC 2.0 Protocol
+`/ws` is the oldest entry and is still on the production path, but under the current contract it carries a compatibility role; the target entries for Protocol v1 are the two below. The upgrade logic lives in `ws_upgrade_handler` in `src/gateway/server/connection/upgrade.rs`, and a connection that gets through reaches the full RPC method set.
 
-All communication uses [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over WebSocket frames. There are three message types.
+Three rejections happen before the upgrade:
 
-### Request (Client to Gateway)
+| Condition | Rejection |
+|-----------|-----------|
+| Remote plaintext (no TLS, and `allow_insecure_remote` not set) | 426 `TLS required for remote connections` |
+| `Origin` not allowed by the state's `origin_policy` | 403 `origin not allowed` |
+| Global connection count reached the state's `max_connections` | 503 `Connection limit reached` |
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "uuid-xxx",
-  "method": "agent.run",
-  "params": {
-    "message": "Hello, what can you do?",
-    "session_key": "agent:main:main"
-  }
-}
-```
+The per-client-IP concurrency cap exempts loopback, because the panel and local CLIs open several connections at once. The state's `max_connections` and `origin_policy` fields are defined in `src/gateway/server/mod.rs`. The real client IP behind a trusted proxy is parsed by `parse_trusted_ips`, which accepts bare IPs only and rejects CIDR ranges.
 
-The `id` field is a client-generated UUID. The Gateway returns the same `id` in the response so the client can match request to response.
+### Desktop IPC Entry
 
-### Response (Gateway to Client)
+Desktop IPC is the read-only entry for the desktop host: a Unix domain socket that only the same user account can reach. The entry point is a startup flag, `--desktop-ipc <socket>` (`src/bin/aleph-server/cli.rs:54`), and the server binds the listener in `run_with_desktop_ipc` at `src/gateway/server/mod.rs:1424`.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "uuid-xxx",
-  "result": {
-    "run_id": "run-123",
-    "status": "running"
-  }
-}
-```
+Once a connection is established, the following constraints apply (`src/gateway/server/connection/local_ipc.rs`):
 
-For `agent.run`, the initial response confirms the run has started. The actual AI output arrives via streaming events.
+- **Same user account**: `require_same_user` (`shared/client/src/local_ipc.rs:181`) checks the peer uid and disconnects on mismatch.
+- **The first frame must be `system.hello`**: otherwise the gateway replies `AUTH_REQUIRED` / `system.hello must be first`.
+- **Method allowlist**: `execute` lets through `health` and `sessions.list` only, and answers everything else with `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`.
+- **Identity**: the role comes from `active_desktop_owner`, and the caller user is pinned to `OWNER_USER_ID`.
+- **No network rights**: the connection's origin is recorded as `NO_NETWORK_ORIGIN` (0.0.0.0), so it never receives a permission that requires a network origin.
 
-### Event (Gateway to Client, no id)
+Resource limits:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.chunk",
-    "data": {
-      "run_id": "run-123",
-      "content": "Hello! I can help you with..."
-    }
-  }
-}
-```
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `MAX_CONNECTIONS` | 8 | Concurrent Desktop IPC connections |
+| `WIRE_BUDGET` | 16 MiB | Per-connection budget of bytes in flight; semaphore permits are charged by frame length |
+| `WRITE_TIMEOUT` | 5s | Timeout for a single write |
+| `MAX_FRAME_BYTES` | 8 MiB | Maximum payload size of one frame (`shared/client/src/local_ipc.rs`) |
+| `MAX_INFLIGHT` | 8 | In-flight requests per connection (`shared/client/src/local_ipc.rs`) |
 
-Events are server-initiated notifications (no `id` field). Clients subscribe to event topics via the `events.subscribe` method.
+A response larger than `MAX_FRAME_BYTES` is answered with `INTERNAL_ERROR` / `response exceeds Desktop IPC limits`.
 
----
+### Web v1 Entry
 
-## RPC Method Reference
+Web v1 is the target network entry for Protocol v1: WebSocket over native TLS, with credentials obtained through a one-time exchange instead of putting a long-lived token into a query parameter.
 
-### Agent Methods
+Two steps:
 
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `agent.run` | Start agent execution | `message`, `session_key`, `thinking?`, `model?` |
-| `agent.status` | Get run status | `run_id` |
-| `agent.cancel` | Cancel a running agent | `run_id` |
-| `agent.abort` | Force-abort immediately | `run_id` |
+1. `POST /v1/session` exchanges a credential for a session. The request body is `{"device_token": "..."}` or `{"bootstrap_ticket": "..."}` (the `Credentials` enum in `src/gateway/server/connection/web_v1.rs`). On success the gateway returns 204 and sets `Set-Cookie: __Host-aleph-v1=<uuid>; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=300`, together with `Cache-Control: no-store`.
+2. `GET /v1/ws` upgrades to a WebSocket. The credential travels in the cookie (read by `cookie_handle`), and the subprotocol is `aleph.protocol.v1`.
 
-### Session Methods
+Two gates run first:
 
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `session.get` | Get session info | `session_key` |
-| `session.list` | List all sessions | `filter?` |
-| `session.history` | Get message history | `session_key`, `limit?` |
-| `session.compact` | Trigger compression | `session_key` |
-| `session.delete` | Delete a session | `session_key` |
+- **Same origin**: `same_origin` requires a request without a query string, an `Origin` header exactly equal to the authority's https origin, and an authority free of `@ / \ ? #`; otherwise the gateway answers 403.
+- **Throttle**: `throttle` charges the client's IP against `RateLimitScope::Auth` and answers 429 when the quota is exhausted.
 
-### Configuration Methods
+The session is bound in a `WebBinding` (`store`, `origin`, `token_id`, `device_id`, `user`, `expires`). `current_role` returns `None` once the binding expires, and on every call it re-checks with `active_device_principal` that the device token is still valid and still belongs to the same user.
 
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `config.get` | Get current config | -- |
-| `config.patch` | Partial update (JSON Merge Patch) | `patch` |
-| `config.apply` | Full config replace | `config` |
-| `config.reload` | Reload from disk | -- |
+## Connections and Identity
 
-### Event Methods
+A connection enters the connection table the moment it is accepted, and at that point it holds no permissions; its role is `guest`. The real authorization happens after `connect`.
 
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `events.subscribe` | Subscribe to event topic | `pattern` (glob) |
-| `events.unsubscribe` | Unsubscribe | `pattern` |
-| `events.list` | List active subscriptions | -- |
+### The Login Wall
 
-### Memory Methods
-
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `memory.store` | Store a fact | `content`, `metadata?` |
-| `memory.search` | Search facts | `query`, `limit?` |
-| `memory.delete` | Delete a fact | `fact_id` |
-| `memory.stats` | Get memory statistics | -- |
-
-### Browser Methods (CDP)
-
-| Method | Description | Key Parameters |
-|--------|-------------|----------------|
-| `browser.navigate` | Go to URL | `url` |
-| `browser.click` | Click element | `selector` |
-| `browser.type` | Type text | `selector`, `text` |
-| `browser.screenshot` | Take screenshot | `selector?` |
-| `browser.evaluate` | Run JavaScript | `script` |
-
-### Other Method Domains
-
-> The full and authoritative list lives in [Gateway Methods Reference](/docs/en/gateway/methods) and the registration block at `src/gateway/handlers/mod.rs::HandlerRegistry::new`. Below is a domain-grouped summary:
-
-| Domain | Description |
-|--------|---------|
-| `connect` | Top-level method (no prefix); the first frame on a `/ws` connection must be `connect`; carries `device_token` / `bootstrap_ticket` / `token` |
-| `pairing.*` | Channel sender approval (iMessage / Telegram unknown senders) -- **not** device auth |
-| `plugin.*` / `plugins.*` | Plugin install / enable / disable / call; CC-compatible dual prefix |
-| `mcp.*` | MCP server lifecycle + `call` + on-demand `list_*` resource / prompt discovery |
-| `skill.*` | Skill list / install / activate (v2 `SkillSystem`) |
-| `generation.*` | Image / video / voice generation |
-| `cron.*` | Scheduled tasks: list / add / remove / run |
-| `heartbeat.*` / `dreaming.*` | Background-task RPCs |
-| `artifacts.*` | Artifact store: list / get / put |
-| `voice.*` | Voice sessions + delta topics |
-| `hub.*` | Aleph Hub: `primer` / `catalog_client` / `install` / `verify` / `trust` |
-| `strategy.*` / `goal.*` / `loop.*` | Three independent long-task subsystems |
-| `graph.*` | Governance topology node / edge queries |
-| `cluster.*` | Cluster federation RPCs (`environments.list` / `node_invoke`, etc.) |
-| `identity.*` / `agent_identity.*` | Per-agent signed operation ledger |
-| `exec_approvals.*` / `secret_approvals.*` | Action / secret approval |
-| `gateway.*` | Gateway self: `credentials` / `identity.get` / `metrics.lanes` / `metrics.run_concurrency`, etc. |
-| `wizard.*` | Wizard sessions (RPC-driven, not a CLI subcommand) |
-
----
-
-## Message Pipeline
-
-When a WebSocket frame arrives, the Gateway processes it through a layered middleware pipeline:
-
-```
-WebSocket Frame
-    │
-    ▼
-┌────────────────────────────────┐
-│ 1. Frame Parsing               │
-│    • Deserialize JSON-RPC      │
-│    • Validate structure        │
-│    • Extract method + params   │
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 2. Middleware Pipeline         │
-│    • TraceLayer (span/req-id)  │
-│    • MetricsLayer (timing)     │
-│    • AuthLayer (auth check)    │
-│    • RateLimitLayer (quota)    │
-│    • ValidateLayer (schema)    │
-│    • HandlerService (dispatch) │
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 3. Handler Dispatch            │
-│    • Look up method in registry│
-│    • agent.run → ExecutionEngine│
-│    • session.* → SessionManager│
-│    • config.* → ConfigManager  │
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 4. Execution                   │
-│    • Handler processes request │
-│    • May spawn AgentLoop       │
-│    • Streams events via EventBus│
-└────────────────┬───────────────┘
-                 │
-                 ▼
-┌────────────────────────────────┐
-│ 5. Response                    │
-│    • JSON-RPC result frame     │
-│    • Or JSON-RPC error frame   │
-└────────────────────────────────┘
-```
-
-The middleware pipeline runs for every JSON-RPC request in this order:
-
-1. **TraceLayer** -- Attaches request spans and trace IDs for observability
-2. **MetricsLayer** -- Records request timing and method-level metrics
-3. **AuthLayer** -- Validates authentication (skipped when `auth.mode = "none"`)
-4. **RateLimitLayer** -- Enforces per-identity, per-scope rate limits
-5. **ValidateLayer** -- Validates request schema before reaching the handler
-6. **HandlerService** -- Dispatches to the registered handler for execution
-
----
-
-## Multi-Channel Routing
-
-Aleph supports multiple chat interfaces simultaneously. Each interface (Telegram, Discord, iMessage, etc.) translates its platform-specific messages into the unified JSON-RPC protocol and forwards them to the Gateway.
-
-### Channel Adapter (`src/gateway/channel.rs`)
-
-Every channel adapter implements the `Channel` trait; there are no compile-time feature flags -- channels are registered at runtime through `[channels.<type>]` into `ChannelRegistry`:
+`wall_admits` (`src/gateway/server/connection/auth.rs:64`) is the single authorization predicate:
 
 ```rust
-#[async_trait]
-pub trait Channel: Send + Sync {
-    fn info(&self) -> &ChannelInfo;
-    fn state(&self) -> &ChannelState;
-    fn id(&self) -> &ChannelId;
-    fn capabilities(&self) -> &ChannelCapabilities;
-    async fn health(&self) -> ChannelHealth;
-    async fn start(&mut self) -> ChannelResult<()>;
-    async fn stop(&mut self) -> ChannelResult<()>;
-    async fn send(&self, message: OutboundMessage) -> ChannelResult<SendResult>;
-    async fn send_typing(&self, conversation_id: &ConversationId) -> ChannelResult<()>;
-    fn approval_capability(&self) -> Option<Arc<dyn ChannelApprovalCapability>>;
+pub fn wall_admits(role: Option<&str>, method: &str) -> bool {
+    matches!(role, Some("operator" | "member")) || method == "connect"
 }
 ```
 
-Built-in adapters are wired through `ChannelFactory` entries registered in `interfaces::register_channel_plugins`. An unregistered factory is unreachable from config. `imessage` and `cli` deliberately bypass that table -- iMessage is constructed directly in `initialize_channels`, and CLI is not a configurable channel type.
+A connection holding the `operator` or `member` role may send any method; a `guest` may send only `connect`. The message an unauthorized connection receives is `LOGIN_WALL_MESSAGE` at `:13` of the same file: `Not authorized: present a valid Gateway token via \`connect\` to access this core.`
 
-### Available Interfaces
+The same predicate is used in both directions: once before dispatching a request, and once again before delivering an event. Judging only one direction would let unauthorized connections receive events that were meant to be blocked.
 
-| Interface | Location | Platform |
-|-----------|----------|----------|
-| CLI | `interfaces/cli/` | All platforms |
-| Telegram | `src/gateway/interfaces/telegram/` | All platforms |
-| Discord | `src/gateway/interfaces/discord/` | All platforms |
-| iMessage | `src/gateway/interfaces/imessage/` (Local + BlueBubbles transports) | Local: macOS only; BlueBubbles: any OS |
-| Slack / Matrix / Mattermost / Signal / IRC / Nostr / XMPP / Email / Webhook / WeChat / Feishu / Line / QQ / MS Teams | `src/gateway/interfaces/<name>/` | Per platform |
-| WebChat | Embedded in `aleph-server` (via `rust_embed`) | All platforms |
+### The system.hello Handshake
 
-### Session Key Resolution
+`system.hello` (`src/gateway/handlers/system_hello.rs`) is the Protocol v1 handshake. It negotiates the protocol and grants nothing.
 
-Each channel produces a unique session key that determines whether conversations are shared or isolated (format decided by `DmScope` and `PeerKind`, see [`src/routing/session_key.rs`]):
-
-| Session Key Format | Use Case |
-|-------------------|----------|
-| `agent:main:main` | Cross-channel shared session (`DmScope::Main` or main session) |
-| `agent:main:dm:user123` | Per-user isolated DM (`DmScope::PerPeer`, **default**) |
-| `agent:main:telegram:dm:user123` | Per-channel per-user DM (`DmScope::PerChannelPeer`) |
-| `agent:main:discord:group:guild-id` | Discord server channel (Group) |
-| `agent:main:cron:daily-summary` | Cron job / webhook (Task) |
-| `subagent:agent:main:translator` | Sub-agent delegation (Subagent) |
-| `agent:main:ephemeral:uuid` | Temporary, no persistence (Ephemeral) |
-
-DM scope can be configured per interface:
-
-```rust
-pub enum DmScope {
-    Main,           // All DMs share the main session
-    PerPeer,        // Isolated session per user (default)
-    PerChannelPeer, // Isolated per channel + user
-}
-```
-
----
-
-## Event System
-
-The EventBus provides a pub/sub mechanism for real-time event distribution. Clients subscribe using glob patterns.
-
-### Event Topics
-
-| Pattern | Events |
-|---------|--------|
-| `stream.*` | All streaming events |
-| `stream.chunk` | Text content chunks |
-| `stream.agent_trace` | Structured loop-originated execution trace |
-| `stream.tool_start` | Tool execution started |
-| `stream.tool_end` | Tool execution completed |
-| `agent.*` | Agent lifecycle events |
-| `agent.started` | Run started |
-| `agent.completed` | Run completed |
-| `agent.error` | Run error |
-| `session.*` | Session events |
-| `config.*` | Configuration change events |
-| `system.tick` | Periodic heartbeat (uptime, connections, state version) |
-| `system.shutdown` | Server shutdown notification |
-
-### Subscribing to Events
+Request:
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": "sub-1",
-  "method": "events.subscribe",
-  "params": { "pattern": "stream.*" }
-}
-```
-
-After subscribing, the client receives all matching events as server-initiated notifications until it unsubscribes.
-
----
-
-## Connection Lifecycle
-
-### Authentication Flow
-
-```
-Client WebSocket Connect
-    │
-    ▼
-┌─────────────────────────────────┐
-│ Loopback connection?            │
-│   Yes → Zero-config operator    │
-│         (no credentials)        │
-│   No  → First frame must be     │
-│         "connect" method        │
-└─────────────────────────────────┘
-    │
-    ▼ (remote)
-┌─────────────────────────────────┐
-│ resolve_connect_auth            │
-│   1. Device token (aleph-dt-*)  │
-│      -- paired device, long-lived│
-│   2. Bootstrap ticket           │
-│      (aleph-bt-*) -- 5 min,    │
-│      single-use                 │
-│   3. Shared Gateway token       │
-│      (aleph-<uuid>, HMAC)       │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ Authorized → role = operator    │
-│   WS dispatch accepts all       │
-│   Remote WS closed with 4001    │
-│   (token rotation / device      │
-│   revocation)                   │
-└─────────────────────────────────┘
-```
-
-The default bind is `127.0.0.1` (loopback only); loopback is the zero-config operator and needs no credential. Set `[gateway] host = "0.0.0.0"` to open the LAN -- a remote device can then reach the socket but is **walled until it presents a valid credential** at `connect`. The `is_loopback` check reads the raw socket peer (not `X-Forwarded-For`), preventing forged headers from granting zero-config operator. A valid credential = full operator authority (identical to local); remote WS sockets are closed immediately on token rotation (`gateway.token.rotate`) or per-device revoke (`gateway.devices.revoke`), not at the next handshake.
-
-### Connect Request
-
-A remote client must send a `connect` message as the first frame:
-
-```json
-{
-  "method": "connect",
+  "id": 1,
+  "method": "system.hello",
   "params": {
-    "minProtocol": 1,
-    "maxProtocol": 1,
+    "protocol": { "major": 1, "minor": 0 },
     "client": {
-      "id": "macos-app",
-      "version": "1.0.0",
-      "platform": "macos"
+      "name": "aleph-nsh-desktop",
+      "version": "0.1.0",
+      "platform": "linux",
+      "ui_runtime": "nsh"
     },
-    "device_token": "aleph-dt-...",
-    "bootstrap_ticket": "aleph-bt-..."
+    "features": ["event_replay", "snapshot", "binary_channel"]
   }
 }
 ```
 
-> Loopback clients omit the credential fields entirely. A remote client sends `bootstrap_ticket` on first pairing (receiving a `device_token` back), then `device_token` on every reconnect. `token` (the legacy shared Gateway token) is accepted as a fallback. `device_id` is **client-asserted** and shares a namespace with cluster nodes, so the exchange refuses a `device_id` already naming a non-Panel device.
-
----
-
-## OpenAI-Compatible Routes
-
-In addition to the WebSocket JSON-RPC API, the Gateway exposes an OpenAI-compatible HTTP API on the same port (`18790`) via `src/gateway/openai_api/`. This allows existing clients and tools that speak the OpenAI API format to connect to Aleph without modification.
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/v1/models` | GET | List available models |
-| `/v1/models/{model_id}` | GET | Get model details |
-| `/v1/chat/completions` | POST | Chat completions (streaming + non-streaming) |
-| `/v1/embeddings` | POST | Text embeddings |
-| `/v1/responses` | POST | OpenAI Responses API |
-| `/v1/health` | GET | API health check |
-
-These routes share the WebSocket bearer-token mechanism. With `[gateway] allow_insecure_remote = false` (the default), remote HTTP access must arrive over TLS; plaintext to a non-loopback peer is refused.
-
----
-
-## Hot Reload
-
-The Gateway watches `~/.aleph/config/aleph.toml` for changes and applies them without restarting:
-
-```
-~/.aleph/config/aleph.toml modified
-    │
-    ▼
-┌─────────────────────────────────┐
-│ Debounce (500ms)                │
-└─────────────────┬───────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────┐
-│ Parse + validate new config     │
-└─────────────────┬───────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────┐
-│ Apply changes:                  │
-│ • Restart affected channels     │
-│ • Update routing rules          │
-│ • Emit config.changed event     │
-└─────────────────────────────────┘
-```
-
-The `[execution]` run caps (`max_runs_global` / `max_runs_per_agent`) hot-reload via an arc-swap global semaphore without restart.
-
----
-
-## HTTP Endpoints
-
-Alongside the WebSocket server, the Gateway also serves HTTP endpoints on the same port:
-
-| Endpoint | Purpose |
-|----------|---------|
-| `/ws` | WebSocket upgrade endpoint |
-| `/health` | Health check (returns 200 OK) |
-| `/metrics` | Prometheus-compatible metrics |
-| `/` | Static files for built-in WebChat UI (ControlPlane) |
-| `/login` | Session-cookie login page |
-| `/auth/login` | Login form submission |
-| `/auth/logout` | Logout (clears session cookie) |
-
-When A2A (Agent-to-Agent) is enabled, additional A2A routes are mounted on the same HTTP server.
-
----
-
-## Interface Configuration Example
+Response:
 
 ```json
 {
-  "interfaces": {
-    "telegram": {
-      "token": "BOT_TOKEN",
-      "allowFrom": ["+1234567890"],
-      "groups": {
-        "*": { "requireMention": true }
-      }
-    },
-    "discord": {
-      "token": "BOT_TOKEN",
-      "guilds": ["guild-id-1"]
-    }
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocol": { "major": 1, "minor": 0 },
+    "server": { "name": "aleph-server", "version": "26.9.1" },
+    "connection_id": "conn-...",
+    "features": [],
+    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 }
   }
 }
 ```
 
-Each interface has its own authentication and scope configuration. Telegram can restrict which phone numbers are allowed; Discord can restrict which guilds the bot joins.
+- Missing or unparsable `params` produces `INVALID_PARAMS`.
+- A different major version produces `INVALID_PARAMS` / `incompatible protocol major version`; with the same major, the smaller of the two minor versions wins (`negotiate_version` in `shared/protocol/src/system_hello.rs`).
+- `features` is the intersection of what the client asked for and what the server implements (`negotiate_features`). The server currently passes an empty implementation list, so the negotiated result is always an empty array — a client cannot assume a feature is available just because it listed `snapshot` in the handshake.
+- `limits` are hints rather than enforced transport limits; the source comment says `legacy wire hints, not enforced transport limits`. The frame size limits that actually bind live on the Desktop IPC side (`MAX_FRAME_BYTES` and `MAX_INFLIGHT`).
+- `server.version` comes from the compile-time constant `ALEPH_VERSION`.
 
----
+## Request Dispatch
 
-## Related Pages
+The order of a request:
 
-- [Architecture Overview](./overview) -- Full system diagram and module map
-- [Agent Harness](./harness) -- What happens after the Gateway dispatches to the agent
-- [Session Service](./session-service) -- Session key resolution and persistence
-- [Tool Architecture](./tools) -- Tool execution triggered by agent requests
----
+```
+Connection receives a frame
+  → JSON parse (serde)
 
-## 26.7.x Addendum
+  → Role and permission decision (wall_admits, method_requires_admin)
+  → Idempotency key and lane planning (rpc::prepare)
+  → Middleware chain (validate → rate_limit → auth → metrics → trace)
+  → Method registry lookup (HandlerRegistry::handle)
+  → Handler
+  → Response
+```
 
-### Gateway Core Status
+### Dispatch Entry Points
 
-The in-process gateway in `aleph-server` handles:
+`src/gateway/server/connection/dispatch.rs` offers three entry points:
 
-- **WebSocket protocol** (JSON-RPC 2.0 over ws/wss)
-- **TLS** (self-signed or user-supplied, terminated in-process by `axum-server`)
-- **Authentication** (loopback zero-config operator / device token / bootstrap ticket / shared token / WS Origin check)
-- **Routing** (chat / config / memory / agents / tools / mcp / skills / plugins / extensions / channels / teams / projects / workspaces / runtimes / voice / artifacts / hub / strategy / goal / loop / ...)
-- **Full RPC surface** (see [Methods Reference](/docs/en/gateway/methods))
+- `dispatch_for_connection`: the old `/ws` path. `capabilities.ui.invoke` is special-cased — it first resolves the real caller through `live_ui_caller`, and answers with `viewer_denied_response` when there is none, so the handshake snapshot is never passed off as the current caller.
+- `dispatch_for_peer`: the Desktop IPC and Web v1 paths.
+- `dispatch_with_caller_context`: the internal call path.
 
-### Single-Source Error Receipt
+All three end up in `dispatch_ordinary` → `validate_live` → `dispatch_snapshot`. `dispatch_snapshot` reads the role, user, verified user, and device id out of a single `ConnectionState` read (`CallerSnapshot`), which avoids identity drift from reading them separately.
 
-26.7.21+: every execution error is normalized through `ExecutionError::user_receipt(locale)` in `src/gateway/execution_engine/` to a stable error code plus a localized short message. This is the **single source** the Panel and channels render -- the raw typed error chain never leaks. The bin-crate RPC handlers (`agent.run` / `chat.send` in `src/bin/aleph-server/server_init.rs`) and the inbound router's channel reply path both call the same function, so a single failure can never produce two error bubbles.
+### Runtime Role Gating
 
-### WS Task-Leak Fixes
+`process_request` (same file, `:511`) is the single chokepoint:
 
-26.7.21+ (see `src/gateway/server/handler.rs::forward_bus_to_client`): per-connection event-forward tasks exit on a failed `try_send` instead of holding a global `broadcast::Receiver` for the rest of the process; `RecvError::Lagged(n)` is non-fatal (counted into an overflow metric, with the idle/ping watchdog eventually closing the socket with code 1008); webhook backpressure returns 503 instead of silently dropping inbound messages.
+- A JSON parse failure produces `PARSE_ERROR` / `Parse error: {e}`.
+- When `method_requires_admin` matches and the caller is a member, the gateway answers `AUTH_REQUIRED` with `ADMIN_REQUIRED_MESSAGE`: `Not authorized: this method requires operator privileges`. `None` (internal calls) and `operator` pass through, and a `guest` was already stopped by the login wall.
+- After that, a `traceparent` is taken from the request params or a root trace is created, and the method name, trace id, and span id all go into one span.
 
-### Self-Signed TLS + Client-Side TOFU
+`method_requires_admin` (`src/gateway/method_admin.rs:544`) decides in this order: a hit in `ADMIN_METHODS` requires an administrator, a hit in `MEMBER_CARVE_OUTS` exempts the method, and otherwise the method name is matched against `ADMIN_PREFIXES`.
 
-26.7.17 introduces in-process TLS (`src/gateway/tls.rs`); 26.7.18 adds SAN auto-discovery + drift sidecar; the Panel's WKWebView adapter (macOS reference platform, with iOS Keychain mirror) implements **TOFU certificate trust** (fingerprint + SAN approval + pinned trust store). Config:
+### The Method Registry
 
-- `[gateway.tls]` — self-signed or user-supplied (`cert` / `key` empty → auto-generated)
-- `[gateway] trusted_proxy` — real reverse-proxy IP
-- `[gateway] allow_insecure_remote = false` (default) — fail closed
+The method registry is `HandlerRegistry` (`src/gateway/handlers/mod.rs:1229`). `register` maps a method name to a handler; an unknown method produces `METHOD_NOT_FOUND` / `Method not found: {method}`. Bulk registration uses the `register_handler!` macro, defined at `src/bin/aleph-server/commands/start/builder/handlers/mod.rs:35`.
 
-### Device / Credentials / Ticket / Token RPCs
+`src/gateway/method_census.rs` turns "which methods are registered, and whether each is Open or Admin" into an executable census: it scans the registration calls in production code and pins the current ruling for every method, so adding a method or flipping any entry fails the census test until someone records the ruling explicitly.
 
-26.7.21 registers in `HandlerRegistry`:
+`src/gateway/method_visibility.rs` is a different table with a different shape: it records whether a method's return value depends on who is calling, and each handler enforces it with a `visibility` predicate. It is not a dispatch gate by itself — data visibility has to be decided inside the handler, by session ownership.
 
-- `gateway.credentials`
-- `gateway.identity.get`
-- `gateway.metrics.lanes` / `gateway.metrics.run_concurrency`
+### The Middleware Chain
 
-`gateway.token.current` / `gateway.token.rotate` / `gateway.devices.list` / `gateway.devices.revoke` are wired in via boot-phase injection (see the `gateway_state` registration block in `src/gateway/handlers/mod.rs`).
+`MiddlewareChain::serve_with_panel_context` (`src/gateway/middleware/chain.rs:96`) runs outer to inner:
 
-### See Also
+| Layer | File |
+|-------|------|
+| `validate` | `src/gateway/middleware/validate.rs` |
+| `rate_limit` | `src/gateway/middleware/rate_limit.rs` |
+| `auth` | `src/gateway/middleware/auth.rs` |
+| `metrics` | `src/gateway/middleware/metrics.rs` |
+| `trace` | `src/gateway/middleware/trace.rs` |
+| `HandlerService` | `src/gateway/middleware/handler_service.rs` |
 
-- [Gateway Protocol](/docs/en/gateway/protocol) — protocol
-- [Gateway Auth](/docs/en/gateway/auth) — auth / pairing / TOFU
-- [Gateway Methods Reference](/docs/en/gateway/methods) — full RPC
+An error raised by the chain itself produces `INTERNAL_ERROR` / `Middleware chain error`. Throttling inside the middleware produces `RATE_LIMITED`.
+
+### Lanes and Idempotency
+
+Every method maps to a lane: `Query`, `Execute`, `Mutate`, or `System` (`src/gateway/lane.rs:37`). The mapping consults an explicit override table first, then a suffix heuristic on the last segment of the method name (`get`/`list`/`subscribe` and friends land in `Query`, `install`/`uninstall` in `System`, `run`/`send`/`invoke`/`execute` in `Execute`), and falls back to `Mutate`. The fallback is deliberate: the source comment explains that the old implementation fell back to `Query`, which let side-effecting methods that were not covered by the table bypass idempotency protection.
+
+`rpc::prepare` (`src/gateway/server/connection/rpc.rs:63`) owns the idempotency key and the lane permit:
+
+- An `idempotency_key` containing the reserved separator is rejected with `INVALID_PARAMS`.
+- A lane that requires an idempotency key, called without one, produces `IDEMPOTENCY_KEY_REQUIRED` / `idempotency_key required for mutating RPCs`, with `method`, `lane`, and a hint in `data`.
+- Idempotency slots are namespaced by "caller + method + key", and browser viewer methods get a separate prefix so they cannot collide with another user's slots.
+
+During execution:
+
+- Failing to acquire a lane permit produces `INTERNAL_ERROR` / `Service congested, try again later`.
+- Waiting more than 30 seconds for an in-flight duplicate produces `Request timed out waiting for in-flight duplicate`.
+
+## The Event Outlet
+
+### Two Wire Shapes
+
+The server wraps internal events into JSON-RPC notifications. Events travel in one of two wire shapes (`publish_frame` at `src/gateway/event_bus.rs:423`):
+
+| Frame kind | Wire shape |
+|------------|------------|
+| Frames with a `stream_method()` | A notification sent directly: `{"jsonrpc":"2.0","method":"stream.run_complete","params":<frame body>}` |
+| Frames without a `stream_method()` | A bare event `{"topic":"...","data":<frame body>}` first, which the delivery layer wraps into `{"jsonrpc":"2.0","method":"event","params":{"topic":"...","data":...}}` |
+
+The `event` method of the second shape is `TOPIC_EVENT_METHOD` (`shared/protocol/src/jsonrpc.rs:85`), and the wrapping happens in `event_wire_form` at `src/gateway/server/connection/forward.rs:228`.
+
+The canonical topic name and the wire method name are two separate namespaces: the canonical name (`agent.run.complete`) mainly appears in the `source_topic` diagnostic field, while subscriptions on the wire use `stream.*`. The full table is in the [event topic catalogue](../gateway/methods/events).
+
+### The Delivery Filter Chain
+
+For a frame to reach a connection it has to pass the filter chain starting at `src/gateway/server/connection/mod.rs:1373`:
+
+1. `pty::manager::frame_admits` — PTY frames are judged by session ownership.
+2. `ui_display_admits_connection` — `capabilities.ui.display` additionally checks the display mount.
+3. `wall_admits` — the login wall, the same predicate as in the request direction.
+4. `can_receive` (`src/gateway/event_scope.rs`) — coarse scope by topic prefix.
+5. `surface::delivery::audience_allows` — by delivery audience.
+6. `should_receive` (`src/gateway/handlers/events.rs`) — whether this connection subscribed to the topic.
+7. `event_admits_for` (`src/gateway/event_visibility.rs`) — per-frame ownership ruling.
+
+`stream.running_set_changed` is the only "projected" frame on the chain: it is admitted, but its array is narrowed per connection (`project_for`), so each connection sees only the running set that concerns it.
+
+### Scope and Visibility
+
+The two mechanisms have different jobs:
+
+- `src/gateway/event_scope.rs` is a **coarse prefix rule set**. `default_rules` registers only a few prefixes (`pairing.`, `guest.`, `config.changed`, `node.`, `pty.`); a matched prefix requires the caller to hold an administrator scope, and a topic that matches no rule is admitted by default. `scope_for_role` returns `["*"]` for operator and an empty scope for every other role.
+- `src/gateway/event_visibility.rs` is **per-frame ownership ruling**. `classify` maps the topic and its data to one `SessionIdentity` (`BySessionKey`, `ByRunId`, `ByTeamId`, `ByUserId`, `ByCanvasScope`, `ByProjectScope`, `ByPtySession`, `OperatorOnly`, and others), and `event_admits_for` recomputes the ruling for each frame against the caller's identity. `session_identity_of` returns `Global` when `classify` finds no match, which matches the default-allow behaviour of the scope rules.
+
+For which topic belongs to whom, see the visibility section of the [event topic catalogue](../gateway/methods/events).
+
+### Subscribe and Unsubscribe
+
+`events.subscribe`, `events.unsubscribe`, and `events.list` do not go through the method registry; they are intercepted separately in the connection loop (`src/gateway/server/connection/mod.rs:630`), with the handlers in `src/gateway/handlers/events.rs`.
+
+Subscription state lives in `SubscriptionManager` (same file, `:17`): one `TopicFilter` per connection, holding the wildcard patterns, the excepted patterns, and the `where` predicates. The matching logic is `topic_matches` at `src/gateway/event_bus.rs:150`:
+
+- A pattern of `*` or `**` matches everything.
+- A pattern whose last segment is `*` or `**` matches any remaining depth — `stream.*` matches `stream.run_complete`.
+- A `*` in the middle of a pattern eats a single segment — `*.complete` does not match `stream.run_complete`.
+- Both sides have to be exhausted.
+
+Matching works on the wire topic string of the event: the `topic` field for the bare event shape, and the `method` field for the notification shape (`extract_topic_and_data` at `src/gateway/server/connection/forward.rs:187`), so stream frames are matched by their `stream.` prefix.
+
+A `where` predicate is described by `FieldPredicate` (`{"field":"...","equals":...}`), and the field path is resolved by `.` segments, not by JSON Pointer. A non-empty predicate whose field is missing from the payload counts as no match.
+
+## Configuration Hot Reload
+
+`ConfigWatcher` in `src/gateway/hot_reload.rs` watches the configuration file with debouncing (500ms by default), reloads and validates on change, and broadcasts the result to subscribers. `ReloadMode::should_hot_reload` decides which configuration sections may take effect live; in `Hybrid` mode only `ui`, `channels`, `skills`, `workspace`, and `cron` are hot-reloaded, and the rest need a restart.
+
+## Relationship to the Desktop Host
+
+The desktop host (NSH) connects through the gateway's Desktop IPC entry and its Web v1 entry, not through the old `/ws`. The host's shape, its panel, and the plugin boundary are described in [Desktop hosts](../desktop-hosts/overview).
+
+## Planned: What's Next for the Gateway
+
+The items below have a complete design in the blueprint, but no implementation exists in the code yet.
+
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` (chapter 10, backpressure, flow control, and resource limits); the current implementation is in `src/gateway/lane.rs` for lane permits and `src/gateway/server/connection/rpc.rs` for `Service congested, try again later`. Today the only flow control is the coarse "reject when the permit is unavailable", with no per-subscriber rate shaping.
+
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` (chapter 9, Snapshot + Replay); the current implementation is in `shared/protocol/src/trace_replay.rs` and `shared/protocol/src/resume.rs`. `trace_replay.rs` holds query DTOs for persisted traces and `resume.rs` holds receipts for resumed tasks, so neither is an event replay; `session.get_snapshot` is not registered in `src/gateway/method_census.rs`.
+
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` (chapter 11, the binary data channel); the current implementation is in `shared/protocol/src/framing.rs` and `shared/protocol/src/system_hello.rs`. The frame format is a text frame behind a 4-byte big-endian length prefix, and although `Feature::BinaryChannel` already exists in the handshake DTO, the server's implementation list is empty.
+
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` (chapter 18, acceptance tests); the current implementation is in `src/gateway/method_census.rs`. The method catalogue is already an executable census, but the protocol-level acceptance test matrix has not been built.
+
+## History: How the Transport Entries Evolved
+
+There was originally one entry, `/ws`, with a single WebSocket carrying all RPC and events. Desktop IPC and Web v1 came later, and their responsibilities were cut apart deliberately: Desktop IPC is read-only, while Web v1 is the network entry with its own TLS and credential exchange. `/ws` was not retired; it continues to serve as the compatibility entry, and new clients should pick Desktop IPC or Web v1. The old desktop shell that predates the current NSH host is a transitional leftover and is on its way out.
+
+## See Also
+
+- [Protocol v1](../gateway/protocol-v1): frame format, handshake, and JSON-RPC rules.
+- [Authentication](../gateway/auth): the three credential kinds, their TTL, and revocation paths.
+- [Event topic catalogue](../gateway/methods/events): the topic list and per-topic visibility.
+- [JSON-RPC error model](../api/jsonrpc): error codes and the shape of the error object.
+- [Desktop hosts](../desktop-hosts/overview): how a host connects to the gateway.

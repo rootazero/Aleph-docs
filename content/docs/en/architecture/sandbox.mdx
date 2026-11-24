@@ -5,7 +5,7 @@ description: "Per-session workspace provisioning, capability enforcement, and OS
 
 The Sandbox is where exec-class tools actually run. It provides the execution boundary between Aleph and the operating system — ensuring every subprocess runs inside a scoped workspace with restricted filesystem, network, and process capabilities.
 
-For the broader security model, see [Security Overview](./security/overview). For how tools consume the sandbox, see [Tool Architecture](./tools).
+For the broader security model, see [Security Overview](../security/overview). For how tools consume the sandbox, see [Tool Architecture](./tools).
 
 ---
 
@@ -213,8 +213,9 @@ pub trait OsSandboxDriverTrait: Send + Sync {
 
 | Platform | Implementation | Mechanism |
 |----------|---------------|-----------|
-| macOS | `OsSandboxDriver` in `src/exec/sandbox/executor.rs` | `sandbox-exec` seatbelt profiles |
-| Linux | Bubblewrap driver | `bwrap` namespaces + seccomp |
+| macOS | `SeatbeltDriver` in `src/sandbox/platforms/macos/seatbelt.rs` | `sandbox-exec` seatbelt profiles |
+| Linux | `BubblewrapDriver` in `src/sandbox/platforms/linux/bwrap.rs` | `bwrap` namespaces + seccomp |
+| Windows | `WindowsSandboxDriver` in `src/sandbox/platforms/windows/driver.rs` | Job object (`job.rs`) + WFP network filtering (`wfp.rs`) |
 
 ---
 
@@ -268,8 +269,8 @@ The resulting `Arc<dyn Sandbox>` is threaded through tool registration into ever
 ## Related Pages
 
 - [Tool Architecture](./tools) — How exec-class tools consume the sandbox
-- [Security Overview](./security/overview) — The broader security model
-- [Sandboxing Deep Dive](./security/sandboxing) — OS-level sandboxing mechanisms
+- [Security Overview](../security/overview) — The broader security model
+- [Sandboxing Deep Dive](../security/sandboxing) — OS-level sandboxing mechanisms
 
 ---
 

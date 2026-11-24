@@ -45,7 +45,7 @@ iMessage is one channel type with two transports:
 
 | Transport | Inbound | Outbound | Platform boundary |
 | --- | --- | --- | --- |
-| Local | macOS `chat.db` polling | AppleScript | macOS only; requires Full Disk Access and Automation; cannot send tapbacks, so `reactions` is false |
+| Local | macOS chat.db polling | AppleScript | macOS only; requires Full Disk Access and Automation; cannot send tapbacks, so `reactions` is false |
 | BlueBubbles | REST + webhook, with optional catch-up polling | BlueBubbles REST | Any OS; attachments, replies, and reactions; reactions require private-api; editing and deletion are not declared |
 
 Local iMessage polling turns add-tapbacks into inbound context carrying `MessageMeta::Reaction` and filters remove-tapbacks. Therefore, surfacing a user's new reaction to the model does not mean the local transport can send reactions. BlueBubbles also validates the tapback name and private-api availability.

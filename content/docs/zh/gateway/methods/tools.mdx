@@ -45,7 +45,7 @@ BTreeMap 排序使输出确定:`builtin`、`mcp:<a>`、`mcp:<b>`、`native`、`p
 |------|------|------|------|
 | `tool_name` | string | 是 | 规范工具名(如 `memory_search`、`note_manage`) |
 | `arguments` | object | 否 | 传给工具的 JSON 参数(schema 取决于工具) |
-| `agent_id` | string | 否 | 提供时,合并到 `arguments.agent_id`(除非已经存在) |
+| `agent_id` | string | 否 | 提供时,合并到 `arguments` → `agent_id`(除非已经存在) |
 
 **响应(成功):** `{ "ok": true, "tool_name", "result" }`。
 
@@ -89,7 +89,7 @@ BTreeMap 排序使输出确定:`builtin`、`mcp:<a>`、`mcp:<b>`、`native`、`p
 |------|------|------|
 | `native` | `ToolSource::Native` | 硬编码内建能力 |
 | `builtin` | `ToolSource::Builtin` | `BUILTIN_TOOL_DEFINITIONS` 循环条目 |
-| `mcp:<server>` | `ToolSource::Mcp { server }` | 通过 `mcp.add` 添加的服务器(如 `mcp:github`) |
+| `mcp:<server>` | `ToolSource::Mcp { server }` | 通过 `mcp_config.create` 添加的服务器(如 `mcp:github`) |
 | `skill:<id>` | `ToolSource::Skill { id }` | `skill_read` 等 |
 | `plugin:<plugin_id>` | `ToolSource::Plugin { plugin_id }` | 插件注册的工具 |
 | `custom` | `ToolSource::Custom { .. }` | 用户定义 |

@@ -3,7 +3,7 @@ title: "group_chat.*"
 description: "Group chat and multi-party conversation RPC methods"
 ---
 
-`group_chat.*` is the lower-level multi-agent group-chat **session primitive** that the durable `teams.chat.*` thread (and the Panel's three-panel group-chat window) build on. Six methods are registered in `HandlerRegistry::new()` as `service_unavailable` placeholders, then overlaid with the real handlers in `register_group_chat_handlers` once the `GroupChatOrchestrator` + `GroupChatExecutor` exist at server boot (`src/bin/aleph-server/commands/start/builder/handlers/system.rs:95-150`).
+`group_chat.*` is the lower-level multi-agent group-chat **session primitive** that the durable `teams.chat.*` thread (and the Panel's three-panel group-chat window) build on. Six methods are registered in `HandlerRegistry::new()` as `service_unavailable` placeholders, then overlaid with the real handlers in `register_group_chat_handlers` once the `GroupChatOrchestrator` + `GroupChatExecutor` exist at server boot (`src/bin/aleph-server/commands/start/builder/handlers/system.rs`).
 
 The placeholder is what gets called between registry construction and orchestrator install — calls during that window return `INTERNAL_ERROR: group_chat.<method> requires GroupChatOrchestrator runtime - wire Gateway first`. In normal operation the orchestrator is installed before the first RPC arrives.
 

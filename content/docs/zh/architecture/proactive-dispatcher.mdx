@@ -1,9 +1,9 @@
 ---
 title: "主动任务调度"
-description: "守护后台任务：cron / heartbeat 实化服务；runtimes 能力 ledger；wake queue 与防风暴守卫；不再有 `src/daemon/`。"
+description: "守护后台任务：cron / heartbeat 实化服务；runtimes 能力 ledger；wake queue 与防风暴守卫；不再有独立的 daemon 模块。"
 ---
 
-> 文档历史版本中的 `daemon::dispatcher` 模块、`src/daemon/` 目录、`ProposedAction` / `PolicyEngine` / `DispatcherMode` 枚举**已全部移除**。本页描述当前 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 中的真实代码，附 `src/tasks/shared/`、`src/runtimes/` 协作；`src/components/` 只剩共享域类型。
+> 文档历史版本中的 `daemon::dispatcher` 模块、顶层 `daemon` 目录、`ProposedAction` / `PolicyEngine` / `DispatcherMode` 枚举**已全部移除**。本页描述当前 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 中的真实代码，附 `src/tasks/shared/`、`src/runtimes/` 协作。
 
 主动后台任务现在由两条正交的服务组成：
 - **Cron**（`src/tasks/cron/`）—— 计划任务，按 cron 表达式 / 间隔 / 一次性触发
@@ -158,9 +158,9 @@ pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
 
 ---
 
-## 共享域类型（`src/components/`）
+## 历史：已移除的 components 模块
 
-`src/components/` 仅剩最小骨架：`mod.rs` + `types/`。原 EventHandler 链路（`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`）在 Harness 迁移期间已删除，只剩共享域类型并由事件系统消费。
+本页早期版本记载过一个顶层 `components` 薄壳模块（`mod.rs` + `types/`），承载旧 EventHandler 链路（`IntentAnalyzer` / `TaskPlanner` / `ToolExecutor` / `LoopController` / `SessionRecorder` / `SessionCompactor`）的共享域类型。该链路在 Harness 迁移期间已删除，剩余骨架随后作为死脚手架整体删除（提交 `682e49adc`，"components: cut entire module"）。cron / heartbeat 不依赖它；事件系统位于 `src/event/`。
 
 ---
 
@@ -178,7 +178,7 @@ pub fn get_runtimes_dir() -> Result<PathBuf>;  // ~/.aleph/runtimes/
 ## 与历史"daemon::dispatcher"的差异
 
 - **没有 `ProposedAction` / `PolicyEngine` / `DispatcherMode`**——风险评估、策略执行由执行引擎的 `PermissionLayer` + `ContextRuleLayer` + `SmartFilter` 统一处理
-- **没有 `src/daemon/` 目录**——cron / heartbeat 直接位于 `src/tasks/`
+- **没有顶层 `daemon` 目录**——cron / heartbeat 直接位于 `src/tasks/`
 - **没有独立的通知队列 / 调度 DAG**——通知通过 `DeliveryEngine` 与 gateway `event_bus` 走总线
 - **没有 `ActionExecutor` 子组件**——执行通过 `execution_engine::RunRequest` 复用现有 harness
 

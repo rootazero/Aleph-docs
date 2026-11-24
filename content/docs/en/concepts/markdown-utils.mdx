@@ -123,31 +123,20 @@ A same id in a higher-priority directory shadows lower-priority ones. The return
 
 ---
 
-## PII Scrubbing (`src/utils/pii.rs`)
+## PII Scrubbing (`shared/logging/src/pii.rs`)
 
 ```rust
 #[must_use]
 pub fn scrub_pii(text: &str) -> String;
 ```
 
-`utils::pii` is more aggressive than the gateway-side PII (`src/gateway/pii`): it accepts false positives and is intended for log / telemetry paths where the only requirement is "no raw token leaks into logs". The gateway-side PII is the final pre-LLM filter and is more conservative (a double-false-positive would pollute the prompt). **They are not the same module** — choose by call site, not by appearance.
+`aleph_logging::scrub_pii` (in `shared/logging/src/pii.rs`) is more aggressive than the gateway-side PII engine (`src/pii/`): it accepts false positives and is intended for log / telemetry paths where the only requirement is "no raw token leaks into logs". The gateway-side engine (`crate::pii::PiiEngine`, `src/pii/engine.rs`) is the final pre-LLM filter and is precision-tuned — a false positive degrades LLM comprehension. **They are not the same module** — choose by call site, not by appearance.
 
 ---
 
-## Config Field Deserialization (`src/utils/one_or_many.rs`)
+## History: Config field deserialization (`OneOrMany<T>`)
 
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany<T> {
-    One(T),
-    Many(Vec<T>),
-}
-```
-
-No `tag` attribute — single value deserializes to `T`, an array to `Vec<T>`. The intent is to make `voice = "deepgram"` and `voice = ["deepgram", "elevenlabs"]` both legal in the same field.
-
-`Default` is `Many(vec![])` (`is_empty() = true`), so "omitted" and "empty array" behave the same.
+The early `OneOrMany<T>` helper (a `#[serde(untagged)]` enum) let a single value and an array both deserialize into the same field, e.g. `voice = "deepgram"` and `voice = ["deepgram", "elevenlabs"]`. The type has been removed: config fields now use concrete structs — the `voice` key maps to `VoiceSection` / `VoiceLocalConfig` in `src/config/types/voice_local.rs` (wired via `#[serde(rename = "voice")]` in `src/config/structs.rs`). There is no generic single-value/array deserialization helper anymore.
 
 ---
 
@@ -231,12 +220,10 @@ Pure lexical, no IO (does not call `canonicalize`, avoiding symlink TOCTOU). Aft
 - `src/markdown/fences.rs` — `FenceSpan` + `FenceSplit` + the four parser functions
 
 **Utils:**
-- `src/utils/mod.rs` — module entry, re-exports `OneOrMany`
+- `src/utils/mod.rs` — module entry
 - `src/utils/text_format.rs` — `format_timestamp` / `truncate_text` / `escape_markdown`
 - `src/utils/json_extract.rs` — `extract_json_robust` + four strategies + `find_matching_brace`
 - `src/utils/paths.rs` — `get_config_dir` / `get_data_dir` / `get_memory_db_path` / `get_note_memory_dir` / `get_agent_config_dir` / `get_skills_dir` / `get_runtimes_dir` / `expand_tilde` / `equivalent` / `get_all_skills_dirs` / `migrate_legacy_db_files`
-- `src/utils/pii.rs` — `scrub_pii`
-- `src/utils/one_or_many.rs` — `OneOrMany<T>` + `OneOrManyIter`
 - `src/utils/sqlite_open.rs` — `open_sqlite_safe` / `open_sqlite_readonly`
 - `src/utils/atomic_io.rs` — `write_atomic` + `with_file_lock` (fs2 exclusive lock)
 - `src/utils/atomic_write.rs` — `atomic_write_file` (async, mode-bit-preserving)
@@ -245,6 +232,10 @@ Pure lexical, no IO (does not call `canonicalize`, avoiding symlink TOCTOU). Aft
 - `src/utils/no_window.rs` — `no_window` (Windows CREATE_NO_WINDOW / Unix setsid)
 - `src/utils/path_within.rs` — `is_path_within` (allow-list, lexical)
 - `src/utils/vault_io.rs` — `VaultIo::new` / `read` / `write` (atomic + locked)
+
+**PII:**
+- `shared/logging/src/pii.rs` — `scrub_pii` (log / telemetry, false-positive-tolerant)
+- `src/pii/engine.rs` — `PiiEngine` + `FilterResult` + `PiiMatch` + `PiiSeverity` (gateway pre-LLM filter)
 
 ---
 
@@ -282,6 +273,6 @@ Pure lexical, no IO (does not call `canonicalize`, avoiding symlink TOCTOU). Aft
 - [Skill System](/docs/en/concepts/skill-system) — `SKILL.md` format + tool invocation
 - [Memory Evolution](/docs/en/concepts/memory-evolution) — note layer + dreaming
 - [Builtin Tools](/docs/en/concepts/builtin-tools) — builtin tools that use markdown parsing
-- [PII Protection](/docs/en/concepts/pii-protection) — gateway-level PII filter (vs `utils::pii`: conservatism differs)
+- [PII Protection](/docs/en/concepts/pii-protection) — gateway-level PII engine (vs `aleph_logging::scrub_pii`: conservatism differs)
 - [Official skills repo](https://github.com/rootazero/Aleph-skills) — Aleph official skills
 - [Official plugins repo](https://github.com/rootazero/Aleph-plugins) — Aleph official plugins

@@ -47,6 +47,12 @@ Auto-discovery recognizes `skills/`, `agents/`, `commands/`, `hooks/hooks.json`,
 
 ## Unified capability registration
 
+> This is the **plugin declaration layer** model (`src/extension/capability.rs`).
+> The runtime capability subsystem is a different thing: capability kinds, facets,
+> owner generations, fencing tokens and backend leases all live in
+> `src/capability/`. Do not conflate the two — see
+> [Capability Model](/docs/en/capabilities/capability-model).
+
 `CapabilityDeclaration` has six production variants:
 
 ```rust
@@ -121,7 +127,7 @@ The Hub is the catalog and trust boundary. This module is the plugin runtime and
 
 - `src/extension/mod.rs` — manager and shared subsystem wiring
 - `src/extension/manifest/` — adapters and normalized manifests
-- `src/extension/discovery/` — candidates, scopes, and conflict resolution
+- `src/discovery/` — candidates, scopes, and conflict resolution
 - `src/extension/capability.rs` — declarations and tiers
 - `src/extension/registrar/` — registration dispatch
 - `src/extension/registry/` — component registry

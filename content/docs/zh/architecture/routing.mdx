@@ -1,6 +1,6 @@
 ---
 title: "路由系统"
-description: "Aleph 真实的路由层：会话键解析（SessionKey）、DmScope 隔离、RouteBinding 分层匹配、RoutingRuleConfig（command / keyword 两阶段）、runtime overlay、provider failover 与 VESR。"
+description: "Aleph 真实的路由层：会话键解析（SessionKey）、DmScope 隔离、RouteBinding 分层匹配、RoutingRuleConfig（command / keyword 两阶段）、runtime overlay 与 provider failover 链。"
 ---
 
 > **本页描述 Aleph 真实路由层（`src/routing/` + `src/config/types/routing.rs`）**，而非通用 Web 路由框架。
@@ -279,56 +279,25 @@ process_clipboard / inbound message
 
 ---
 
-## 7. 上下文感知（`[smart_matching]`）
+## 7. 历史：上下文感知（`[smart_matching]`，已移除）
 
-`SmartMatchingConfig`（`src/config/types/smart_flow.rs`）定义一个四层语义匹配栈：
+本页早期版本记载过一个由 `[smart_matching]` 配置节驱动的四层语义匹配栈（`SmartMatchingConfig`：命令快路径、加权关键词、上下文规则、AI 兜底，配有 `[[smart_matching.context_rules]]` / `[[smart_matching.keyword_rules]]` 表）。该配置节已被弃用且不起作用，并在提交 `54a12d89b`（"config: cut deprecated inert sections (smart_flow, smart_matching, dispatcher, subagent, evolution, media)"）中从配置 schema 里删除。配置文件里再写 `[smart_matching]` 不会被解析。
 
-| Layer | 名称 | 阈值字段 | 用途 |
-|---|---|---|---|
-| 1 | Fast path（command/regex） | `command_confidence = 1.0` | first-match-stops |
-| 2 | Keyword matching | `keyword_threshold = 0.7` | 加权打分 |
-| 3 | Context-aware inference | `enable_context_inference = true` | 多轮 / 应用上下文 / 时间上下文 |
-| 4 | AI detection fallback | `ai_threshold = 0.6` | AI 兜底 |
-
-**第三层（context-aware）**通过 `context_rules: Vec<ContextRuleConfig>` 配置：
-
-```toml
-[smart_matching]
-enabled = true
-enable_context_inference = true
-
-[[smart_matching.context_rules]]
-id = "complete-pending-language"
-condition_type = "pending_param"     # pending_param | app_context | time_context | conversation
-param_name = "target_lang"
-intent = "translation"
-action_type = "complete_param"       # complete_param | add_capability | set_provider | add_prompt
-use_input_as_value = true
-
-[[smart_matching.context_rules]]
-id = "weekend-tone"
-condition_type = "time_context"
-days_of_week = [0, 6]                # 0=Sun, 6=Sat
-action_type = "add_prompt"
-system_prompt = "Use a casual tone on weekends."
-```
-
-第四层通过 `[[smart_matching.keyword_rules]]` 用加权关键词（`"keyword"` 或 `"keyword:1.5"`）触发。
+当前真正运行的是第 6 节的「命令 + 关键词」两阶段匹配，由 `RoutingRuleConfig`（第 5 节）驱动。没有单独的上下文推断层；与上下文相关的判断由 harness 循环内的模型完成。
 
 ---
 
-## 8. Provider Failover 与 VESR
+## 8. Provider Failover
 
-路由到 provider 后，**真正的"哪个模型能干活"判定由 `routing/recall.rs` 与 VESR 完成**：
+路由到 provider 之后，「用哪个模型、失败了退到哪」由 provider failover 链决定，**不在 `src/routing/` 里**。
 
-- **`ProviderAvailability`**（`recall.rs`）：provider 当前是否在线 / 是否限流 / 是否配额耗尽；`provider_availability_from_config` 把配置 + vault 编译成一个谓词 `Fn(&str) -> ProviderStatus`，boot 时一次构造
-- **`ProviderStatus::Available | Deconfigured | Unknown`**：render-time gate，对未识别 provider（"" / "failover" / "(dynamic)"）显式 fail-open，不惩罚无法识别的
-- **`RoutingRecall::build_routing_experience_message`**：每 run 在 run-start **只调用一次**，嵌入用户 query、把 `task_emb` 回填到 `RoutingAttribution`、回溯 k-NN 邻居、标记不可用 provider、fence-wrap 通过 `wrap_memory_context`
-- **`RoutingExperienceStore`**（`experience_store.rs`）：基于 sqlite-vec 的 k-NN，按本次任务描述回溯**实测可用**的模型
-- **`RoutingAttribution`**（`mod.rs`）：per-run handle，把 run-start recall（写 `task_emb`）和 completion observer（读它）串起来
-- **`OutcomeObserver`**（`observer.rs`）：`TraceSink::SessionCompleted` → 写入 routing experience 表（含实际 token / cost / 模型 / provider / agent_id）
+- **链路装配**：`src/orchestrator/deps_builder/provider_chain.rs` 的 `build_failover_chain` 在 boot 期把 `[primary, ...[fallback_provider].chain]` 组成一条全局链，套进 `FailoverProvider`。primary 槽位保持**活**的——每次调用都读 `default_provider.current()`，所以 UI 里换默认 provider 下一轮就生效（热重载语义保留）。每个已配置 provider 的 `models` 列表都进目录，所以链也能在**同一 provider 的不同模型之间**回退。
+- **显式 provider / model 路由**：`agent_overrides` 把指定 provider 钉成 primary，再挂一整条全局链作为唯一 fallback 节点（pin + fall-through 语义）。所有链共享同一个 `FailoverHealth`，一个 provider 挂掉在所有链上都看得见。primary provider 自己没有 override 条目——显式选它等价于走默认路由。构造失败的 provider、以及命中 primary 或不在 `[providers]` 里的链条目，都只记一条 warn 跳过。
+- **熔断与冷却**：`src/providers/failover/health.rs` 的 `FailoverHealth` 维护 per-provider `CircuitState`：`Closed`（正常放行）→ `Open`（跳过该 provider）→ `HalfOpen`（冷却到期后放一次探测）。连续失败 `CIRCUIT_OPEN_THRESHOLD = 3` 次开闸，冷却上限 `MAX_COOLDOWN = 600s`。另有 `ModelCooldown`（provider + model 粒度）与 `ProviderCooldown`（provider 粒度）两套窗口，经 `FailoverProvider::with_model_cooldown` / `with_provider_cooldown` 注入。
+- **重试与放弃**：`src/providers/failover/decision.rs` 的 `decide` 判定一次失败是原地重试、推进链路还是直接失败；分类器是 `src/providers/llm_retry.rs` 的 `classify`，返回 `RetryVerdict::{Retry, Fatal, CompactAndRetry, Fallback}`。裸瞬时错误的退避是 `DEFAULT_TRANSIENT_DELAY = 300ms`，单次原地等待上限 `MAX_RETRY_DELAY = 30s`；瞬时**服务端过载**（429 "please wait a moment"、529）走更深的等待预算，上限 `MAX_OVERLOAD_RETRY_DELAY = 120s`，用来把服务端给的 `Retry-After` 骑完。账号 / 配额型 429 被判为 `Fatal`，不享受原地重试，直接推进链路。
+- **失败记账**：`strike_for` 把一次失败归成 `FailureKind::Permanent` 或 `Transient`——永久性失败（如死凭据）一次就熔断，其余要攒够 `CIRCUIT_OPEN_THRESHOLD` 次。限流类错误额外带一个冷却窗口，其余故障不带窗口，避免因为一次网络抖动就把 provider 提前下线。
 
-完整说明参见 [AI 提供商](/docs/zh/concepts/ai-providers)。
+配置入口见 [AI 提供商](/docs/zh/concepts/ai-providers)。
 
 ---
 
@@ -359,7 +328,7 @@ system_prompt = "Use a casual tone on weekends."
 | `routing_rules.delete` | 删除（仅非 builtin） |
 | `route_config.get` / `update` | 整段 `[route_config]` 段 |
 | `channels.set_agent` | 把通道绑到指定 agent（**26.7.15+ 校验 agent 存在**） |
-| `agent.resolve_session` | 把任意入站元数据解析为 `SessionKey` |
+| `resolve_session_key_with_agent`（内部函数，非 RPC） | 把任意入站元数据解析为 `SessionKey` |
 | `gateway_route` | 工具：以 `OverlaySource` 报告消息将去往哪个 agent |
 
 完整 RPC 列表参见 [网关方法 · 配置路由](/docs/zh/gateway/methods/config) 与 [网关方法 · 会话](/docs/zh/gateway/methods/session)。
@@ -375,10 +344,17 @@ src/routing/
 ├── resolve.rs            # resolve_route + scope_satisfied + session_keys_for
 ├── config.rs             # RouteBinding / MatchRule / SessionConfig / binding_problems
 ├── identity_links.rs     # resolve_linked_peer_id + validate_identity_links
-├── overlay.rs            # overlay_route + RuntimeOverlay + OverlaySource
-├── recall.rs             # RoutingRecall + ProviderAvailability + provider_availability_from_config
-├── experience_store.rs   # VESR 经验库（k-NN over sqlite-vec）
-└── observer.rs           # OutcomeObserver + outcome_from_session_completed
+└── overlay.rs            # overlay_route + RuntimeOverlay + OverlaySource
+
+src/providers/failover/     # provider 回退链（第 8 节）
+├── mod.rs                # FailoverProvider + 阈值常量
+├── provider.rs           # FailoverProvider：按链推进、注入冷却窗口
+├── health.rs             # FailoverHealth / CircuitState / ModelCooldown / ProviderCooldown
+├── decision.rs           # decide / strike_for / FailureKind / Decision
+└── tests.rs
+
+src/orchestrator/deps_builder/
+└── provider_chain.rs     # build_failover_chain：装配全局链与 agent_overrides
 
 src/command/
 ├── mod.rs                # CommandParser 入口

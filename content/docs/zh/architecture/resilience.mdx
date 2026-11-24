@@ -165,8 +165,6 @@ impl TaskTrace {
 
 `AgentTraceEvent` 来自 `aleph_protocol`（统一协议 crate）；`task_id` 与 `step_index` 由调度器写入；`event_kind()` 返回稳定字符串用于索引与过滤。
 
-> `[[test]] integration_tests::observer_*` 在 `src/routing/integration_tests.rs` 中验证：完整 trace 路径（`RoutingAttribution` → `OutcomeObserver::on_trace` → `RoutingExperienceStore::recall`）能往返。
-
 ---
 
 ## Shadow Replay 与状态恢复
@@ -214,19 +212,25 @@ impl TaskTrace {
 ## Trace 数据流
 
 ```
-执行期：每个 step 写入 TaskTrace
+执行期：每个 step 产生一个 LoopTraceEvent
     │
     ▼
-harness::trace::TraceSink::on_trace(SessionCompleted { … })
+harness::trace::TraceSink::on_trace（src/harness/trace_sink.rs）
     │
     ▼
-gateway event bus 路由到 OutcomeObserver（src/routing/observer.rs）
+GatewayTraceSink → TraceFlushHandle → TracePersistence::record
+（src/gateway/execution_engine/trace_sink_adapter.rs、callback.rs）
     │
     ▼
-RoutingExperienceStore.record（src/routing/experience_store.rs，sqlite-vec k-NN）
+task_traces 表（INSERT 见 src/resilience/database/traces.rs:133，
+表结构见 src/resilience/database/state_database/schema.rs:261）
 ```
 
-`OutcomeObserver` 是 VESR 的写入端；`RoutingRecall::build_routing_experience_message` 是读取端（run-start 一次）。两者通过 `RoutingAttribution` 的 `task_emb` 字段（`OnceLock<Vec<f32>>`）配对。
+`TraceSink` 的实现方**不得阻塞**：sink 是在 harness 的异步任务里被调用的，一旦阻塞就等于把整个 harness 循环压住。所以生产路径用 `GatewayTraceSink`，它同步转发进 `TracePersistence::record`，而后者为每个事件 spawn 一个写任务并持有句柄供 `flush` 使用——harness 侧那次调用因此从不阻塞。
+
+无人值守的运行另走 `UnattendedRedactingSink`（`src/gateway/execution_engine/unattended_redacting_sink.rs`）：脱敏在**写入端**只做一次，`task_traces` 行、频道消息与 WS `agent_trace` 镜像共用同一份已脱敏内容。重放由 trace replay 处理器（`src/gateway/handlers/trace_replay.rs`）只读 `task_traces` 表完成。
+
+`LoopTraceEvent::SessionCompleted`（`src/harness/trace.rs:59`）是「一次运行结束了」的结构化事实：`outcome` / `iterations` / `tool_calls_made` / `total_tokens` / `hit_limit` / `final_text` / `terminate_reason`（`src/orchestrator::dispatch::TerminateReason`，精确的循环退出原因）。用量聚合则直接扫 `task_traces` 中 `event_kind = 'provider_usage'` 的行（`aggregate_usage_by_agents`，`src/resilience/database/traces.rs:298`），不另建统计表。
 
 ---
 

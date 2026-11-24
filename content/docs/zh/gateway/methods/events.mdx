@@ -1,217 +1,252 @@
 ---
-title: "events.*"
-description: "事件订阅和流式 RPC 方法"
+title: "事件主题"
+description: "Aleph 网关的事件主题册：规范主题名、线上方法名、负载字段、订阅匹配与逐主题可见性"
 ---
 
-`events.*` 管理 WebSocket 连接上的实时事件订阅。所有事件都通过同一个主题总线投递（`src/gateway/event_bus.rs`），并由 `SubscriptionManager` 按连接维护订阅。
+本页是网关事件的主题册：每个主题的规范名、线上方法名、负载字段、订阅匹配规则与可见性。事件的线上形态与整体投递链路见 [网关架构](../../architecture/gateway)，协议细节见 [Protocol v1](../../gateway/protocol-v1)。
 
-## 方法
+## 事件如何到达客户端
 
-| 方法 | 说明 |
-|--------|-------------|
-| [`events.subscribe`](#eventssubscribe) | 添加主题订阅（累加） |
-| [`events.unsubscribe`](#eventsunsubscribe) | 移除主题订阅 |
-| [`events.list`](#eventslist) | 列出当前连接的活动订阅 |
+服务端把内部事件封装成 JSON-RPC 通知发给客户端，客户端先订阅感兴趣的主题，再按通知里的主题分发。通知有两种线上形态。
 
-## 事件传递
+### 通知形态
 
-事件以 WebSocket 上的 JSON-RPC 通知（无 `id` 字段）形式投递，结构由 `TopicEvent` 序列化：
+`GatewayEventFrame` 里带 `stream_method()` 的帧直接以方法名发出，`params` 就是帧体：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "stream.run_complete",
+  "params": {
+    "run_id": "run-...",
+    "seq": 12,
+    "summary": { "...": "..." },
+    "total_duration_ms": 4820
+  }
+}
+```
+
+### 事件形态
+
+没有 `stream_method()` 的帧先发裸事件 `{"topic": "...", "data": {...}}`，投递层再把它包成方法名为 `event` 的通知。`event` 就是 `TOPIC_EVENT_METHOD`（`shared/protocol/src/jsonrpc.rs:85`），包装发生在 `src/gateway/server/connection/forward.rs:228`：
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "topic": "agent.run.complete",
-    "data": { "run_id": "run-uuid-123", "duration_ms": 5000 },
-    "timestamp": 1706400000000
+    "topic": "config.changed",
+    "data": { "section": "execution", "value": { "...": "..." } }
   }
 }
 ```
 
-事件为即发即弃：服务器推送，不等待确认；客户端断连期间的事件会丢失。每条事件主题名由 `GatewayEventFrame::topic_name()` 返回，详见[事件主题](#事件主题)。
+两种形态的区别只有一处：线上方法名不同。规范主题名（`agent.run.complete`）与线上方法名（`stream.run_complete`）是两套命名，前者主要出现在 `surface.notify` 的 `source_topic` 诊断字段里，线上订阅用的是后者。
 
-### events.subscribe
+## 订阅与匹配
 
-订阅一个或多个主题。订阅是**累加的**——多次调用会持续追加模式，不影响已有订阅。
+`events.subscribe`、`events.unsubscribe`、`events.list` 三个方法不在方法注册表里，而是在连接循环中被单独拦截（`src/gateway/server/connection/mod.rs:630`），处理器在 `src/gateway/handlers/events.rs`。
 
-**请求（仅模式）：**
+订阅请求的形状：
+
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
+  "id": 4,
   "method": "events.subscribe",
   "params": {
-    "topics": ["agent.run.*", "session.*"]
+    "topics": ["stream.*", { "topic": "team.changed", "where": [{ "field": "team_id", "equals": "team-1" }] }]
   }
 }
 ```
 
-**请求（带字段过滤）：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "events.subscribe",
-  "params": {
-    "topics": [
-      "agent.run.*",
-      { "topic": "tools.changed", "where": [{ "field": "scope", "equals": "extension" }] }
-    ]
-  }
-}
-```
+`topics` 为空数组会回 `INVALID_PARAMS` / `Topics array cannot be empty`。订阅状态由 `SubscriptionManager`（`src/gateway/handlers/events.rs:17`）保存，每个连接一个过滤器。
 
-**响应：**
-```json
-{ "jsonrpc": "2.0", "id": 1, "result": { "subscribed": ["agent.run.*", "session.*"], "changed": 2 } }
-```
+匹配时用的是事件的线上主题串：裸事件形态取 `topic` 字段，通知形态取 `method` 字段（`src/gateway/server/connection/forward.rs:187` 的 `extract_topic_and_data`）。所以流式帧是按 `stream.` 前缀匹配的。
 
-**参数：**
+### 通配模式
 
-| 参数 | 类型 | 必填 | 说明 |
-|-----------|------|----------|-------------|
-| `topics` | array | 是 | 主题选择器数组；每个元素为字符串模式或 `{topic, where}` 过滤对象 |
+匹配逻辑在 `src/gateway/event_bus.rs:150` 的 `topic_matches`：
 
-`where` 子句中的每个谓词为 `{ "field": "<json_pointer>", "equals": <value> }`；payload 中对应字段必须严格等于给定值才会投递。无 payload 时带谓词的订阅会被跳过（不会盲目放行）。
+| 模式 | 语义 |
+|------|------|
+| `*` 或 `**` | 匹配全部主题 |
+| 最后一段是 `*` 或 `**` | 匹配剩余任意深度，`stream.*` 能匹配 `stream.run_complete`，也能匹配 `voice.transcribe.delta` |
+| 中间的 `*` | 只吃一段，`*.complete` 匹配不到 `stream.run_complete` |
 
-### events.unsubscribe
+两端必须同时耗尽才算命中。
 
-按精确匹配移除模式。模式必须与已订阅的形式完全一致才会被移除。
+### where 谓词
 
-**请求：**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "events.unsubscribe",
-  "params": { "topics": ["agent.run.*"] }
-}
-```
+`topics` 的元素也可以是对象，带一个 `where` 数组。谓词用 `FieldPredicate` 描述（`{"field": "...", "equals": ...}`），字段路径按 `.` 分段取值，不是 JSON Pointer。谓词非空而负载里没有对应字段时判为不匹配。
 
-**响应：**
-```json
-{ "jsonrpc": "2.0", "id": 2, "result": { "subscribed": ["session.*"], "changed": 1 } }
-```
+### 例外与退订
 
-### events.list
+`except` 是与 `topics` 平级的键，列出要从订阅里排除的顶层主题。`events.unsubscribe` 移除指定模式，`events.list` 返回当前连接的订阅快照（`subscribed` 是模式列表，`entries` 是条目全量）。
 
-列出当前连接的全部已订阅模式。
+## 主题册
 
-**请求：**
-```json
-{ "jsonrpc": "2.0", "id": 3, "method": "events.list" }
-```
+规范主题名来自 `GatewayEventFrame::topic_name()`（`src/gateway/events/frame.rs:780`），线上方法名来自同文件的 `stream_method()`（`:844`）。
 
-**响应：**
-```json
-{ "jsonrpc": "2.0", "id": 3, "result": { "subscribed": ["session.*"] } }
-```
+### 运行与 agent 输出
 
-## 事件主题
+| 规范主题 | 线上方法 | 何时触发 | 负载要点 | 代码位置 |
+|----------|----------|----------|----------|----------|
+| `run.accepted` | `stream.run_accepted` | 一次运行被接受 | `run_id`、`session_key`、`accepted_at` | `src/gateway/events/frame.rs` |
+| `run.queued` | `stream.run_queued` | 运行进入队列 | `run_id`、`session_key`、`ahead` | `src/gateway/events/frame.rs` |
+| `agent.reasoning` | `stream.reasoning` | 模型推理增量 | `run_id`、`seq`、`content`、`is_complete` | `src/gateway/events/frame.rs` |
+| `agent.tool.start` | `stream.tool_start` | 工具调用开始 | `run_id`、`seq`、`tool_name`、`tool_id`、`params` | `src/gateway/events/frame.rs` |
+| `agent.tool.update` | `stream.tool_update` | 工具调用进度 | `run_id`、`seq`、`tool_id`、`progress` | `src/gateway/events/frame.rs` |
+| `agent.tool.end` | `stream.tool_end` | 工具调用结束 | `run_id`、`seq`、`tool_id`、`result`、`duration_ms` | `src/gateway/events/frame.rs` |
+| `agent.trace` | `stream.agent_trace` | 代理轨迹事件 | `run_id`、`seq`、`event` | `src/gateway/events/frame.rs` |
+| `agent.response.chunk` | `stream.response_chunk` | 回答分片 | `run_id`、`seq`、`delta`、`chunk_index`、`is_final`、`is_intermediate` | `src/gateway/events/frame.rs` |
+| `agent.context.gauge` | `stream.context_gauge` | 一次模型调用后的上下文占用 | `run_id`、`seq`、`context_tokens`、`context_window`、`total_tokens` | `src/gateway/events/frame.rs` |
+| `agent.run.complete` | `stream.run_complete` | 一次运行结束 | `run_id`、`seq`、`summary`、`total_duration_ms` | `src/gateway/events/frame.rs` |
+| `agent.run.error` | `stream.run_error` | 一次运行失败 | `run_id`、`seq`、`error`、`error_code`，可能带 `session_key` | `src/gateway/events/frame.rs` |
+| `agent.run.retrying` | `stream.run_retrying` | 运行重试 | `run_id`、`seq`、`provider`、`attempt`、`max_attempts`、`reason` | `src/gateway/events/frame.rs` |
+| `agent.model.resolved` | `stream.model_resolved` | 模型选择确定 | `run_id`、`model_info` | `src/gateway/events/frame.rs` |
+| `agent.uncertainty` | `stream.uncertainty_signal` | 模型给出不确定信号 | `run_id`、`seq`、`uncertainty`、`suggested_action` | `src/gateway/events/frame.rs` |
 
-主题空间按命名空间分组；同一组事件可能在 `events.subscribe` 中用通配 `*` 一并订阅。
+### 澄清与审批
 
-### Run / Agent 生命周期（`run.*`、`agent.*`）
+| 规范主题 | 线上方法 | 何时触发 | 负载要点 | 代码位置 |
+|----------|----------|----------|----------|----------|
+| `agent.ask.user` | `stream.ask_user` | 运行停在等人回答 | `run_id`、`seq`、`session_key`、`request_id`、`question`、`options`、`questions`、`answered` | `src/gateway/events/frame.rs` |
+| `agent.clarification.ended` | `stream.clarification_ended` | 澄清结束 | `session_key`、`request_id`、`outcome` | `src/gateway/events/frame.rs` |
+| `approval.requested` | 无 | 需要人工批准 | `approval_id`、`session_key`、`channel_id`、`conversation_id`、`tool_call_id` | `src/gateway/events/frame.rs` |
+| `approval.reminder` | 无 | 批准等待超时提醒 | `approval_id`、`session_key` | `src/gateway/events/frame.rs` |
+| `approval.resolved` | 无 | 批准有结果 | `approval_id`、`session_key`、`decision`、`resolved_by` | `src/gateway/events/frame.rs` |
+| `approval.expired` | 无 | 批准过期 | `approval_id`、`session_key` | `src/gateway/events/frame.rs` |
+| `pairing.requested` | 无 | 新设备请求配对 | `device_name` | `src/gateway/events/frame.rs` |
+| `pairing.completed` | 无 | 设备配对完成 | `device_id` | `src/gateway/events/frame.rs` |
 
-| 主题 | 说明 |
-|-------|-------------|
-| `run.accepted` | run 已入队并启动 |
-| `agent.reasoning` | 思考阶段输出 |
-| `agent.reasoning.block` | 推理块（双过程认知） |
-| `agent.tool.start` | 工具调用开始 |
-| `agent.tool.update` | 工具进度更新 |
-| `agent.tool.end` | 工具调用结束 |
-| `agent.trace` | 执行轨迹事件 |
-| `agent.response.chunk` | 响应文本块 |
-| `agent.context.gauge` | 上下文窗口使用率 |
-| `agent.run.complete` | run 成功完成 |
-| `agent.run.error` | run 出错 |
-| `agent.run.retrying` | 失败重试 |
-| `agent.ask.user` | `ask_user` 触发澄清 |
-| `agent.clarification.ended` | 澄清回合结束 |
-| `agent.uncertainty` | 模型不确定性信号 |
-| `agent.model.resolved` | 模型选择已解析 |
+### 会话与运行集
 
-### Session / Running Set
+| 规范主题 | 线上方法 | 何时触发 | 负载要点 | 代码位置 |
+|----------|----------|----------|----------|----------|
+| `session.updated` | `stream.session_updated` | 会话元数据变化 | `session_key`、`origin_channel`、`origin_run_id` | `src/gateway/events/frame.rs` |
+| `session.user.message` | `stream.session_user_message` | 用户消息入会话 | `session_key`、`author_user_id`、`content`、`timestamp`、`seq` | `src/gateway/events/frame.rs` |
+| `session.lifecycle.changed` | 无 | 会话状态迁移 | `session_key`、`old_state`、`new_state`、`reason` | `src/gateway/events/frame.rs` |
+| `running.set.changed` | `stream.running_set_changed` | 运行集变化 | `seq`、`running` | `src/gateway/events/frame.rs` |
 
-| 主题 | 说明 |
-|-------|-------------|
-| `session.updated` | 会话元数据更新 |
-| `session.lifecycle.changed` | 会话生命周期阶段变化 |
-| `running.set.changed` | 活跃 run 集合变化 |
+### 渠道
 
-### Channels
+| 规范主题 | 线上方法 | 何时触发 | 负载要点 | 代码位置 |
+|----------|----------|----------|----------|----------|
+| `channel.message` | 无 | 渠道收到消息 | `channel_id`、`conversation_id`、`message` | `src/gateway/events/frame.rs` |
+| `channel.typing` | 无 | 渠道正在输入 | `channel_id`、`conversation_id` | `src/gateway/events/frame.rs` |
+| `channel.status` | 无 | 渠道连接状态变化 | `channel_id`、`status` | `src/gateway/events/frame.rs` |
+| `channel.error` | 无 | 渠道错误 | `channel_id`、`error` | `src/gateway/events/frame.rs` |
 
-| 主题 | 说明 |
-|-------|-------------|
-| `channel.message` | 入站消息 |
-| `channel.typing` | 输入指示器 |
-| `channel.status` | 通道运行状态 |
-| `channel.error` | 通道错误 |
+### 配置与系统
 
-### Config / Approvals
+| 规范主题 | 线上方法 | 何时触发 | 负载要点 | 代码位置 |
+|----------|----------|----------|----------|----------|
+| `config.changed` | 无 | 配置段变更 | `section`、`value` | `src/gateway/events/frame.rs` |
+| `cron.job.changed` | 无 | 定时任务变更 | `job_id`、`change` | `src/gateway/events/frame.rs` |
+| `heartbeat.task.changed` | 无 | 心跳任务变更 | `task_id`、`change` | `src/gateway/events/frame.rs` |
+| `team.changed` | 无 | 团队变更 | `team_id`、`change` | `src/gateway/events/frame.rs` |
+| `workspace.changed` | 无 | 工作区变更 | `workspace_id`、`change` | `src/gateway/events/frame.rs` |
+| `projects.changed` | 无 | 项目变更 | `project_id`、`change`、`affected_user` | `src/gateway/events/frame.rs` |
+| `acp.sessions.changed` | 无 | ACP 会话池变化 | 无负载，客户端自行重新拉取 | `src/gateway/events/frame.rs` |
+| `gateway.token.rotated` | 无 | 共享网关令牌轮换 | 无负载 | `src/gateway/events/frame.rs` |
+| `gateway.device.revoked` | 无 | 配对设备被吊销 | `device_id` | `src/gateway/events/frame.rs` |
 
-| 主题 | 说明 |
-|-------|-------------|
-| `config.changed` | 配置变更（来自 `[gateway.config_watcher]` 热重载或 RPC） |
-| `approval.requested` / `approval.resolved` / `approval.expired` | 审批生命周期 |
+### 投送面、画布与浏览器
 
-### Cron / Heartbeat
+| 规范主题 | 线上方法 | 何时触发 | 负载要点 | 代码位置 |
+|----------|----------|----------|----------|----------|
+| `surface.notify` | 无 | 向投递面推送通知 | `audience`、`title`、`body`、`source_topic` | `src/gateway/events/frame.rs` |
+| `surface.approval` | 无 | 向投递面推送批准请求 | `audience`、`approval_id`、`session_key`、`title`、`body` | `src/gateway/events/frame.rs` |
+| `canvas.updated` | 无 | 画布变更 | `canvas_id`、`revision`、`ops`、`actor`、`owner_user_id`、`project_id` | `shared/protocol/src/canvas.rs` |
+| `browser.live.resource` | 无 | 浏览器实时资源更新 | `resource` | `shared/protocol/src/browser_live.rs` |
+| `browser.live.closed` | 无 | 浏览器实时会话关闭 | `closed` | `shared/protocol/src/browser_live.rs` |
+| `browser.live.intervention` | 无 | 浏览器需要人工介入 | `summary` | `shared/protocol/src/browser_live.rs` |
 
-| 主题 | 说明 |
-|-------|-------------|
-| `cron.job.changed` | cron 任务变更（含 `cron.run` 触发） |
-| `heartbeat.task.changed` | 心跳任务变更 |
+### 原始主题
 
-### Teams / ACP / Gateway 凭据
+下面这些主题不经帧封装，由生产者直接投递。主题常量的定义处与生产者分开，表中列的是生产者。
 
-| 主题 | 说明 |
-|-------|-------------|
-| `team.changed` | 团队组成或任务变更 |
-| `acp.sessions.changed` | ACP 会话集合变化 |
-| `gateway.token.rotated` | 网关 token 轮换 |
-| `gateway.device.revoked` | 设备撤销 |
+| 主题 | 何时触发 | 负载要点 | 生产者 |
+|------|----------|----------|--------|
+| `session.artifact` | 会话产物变化，提示客户端重读产物列表 | 只带 `session_key` | `src/gateway/event_emitter/artifact_ping.rs` |
+| `run.subagent_tree` | 子代理树结构变化 | 根会话与子节点 | `src/gateway/subagent_tree_relay.rs` |
+| `pty.screen` | PTY 屏幕输出 | 会话 id 与屏幕内容 | `src/gateway/pty/manager.rs` |
+| `pty.exit` | PTY 退出 | 会话 id 与退出码 | `src/gateway/pty/manager.rs` |
+| `node.connected` | 集群节点接入 | — | `src/gateway/server/connection/mod.rs` |
+| `node.disconnected` | 集群节点断开 | — | `src/gateway/server/connection/cleanup.rs` |
+| `presence.joined` | 连接加入 | `conn_id` | `src/gateway/server/connection/mod.rs` |
+| `presence.left` | 连接离开 | `conn_id` | `src/gateway/server/connection/cleanup.rs` |
+| `voice.transcribe.delta` | 语音转写增量 | `owner_user_id` | `src/gateway/voice/streaming/relay.rs` |
+| `capability.event` | 能力事件 | — | `src/gateway/capability_events.rs` |
+| `capability.event.status` | 能力事件状态 | — | `src/gateway/capability_events.rs` |
+| `capabilities.ui.display` | UI 显示内容变更 | — | `src/gateway/capability_ui.rs` |
+| `tools.changed` | 工具集合变更 | — | `src/gateway/tools_invalidation.rs` |
+| `sessions.changed` | 会话列表变更 | — | `src/gateway/session_store/file_backend/mod.rs` |
+| `system.tick` | 网关心跳 | — | `src/gateway/server/mod.rs` |
+| `config.reloaded` | 配置重载完成 | — | `src/bin/aleph-server/commands/start/builder/handlers/config.rs` |
+| `config.error` | 配置重载失败 | — | `src/bin/aleph-server/commands/start/builder/handlers/config.rs` |
+| `extension.reloaded` | 扩展重载 | — | `src/bin/aleph-server/commands/start/mod.rs` |
+| `memory.reembed.progress` | 记忆重嵌入进度 | — | `src/gateway/handlers/memory/mod.rs` |
+| `memory.reembed.completed` | 记忆重嵌入完成 | — | `src/gateway/handlers/memory/mod.rs` |
+| `agent.lifecycle.registered` | 代理注册 | — | `src/gateway/agent_lifecycle.rs` |
+| `agent.lifecycle.deleted` | 代理删除 | — | `src/gateway/agent_lifecycle.rs` |
+| `agent.lifecycle.bound` | 代理绑定 | — | `src/gateway/agent_lifecycle.rs` |
+| `agent.lifecycle.unbound` | 代理解绑 | — | `src/gateway/agent_lifecycle.rs` |
+| `runtimes.install.progress` | 运行时安装进度 | — | `src/gateway/handlers/runtimes.rs` |
+| `config.embedding.providers.changed` | 嵌入 provider 注册表变更 | — | `src/gateway/handlers/embedding_providers.rs` |
+| `config.generation.providers.changed` | 生成 provider 注册表变更 | — | `src/gateway/handlers/generation_providers/handlers.rs` |
 
-### Surfaces / Runtimes
+## 可见性与授权
 
-| 主题 | 说明 |
-|-------|-------------|
-| `surface.notify` | 面板通用通知 |
-| `surface.approval` | 面板审批请求 |
-| `runtimes.install.progress` | 运行时安装进度（步骤 / 日志 / 完成 / 失败） |
+一帧事件要送达某个连接，必须逐层通过过滤链（`src/gateway/server/connection/mod.rs:1373`）。其中与主题相关的有两道机制，分工不同。
 
-## Glob 模式匹配
+### 作用域规则
 
-订阅模式使用 glob 风格匹配（`src/gateway/event_bus.rs::topic_matches`）：
+`src/gateway/event_scope.rs` 是粗粒度的前缀规则。`default_rules` 只登记了几条前缀——配对、访客、配置变更、节点与 PTY——命中的前缀要求调用方持有管理员作用域；没有规则命中的主题默认放行。`scope_for_role` 对 operator 返回通配作用域，对其他角色返回空。
 
-| 模式 | 匹配 |
-|---------|---------|
-| `agent.run.*` | `agent.run.started`、`agent.run.complete` 等 |
-| `agent.*` | 所有 `agent.` 前缀的事件 |
-| `*` | 所有事件 |
-| `agent.run.complete` | 仅精确匹配 |
-| `*.complete` | 任何以 `.complete` 结尾的事件 |
+因此 `config.changed`、`node.` 前缀与 `pty.` 前缀下的主题，只有 operator 能收到。
 
-`*` 通配符匹配单个非点段；模式按完整主题字符串匹配。
+### 逐帧归属裁决
 
-## 典型客户端流程
+`src/gateway/event_visibility.rs` 负责「这一帧属于谁」。`classify`（`:440`）把主题与负载映射成一种身份：
 
-```json
-// 1. 订阅相关主题
-{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*", "session.*"] } }
+| 身份 | 覆盖的主题 | 裁决 |
+|------|------------|------|
+| 按会话 | `stream.ask_user`、`stream.clarification_ended`、`stream.run_accepted`、`stream.run_queued`、`stream.session_updated`、`stream.session_user_message`、`session.lifecycle.changed`、`sessions.changed` | 会话归属者可见 |
+| 按运行 | `stream.reasoning`、`stream.tool_start`、`stream.tool_update`、`stream.tool_end`、`stream.agent_trace`、`stream.response_chunk`、`stream.context_gauge`、`stream.run_complete`、`stream.run_error`、`stream.uncertainty_signal`、`stream.model_resolved`、`stream.run_retrying` | 先由 `run_id` 解析到会话，再按会话归属裁决 |
+| 按会话或管理员 | `approval.requested`、`approval.reminder`、`approval.resolved`、`approval.expired`、`surface.approval` | operator 直通，其余按会话归属 |
+| 按用户 | `voice.transcribe.delta` | 调用方 id 与 `owner_user_id` 相等 |
+| 按 PTY 会话 | `pty.screen`、`pty.exit` | 按 PTY 会话归属 |
+| 按画布 | `canvas.updated` | 按画布可见性谓词 |
+| 按项目 | `projects.changed` | 按项目花名册，无管理员豁免 |
+| 仅管理员 | `workspace.changed`、`config.embedding.providers.changed`、`config.generation.providers.changed`，以及 `host.` 前缀 | 角色必须是 operator |
+| 全局 | `channel.message`、`channel.typing`、`channel.status`、`channel.error`、`acp.sessions.changed`、`gateway.token.rotated`、`gateway.device.revoked`、`cron.job.changed`、`heartbeat.task.changed`、`team.changed`、`surface.notify`、`pairing.requested`、`pairing.completed`、`config.changed`、`system.tick`、`presence.joined`、`presence.left`、`tools.changed`、`config.reloaded`、`config.error`、`extension.reloaded`、`memory.reembed.progress`、`memory.reembed.completed`、`runtimes.install.progress`、`agent.lifecycle.registered`、`agent.lifecycle.deleted`、`agent.lifecycle.bound`、`agent.lifecycle.unbound` | 对所有已登录连接放行 |
+| 能力受众 | `capability.event`、`capabilities.ui.display`、`capability.event.status` | 按能力受众裁决 |
 
-// 2. 启动一次 run
-{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Check disk usage" } }
+两点补充：
 
-// 3. 接收事件（无 id = 通知）
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "run.accepted", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "run_id": "run-123", "content": "Disk usage is at 45%..." } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.run.complete", "data": { "run_id": "run-123", "duration_ms": 4200 } } }
-```
+- `config.changed` 既命中作用域规则里的配置前缀，也在逐帧裁决里算全局。前缀规则先执行，所以实际只有 operator 收到。
+- 团队相关的主题里，带团队 id 的那类按团队归属裁决；不带 id 的 `team.changed` 才是全局。
 
-## 另请参阅
+### 投影帧
 
-- [协议](../protocol)——事件传递格式与 WebSocket 传输
-- [agent.*](./agent)——发出事件的代理方法
-- [方法参考](./index)——所有方法命名空间
+`stream.running_set_changed` 是链上唯一的投影帧：它被判定为全局（没有人拥有这一帧），但它的 `running` 数组会按连接裁剪，每个连接只看到与自己相关的运行集。
+
+## 重放与快照
+
+当前实现里没有事件重放与快照订阅。
+
+- `shared/protocol/src/trace_replay.rs` 定义的是持久化 trace 的查询 DTO（`AgentTraceReplay`、`AgentTraceReplayEntry`、`AgentTraceListRow` 等），它读的是已经落盘的轨迹记录，不是从事件流里重放。
+- `shared/protocol/src/resume.rs` 定义的是恢复任务的回执（`ResumeReceipt`、`ResumeStatus` 及其常量），与事件重放无关。
+- 订阅语义本身也不支持重放：`events.subscribe` 只记录模式，不记录游标。
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_PROTOCOL_V1.md`（第 9 章 Snapshot + Replay，含 9.3 无丢失订阅要求、9.4 历史不可用、9.5 去重游标）；当前实现见 `shared/protocol/src/trace_replay.rs`、`shared/protocol/src/resume.rs` 与 `src/gateway/handlers/events.rs`。`session.get_snapshot` 在 `src/gateway/method_census.rs` 里没有登记，快照接口尚未存在。
+
+## 历史：事件名从旧命名收敛
+
+早期文档里的事件名是扁平的命名，例如 agent.completed、agent.started、agent.error、stream.chunk。现行代码里已经没有这些字符串，它们只在历史文档与早期计划里出现。
+
+收敛到现在的命名空间之后，`agent.run.complete` 表示一次运行完成，而 `session.user.message` 表示一条用户消息——两者不再混在同一个扁平名字里。`stream.chunk` 则落到 `agent.response.chunk`，与 `agent.reasoning`、`agent.trace` 归到同一个 agent 输出族。
+
+另一次收敛是规范名与线上方法名的分离：规范主题名描述「这是什么事件」，线上方法名描述「它怎么送达」。两套名字并存期间，`agent.run.complete` 主要作为 `source_topic` 诊断字段出现，线上订阅一直用 `stream.*`。

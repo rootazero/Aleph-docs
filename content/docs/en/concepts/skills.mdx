@@ -83,7 +83,7 @@ install:
 
 ### Markdown CLI compatibility
 
-The compatibility Markdown CLI reader also understands `metadata.requires.bins`, `metadata.aleph.security`, `metadata.aleph.input_hints`, and Docker settings. Those fields describe the legacy CLI execution path; new SkillSystem skills should use the top-level fields above for eligibility and dependency installation. A security declaration is not a replacement for Aleph's runtime approval and install gates.
+The compatibility Markdown CLI reader also understands required binaries, security declarations, input hints, and Docker settings. Those legacy metadata fields describe the old CLI execution path; new SkillSystem skills should use the top-level fields above for eligibility and dependency installation. A security declaration is not a replacement for Aleph's runtime approval and install gates.
 
 ## Keep the body lean
 
@@ -91,7 +91,7 @@ Use progressive disclosure:
 
 1. Keep `SKILL.md` focused on routing, rules, and the normal workflow.
 2. Put deep reference material in files such as `references/guide.md`.
-3. Put deterministic helper code in `scripts/` when appropriate.
+3. Put deterministic helper code in a `scripts` directory when appropriate.
 4. Ask the model to use `skill_read(skill_id, file_name=...)` for supporting text.
 
 The `skill_read` path is containment-checked, size-bounded, and expands the skill-relative context. Do not teach a skill to read its own Markdown resources with a raw absolute path or shell `cat`. The absolute location returned by `skill_read` is for executing a referenced script, not for bypassing the reader.

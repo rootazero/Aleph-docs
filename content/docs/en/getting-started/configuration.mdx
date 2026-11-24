@@ -37,7 +37,7 @@ port = 18790
 
 ## Providers and Models
 
-Providers use `[providers.<name>]` tables. `general.default_provider` and `general.fallback_providers` refer to those names.
+Providers use `[providers.<name>]` tables. The `default_provider` and `fallback_providers` keys in the `[general]` table refer to those names.
 
 ```toml
 [general]
@@ -74,7 +74,7 @@ exec_tier = "auto"  # ask / auto / full
 | `mode` | `work` | Statically partitions tool presentation without changing permissions |
 | `exec_tier` | `auto` | Selects the tool approval policy |
 
-`[sandbox.command_policy]` is an independent hard security floor that `full` cannot lower. Thinking level defaults to `minimal` and is controlled by session/client state; do not add a nonexistent `agents.defaults.thinking` field.
+`[sandbox.command_policy]` is an independent hard security floor that `full` cannot lower. Thinking level defaults to `minimal` and is controlled by session/client state; the config file has no field for a default thinking level, so do not add one.
 
 ## Gateway
 

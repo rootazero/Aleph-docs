@@ -3,7 +3,7 @@ title: "workspace.*"
 description: "Workspace management RPC methods"
 ---
 
-`workspace.*` is the runtime surface over the `AgentEnvStore` (SQLite-backed). Five core methods are wired in `register_workspace_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:6-88`); the channel-binding surface lives in the same module, since the bind / unbind seam is shared with the `agent_switch` builtin tool.
+`workspace.*` is the runtime surface over the `AgentEnvStore` (SQLite-backed). Five core methods are wired in `register_workspace_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/settings.rs`); the channel-binding surface lives in the same module, since the bind / unbind seam is shared with the `agent_switch` builtin tool.
 
 The store model is **one workspace per agent, many channels per agent**. A workspace is a logical isolation boundary — it carries the agent's profile, project root, and binding table; it does **not** own a file directory (the working directory is bound at run time from `sessions.set_project_root`).
 
@@ -90,15 +90,15 @@ Get every channel bound to each agent, sorted by channel id. Many-to-one aware: 
 
 **Response:** `{ "bindings": { "agent-1": [ "discord", "telegram" ], … } }`. The previous one-channel-per-agent map was lossy and was replaced when the new shape landed.
 
-## Methods that are **not** RPC
+## History: former workspace operations
 
-The following methods are described in earlier versions of this page but are **not** registered on the current `aleph-server`:
+These historical names are no longer in the census and are not current RPCs; use the alternatives below:
 
 | Method | Why it is not an RPC |
 |--------|---------------------|
-| `workspace.activate` | There is no "active workspace" concept at runtime — the agent loop reads the session's `project_root` (set via `sessions.set_project_root`) on every turn, so an "active" switch would be redundant. |
-| `workspace.files` | Workspace storage is an `AgentEnvStore` row, not a directory listing. Use `fs.list_dir` (scoped to the project root) or the agent's own tool surface. |
-| `workspace.delete` | The runtime exposes only `archive`; the row is reserved after archive. |
+| workspace.activate (historical, not registered) | There is no "active workspace" concept at runtime — the agent loop reads the session's `project_root` (set via `sessions.set_project_root`) on every turn, so an "active" switch would be redundant. |
+| workspace.files (historical, not registered) | Workspace storage is an `AgentEnvStore` row, not a directory listing. Use `fs.list_dir` (scoped to the project root) or the agent's own tool surface. |
+| workspace.delete (historical, not registered) | Use `workspace.archive` to archive and `workspace.unarchive` to restore. |
 
 ## See Also
 

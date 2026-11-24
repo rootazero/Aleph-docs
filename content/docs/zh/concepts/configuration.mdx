@@ -28,9 +28,9 @@ port = 18790
 allow_insecure_remote = false
 ```
 
-`[providers.<name>]` 是提供商表；`general.default_provider` 与 `general.fallback_providers` 引用表名。模型 ID 应以当前模型目录和 Panel 配置为准。
+`[providers.<name>]` 是提供商表；`[general]` 表里的 `default_provider` 与 `fallback_providers` 键引用表名。模型 ID 应以当前模型目录和 Panel 配置为准。
 
-`[policies]` 保存全局 `mode` 与 `exec_tier`。`[sandbox.command_policy]` 是不能被 `exec_tier` 降低的独立安全硬底。不要把会话模式、执行等级或不存在的 `agents.defaults.thinking` 放进 `[agents.defaults]`；该表只放 Agent 定义支持的默认值，例如模型、工作区和技能。
+`[policies]` 保存全局 `mode` 与 `exec_tier`。`[sandbox.command_policy]` 是不能被 `exec_tier` 降低的独立安全硬底。不要把会话模式、执行等级或不存在的 `thinking` 键放进 `[agents.defaults]`；该表只放 Agent 定义支持的默认值，例如模型、工作区和技能。
 
 ## Gateway host、TLS 与可信代理
 

@@ -100,7 +100,7 @@ API keys and secrets are held by the **OS keychain** and persisted as AES-256-GC
 
 ## Session Storage (`data/sessions.db`)
 
-The session event log is the **single source of truth** (`session_events` table); `MessageProjector` materialises events into the `messages` table, and `ProjectionReconciler` back-fills projections on startup. Schemas are defined in `src/session/events.rs` and `src/session/projector.rs`.
+The session event log is the **single source of truth** (`session_events` table); `MessageProjector` materialises events into the `messages` table, and `ProjectionReconciler` back-fills projections on startup. Event schemas are defined in `src/session/events.rs`; the projector and reconciler live in `src/gateway/session_projector.rs` and `src/gateway/projection_reconciler.rs`.
 
 **Session keys** use a hierarchical format encoding agent, channel, and scope:
 
@@ -122,7 +122,7 @@ The memory subsystem uses a single storage backend: **SQLite + sqlite-vec**, plu
 - **Raw sources**: `memory/raw/` — distillation input; the notes layer back-fills `[[wikilink]]` edges from these
 - **Graph cache / insights**: written by `GraphRecomputeStage` into `notes_graph_cache` / `notes_graph_insights` (spawn_blocking, zero LLM)
 
-LanceDB and the legacy single-file `graph.db` have been folded in.
+LanceDB and the legacy single-file graph.db database have been folded in.
 
 ## Skill / Plugin Directories
 
@@ -180,7 +180,7 @@ Workspaces are the user-facing "multiple workspaces side-by-side" abstraction �
 - `channels.set_agent` — bind a channel to a specific agent (**now requires the agent to exist**; the prior version that accepted non-existent agents was fixed)
 - `agents.bindings` — query current agent ↔ channel bindings
 
-Backed by the SQLite `AgentEnvStore` (not by `~/.aleph/projects.json`); defined in `src/gateway/agent_env.rs`.
+Backed by the SQLite `AgentEnvStore` (not by `~/.aleph/projects.json`); defined in `src/gateway/agent_env/`.
 
 ## Identity and Soul Files
 

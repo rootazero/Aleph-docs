@@ -204,10 +204,9 @@ let output = provider.generate(request).await.unwrap();
 ## Code Location
 
 - `src/generation/mod.rs` — `GenerationProvider` trait and mock provider
-- `src/generation/types.rs` — Request/output types and builder
+- `src/generation/types/` — Request/output types and builder
 - `src/generation/error.rs` — `GenerationError` typed errors
 - `src/generation/registry.rs` — Provider registry
-- `src/generation/response_parser.rs` — Natural language request parsing
 - `src/generation/providers/` — Provider implementations
 
 ## See Also
@@ -227,9 +226,9 @@ let output = provider.generate(request).await.unwrap();
 
 `session.usage` is computed in-core from the single `crate::pricing` rate-card table. The duplicate `format_params_*` price table in the shell was deleted — previously it drifted across processes.
 
-### VESR Dynamic Model Routing
+### VESR Dynamic Model Routing (removed)
 
-26.6.29+: replaces the deterministic router. `src/routing/recall.rs` records every completed run's outcome and recalls a per-model track record at run start (**k-NN over sqlite-vec**), so the model sees which models have actually performed for this kind of work. Includes per-agent / per-model lifetime aggregates, USD-cost enrichment (reusing `crate::pricing`), and subagent routing capture.
+VESR (dynamic model routing) was introduced in 26.6.29 and has since been removed. Its per-model track-record recall lived in src/routing/recall.rs (**k-NN over sqlite-vec**); the file is gone, and `src/routing/` now handles only the agent-routing grammar (`config.rs` / `identity_links.rs` / `overlay.rs` / `resolve.rs` / `session_key.rs`). Model selection is currently done by `src/providers/capability_gate.rs` (prompt-blind capability floor) followed by the failover walk.
 
 ### Provider Presets Refreshed
 
@@ -237,7 +236,7 @@ let output = provider.generate(request).await.unwrap();
 
 ### Provider Configuration Block
 
-Each provider is configured through a `[providers.<name>]` table (protocol, model, API key, base URL). Multiple providers can coexist; `agents.defaults.model` and the `models` failover chain control the order. `[provider.<name>]` is not a valid key.
+Each provider is configured through a `[providers.<name>]` table (protocol, model, API key, base URL). Multiple providers can coexist; the `model` key in the `[agents.defaults]` table and the `models` failover chain control the order. `[provider.<name>]` is not a valid key.
 
 ### See Also
 

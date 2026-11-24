@@ -40,47 +40,66 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 
 ### 流式事件 (`stream.*`)
 
-在代理响应生成期间发出。这些是最频繁的事件，为实时 UI 提供动力。
+在代理运行期间发出。这些是最频繁的事件，为实时 UI 提供动力。
 
-| 主题 | 说明 | 关键字段 |
+它们以 **JSON-RPC 通知**送达：`method` 是 `stream.*` 之一，`params` 就是事件负载本身（不再包一层 `event` 信封）。订阅匹配用的就是这个 `method` 名。
+
+| 方法 | 说明 | 关键字段 |
 |-------|-------------|------------|
-| `stream.start` | 响应流式传输开始 | `run_id` |
-| `stream.chunk` | 来自代理的文本块 | `run_id`, `content` |
-| `stream.tool_start` | 代理正在调用工具 | `run_id`, `tool_name`, `args` |
-| `stream.tool_end` | 工具执行完成 | `run_id`, `tool_name`, `result`, `duration_ms` |
-| `stream.thinking` | 推理步骤（思维链） | `run_id`, `step_type`, `content` |
-| `stream.end` | 响应流式传输完成 | `run_id` |
+| `stream.run_accepted` | 运行已接受 | `run_id`, `session_key`, `accepted_at` |
+| `stream.run_queued` | 运行排队中 | `run_id`, `session_key`, `ahead` |
+| `stream.reasoning` | 推理步骤（思维链） | `run_id`, `seq`, `content`, `is_complete` |
+| `stream.tool_start` | 代理正在调用工具 | `run_id`, `seq`, `tool_name`, `tool_id`, `params` |
+| `stream.tool_update` | 工具调用进度 | `run_id`, `seq`, `tool_id`, `progress` |
+| `stream.tool_end` | 工具执行完成 | `run_id`, `seq`, `tool_id`, `result`, `duration_ms` |
+| `stream.agent_trace` | 代理内部轨迹 | `run_id`, `seq`, `event` |
+| `stream.response_chunk` | 来自代理的文本块 | `run_id`, `seq`, `delta`, `full_text`, `is_final` |
+| `stream.context_gauge` | 上下文用量 | `run_id`, `seq`, `context_tokens`, `context_window`, `total_tokens` |
+| `stream.run_complete` | 运行完成 | `run_id`, `seq`, `summary`, `total_duration_ms` |
+| `stream.run_error` | 运行出错 | `run_id`, `seq`, `error`, `error_code` |
+| `stream.ask_user` | 代理向用户提问 | `run_id`, `seq`, `session_key`, `request_id`, `question` |
+| `stream.clarification_ended` | 澄清回合结束 | `session_key`, `request_id`, `outcome` |
+| `stream.uncertainty_signal` | 代理表达不确定 | `run_id`, `seq`, `uncertainty`, `suggested_action` |
+| `stream.model_resolved` | 本次运行选定的模型 | `run_id`, `seq`, `model_info` |
+| `stream.run_retrying` | 运行正在重试 | `run_id`, `seq`, `provider`, `attempt`, `max_attempts`, `reason` |
+| `stream.session_updated` | 会话元数据更新 | `session_key` |
+| `stream.session_user_message` | 用户消息落进会话 | `session_key`, `author_user_id`, `content`, `timestamp` |
+| `stream.running_set_changed` | 在跑的会话集合变化 | `seq`, `running` |
 
 ### 代理事件 (`agent.*`)
 
-代理运行生命周期 —— 开始、完成、错误、取消。
+代理注册与绑定的变化。
 
 | 主题 | 说明 | 关键字段 |
 |-------|-------------|------------|
-| `agent.started` | 代理运行已开始 | `run_id`, `session_key` |
-| `agent.completed` | 代理运行完成 | `run_id`, `session_key`, `tokens_used`, `duration_ms` |
-| `agent.error` | 代理运行遇到错误 | `run_id`, `error` |
-| `agent.cancelled` | 代理运行被取消 | `run_id` |
+| `agent.lifecycle.registered` | 代理已注册 | `agent_id`, `workspace`, `model` |
+| `agent.lifecycle.deleted` | 代理已删除，工作区归档 | `agent_id`, `workspace_archived` |
+| `agent.lifecycle.bound` | 频道的代理绑定被切换 | `agent_id`, `channel`, `previous_agent` |
+| `agent.lifecycle.unbound` | 频道的显式绑定被清除 | `channel`, `previous_agent` |
+
+代理**运行**的生命周期（开始、输出、结束）不走这个命名空间：那些帧在网络上是 `stream.*` 通知（见上一节）。帧内部另有一个 `agent.*` 主题名，但订阅匹配用的是通知的 `method`，不是它。
 
 ### 会话事件 (`session.*`)
 
-会话生命周期更改。
+会话状态与内容的变化。
 
 | 主题 | 说明 | 关键字段 |
 |-------|-------------|------------|
-| `session.created` | 新会话已创建 | `session_key` |
-| `session.deleted` | 会话已删除 | `session_key` |
-| `session.compacted` | 会话已压缩 | `session_key`, `tokens_before`, `tokens_after` |
+| `session.updated` | 会话元数据更新 | `session_key` |
+| `session.user.message` | 用户消息落进会话记录 | `session_key`, `author_user_id`, `content`, `timestamp`, `seq` |
+| `session.lifecycle.changed` | 会话状态迁移 | `session_key`, `old_state`, `new_state`, `reason` |
 
 ### Cron 事件 (`cron.*`)
 
-计划作业执行事件。
+计划作业**定义**本身的变化。
 
 | 主题 | 说明 | 关键字段 |
 |-------|-------------|------------|
-| `cron.triggered` | 作业执行已开始 | `job_id`, `run_id`, `trigger_source` |
-| `cron.completed` | 作业成功完成 | `job_id`, `run_id`, `duration_ms` |
-| `cron.failed` | 所有重试后作业失败 | `job_id`, `run_id`, `error` |
+| `cron.job.changed` | 作业被创建、更新、删除，或仅运行状态变化 | `job_id`, `change` |
+
+`change` 的取值是 `created`、`updated`、`deleted`、`state_changed`。
+
+作业的**执行结果**不在事件流里：用 `cron.runs` 查某个作业的运行记录（`status` 取值为 `ok`、`error`、`skipped`、`timeout`），用 `cron.status` 看整体（`running`、`last_tick_at_ms`、`job_count`、`enabled_count`）。
 
 ### 配置事件 (`config.*`)
 
@@ -88,17 +107,24 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 
 | 主题 | 说明 | 关键字段 |
 |-------|-------------|------------|
-| `config.changed` | 配置已修改 | `changed_keys`, `source` |
-| `config.reloaded` | 配置已从文件重新加载 | `source` |
+| `config.changed` | 某个配置段被修改 | `section`, `value` |
+| `config.reloaded` | 配置文件被重新加载 | `agents`, `timestamp` |
+| `config.error` | 配置文件校验失败 | `error`, `timestamp` |
 
-### 执行事件 (`exec.*`)
+### 审批事件 (`approval.*`)
 
 命令执行审批流程。
 
 | 主题 | 说明 | 关键字段 |
 |-------|-------------|------------|
-| `exec.approval_requested` | 需要审批命令 | `id`, `command`, `risk_level` |
-| `exec.approval_resolved` | 审批决策已做出 | `id`, `decision` |
+| `approval.requested` | 需要人工审批 | `approval_id`, `session_key`, `channel_id`, `conversation_id`, `tool_call_id` |
+| `approval.reminder` | 尚无应答的审批被再次提醒 | `approval_id`, `session_key` |
+| `approval.resolved` | 审批已决策 | `approval_id`, `session_key`, `decision`, `resolved_by` |
+| `approval.expired` | 审批超时作废 | `approval_id`, `session_key` |
+
+`decision` 的取值是 `allow-once`、`allow-session`、`allow-always`、`deny`。
+
+审批事件走 `approval.*` 主题；`exec.*` 是**方法**命名空间，用来查待批列表和下决策：`exec.approvals.pending`、`exec.approval.resolve`、`exec.grants.list`、`exec.grant.revoke`。
 
 ### 守护进程事件
 
@@ -146,14 +172,28 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "topic": "agent.completed",
+    "topic": "session.lifecycle.changed",
     "data": {
-      "run_id": "run-uuid-123",
       "session_key": "agent:main:main",
-      "tokens_used": 1247,
-      "duration_ms": 5000
+      "old_state": "idle",
+      "new_state": "running"
     },
     "timestamp": 1706400000000
+  }
+}
+```
+
+流式帧走的是另一种信封 —— `method` 直接是 `stream.*`，负载就在 `params` 里：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "stream.run_complete",
+  "params": {
+    "run_id": "run-uuid-123",
+    "seq": 42,
+    "summary": "done",
+    "total_duration_ms": 5000
   }
 }
 ```
@@ -186,13 +226,14 @@ Aleph 建立在事件驱动架构之上。每个重要动作 —— 工具调用
 | 模式 | 匹配 |
 |---------|---------|
 | `stream.*` | 所有流式事件 |
-| `agent.*` | 所有代理生命周期事件 |
+| `agent.*` | 所有以 `agent.` 开头的主题（如 `agent.lifecycle.registered`） |
+| `session.*` | 所有会话主题 |
+| `cron.*` | 所有 cron 主题（如 `cron.job.changed`） |
 | `*` | 所有事件 |
-| `stream.chunk` | 仅精确匹配 |
-| `*.completed` | 所有命名空间中的任何 `completed` 事件 |
-| `cron.*` | 所有 cron 作业事件 |
+| `stream.response_chunk` | 仅精确匹配 |
+| `*.changed` | 两段式、以 `changed` 结尾的主题（如 `config.changed`） |
 
-`*` 通配符匹配任何非点字符序列。单独使用 `*` 订阅系统中的每个事件。
+匹配规则：`*` 单独使用或处于末尾时匹配其后所有段；出现在中间时只匹配一个段；其余按段精确匹配。`cron.job.changed` 有三段，所以 `*.changed` 匹配不到它 —— 要匹配它请用 `cron.*`。
 
 ## 事件负载结构
 
@@ -203,10 +244,35 @@ interface EventNotification {
   jsonrpc: "2.0";
   method: "event";
   params: {
-    topic: string;        // 例如 "agent.completed"
+    topic: string;        // 例如 "session.lifecycle.changed"
     data: Record<string, any>;  // 事件特定负载
     timestamp: number;    // Unix 时间戳（毫秒）
   };
+}
+
+// 流式帧不走上面的信封：method 就是 stream.* 之一
+interface StreamNotification {
+  jsonrpc: "2.0";
+  method: string;         // 例如 "stream.run_complete"
+  params: Record<string, any>;  // 帧负载
+}
+```
+
+两种形状可以归一化成同一个处理函数：
+
+```javascript
+function readEvent(frame) {
+  if (frame.method === "event") {
+    return {
+      topic: frame.params.topic,
+      data: frame.params.data,
+      timestamp: frame.params.timestamp
+    };
+  }
+  if (typeof frame.method === "string" && frame.method.startsWith("stream.")) {
+    return { topic: frame.method, data: frame.params, timestamp: null };
+  }
+  return null;
 }
 ```
 
@@ -243,11 +309,10 @@ ws.onopen = () => {
 };
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method === "event") {
-    const { topic, data, timestamp } = event.params;
-    updateDashboard(topic, data, timestamp);
-  }
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
+  updateDashboard(evt.topic, evt.data, evt.timestamp);
 };
 ```
 
@@ -256,22 +321,23 @@ ws.onmessage = (msg) => {
 监视整个系统中的错误和失败：
 
 ```javascript
-// 订阅失败事件
+// 订阅失败事件：代理运行失败走 stream.run_error，
+// 频道错误走 channel.error，配置校验失败走 config.error
 ws.send(JSON.stringify({
   jsonrpc: "2.0",
   id: 1,
   method: "events.subscribe",
-  params: { patterns: ["agent.error", "cron.failed", "*.error"] }
+  params: { patterns: ["stream.run_error", "channel.error", "config.error"] }
 }));
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method === "event") {
-    sendAlert({
-      channel: "#aleph-alerts",
-      text: `[${event.params.topic}] ${JSON.stringify(event.params.data)}`
-    });
-  }
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
+  sendAlert({
+    channel: "#aleph-alerts",
+    text: `[${evt.topic}] ${JSON.stringify(evt.data)}`
+  });
 };
 ```
 
@@ -290,10 +356,11 @@ ws.send(JSON.stringify({
 const toolMetrics = {};
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method !== "event") return;
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
 
-  const { topic, data } = event.params;
+  const { topic, data } = evt;
 
   if (topic === "stream.tool_start") {
     toolMetrics[data.run_id] = {
@@ -325,22 +392,16 @@ ws.send(JSON.stringify({
 }));
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method !== "event") return;
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
 
-  const { topic, data } = event.params;
+  const { topic, data } = evt;
 
-  switch (topic) {
-    case "cron.triggered":
-      setJobStatus(data.job_id, "running", data.trigger_source);
-      break;
-    case "cron.completed":
-      setJobStatus(data.job_id, "completed", `${data.duration_ms}ms`);
-      break;
-    case "cron.failed":
-      setJobStatus(data.job_id, "failed", data.error);
-      alertOnFailure(data.job_id, data.error);
-      break;
+  // cron.job.changed 只说明作业定义变了（change: created | updated | deleted | state_changed）；
+  // 执行结果（ok / error / skipped / timeout）要用 cron.runs 查。
+  if (topic === "cron.job.changed") {
+    setJobStatus(data.job_id, data.change);
   }
 };
 ```

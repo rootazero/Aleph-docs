@@ -1,0 +1,313 @@
+---
+title: "Protocol v1"
+description: "Aleph wire protocol v1: bounded frames, the system.hello handshake, feature negotiation, the transport matrix, and what is not implemented yet."
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+This page explains how to attach a new client: how to cut frames, how to handshake, which entrance can call what, and which parts of the blueprint are not implemented yet.
+
+## What Protocol v1 is
+
+Protocol v1 is the Gateway's connection protocol: **bounded frames** + **a handshake** + **feature negotiation**. It solves three problems: frame boundaries are predictable (read a fixed-size header before allocating), capabilities are negotiable (each side declares what it supports), and the handshake is auditable (the server refuses an incompatible version explicitly).
+
+| Part | Code |
+|------|------|
+| Frame encode/decode | `shared/protocol/src/framing.rs` |
+| Handshake DTOs and negotiation functions | `shared/protocol/src/system_hello.rs` |
+| Server-side handshake handler | `src/gateway/handlers/system_hello.rs` |
+| JSON-RPC messages and error codes | `shared/protocol/src/jsonrpc.rs` |
+
+Message semantics are still JSON-RPC 2.0 (see [JSON-RPC](../api/jsonrpc)); v1 only specifies how those messages are framed and how a connection opens.
+
+<Callout type="info">
+The old `ws://127.0.0.1:18790/ws` is a historical compatibility endpoint. It does not use length-prefixed framing; see the [legacy WebSocket endpoint](./protocol).
+
+The v1 **Desktop IPC** and **Web v1** entrances are there for new clients. The current NSH desktop host still takes the old path: it loads the Panel over an HTTP(S) origin (`desktop/nsh-shell/src/shell_host.rs`), and the Panel then connects to the Gateway's legacy `/ws` from inside the WebView (`desktop/nsh-shell/src/credentials.rs`). The parameters NSH once used for the v1 handshake live in `desktop/nsh-shell/src/connection.rs` — a historical design, see the note below.
+</Callout>
+
+<Callout type="warn">
+`desktop/nsh-shell/src/connection.rs` is the Phase 2 native-connection design. It is **not** declared as a `mod` in `desktop/nsh-shell/src/main.rs`, so it is not part of the currently compiled NSH binary, and `desktop/nsh-shell/Cargo.toml` declares no extra `[[bin]]` or `[lib]` target. It is cited here only to show how NSH once implemented the handshake — do not read it as current behaviour. See [Desktop Hosts](/docs/en/desktop-hosts/overview) for how the shipped host and Panel actually connect.
+</Callout>
+
+## Frame format
+
+A frame = a 4-byte **big-endian** `u32` length prefix + a UTF-8 payload. The length counts payload bytes only, not the 4 header bytes.
+
+```text
+ 0        1        2        3        4 ...
++--------+--------+--------+--------+---------------------------+
+|  len (u32, big-endian, payload bytes only)  |  UTF-8 JSON payload (len bytes) |
++--------+--------+--------+--------+---------------------------+
+```
+
+Constants and errors from `shared/protocol/src/framing.rs`:
+
+```rust
+pub const HEADER_BYTES: usize = 4;
+pub const DEFAULT_MAX_PAYLOAD_BYTES: u32 = 8_388_608; // 8 MiB, header excluded
+
+pub enum FrameError { Empty, Oversize, InvalidUtf8 }
+```
+
+`DEFAULT_MAX_PAYLOAD_BYTES` is a recommended cap; each endpoint enforces its own (Web v1 uses 1 MiB, see the transport matrix below).
+
+| Function | Semantics |
+|----------|-----------|
+| `encode_header(payload_len, max_payload) -> Result<[u8; 4], FrameError>` | Length 0 returns `Empty`; a length above `max_payload` (or one that does not fit in `u32`) returns `Oversize`; otherwise the big-endian bytes |
+| `decode_header(header, max_payload) -> Result<u32, FrameError>` | Validates the declared length **before** the payload is read or allocated, with the same rules |
+| `split_frame(bytes, max_payload) -> Result<Option<(&str, &[u8])>, FrameError>` | Borrows one UTF-8 payload and the unconsumed tail from a buffer; fewer bytes than one full frame returns `Ok(None)`, meaning more bytes are needed; `Err` means framing on this stream is over; a payload that is not valid UTF-8 returns `InvalidUtf8` |
+
+The limit is **inclusive**: a length exactly equal to `max_payload` is valid, one byte more is `Oversize`.
+
+Byte-level example: the payload `{"jsonrpc":"2.0","id":2,"method":"health"}` is 42 bytes, so the header is `00 00 00 2A`:
+
+```text
+00 00 00 2A | 7B 22 6A 73 6F 6E 72 70 63 22 3A 22 32 2E 30 22 ... 7D
+ ^^^^^^^^^^^   ^ payload, 42 bytes in total (UTF-8 JSON)
+ len = 42
+```
+
+Headers for a few other lengths:
+
+| Payload length | Header (hex) | Result |
+|----------------|--------------|--------|
+| 12 | `00 00 00 0C` | valid |
+| 258 | `00 00 01 02` | valid |
+| 8,388,608 | `00 80 00 00` | valid (equal to the default cap) |
+| 8,388,609 | not encodable | `Oversize` |
+| 0 | not encodable | `Empty` |
+
+The unit tests in `framing.rs` cover three of these: 258, 8,388,608, and 8,388,609.
+
+## Handshake `system.hello`
+
+`system.hello` is the first business request on a connection: the client reports the protocol version, its identity, and the features it wants; the server returns the negotiated result and the connection limits. The fields are defined in `shared/protocol/src/system_hello.rs`.
+
+### Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "system.hello",
+  "params": {
+    "protocol": { "major": 1, "minor": 0 },
+    "client": {
+      "name": "aleph-nsh-desktop",
+      "version": "1.2.3",
+      "platform": "linux",
+      "ui_runtime": "nsh"
+    },
+    "features": ["event_replay", "snapshot", "binary_channel"]
+  }
+}
+```
+
+All four `client` fields (`name`, `version`, `platform`, `ui_runtime`) are required strings. `version` is an example value. In the historical NSH design the values came from `build_hello_params()` in `desktop/nsh-shell/src/connection.rs`: `platform` was `std::env::consts::OS` and `ui_runtime` was `"nsh"`. That file is not part of the current build (see the note at the top of this page).
+
+### Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocol": { "major": 1, "minor": 0 },
+    "server": { "name": "aleph-server", "version": "26.9.1" },
+    "connection_id": "conn-3f0c1b52-8a0e-4d0a-9b1a-6a6d2f0a7e11",
+    "features": [],
+    "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 128 }
+  }
+}
+```
+
+`server.version` and the UUID in `connection_id` are example values. The reason `features` is an empty array is under "Server behavior" below.
+
+### Version negotiation
+
+`negotiate_version(client, server) -> Option<ProtocolVersion>`:
+
+- different major versions return `None`, and the handshake fails;
+- the same major version returns `{ major, minor: min(client.minor, server.minor) }`.
+
+The version the server currently declares is the constant `1.0` (`src/gateway/handlers/system_hello.rs`), so `protocol.minor` in a successful response is always `0`. In the historical NSH design the client treated `result.protocol.major != 1` as a failed handshake (`desktop/nsh-shell/src/connection.rs`, not part of the current build).
+
+### Feature negotiation
+
+`negotiate_features(requested, implemented) -> Vec<Feature>`: keeps features that the client requested, the server implements, and are of a known kind, in **client order** and deduplicated.
+
+| Feature string | `Feature` variant | Meaning (per source comments) |
+|----------------|-------------------|-------------------------------|
+| `event_replay` | `EventReplay` | replay events from a stored stream offset |
+| `snapshot` | `Snapshot` | point-in-time capability snapshot |
+| `binary_channel` | `BinaryChannel` | binary framing over the WebSocket channel |
+| any other string | `Unknown(String)` | a feature from a newer version; kept verbatim on deserialization so older clients do not fail to parse, but it never enters the negotiated result |
+
+## Server behavior
+
+`negotiate()` in `src/gateway/handlers/system_hello.rs` proceeds in this order:
+
+1. `params` missing: `INVALID_PARAMS`, message `Missing params`.
+2. `params` fails to parse as `HelloParams`: `INVALID_PARAMS`, message `Invalid system.hello params: <reason>`.
+3. major is not 1: `INVALID_PARAMS`, message `incompatible protocol major version`.
+4. Success: returns the negotiated `protocol`, `server` (`name` is fixed to `"aleph-server"`, `version` is the compile-time `ALEPH_VERSION`), `connection_id`, `features`, and `limits`.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": { "code": -32602, "message": "incompatible protocol major version" }
+}
+```
+
+**`features` is currently always empty.** The handler calls `negotiate_features(&params.features, &[])`, so the server's implemented list is empty; even when NSH requests all three features it receives `[]`. The negotiation mechanism is in place, but the capabilities behind it are not implemented; see "Planned" below.
+
+**`connection_id` and `limits` depend on the entrance.** The same `negotiate()` is reused by three entrances, each passing its own values:
+
+| Entrance | `connection_id` | `limits.max_message_bytes` | `limits.max_inflight_requests` | Enforced |
+|----------|-----------------|----------------------------|--------------------------------|----------|
+| Legacy `/ws` (`system_hello::handle`) | `conn-<uuid4>` | 8,388,608 | 128 | No. The source comment says legacy wire hints, not enforced transport limits; they are hints only |
+| Desktop IPC | `ipc-<uuid4>` | `MAX_FRAME_BYTES` (8,388,608) | `MAX_INFLIGHT` (8) | Yes, see below |
+| Web v1 | `web-v1-<uuid4>` | `MAX_MESSAGE` (1,048,576) | 1 | The frame cap is enforced; requests are handled serially |
+
+On `/ws`, `system.hello` is a probe method after `connect`: the handler comment states that it neither admits the connection nor sets identity.
+
+## Transport matrix
+
+| Entrance | Transport | Authentication | What it can call | Code |
+|----------|-----------|----------------|------------------|------|
+| Legacy `/ws` (historical compatibility) | WebSocket Text messages, no length prefix | Transport and `Origin` checked at upgrade, then `connect` authenticates | The full RPC surface, see the [Method reference](./methods) | `src/gateway/server/connection/upgrade.rs` |
+| Desktop IPC | Unix domain socket, length-prefixed frames | Peer verified as the same user; grants no network authority | Read-only: `system.hello`, `health`, `sessions.list` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | WebSocket Binary messages over native TLS, exactly one frame per message | Same-origin check + a session cookie (obtained with a device token or bootstrap ticket) | Read-only: `system.hello`, `health`, `sessions.list` | `src/gateway/server/connection/web_v1.rs` |
+
+Authentication details are in [Authentication](./auth); the security boundary is in the [IPC protocol](../security/ipc).
+
+### Desktop IPC
+
+The entrance is enabled explicitly with `aleph-server start --desktop-ipc <socket>` (`src/bin/aleph-server/cli.rs`): the path must be a new absolute Unix socket path inside a 0700 directory held by the caller; the server does not remove the socket entry on exit. It is available on Unix only; other platforms return `Desktop IPC is unavailable on this platform` (`src/gateway/server/mod.rs`).
+
+Constants (`src/gateway/server/connection/local_ipc.rs` and `shared/client/src/local_ipc.rs`):
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `MAX_CONNECTIONS` | 8 | connections served at once; `accept` is paused at the cap |
+| `WIRE_BUDGET` | `16 * 1024 * 1024` | per-connection byte budget for in-flight frames; reserved after the header is validated and before the payload is allocated |
+| `WRITE_TIMEOUT` | 5 seconds | timeout for writing one frame |
+| `NO_NETWORK_ORIGIN` | `0.0.0.0` | the origin address recorded for the connection; grants no network authority |
+| `MAX_FRAME_BYTES` | `DEFAULT_MAX_PAYLOAD_BYTES` | per-frame payload cap |
+| `MAX_INFLIGHT` | 8 | concurrent in-flight requests per connection |
+| `HELLO_TIMEOUT` | 5 seconds | how long to wait for the first `system.hello` frame |
+
+Behavioral constraints:
+
+- The first frame must arrive within `HELLO_TIMEOUT` and be `system.hello`; otherwise the server returns `AUTH_REQUIRED` (`system.hello must be first`) and disconnects.
+- A request must be `"jsonrpc": "2.0"` with a string or integer `id`; a notification without an `id`, or any other envelope shape, ends the connection.
+- After the handshake only `health` and `sessions.list` are admitted; other methods return `METHOD_NOT_FOUND` (`method not mounted on Desktop IPC`).
+- If in-flight requests reach `MAX_INFLIGHT`, or an in-flight `id` repeats, the connection ends with `IPC request limit exceeded`.
+- A response larger than the frame cap is replaced by `INTERNAL_ERROR` (`response exceeds Desktop IPC limits`), so the transport is not corrupted.
+- `parse_payload` also bounds JSON shape: nesting depth 64 (`MAX_DEPTH`), 4096 entries per container (`MAX_ITEMS`), and 65,536 bytes per string (`MAX_STRING_BYTES`).
+
+### Web v1
+
+Mounted only in native TLS mode: `native_tls_router` merges `connection::web_v1::routes` into the router (`src/gateway/server/mod.rs`).
+
+| Item | Value |
+|------|-------|
+| Session exchange | `POST /v1/session`, request body capped at 4096 bytes |
+| Request body | `{"device_token": "..."}` or `{"bootstrap_ticket": "..."}` |
+| Success response | `204 No Content` + `Set-Cookie: __Host-aleph-v1=<uuid>; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=300` |
+| Upgrade | `GET /v1/ws`; `Sec-WebSocket-Protocol` must be exactly `aleph.protocol.v1`, and the cookie above must be sent |
+| Session TTL | 300 seconds (`TTL`) |
+| Per-frame cap | 1 MiB (`MAX_MESSAGE`) |
+| Sessions / concurrent sockets | 256 (`MAX_SESSIONS`) / 8 (`MAX_SOCKETS`) |
+| IO timeout | 5 seconds (`IO_TIMEOUT`) |
+
+Both endpoints first run a same-origin check (`same_origin`: `Origin` must match the `https` origin of the request's `Host`), then rate-limit by source IP (`throttle`). Failures return `403` (origin mismatch), `429` (throttled), `400` (malformed body or subprotocol), `401` (invalid credential or cookie), `503` (capacity or service not ready), and `408` (timed out reading the body).
+
+After the upgrade, every WebSocket message must be **Binary** and contain exactly one complete frame (no leftover bytes after `split_frame`); a Text message or a malformed frame ends the connection. The first frame must be `system.hello` (within 5 seconds); afterwards only `health` and `sessions.list` are admitted, and other methods return `METHOD_NOT_FOUND` (`method unavailable on Web v1`). The connection closes when the session expires, when the device credential is revoked (checked every second), or when the Gateway stops.
+
+### Legacy `/ws`
+
+The legacy entrance carries JSON text in WebSocket Text messages and relies on WebSocket's own message boundaries; a Binary message is logged as a warning and ignored (`src/gateway/server/connection/mod.rs`). It keeps the full RPC surface; see the [legacy WebSocket endpoint](./protocol).
+
+## Events and subscriptions
+
+Events are delivered as JSON-RPC notifications without an `id`, with `method` always `"event"` (`TOPIC_EVENT_METHOD`, `shared/protocol/src/jsonrpc.rs`); the topic and payload live in `params`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "event",
+  "params": { "topic": "agent.run.complete", "data": {} }
+}
+```
+
+Example topic names: `agent.run.complete` (`src/gateway/events/frame.rs`), `session.lifecycle.changed`, and `config.changed` (`src/gateway/event_visibility.rs`). The full topic catalog is in [Event methods](./methods/events).
+
+- Subscribe with `events.subscribe`; the parameter key is `topics` (string patterns, or `{topic, where}` filter objects); see `SubscribeParams` in `src/gateway/handlers/events.rs`.
+- Event subscription is currently **available only on the legacy `/ws`**. Desktop IPC and Web v1 admit only `health` and `sessions.list` and do not mount `events.subscribe`, so they deliver no topic events.
+- Visibility is bounded by `src/gateway/event_visibility.rs` (isolation by owner and session) and `src/gateway/event_scope.rs` (role-based blocking of administrative topics); subscribing to a topic does not let you receive another user's events.
+
+## Error model
+
+Errors come in two layers, handled differently:
+
+| Layer | Examples | Behavior |
+|-------|----------|----------|
+| Frame | `FrameError::Empty`, `Oversize`, `InvalidUtf8` | Framing cannot continue on that stream; the connection ends, and there is **no** JSON-RPC response |
+| JSON-RPC | `INVALID_PARAMS`, `AUTH_REQUIRED`, `METHOD_NOT_FOUND` | An `error` response carrying the original request `id`; the connection can continue (except for a failed handshake) |
+
+At the frame layer: Web v1's reader uses `split_frame`, and any `FrameError` or extra trailing bytes ends the connection; Desktop IPC validates the length with `decode_header` (failure is `invalid IPC frame length`) and decodes the payload with `String::from_utf8`, and failure likewise ends the connection (`shared/client/src/local_ipc.rs`).
+
+The full error-code list and semantics are in [JSON-RPC](../api/jsonrpc); rejections specific to the v1 entrances:
+
+| Situation | Code | Message |
+|-----------|------|---------|
+| First frame is not `system.hello` | `AUTH_REQUIRED` (-32000) | `system.hello must be first` |
+| Any other method on Desktop IPC | `METHOD_NOT_FOUND` (-32601) | `method not mounted on Desktop IPC` |
+| Any other method on Web v1 | `METHOD_NOT_FOUND` (-32601) | `method unavailable on Web v1` |
+| Desktop IPC response too large | `INTERNAL_ERROR` (-32603) | `response exceeds Desktop IPC limits` |
+| Web v1 response too large | the original code or `INTERNAL_ERROR` | `response exceeds Web v1 limits` |
+
+## Planned: not yet implemented
+
+The blueprint `docs/research/NSH_PROTOCOL_V1.md` describes itself as a design baseline that must be reconciled with the current repository interfaces before implementation. The items below belong to the blueprint, not to the current state.
+
+> **Status: planned** — blueprint is `docs/research/NSH_PROTOCOL_V1.md` (§10 backpressure, flow control, and resource limits); current implementation is in `src/gateway/server/connection/local_ipc.rs` (`MAX_INFLIGHT`, `WIRE_BUDGET`) and `src/gateway/server/per_client_buffer.rs`.
+
+The blueprint calls for per-subscription limits on pending events and buffered bytes, coalescing or dropping Ephemeral events, and disconnecting or requiring a resync when a Durable event buffer is exhausted. Today there are only per-connection in-flight request counts and a byte budget, with no per-subscription backpressure policy.
+
+> **Status: planned** — blueprint is `docs/research/NSH_PROTOCOL_V1.md` (§9 Snapshot + Replay); current implementation is in `shared/protocol/src/system_hello.rs` (only the `Feature::EventReplay` and `Feature::Snapshot` identifiers).
+
+The handshake already has these two feature names, but the server's implemented list is empty (`negotiate_features(&params.features, &[])`), so they never negotiate successfully. Snapshots, subscription cursors, resync when history is unavailable, and the dedup and cursor semantics in the blueprint have no implementation.
+
+> **Status: planned** — blueprint is `docs/research/NSH_PROTOCOL_V1.md` (§11 binary data channel); current implementation is in `shared/protocol/src/system_hello.rs` (`Feature::BinaryChannel` is only an identifier).
+
+There is no binary channel: a Web v1 Binary message is only a container for the same JSON frame, not the resource-reference and data-transfer channel the blueprint describes.
+
+> **Status: planned** — blueprint is `docs/research/NSH_PROTOCOL_V1.md` (§8 Event Envelope, §9.5 dedup and cursors); current implementation is in `shared/protocol/src/jsonrpc.rs` (`TOPIC_EVENT_METHOD`).
+
+The current event envelope is `{"method":"event","params":{"topic","data"}}`, without the blueprint's Durable/Ephemeral classification or cursor fields.
+
+Two file names are easy to mistake for v1's replay and recovery implementation; they are not:
+
+| File | What it actually holds |
+|------|------------------------|
+| `shared/protocol/src/trace_replay.rs` | Query DTOs for agent execution traces: `AgentTraceReplay`, `AgentTraceReplayEntry`, `AgentTraceTaskSummary`, plus `AgentTraceListRow`, `AgentTraceListPage`, and `AgentTraceListCursor` for `trace.list`. It replays persisted task traces, not an event-stream offset on a connection |
+| `shared/protocol/src/resume.rs` | `ResumeReceipt` and `RefusedEntry`: the unified receipt for resuming interrupted runs after a crash (`agent.resume`, `POST /v1/admin/resume`, `aleph-server resume --json`); unrelated to reconnecting a dropped connection |
+
+## Migration and compatibility
+
+- **Older clients** keep using `/ws` and the `connect` handshake with no changes; after `connect` they may also call `system.hello` for version probing, and the `limits` in its response are only hints.
+- **New clients** should handshake before sending business methods: Desktop IPC and Web v1 force `system.hello` as the first frame, and business methods before the handshake are always refused.
+- Clients should check `result.protocol.major` and give up the connection if it is not 1, and should tolerate feature strings they do not recognize.
+- A client that needs to subscribe to events or call write methods can currently only use `/ws`. The read-only scope of the v1 entrances is the current state; widening the method surface is future work, and this page makes no commitment about it.
+
+## See also
+
+- [Legacy WebSocket endpoint](./protocol) — the `/ws` connection flow and differences
+- [JSON-RPC](../api/jsonrpc) — message shapes and error codes
+- [Authentication](./auth) — how each entrance authenticates
+- [IPC protocol](../security/ipc) — entrances and trust boundaries
+- [Method reference](./methods) — the full RPC catalog

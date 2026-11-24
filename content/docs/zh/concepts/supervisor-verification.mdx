@@ -7,7 +7,7 @@ description: "用于外部 CLI 工具的基于 PTY 的进程控制，以及代�
 
 ## 设计理念
 
-1. **PTY 嵌入** — `gateway/pty/` 用 `portable-pty` 包装本地 shell / `cmd.exe`，输出经 WebSocket `pty.output` / `pty.exit` topic 推送（不走第二个端口）。
+1. **PTY 嵌入** — `gateway/pty/` 用 `portable-pty` 包装本地 shell / `cmd.exe`，输出经 WebSocket `pty.screen` / `pty.exit` topic 推送（不走第二个端口）。
 2. **Turn 级验证** — `verification::VerfierChain` 在 Think→Act 之间跑，链上挂着 `StopHookVerifier`（shell 钩子）、`ToolLoopVerifier`（死循环看门狗）、`ExtensionStopHookVerifier`（`HookEvent::Stop` 钩子）、`ScratchpadGoalVerifier`（执行列表未完成就阻停）、`MutationEvidenceVerifier`（写入未取证柔阻一次）。
 3. **只读式 shell 钩子** — `ShellStopHook` 跑外部命令，exit 0/2/3 = 通过/阻停/退出循环；exit 其它、超时、信号、shell 元字符全部走 `Error`，由调用方决定 fail-open 还是 fail-closed。
 
@@ -23,7 +23,7 @@ pty/
 └── handler (in gateway/handlers/pty.rs)
 ```
 
-`PtySession::spawn(opts)` 创建 `portable_pty::native_pty_system()`，clone 出 writer / reader / killer，把 `pty.output` 帧 base64 推上事件总线；`PtyManager` 是 process-global 单例（`OnceLock`），并发的 `pty.spawn` 走到容量上限时淘汰最老会话。`commands`：`pty.spawn`、`pty.input`、`pty.resize`、`pty.close`、`pty.list`；流式事件 `pty.output` / `pty.exit` 经 `events.subscribe("pty.*")` 接收。
+`PtySession::spawn(opts)` 创建 `portable_pty::native_pty_system()`，clone 出 writer / reader / killer，把 `pty.screen` 帧（渲染终端差分）推上事件总线；`PtyManager` 是 process-global 单例（`OnceLock`），并发的 `pty.spawn` 走到容量上限时淘汰最老会话。`commands`：`pty.spawn`、`pty.input`、`pty.resize`、`pty.close`、`pty.list`；流式事件 `pty.screen` / `pty.exit` 经 `events.subscribe("pty.*")` 接收。
 
 ---
 
@@ -155,7 +155,7 @@ Aleph 的完成度判断**永远在提示词里**，不在 Rust 代码里（`src
 
 26.7.20+（commit 历史可见）：`DiminishingReturnsDetector` 硬停机制从 `src/context/budget/` 整体删除，配套 `StopDiminishing` 指令与 `TurnMetrics` 类型同步下线、`src/thinker/nudges.rs::GRACE_NUDGE_DIMINISHING` 常量删除、`src/harness/agent/think.rs` 的 `after_turn` consumer + `GraceReason::Diminishing` 优雅轮路径全部清除。
 
-`src/harness/tests/budget.rs:280` 写得很坦白：「R10 '5 don'ts' #3 — the loop must make no completion judgement of its own」。具体执行方式：`TokenLoopVerifier`（`repeat_threshold` = 5、连续同名同参数）和 `max_iterations` / `consecutive_failures` / 模型自评共同决定停；缺了「令牌减少就强制结束」这种循环内确定性完成判断。ratchet 当前 **5055 行**（`src/harness/tests/budget.rs:335` 的 `CEILING`），代码是权威——任何文档数字都只是 `CEILING` 的副本。
+`src/harness/tests/budget.rs:313` 写得很坦白：「R10 '5 don'ts' #3 — the loop must make no completion judgement of its own」。具体执行方式：`ToolLoopVerifier`（`repeat_threshold` = 5、连续同名同参数；`src/verification/tool_loop_verifier.rs`）和 `max_iterations` / `consecutive_failures` / 模型自评共同决定停；缺了「令牌减少就强制结束」这种循环内确定性完成判断。ratchet 当前 **5535 行**（`src/harness/tests/budget.rs:795` 的 `CEILING`），代码是权威——任何文档数字都只是 `CEILING` 的副本。
 
 ### Turn 级验证器
 

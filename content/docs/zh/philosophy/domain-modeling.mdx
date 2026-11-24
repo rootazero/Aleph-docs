@@ -192,7 +192,7 @@ Aleph 的领域被划分为限界上下文 —— 具有自己的通用语言、
 
 ### 意图上下文（不存在）
 
-> **Aleph 源码中不存在独立的「意图检测」bounded context**：`src/intent/` 目录不存在，`AggregatedIntent` / `IntentSignal` 类型在全仓 grep 0 命中。R7 把「Intent Detection 规则引擎」明列为越俎代庖，意图分类由 LLM 一次推理自然完成（R7 + R9）。唯一相关的运行时配置壳 `src/config/types/smart_flow.rs::IntentDetectionConfig` 也已落入 `config/reload_impact.rs` 的 `INERT_SECTIONS`，不再驱动运行时分类。
+> **Aleph 源码中不存在独立的「意图检测」bounded context**：源码树里没有名为 intent 的模块目录，`AggregatedIntent` / `IntentSignal` 类型在全仓 grep 0 命中。R7 把「Intent Detection 规则引擎」明列为越俎代庖，意图分类由 LLM 一次推理自然完成（R7 + R9）。唯一相关的运行时配置壳 `IntentDetectionConfig` 已于 2026-08-01 连同 smart_flow 配置类型文件一起从源码树移除；今天由 `src/config/dead_keys.rs` 报告「能解析但无消费者」的配置键，而 `src/config/reload_impact.rs` 的 `INERT_SECTIONS` 自 2026-08-16 起已清空。
 
 ### POE 上下文（已退役）
 
@@ -226,7 +226,7 @@ Aleph 的领域被划分为限界上下文 —— 具有自己的通用语言、
 ```
 
 - **Harness ↔ teams/dispatcher**：Harness 的 Act 阶段调用 dispatcher；dispatcher 把并发分桶结果回传 Harness；两者均由 R10「笨循环」约束，不做意图判断。
-- **teams/dispatcher ↔ Memory**：dispatcher 在执行期间查询记忆以获取相关上下文（`src/memory/retrieval.rs`）。
+- **teams/dispatcher ↔ Memory**：dispatcher 自己不检索记忆——它用 `build_handoff_context` 组装确定性上下文（任务描述、团队策略、收件箱摘要、重试恢复日志；`src/teams/dispatcher/handoff.rs`、`src/teams/context.rs`）；记忆检索走成员 agent 的 `memory_search` 工具，底层是 `src/memory/note_retrieval/` 的 `NoteFactRetrieval`。
 - **Harness → Thinker / PromptLayer**：Think→Act 的 Think 阶段调 Thinker，裁决由 LLM 一次推理自然输出，而非中间件输出（R10 第 5「不」）。
 - **Harness / Memory → dreaming**：每轮成功完成进入 dreaming 管线（`src/memory/dreaming/`），按 SkillOpt 纪律晋升技能，反过来给 Memory 增加事实，给下一次 Think 提供更密集的上下文。
 

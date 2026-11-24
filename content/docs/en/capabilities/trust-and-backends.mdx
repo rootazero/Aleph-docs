@@ -1,0 +1,193 @@
+---
+title: "Trust and Backends"
+description: "Who provides a capability, and on what grounds third-party code is allowed to run: the two trust axes, WASM and process plugin constraints, same-origin trust for plugin UI."
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+This page answers two questions: who **implements** a capability (the backend), and on what grounds a piece of third-party code is **allowed to run** (trust). The current code lives in `src/capability/` (backends and providers), `src/extension/` (plugin runtime and trust policy), and `crates/aleph-slot-api/src/approval.rs` (the approval surface).
+
+<Callout type="warn" title="Trust has two axes; only one exists">
+  The blueprint `docs/research/aleph_modularization_plan.md` §5.2 defines two trust axes: **load trust** (existing) and **capability authorization** (new). Only load trust actually runs today; capability authorization and the authorization model for slot replacement do not exist yet. Every item in this page that comes from a blueprint or an ADR is marked `Status: planned`. For the backend taxonomy see [Slots and replacement](./slots-and-replacement); for descriptors and ownership see the [Capability model](./capability-model).
+</Callout>
+
+## What a backend is
+
+### Current: capability backends and where they come from
+
+The minimal backend interface has two methods. In `src/capability/backend.rs`:
+
+```rust
+pub trait CapabilityBackend: Send + Sync {
+    fn lookup(&self, id: &CapabilityId) -> Option<CapabilityDescriptor>;
+    fn enumerate(&self, scope: &Scope) -> Vec<CapabilityDescriptor>;
+}
+```
+
+In the same file, `TOOL_NAMESPACE` is the namespace of Tool capabilities (`aleph/tools`), and `LegacyCapabilityHandler` is the callable boundary for non-Tool capabilities (a trait): `invoke(input: Value) -> Result<Value, LegacyCapabilityDispatchError>`, whose error type has exactly three variants — `InvalidInput`, `Execution`, `NotFound` — each carrying a message.
+
+Where a backend **comes from** is recorded as four-way evidence in `BackendSourceEvidence` in `src/capability/facade.rs`: `Tool` (canonical entry lease + provider generation), `Provider` (provider id + generation), `MemoryResource` (`Weak<MemoryRuntime>`), `Special` (captured special entry + generation). The backend adapters that actually exist today are:
+
+- `ToolBackendAdapter` in `src/capability/backend.rs` — wraps the tool registry and translates tools into capability descriptors;
+- `ProviderBackendAdapter` in `src/capability/provider_backend.rs` — wraps `ProviderRegistry`;
+- the special capability registry in `src/capability/special.rs`;
+- the canonical adapter registrations in `src/capability/tool_adapters.rs` (for example the terminal capability's `TERMINAL_ADAPTER_ID`).
+
+Activation on the provider side is explicit. `src/capability/provider_registry.rs` has `ProviderRegistry`, `ProviderRegistration` and `ProviderActivator`, plus the four variants of `ActivationError`: `Rejected` (the provider owner rejected activation), `Failed`, `Unknown`, `NotVisible` — a refusal is a result, not a silent degradation.
+
+### Planned: six kinds of backend
+
+> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §5.1 (backends).
+
+The blueprint splits backends into six kinds, each with its own isolation model and default permissions:
+
+| Backend | Isolation | Default permissions |
+|---|---|---|
+| builtin | host process | granted by the kernel |
+| native (linked at compile time by a custom distribution) | host process | equal to builtin |
+| wasm | sandbox + `WasmCapabilityKernel` | zero capabilities, granted item by item |
+| mcp | separate process + protocol boundary | process permissions bounded by the sandbox profile |
+| command | one-shot child process | bounded by the sandbox profile; JSON over stdin, JSON over stdout |
+| plugin | decided by the component's actual backend | the backend's permissions, intersected with both trust axes |
+
+The blueprint adds three hard rules:
+
+1. Third-party code **must not** be loaded natively at runtime — dynamic-library plugins are not supported, because Rust has no stable ABI and loading one would route around the isolation that was built;
+2. No JS engine is embedded in the Aleph process — there is no isolation boundary inside the process, so JS/TS plugins go through command, MCP or WASM;
+3. A replaced tool **keeps** its original admission, concurrency declaration and approval policy — a replacement implementation cannot use the replacement to declare wider permissions than the slot it took over.
+
+The conceptual summary is in `docs/research/Everything-externally-composable-is-a-Capability.md` §3: **plugins are an assembly mechanism; capabilities are the semantics**.
+
+## The two trust axes
+
+### Load trust
+
+Load trust answers "may this code run at all". It exists today, implemented as `OwnerTrustPolicy` in `src/extension/plugin_trust.rs`:
+
+```rust
+pub struct OwnerTrustPolicy {
+    allowlist: HashSet<String>,  // plugin ids allowed to load from untrusted origins
+    enforce: bool,              // when true, Workspace / Global / ClaudeCache need an allowlist entry
+}
+```
+
+Its API is `permissive()` (allow everything), `restrictive(allowlist)` (allow only the listed ids), `trust(id)`, `untrust(id)`, `allowlist()`, and `allows(plugin_id, origin)`. The decision rules live in `allows`: `Bundled` (built into Aleph) and `Config` (added explicitly by the operator) origins are **always trusted**; `Workspace` (project `.aleph/` directory), `Global` (`~/.aleph/` directory) and `ClaudeCache` (Claude Code cache directory) origins need an allowlist entry. When `enforce` is `false` everything is allowed, and the `Default` implementation returns `permissive()`.
+
+The trust decision happens **at plugin mount time, per plugin id** (`admit` in `src/extension/lifecycle.rs`: owner trust first, then the operator's durable preference in `plugins.toml`) — a `false` verdict stops a plugin from silently registering its capabilities, and the refusal lands on the plugin row as `blocked`.
+
+### Capability authorization
+
+> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §5.2 (the two trust axes).
+
+Capability authorization answers "which powers beyond additive registration may it take". The blueprint design is: always deny by default, **not affected by the load trust enforce switch**, with the grant stored on the plugin's entry in `plugins.toml` and bound to the plugin's content hash.
+
+Operations that need capability authorization (per plugin, per item): claiming a single-cardinality slot or replacing a builtin implementation, replacing a replaceable prompt layer, raising a hook priority to the high band, WASM capabilities and host allowlists, and command or sidecar backends asking for filesystem or network permissions above the sandbox default profile.
+
+Operations that do not need authorization: adding tools, skills, commands and MCP servers, plus observer and interceptor hooks in the low priority band (rewritten input is always re-checked, so such a hook cannot use rewriting to bypass approval).
+
+Authorization is by interactive confirmation or `aleph plugin grant <id> <item>`, and revoked with `aleph plugin revoke <id> <item>`. When the plugin is updated its content hash changes, so high-permission grants lapse and must be re-granted; purely additive capabilities are unaffected. Without a human present and without an approval channel nothing is authorized, and the slot keeps its builtin implementation — the same rule as "a hook request for confirmation with no approval channel is automatically refused". Every grant, revoke and lapse is written to the audit log.
+
+This axis **does not exist** today. `GrantScope` and `AuthorizationResult` in `crates/aleph-slot-api/src/approval.rs` are the approval surface (oriented at individual operations), not a per-plugin authorization ledger; `src/extension/plugin_trust.rs` is load trust, which is a different thing.
+
+## Plugin runtimes and their constraints
+
+### WASM plugins
+
+WASM is the only third-party code runtime that is genuinely sandboxed today. Its capability declaration lives in `src/extension/runtime/wasm/capabilities.rs`:
+
+```rust
+pub struct WasmCapabilities {
+    pub workspace: Option<WorkspaceCapability>,
+    pub http: Option<HttpCapability>,
+    pub secrets: Option<SecretsCapability>,
+}
+```
+
+All three slots are `Option`, so not declaring one means not having it: `WorkspaceCapability{allowed_prefixes}` (workspace path prefixes), `HttpCapability{allowlist, credentials, rate_limit, timeout_secs, max_request_bytes, max_response_bytes}` (default timeout 30 seconds), `SecretsCapability{allowed_patterns}`.
+
+The resource limits are in `WasmResourceLimits` in `src/extension/runtime/wasm/limits.rs`, with defaults of 10 MB of memory, 10 million units of fuel, a 60 second timeout, 50 HTTP calls, 1000 log entries and 4096 bytes per log message.
+
+The gate at execution time is in `src/extension/runtime/wasm/capability_kernel.rs`: every host call is checked, capability checking is **default-deny**, and a violation returns a `CapabilityError` (`NotDeclared` / `NotAllowed` / `RateLimited` / `ResourceExhausted` / `PathTraversal`). Credentials are injected on the host side; the plugin never sees plaintext. On the manifest side, `src/extension/runtime/wasm/mod.rs` parses capabilities starting from zero permissions (source comment: `default = zero permissions`) and installs a deny-all resolver by default.
+
+### MCP and static plugins
+
+`PluginKind` in `src/extension/types/plugins.rs` has exactly three variants: `Wasm` (`.wasm`), `Mcp` (`.mcp.json`, which uses Aleph's own MCP client system) and `Static` (markdown content). An MCP plugin is therefore not "a plugin running in a new process" but **client-side configuration**: `McpServerConfig` in `src/config/types/tools.rs` describes one server entry (`command`, `args`, `env`, `cwd`, `requires_runtime`, `timeout_seconds`, `enabled`), and the operator writes it in `config.toml`. The gateway-side exposure list is `McpFaceConfig` in `src/gateway/mcp_face/config.rs`: `expose` is an allowlist that can take effect at runtime, while `enabled` only matters when routes are mounted at boot.
+
+### Third-party Rust plugins
+
+> **Status: planned（规划中）** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-004 (third-party Rust plugins use WASM / a separate process).
+
+ADR-004's decision table is: officially bundled capabilities are compiled in statically and allowed; third-party WASM goes through a restricted WASM runtime and is the default preference; third-party process plugins run in a separate process with controlled IPC and are allowed on demand; **loading an arbitrary Rust dynamic library inside the host process is not supported as a general plugin mechanism**.
+
+The WASM-side constraints are: resources such as files, network, browser and tools are reachable only through the host API; there is no host filesystem or network access by default; exact resource scopes are handed out by capability authorization; memory, fuel, time, concurrency and handle limits are enforced; a runtime crash or a plugin trap must not take the host down.
+
+The process-side constraints are: a separate process with its own working directory and controlled environment; authenticated IPC; CPU, memory, process count, message size and timeout limits; crash restarts must have backoff and a circuit breaker, never an unbounded restart loop; and being a separate process must not imply unrestricted access to the user's files.
+
+Current state: `PluginKind` in `src/extension/types/plugins.rs` has **no** process-style plugin — today's plugins are only WASM, MCP and static.
+
+## Plugin trust today
+
+### The trust policy
+
+See "Load trust" above. The origin classification belongs here as well: `PluginOrigin` in `src/extension/types/plugins.rs` has five variants — `Config`, `Workspace`, `Global`, `Bundled`, `ClaudeCache` — where the serde spelling of `ClaudeCache` is `claude_cache`.
+
+### Declaring trust and the enforcement switch
+
+Trust is **declared** in the plugin configuration file. In `src/extension/plugin_state.rs`:
+
+- the file name constant `PLUGINS_CONFIG_FILE` is `plugins.toml`, stored under the data directory;
+- `PluginTrustConfig{enforce: bool}` defaults to `false` — the source comment explains why: turning enforcement on by upgrade would silently stop loading plugins an operator installed on purpose;
+- the `trusted` field of `PluginEntryConfig` records trust per entry;
+- `PluginsConfig::owner_trust_policy()` is the real source of the policy: when `enforce` is `false` it returns a permissive policy, when `true` it builds an allowlist from the entries whose `trusted` is `Some(true)`.
+
+`src/extension/plugin_ops.rs` exposes `set_trusted` and `set_trust_enforced`, and the builtin tool in `src/builtin_tools/plugin_manage.rs` surfaces four actions to the model: `trust_status`, `trust`, `untrust`, `trust_enforce`.
+
+### Trust is not a stop
+
+`trust` and `untrust` move the **load gate**, not a running process. The wording in `src/builtin_tools/plugin_manage.rs` is blunt: after revoking trust the plugin "will be refused at the next load; if it is running now, that does not stop it — use action='disable' for that." The source comment says the same: "it is a load gate — `disable` is the verb that stops one now".
+
+Likewise, `trust` changes nothing while enforcement is off — the tool appends "owner trust is not currently enforced, so this changes nothing until you enable it with action='trust_enforce'".
+
+### Manifest permissions
+
+The permissions a plugin declares in its manifest live in `PluginPermission` in `src/extension/manifest/types.rs`: `Network`, `Filesystem(FilesystemAccess)` (read, write, full), `Env`, `Shell`, `Background`, `Custom(String)`. Their stable spellings are `network`, `filesystem:read`, `filesystem:write`, `filesystem`, `env`, `shell`, `background`, and a custom item uses its raw string.
+
+A permission shortfall is **not** a mount failure. In `src/extension/registrar/api.rs`, once the plugin row is registered, every capability the plugin declares is checked; refused capabilities are collected and written as a `Warn`-level diagnostic (source log text: `capability refused at mount`), while the plugin row itself still registers. In other words: a refusal leaves a visible diagnostic instead of making the whole plugin disappear.
+
+## Same-origin trust for panel UI
+
+A plugin's own UI panel travels a **same-origin** path, not a sandboxed one. The file header comment in `interfaces/webchat/src/panel/sdk.rs` states: "Same-origin code is trusted/verified code, not sandboxed by these permission checks."
+
+The path is made of: the panel module is dynamically imported by `interfaces/webchat/panel_loader.js` (the version with integrity checking verifies a digest first), the loading bridge in `interfaces/webchat/index.html` starts it, `src/gateway/server/panel_asset_route.rs` mounts the panel asset routes on the same gateway router, and `src/gateway/server/mod.rs` serves the Panel SPA same-origin through the control-plane fallback.
+
+**Same-origin therefore does not mean trusted**: integrity checking and admission still have to happen. `prepare(records, policy: &OwnerTrustPolicy)` in `src/extension/panel_publication/admission.rs` does that, with a 4 MiB limit per entry and a 64 MiB limit per publication; violations produce error codes such as `panel.asset_entry_limit` / `panel.asset_generation_limit` / `panel.asset_outside_root` / `panel.asset_integrity_mismatch`. The panel manifest is `PanelUiManifest` in `src/extension/manifest/types.rs`, carrying `tab_id`, `entry`, `api_major`, `permissions` and `asset_integrity`; its `validate()` yields the error codes `panel.invalid_identity` / `panel.invalid_presentation` / `panel.incompatible_api` / `panel.invalid_entry` / `panel.invalid_integrity`.
+
+> **Status: planned（规划中）** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-005 (Agent dynamic UI uses Restricted TSX).
+
+ADR-005 requires that Agent-generated dynamic UI runs only inside an isolated view container and a restricted runtime: no arbitrary shell, process, filesystem or network access, no self-granting of capabilities, no changing approval state or plugin trust level, and three trust tiers by provenance — formal plugin UI (still bound by the host API permissions), Agent-generated ephemeral UI (minimal component set and the strictest resource limits), and UI whose provenance or integrity cannot be verified (not executed at all). None of this layer is implemented yet.
+
+### The capability UI surface is not plugin UI
+
+Two easily confused things: the capability UI surface in `src/capability/ui.rs` and the plugin UI in `src/extension/panel_publication/` are two different routes.
+
+The capability UI surface lives in `src/capability/ui.rs`: the namespace constant `UI_NAMESPACE` has the value `aleph/ui`, the descriptor's `kind` is `CapabilityKind::Ui`, and the interaction is a **controlled channel** — `src/gateway/capability_ui.rs` provides attach, invoke, acknowledge, submit-input and detach, and failures return a `UiError` (`Closed` / `InvalidInput` / `Poisoned` / `Unavailable` / `StaleAttachment` / `QueueFull` / `Busy` / `RenderFailed` / `Timeout` / `Cancelled`).
+
+Plugin UI is same-origin code and goes through integrity checking and publication admission. **Same-origin means it is not inside the sandbox of those permission checks** — its security boundary comes from integrity checking, admission limits and the manifest declaration, not from runtime isolation.
+
+## Trust decision table
+
+| Scenario | Verdict | Evidence |
+|---|---|---|
+| Bundled plugin (the `Bundled` origin) | always trusted | `allows` in `src/extension/plugin_trust.rs` |
+| Plugin written into the operator config (the `Config` origin) | always trusted | same |
+| Plugin in a workspace / global directory, enforcement off | allowed (permissive by default) | `owner_trust_policy` in `src/extension/plugin_state.rs` |
+| Plugin in a workspace / global directory, enforcement on and allowlisted | allowed | same (the allowlist is built from the `trusted` field) |
+| Plugin in a workspace / global directory, enforcement on and not allowlisted | refused at load | `allows` in `src/extension/plugin_trust.rs` |
+| Plugin in the Claude cache directory | same tier as workspace / global, needs an allowlist entry | `PluginOrigin` in `src/extension/types/plugins.rs` |
+| Revoking trust | affects the next load only, does not stop a running plugin | wording in `src/builtin_tools/plugin_manage.rs` |
+| Plugin manifest asks for a capability beyond its permissions | that capability is not mounted; the plugin row keeps a `Warn` diagnostic | `src/extension/registrar/api.rs` |
+| WASM plugin calls an undeclared capability | refused | `src/extension/runtime/wasm/capability_kernel.rs` |
+| Plugin panel asset exceeds a limit or fails integrity | publication refused | `src/extension/panel_publication/admission.rs` |
+| Code inside a plugin panel | executes same-origin; integrity checking and admission limits are the backstop | comment in `interfaces/webchat/src/panel/sdk.rs` |
+| Arbitrary Rust dynamic-library plugin | not supported (decision accepted, process-style plugins not implemented yet) | `docs/research/NSH_ADR-001~009.md` §ADR-004 |
+| Capability authorization (granting a plugin powers beyond additive registration) | planned | blueprint `docs/research/aleph_modularization_plan.md` §5.2 |

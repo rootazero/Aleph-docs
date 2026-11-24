@@ -126,7 +126,7 @@ aleph.example.com {
 
 The current source tree does not maintain a Dockerfile or Compose file, so this guide does not present an example recipe as an officially supported artifact. A custom image must at least:
 
-1. build `aleph-server` with Rust 1.95+;
+1. build `aleph-server` with Rust 1.99+;
 2. persist `ALEPH_HOME`;
 3. set `[gateway].host = "0.0.0.0"` inside the container;
 4. publish the port only on host loopback or place a TLS proxy in front;

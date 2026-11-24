@@ -1,217 +1,252 @@
 ---
-title: "events.*"
-description: "Event subscription and streaming RPC methods"
+title: "Event Topics"
+description: "The Aleph gateway's topic catalogue: canonical topic names, wire method names, payload fields, subscription matching, and per-topic visibility"
 ---
 
-`events.*` manages real-time event subscriptions over a WebSocket connection. All events flow through a single topic bus (`src/gateway/event_bus.rs`) and are filtered per connection by a `SubscriptionManager`.
+This page is the gateway's topic catalogue: for every topic, its canonical name, its wire method name, its payload fields, how subscriptions match it, and who may see it. For the wire shape and the overall delivery chain see [Gateway architecture](../../architecture/gateway); for protocol details see [Protocol v1](../../gateway/protocol-v1).
 
-## Methods
+## How Events Reach Clients
 
-| Method | Description |
-|--------|-------------|
-| [`events.subscribe`](#eventssubscribe) | Add topic subscriptions (additive) |
-| [`events.unsubscribe`](#eventsunsubscribe) | Remove topic subscriptions |
-| [`events.list`](#eventslist) | List active subscriptions on this connection |
+The server wraps internal events into JSON-RPC notifications. A client first subscribes to the topics it cares about, then dispatches each notification by the topic it carries. Notifications exist in two wire shapes.
 
-## Event Delivery
+### The Notification Shape
 
-Events are delivered as JSON-RPC notifications (no `id`) over WebSocket, serialised from `TopicEvent`:
+Frames with a `stream_method()` are emitted under their method name, with the frame body as `params`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "stream.run_complete",
+  "params": {
+    "run_id": "run-...",
+    "seq": 12,
+    "summary": { "...": "..." },
+    "total_duration_ms": 4820
+  }
+}
+```
+
+### The Event Shape
+
+Frames without a `stream_method()` are emitted first as a bare event `{"topic": "...", "data": {...}}`, and the delivery layer wraps that into a notification whose method is `event`. `event` is `TOPIC_EVENT_METHOD` (`shared/protocol/src/jsonrpc.rs:85`), and the wrapping happens at `src/gateway/server/connection/forward.rs:228`:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "topic": "agent.run.complete",
-    "data": { "run_id": "run-uuid-123", "duration_ms": 5000 },
-    "timestamp": 1706400000000
+    "topic": "config.changed",
+    "data": { "section": "execution", "value": { "...": "..." } }
   }
 }
 ```
 
-Events are fire-and-forget: the server pushes without waiting for acknowledgement; events that fire while a client is disconnected are lost. Topic names come from `GatewayEventFrame::topic_name()` — see [Event Topics](#event-topics).
+The two shapes differ in exactly one place: the wire method name. The canonical topic name (`agent.run.complete`) and the wire method name (`stream.run_complete`) are two separate namespaces; the canonical name mostly shows up in the `source_topic` diagnostic field, while subscriptions on the wire use the latter.
 
-### events.subscribe
+## Subscribing and Matching
 
-Subscribe to one or more topics. Subscriptions are **additive** — repeated calls append patterns without affecting existing ones.
+The three methods `events.subscribe`, `events.unsubscribe`, and `events.list` are not in the method registry; they are intercepted separately in the connection loop (`src/gateway/server/connection/mod.rs:630`), with the handlers in `src/gateway/handlers/events.rs`.
 
-**Request (patterns only):**
+The shape of a subscribe request:
+
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
+  "id": 4,
   "method": "events.subscribe",
   "params": {
-    "topics": ["agent.run.*", "session.*"]
+    "topics": ["stream.*", { "topic": "team.changed", "where": [{ "field": "team_id", "equals": "team-1" }] }]
   }
 }
 ```
 
-**Request (with field filter):**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "events.subscribe",
-  "params": {
-    "topics": [
-      "agent.run.*",
-      { "topic": "tools.changed", "where": [{ "field": "scope", "equals": "extension" }] }
-    ]
-  }
-}
-```
+An empty `topics` array is answered with `INVALID_PARAMS` / `Topics array cannot be empty`. Subscription state is held by `SubscriptionManager` (`src/gateway/handlers/events.rs:17`), one filter per connection.
 
-**Response:**
-```json
-{ "jsonrpc": "2.0", "id": 1, "result": { "subscribed": ["agent.run.*", "session.*"], "changed": 2 } }
-```
+Matching works on the wire topic string of the event: the `topic` field for the bare event shape, and the `method` field for the notification shape (`extract_topic_and_data` at `src/gateway/server/connection/forward.rs:187`). Stream frames are therefore matched by their `stream.` prefix.
 
-**Parameters:**
+### Wildcard Patterns
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `topics` | array | Yes | Array of topic selectors; each is a string pattern or `{topic, where}` filter object |
+Matching lives in `topic_matches` at `src/gateway/event_bus.rs:150`:
 
-Each `where` predicate is `{ "field": "<json_path>", "equals": <value> }`; the event is delivered only when the payload field strictly equals the value. When no payload is available, predicates are skipped (the event is dropped, never blindly passed through).
+| Pattern | Semantics |
+|---------|-----------|
+| `*` or `**` | Matches every topic |
+| Last segment is `*` or `**` | Matches any remaining depth, so `stream.*` matches `stream.run_complete` and also `voice.transcribe.delta` |
+| A `*` in the middle | Eats a single segment, so `*.complete` does not match `stream.run_complete` |
 
-### events.unsubscribe
+Both sides have to be exhausted for a match.
 
-Remove patterns by exact match. A pattern is removed only if it matches the subscribed form exactly.
+### where Predicates
 
-**Request:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "events.unsubscribe",
-  "params": { "topics": ["agent.run.*"] }
-}
-```
+An element of `topics` may also be an object carrying a `where` array. A predicate is described by `FieldPredicate` (`{"field": "...", "equals": ...}`), and the field path is resolved by `.` segments, not by JSON Pointer. A non-empty predicate whose field is missing from the payload counts as no match.
 
-**Response:**
-```json
-{ "jsonrpc": "2.0", "id": 2, "result": { "subscribed": ["session.*"], "changed": 1 } }
-```
+### Exceptions and Unsubscribing
 
-### events.list
+`except` is a sibling key of `topics` and lists the top-level topics to carve out of the subscription. `events.unsubscribe` removes the given patterns, and `events.list` returns a snapshot of the connection's subscriptions (`subscribed` is the list of patterns, `entries` the full entries).
 
-List every active pattern on this connection.
+## Topic Catalogue
 
-**Request:**
-```json
-{ "jsonrpc": "2.0", "id": 3, "method": "events.list" }
-```
+Canonical topic names come from `GatewayEventFrame::topic_name()` (`src/gateway/events/frame.rs:780`), and wire method names from `stream_method()` in the same file (`:844`).
 
-**Response:**
-```json
-{ "jsonrpc": "2.0", "id": 3, "result": { "subscribed": ["session.*"] } }
-```
+### Runs and Agent Output
 
-## Event Topics
+| Canonical topic | Wire method | When it fires | Payload highlights | Code |
+|-----------------|-------------|---------------|--------------------|------|
+| `run.accepted` | `stream.run_accepted` | A run is accepted | `run_id`, `session_key`, `accepted_at` | `src/gateway/events/frame.rs` |
+| `run.queued` | `stream.run_queued` | A run enters the queue | `run_id`, `session_key`, `ahead` | `src/gateway/events/frame.rs` |
+| `agent.reasoning` | `stream.reasoning` | Model reasoning increments | `run_id`, `seq`, `content`, `is_complete` | `src/gateway/events/frame.rs` |
+| `agent.tool.start` | `stream.tool_start` | A tool call starts | `run_id`, `seq`, `tool_name`, `tool_id`, `params` | `src/gateway/events/frame.rs` |
+| `agent.tool.update` | `stream.tool_update` | A tool call reports progress | `run_id`, `seq`, `tool_id`, `progress` | `src/gateway/events/frame.rs` |
+| `agent.tool.end` | `stream.tool_end` | A tool call ends | `run_id`, `seq`, `tool_id`, `result`, `duration_ms` | `src/gateway/events/frame.rs` |
+| `agent.trace` | `stream.agent_trace` | An agent trace event | `run_id`, `seq`, `event` | `src/gateway/events/frame.rs` |
+| `agent.response.chunk` | `stream.response_chunk` | A response chunk | `run_id`, `seq`, `delta`, `chunk_index`, `is_final`, `is_intermediate` | `src/gateway/events/frame.rs` |
+| `agent.context.gauge` | `stream.context_gauge` | Context usage after a model call | `run_id`, `seq`, `context_tokens`, `context_window`, `total_tokens` | `src/gateway/events/frame.rs` |
+| `agent.run.complete` | `stream.run_complete` | A run finishes | `run_id`, `seq`, `summary`, `total_duration_ms` | `src/gateway/events/frame.rs` |
+| `agent.run.error` | `stream.run_error` | A run fails | `run_id`, `seq`, `error`, `error_code`, possibly `session_key` | `src/gateway/events/frame.rs` |
+| `agent.run.retrying` | `stream.run_retrying` | A run retries | `run_id`, `seq`, `provider`, `attempt`, `max_attempts`, `reason` | `src/gateway/events/frame.rs` |
+| `agent.model.resolved` | `stream.model_resolved` | The model choice is settled | `run_id`, `model_info` | `src/gateway/events/frame.rs` |
+| `agent.uncertainty` | `stream.uncertainty_signal` | The model signals uncertainty | `run_id`, `seq`, `uncertainty`, `suggested_action` | `src/gateway/events/frame.rs` |
 
-Topics are grouped by namespace; a single `events.subscribe` call can subscribe to multiple groups via wildcards.
+### Clarification and Approval
 
-### Run / Agent Lifecycle (`run.*`, `agent.*`)
+| Canonical topic | Wire method | When it fires | Payload highlights | Code |
+|-----------------|-------------|---------------|--------------------|------|
+| `agent.ask.user` | `stream.ask_user` | A run waits for an answer | `run_id`, `seq`, `session_key`, `request_id`, `question`, `options`, `questions`, `answered` | `src/gateway/events/frame.rs` |
+| `agent.clarification.ended` | `stream.clarification_ended` | A clarification ends | `session_key`, `request_id`, `outcome` | `src/gateway/events/frame.rs` |
+| `approval.requested` | none | A human approval is needed | `approval_id`, `session_key`, `channel_id`, `conversation_id`, `tool_call_id` | `src/gateway/events/frame.rs` |
+| `approval.reminder` | none | The approval wait times out | `approval_id`, `session_key` | `src/gateway/events/frame.rs` |
+| `approval.resolved` | none | The approval has an outcome | `approval_id`, `session_key`, `decision`, `resolved_by` | `src/gateway/events/frame.rs` |
+| `approval.expired` | none | The approval expires | `approval_id`, `session_key` | `src/gateway/events/frame.rs` |
+| `pairing.requested` | none | A device asks to pair | `device_name` | `src/gateway/events/frame.rs` |
+| `pairing.completed` | none | Device pairing completes | `device_id` | `src/gateway/events/frame.rs` |
 
-| Topic | Description |
-|-------|-------------|
-| `run.accepted` | Run queued and started |
-| `agent.reasoning` | Reasoning-phase output |
-| `agent.reasoning.block` | Reasoning block (dual-process cognition) |
-| `agent.tool.start` | Tool call begins |
-| `agent.tool.update` | Tool progress update |
-| `agent.tool.end` | Tool call ends |
-| `agent.trace` | Execution-trace event |
-| `agent.response.chunk` | Response text chunk |
-| `agent.context.gauge` | Context-window utilisation |
-| `agent.run.complete` | Run completed successfully |
-| `agent.run.error` | Run failed |
-| `agent.run.retrying` | Failure-driven retry |
-| `agent.ask.user` | `ask_user` clarification request |
-| `agent.clarification.ended` | Clarification round resolved |
-| `agent.uncertainty` | Model uncertainty signal |
-| `agent.model.resolved` | Model selection resolved |
+### Sessions and the Running Set
 
-### Session / Running Set
-
-| Topic | Description |
-|-------|-------------|
-| `session.updated` | Session metadata update |
-| `session.lifecycle.changed` | Session lifecycle phase change |
-| `running.set.changed` | Active-run set change |
+| Canonical topic | Wire method | When it fires | Payload highlights | Code |
+|-----------------|-------------|---------------|--------------------|------|
+| `session.updated` | `stream.session_updated` | Session metadata changes | `session_key`, `origin_channel`, `origin_run_id` | `src/gateway/events/frame.rs` |
+| `session.user.message` | `stream.session_user_message` | A user message enters a session | `session_key`, `author_user_id`, `content`, `timestamp`, `seq` | `src/gateway/events/frame.rs` |
+| `session.lifecycle.changed` | none | The session state changes | `session_key`, `old_state`, `new_state`, `reason` | `src/gateway/events/frame.rs` |
+| `running.set.changed` | `stream.running_set_changed` | The running set changes | `seq`, `running` | `src/gateway/events/frame.rs` |
 
 ### Channels
 
-| Topic | Description |
-|-------|-------------|
-| `channel.message` | Inbound message |
-| `channel.typing` | Typing indicator |
-| `channel.status` | Channel runtime status |
-| `channel.error` | Channel error |
+| Canonical topic | Wire method | When it fires | Payload highlights | Code |
+|-----------------|-------------|---------------|--------------------|------|
+| `channel.message` | none | A channel receives a message | `channel_id`, `conversation_id`, `message` | `src/gateway/events/frame.rs` |
+| `channel.typing` | none | A channel is typing | `channel_id`, `conversation_id` | `src/gateway/events/frame.rs` |
+| `channel.status` | none | A channel's connection status changes | `channel_id`, `status` | `src/gateway/events/frame.rs` |
+| `channel.error` | none | A channel errors | `channel_id`, `error` | `src/gateway/events/frame.rs` |
 
-### Config / Approvals
+### Configuration and System
 
-| Topic | Description |
-|-------|-------------|
-| `config.changed` | Configuration change (file-watcher hot-reload or RPC) |
-| `approval.requested` / `approval.resolved` / `approval.expired` | Approval lifecycle |
+| Canonical topic | Wire method | When it fires | Payload highlights | Code |
+|-----------------|-------------|---------------|--------------------|------|
+| `config.changed` | none | A configuration section changes | `section`, `value` | `src/gateway/events/frame.rs` |
+| `cron.job.changed` | none | A scheduled job changes | `job_id`, `change` | `src/gateway/events/frame.rs` |
+| `heartbeat.task.changed` | none | A heartbeat task changes | `task_id`, `change` | `src/gateway/events/frame.rs` |
+| `team.changed` | none | A team changes | `team_id`, `change` | `src/gateway/events/frame.rs` |
+| `workspace.changed` | none | A workspace changes | `workspace_id`, `change` | `src/gateway/events/frame.rs` |
+| `projects.changed` | none | A project changes | `project_id`, `change`, `affected_user` | `src/gateway/events/frame.rs` |
+| `acp.sessions.changed` | none | The ACP session pool changes | No payload; the client re-fetches on its own | `src/gateway/events/frame.rs` |
+| `gateway.token.rotated` | none | The shared gateway token is rotated | No payload | `src/gateway/events/frame.rs` |
+| `gateway.device.revoked` | none | A paired device is revoked | `device_id` | `src/gateway/events/frame.rs` |
 
-### Cron / Heartbeat
+### Delivery Surfaces, Canvas, and Browser
 
-| Topic | Description |
-|-------|-------------|
-| `cron.job.changed` | Cron job change (including `cron.run` triggers) |
-| `heartbeat.task.changed` | Heartbeat task change |
+| Canonical topic | Wire method | When it fires | Payload highlights | Code |
+|-----------------|-------------|---------------|--------------------|------|
+| `surface.notify` | none | A notification is pushed to a delivery surface | `audience`, `title`, `body`, `source_topic` | `src/gateway/events/frame.rs` |
+| `surface.approval` | none | An approval request is pushed to a delivery surface | `audience`, `approval_id`, `session_key`, `title`, `body` | `src/gateway/events/frame.rs` |
+| `canvas.updated` | none | The canvas changes | `canvas_id`, `revision`, `ops`, `actor`, `owner_user_id`, `project_id` | `shared/protocol/src/canvas.rs` |
+| `browser.live.resource` | none | A live browser resource updates | `resource` | `shared/protocol/src/browser_live.rs` |
+| `browser.live.closed` | none | A live browser session closes | `closed` | `shared/protocol/src/browser_live.rs` |
+| `browser.live.intervention` | none | The browser needs human intervention | `summary` | `shared/protocol/src/browser_live.rs` |
 
-### Teams / ACP / Gateway Credentials
+### Raw Topics
 
-| Topic | Description |
-|-------|-------------|
-| `team.changed` | Team composition or task change |
-| `acp.sessions.changed` | ACP session set change |
-| `gateway.token.rotated` | Gateway token rotation |
-| `gateway.device.revoked` | Device revocation |
+The topics below skip the frame wrapper and are published directly by their producers. The topic constants live elsewhere from the producers, so the table lists the producer.
 
-### Surfaces / Runtimes
+| Topic | When it fires | Payload highlights | Producer |
+|-------|---------------|--------------------|----------|
+| `session.artifact` | Session artifacts change, telling the client to re-read the artifact list | Only `session_key` | `src/gateway/event_emitter/artifact_ping.rs` |
+| `run.subagent_tree` | The subagent tree changes | Root session and child nodes | `src/gateway/subagent_tree_relay.rs` |
+| `pty.screen` | PTY screen output | Session id and screen content | `src/gateway/pty/manager.rs` |
+| `pty.exit` | A PTY exits | Session id and exit code | `src/gateway/pty/manager.rs` |
+| `node.connected` | A cluster node joins | — | `src/gateway/server/connection/mod.rs` |
+| `node.disconnected` | A cluster node leaves | — | `src/gateway/server/connection/cleanup.rs` |
+| `presence.joined` | A connection joins | `conn_id` | `src/gateway/server/connection/mod.rs` |
+| `presence.left` | A connection leaves | `conn_id` | `src/gateway/server/connection/cleanup.rs` |
+| `voice.transcribe.delta` | A transcription increment arrives | `owner_user_id` | `src/gateway/voice/streaming/relay.rs` |
+| `capability.event` | A capability event | — | `src/gateway/capability_events.rs` |
+| `capability.event.status` | A capability event's status | — | `src/gateway/capability_events.rs` |
+| `capabilities.ui.display` | The displayed UI content changes | — | `src/gateway/capability_ui.rs` |
+| `tools.changed` | The tool set changes | — | `src/gateway/tools_invalidation.rs` |
+| `sessions.changed` | The session list changes | — | `src/gateway/session_store/file_backend/mod.rs` |
+| `system.tick` | The gateway ticks | — | `src/gateway/server/mod.rs` |
+| `config.reloaded` | A configuration reload completes | — | `src/bin/aleph-server/commands/start/builder/handlers/config.rs` |
+| `config.error` | A configuration reload fails | — | `src/bin/aleph-server/commands/start/builder/handlers/config.rs` |
+| `extension.reloaded` | An extension is reloaded | — | `src/bin/aleph-server/commands/start/mod.rs` |
+| `memory.reembed.progress` | Memory re-embedding progresses | — | `src/gateway/handlers/memory/mod.rs` |
+| `memory.reembed.completed` | Memory re-embedding completes | — | `src/gateway/handlers/memory/mod.rs` |
+| `agent.lifecycle.registered` | An agent is registered | — | `src/gateway/agent_lifecycle.rs` |
+| `agent.lifecycle.deleted` | An agent is deleted | — | `src/gateway/agent_lifecycle.rs` |
+| `agent.lifecycle.bound` | An agent is bound | — | `src/gateway/agent_lifecycle.rs` |
+| `agent.lifecycle.unbound` | An agent is unbound | — | `src/gateway/agent_lifecycle.rs` |
+| `runtimes.install.progress` | A runtime installation progresses | — | `src/gateway/handlers/runtimes.rs` |
+| `config.embedding.providers.changed` | The embedding provider registry changes | — | `src/gateway/handlers/embedding_providers.rs` |
+| `config.generation.providers.changed` | The generation provider registry changes | — | `src/gateway/handlers/generation_providers/handlers.rs` |
 
-| Topic | Description |
-|-------|-------------|
-| `surface.notify` | Surface-level notification |
-| `surface.approval` | Surface approval request |
-| `runtimes.install.progress` | Runtime install progress (step / log / done / failed) |
+## Visibility and Authorization
 
-## Glob Pattern Matching
+For a frame to reach a connection it has to pass the filter chain at `src/gateway/server/connection/mod.rs:1373` layer by layer. Two of those layers are topic-related, and they have different jobs.
 
-Subscription patterns use glob-style matching (`src/gateway/event_bus.rs::topic_matches`):
+### Scope Rules
 
-| Pattern | Matches |
-|---------|---------|
-| `agent.run.*` | `agent.run.started`, `agent.run.complete`, etc. |
-| `agent.*` | Every event under the `agent.` prefix |
-| `*` | Every event |
-| `agent.run.complete` | Exact match only |
-| `*.complete` | Any event ending in `.complete` |
+`src/gateway/event_scope.rs` holds coarse prefix rules. `default_rules` registers only a few prefixes — pairing, guest, configuration change, node, and PTY — and a matched prefix requires the caller to hold an administrator scope; a topic that matches no rule is admitted by default. `scope_for_role` returns a wildcard scope for operator and an empty one for every other role.
 
-`*` matches a single non-dot segment; patterns match against the full topic string.
+Topics under the `config.changed`, `node.`, and `pty.` prefixes therefore reach operators only.
 
-## Typical Client Flow
+### Per-Frame Ownership Ruling
 
-```json
-// 1. Subscribe to relevant topics
-{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*", "session.*"] } }
+`src/gateway/event_visibility.rs` answers "who owns this frame". `classify` (`:440`) maps the topic and the payload onto one identity:
 
-// 2. Start a run
-{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Check disk usage" } }
+| Identity | Topics covered | Ruling |
+|----------|----------------|--------|
+| By session | `stream.ask_user`, `stream.clarification_ended`, `stream.run_accepted`, `stream.run_queued`, `stream.session_updated`, `stream.session_user_message`, `session.lifecycle.changed`, `sessions.changed` | Visible to the session's owner |
+| By run | `stream.reasoning`, `stream.tool_start`, `stream.tool_update`, `stream.tool_end`, `stream.agent_trace`, `stream.response_chunk`, `stream.context_gauge`, `stream.run_complete`, `stream.run_error`, `stream.uncertainty_signal`, `stream.model_resolved`, `stream.run_retrying` | The `run_id` is resolved to a session first, then the session's ownership decides |
+| By session or administrator | `approval.requested`, `approval.reminder`, `approval.resolved`, `approval.expired`, `surface.approval` | Operators pass through; everyone else goes by session ownership |
+| By user | `voice.transcribe.delta` | The caller's id equals `owner_user_id` |
+| By PTY session | `pty.screen`, `pty.exit` | Decided by PTY session ownership |
+| By canvas | `canvas.updated` | Decided by the canvas visibility predicate |
+| By project | `projects.changed` | Decided by the project roster, with no administrator exemption |
+| Operator only | `workspace.changed`, `config.embedding.providers.changed`, `config.generation.providers.changed`, and the `host.` prefix | The caller's role must be operator |
+| Global | `channel.message`, `channel.typing`, `channel.status`, `channel.error`, `acp.sessions.changed`, `gateway.token.rotated`, `gateway.device.revoked`, `cron.job.changed`, `heartbeat.task.changed`, `team.changed`, `surface.notify`, `pairing.requested`, `pairing.completed`, `config.changed`, `system.tick`, `presence.joined`, `presence.left`, `tools.changed`, `config.reloaded`, `config.error`, `extension.reloaded`, `memory.reembed.progress`, `memory.reembed.completed`, `runtimes.install.progress`, `agent.lifecycle.registered`, `agent.lifecycle.deleted`, `agent.lifecycle.bound`, `agent.lifecycle.unbound` | Admitted to every logged-in connection |
+| Capability audience | `capability.event`, `capabilities.ui.display`, `capability.event.status` | Decided by the capability audience |
 
-// 3. Receive events (no id = notification)
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "run.accepted", "data": { "run_id": "run-123" } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "run_id": "run-123", "content": "Disk usage is at 45%..." } } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.run.complete", "data": { "run_id": "run-123", "duration_ms": 4200 } } }
-```
+Two additions:
 
-## See Also
+- `config.changed` matches the configuration prefix in the scope rules and is also Global in the per-frame ruling. The prefix rule runs first, so in practice only operators receive it.
+- Among the team topics, the ones carrying a team id are ruled by team ownership; only the id-less `team.changed` is Global.
 
-- [Protocol](../protocol) -- Event delivery format and WebSocket transport
-- [agent.*](./agent) -- Agent methods that emit events
-- [Methods Reference](./index) -- All method namespaces
+### The Projected Frame
+
+`stream.running_set_changed` is the only projected frame on the chain: it is ruled Global (nobody owns the frame), but its `running` array is narrowed per connection, so each connection sees only the running set that concerns it.
+
+## Replay and Snapshots
+
+There is no event replay and no snapshot subscription in the current implementation.
+
+- `shared/protocol/src/trace_replay.rs` defines query DTOs for persisted traces (`AgentTraceReplay`, `AgentTraceReplayEntry`, `AgentTraceListRow`, and others); they read trace records that are already on disk and are not a replay of the event stream.
+- `shared/protocol/src/resume.rs` defines receipts for resumed tasks (`ResumeReceipt`, `ResumeStatus`, and its constants), which are unrelated to event replay.
+- The subscription semantics themselves do not support replay: `events.subscribe` records patterns, not a cursor.
+
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` (chapter 9, Snapshot + Replay, including 9.3 on lossless subscription, 9.4 on unavailable history, and 9.5 on the deduplication cursor); the current implementation is in `shared/protocol/src/trace_replay.rs`, `shared/protocol/src/resume.rs`, and `src/gateway/handlers/events.rs`. `session.get_snapshot` is not registered in `src/gateway/method_census.rs`, so the snapshot interface does not exist yet.
+
+## History: How Event Names Converged
+
+Earlier documents used flat event names, such as agent.completed, agent.started, agent.error, and stream.chunk. None of those strings exist in the current code; they only appear in historical documents and early plans.
+
+After converging on the current namespaces, `agent.run.complete` means one run finished while `session.user.message` means one user message arrived, and the two no longer share a flat name. `stream.chunk` became `agent.response.chunk`, which puts it in the same family as `agent.reasoning` and `agent.trace`.
+
+Another convergence separated the canonical name from the wire method name: the canonical topic name says what the event is, and the wire method name says how it is delivered. While the two namespaces coexisted, `agent.run.complete` mostly appeared as the `source_topic` diagnostic field, and subscriptions on the wire kept using `stream.*`.

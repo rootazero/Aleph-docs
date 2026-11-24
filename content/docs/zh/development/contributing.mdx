@@ -34,7 +34,7 @@ Aleph 欢迎社区贡献。无论你是修复拼写错误、添加功能还是�
 | `feat/` | 新功能 | `feat/telegram-voice-messages` |
 | `fix/` | Bug 修复 | `fix/memory-search-timeout` |
 | `refactor/` | 代码重构 | `refactor/extension-manager-split` |
-| `docs/` | 文档更改 | `docs/tool-system-guide` |
+| `docs/` | 文档更改 | `docs/<主题>` |
 | `test/` | 测试添加或修复 | `test/gateway-integration` |
 | `chore/` | 构建、CI、依赖更新 | `chore/update-tokio-1.36` |
 
@@ -85,11 +85,11 @@ Aleph 使用默认配置的 `rustfmt`。在每次提交前运行它：
 cargo fmt --all
 ```
 
-CI 会拒绝 `cargo fmt --all -- --check` 失败的 PR。
+CI 对指定 crate 执行格式检查；以 `.github/workflows/aleph-core-ci.yml` 为准。
 
 ### 代码检查
 
-Clippy 是标准的 Rust linter。所有警告在 CI 中都被视为错误：
+本地可用 Clippy 检查；CI 检查的包和 feature 见 `.github/workflows/aleph-core-ci.yml`：
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -188,11 +188,22 @@ Aleph 使用两层错误策略：
 | `tools` | 工具系统 |
 | `extension` | 扩展/插件系统 |
 | `cli` | CLI 应用程序 |
-| `desktop` | 桌面（Tauri）应用程序 |
+| `desktop` | 桌面宿主、能力接口与原生实现 |
 | `protocol` | 共享协议类型 |
 | `docs` | 文档 |
 | `ci` | CI/CD 流水线 |
 | `deps` | 依赖更新 |
+
+`desktop/` 的 crate 家族（工作区成员见 `Cargo.toml`）：
+
+| Crate | 职责与源码锚点 |
+|-------|----------------|
+| `aleph-desktop` | 共享桌面能力 trait（`desktop/shared/Cargo.toml`、`desktop/shared/src/traits/`） |
+| `aleph-desktop-macos` | macOS 原生实现（`desktop/macos/Cargo.toml`） |
+| `aleph-desktop-linux` | Linux 原生实现（`desktop/linux/Cargo.toml`） |
+| `aleph-desktop-windows` | Windows 原生实现（`desktop/windows/Cargo.toml`） |
+| `aleph-nsh-shell` | NSH 桌面宿主（`desktop/nsh-shell/Cargo.toml`） |
+| `aleph-desktop-host` | 宿主侧辅助库（`desktop/host/Cargo.toml`） |
 
 ### 示例
 
@@ -268,15 +279,15 @@ deps: update tokio to 1.36
 
 ## 许可
 
-Aleph 采用 **MIT 许可证**。通过贡献，你同意你的贡献将在相同条款下获得许可。
+Aleph 采用 **MIT 许可证**（`LICENSE`）。通过贡献，你同意你的贡献将在相同条款下获得许可。
 
 ---
 
-## 26.7.x 补充
+## 历史：26.7.x 补充
 
 ### Rust toolchain 1.95+
 
-26.7.x：`rust-version` 在 Cargo.toml 已抬到 **1.95**。开发时使用 `rustup install 1.95` 或 `rust-toolchain.toml`。
+26.7.x：`rust-version` 在 Cargo.toml 已抬到 **1.95**；当前要求见[构建](./building)。
 
 ### Harness 12 文件 + 行数 ratchet
 
@@ -284,7 +295,7 @@ Aleph 采用 **MIT 许可证**。通过贡献，你同意你的贡献将在相�
 
 - 顶层 8 + `agent/` 4 = **12 文件**（测试文件在 `tests/`，不入 ratchet）
 - 行数由 `src/harness/tests/budget.rs` 的 ratchet 守，绑定常量 `CEILING`
-- 当前 `CEILING` = **5055**（`src/harness/tests/budget.rs:335`，2026-07-26 修订）；不要把本节数字当副本
+- 当时的 `CEILING` = **5055**（26.7.x 期间）；当前值 **5535**（`src/harness/tests/budget.rs:795`）；不要把本节数字当副本
 - 加代码前必答 3 问：脚手架 vs 认知？模型升级后是否还需要？真实消费者有几个？
 
 ### YAGNI 撤回

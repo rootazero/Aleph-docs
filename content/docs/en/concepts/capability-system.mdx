@@ -1,49 +1,96 @@
 ---
-title: "Capability System"
-description: "Capability declarations, plugin permissions, action-aware tool enforcement, and the runtime capability ledger."
+title: "Capabilities and Plugins"
+description: "The three meanings of \"capability\" in Aleph: capabilities declared by plugins, runtime capability descriptors, and planned slots, and how they connect."
 ---
 
-Aleph separates three questions:
+import { Callout } from "fumadocs-ui/components/callout";
 
-1. What a plugin or extension registers.
-2. What resources a plugin declares that it needs.
-3. What the running agent is allowed to execute now.
+This page resolves the ambiguity you hit the first time you see the word "capability" in Aleph: three generations of code share the name, and you need to know which one is current and which one is planned.
 
-`src/extension/capability.rs` answers the first question. Plugin manifest permissions and the shared scoped-tool, approval, and sandbox layers answer the other two.
+## Three meanings of capability
 
-## Capability declarations
+| Layer | Question it answers | Name in code | Where it stands |
+|---|---|---|---|
+| **Plugin-declared capability** (old model) | What does this plugin want to contribute: tools, hooks, services, skills... | `CapabilityDeclaration` (`src/extension/capability.rs`) | Current; manifest adapters still produce it |
+| **Runtime capability descriptor** (current) | What is this capability at runtime, who owns it, who can see it, is it still valid right now | `CapabilityDescriptor`, `OwnershipTree`, `Zahir` (`src/capability/`) | Current; `ZahirFacade` is mounted, some modules are not, see [Capability Model](../capabilities/capability-model) |
+| **Slots and replacement** | Which backend implements a feature position, and how a user swaps it out | Contract crate `crates/aleph-slot-api/` (`SlotId`, `ContractVersion`) | Planned: the contract types exist; the slot catalog and replacement mechanism are blueprint only |
 
-The production declaration enum is intentionally small:
+The three layers do not replace each other. An old declaration only describes "what the plugin says it has"; it is not a runtime capability. Only the descriptor carries a revision, ownership, visibility, and a contract version. The slot catalog currently exists only in the blueprint.
+
+## The old declaration enum
+
+`src/extension/capability.rs` defines `CapabilityDeclaration`, the unified declaration model for what a plugin can contribute. It has 7 variants:
 
 ```rust
 pub enum CapabilityDeclaration {
-    Tool(ToolRegistration),
-    Hook(HookRegistration),
-    Service(ServiceRegistration),
-    Skill(SkillRegistration),
-    Agent(AgentRegistration),
-    McpServer(McpServerConfig),
+    Tool(ToolDeclaration),
+    Hook(HookDeclaration),
+    Service(ServiceDeclaration),
+    Skill(SkillDeclaration),
+    Agent(AgentDeclaration),
+    McpServer(McpServerDeclaration),
+    Context(ContextDeclaration),
 }
 ```
 
-Each declaration is owned by a plugin or, for an MCP server configuration, by the runtime that supplies it. The registrar validates ownership and dispatches it to `PluginRegistry` or the MCP path.
+(The per-variant doc comments in the source are omitted here.) Each variant maps one-to-one to a registration type in `PluginRegistry`: `ToolDeclaration` is an alias of `ToolRegistration`, and `HookDeclaration`, `ServiceDeclaration`, `SkillDeclaration`, and `AgentDeclaration` follow the same pattern; `McpServerDeclaration` is `McpManagerConfig`.
 
-| Variant | Registration target | Tier |
+| Variant | Registration target | Tier (`Tier`) |
 |---|---|---|
 | `Tool` | Callable tool registry | Core |
 | `Hook` | Hook executor | Core |
-| `Skill` | Plugin skill registry and shared SkillSystem | Core |
+| `Skill` | Plugin skill registry and the shared SkillSystem | Core |
 | `Agent` | Agent registry | Important |
 | `Service` | Service manager | Pluggable |
 | `McpServer` | MCP manager integration | Pluggable |
+| `Context` | Context descriptor and its WASM transport export; not an authorization | Pluggable |
 
-Plugin `commands/` Markdown is represented as a command-type skill registration. There are no separate channel, provider, HTTP-route, CLI, or gateway-method variants in the current declaration model.
+The tier comes from `CapabilityDeclaration::tier()` and decides registration order and conflict resolution. A plugin's `commands/` Markdown is stored in the skill registry as command-style skills; there is no separate variant for it.
 
-A `CapabilitySource` records the plugin ID, discovery origin, and manifest format. Supported source formats include Claude Code, Aleph TOML, Codex, Cursor, auto-discovery, and runtime registration.
+`CapabilitySource` records the plugin ID, the discovery origin (`PluginOrigin`), and the manifest format (`SourceFormat`). The manifest adapter's `AdapterOutput.capabilities: Vec<CapabilityDeclaration>` (`src/extension/manifest/adapter.rs`) parses each platform format (Claude Code, Aleph TOML, Codex, Cursor, auto-discovery) into one declaration list.
 
-## Plugin permissions
+<Callout type="warn" title="A declaration is not a runtime capability">
+  `CapabilityDeclaration` is only a **declaration**: it states what a plugin intends to register, and after the registrar validates it, it lands in the matching registry. It has no revision, no owner generation, cannot be revoked, and does not guarantee that the handler you hold is fresh. Consumers that need those guarantees should read the descriptors and leases in `src/capability/`.
+</Callout>
 
-The Aleph extension manifest declares resource requirements under its permission section:
+## The current capability subsystem
+
+`src/capability/` is the runtime capability subsystem introduced in 2026-11. It solves four problems: authorization, revocation, invalidation propagation, and avoiding stale handlers. Core building blocks:
+
+- **Descriptor** (`src/capability/descriptor.rs`): `CapabilityDescriptor` carries `id`, `kind` (12 `CapabilityKind` values), a `schema` fingerprint, `revision`, `lifetime`, `visibility`, `owner`, and `facets`.
+- **Ownership** (`src/capability/ownership.rs`): `OwnershipTree` manages bindings by generation (`OwnerGeneration`), supports `bump`, `rotate_capability`, `revoke`, and `dispose`, and notifies observers of changes through `subscribe_changes`.
+- **Leases and facade** (`src/capability/facade.rs`, `src/capability/zahir_facade.rs`): `Zahir::resolve` issues a `BackendLease`, and `Zahir::validate_lease` re-checks it before use; once the owner generation changes, the lease is immediately treated as invalid.
+- **Policy** (`src/capability/policy.rs`, `src/capability/production_init.rs`): at startup, time windows, resource limits, and required conditions are configured per capability id.
+
+For the full reference of fields, variants, and error text, see [Capability Model](../capabilities/capability-model).
+
+## Relationship diagram
+
+```text
+Plugin manifests (Claude Code / Aleph TOML / Codex / Cursor)
+        │  src/extension/manifest/adapter.rs
+        ▼
+CapabilityDeclaration        ← static declaration: what the plugin says it has
+        │  registrar validates, writes into each registry (src/extension/registrar/, registry/)
+        ▼
+ToolHandlerRegistry, etc.    ← runtime registries (single source of truth for callable Tools)
+        │  ToolBackendAdapter (src/capability/backend.rs) folds into descriptors
+        ▼
+CapabilityDescriptor + OwnershipTree binding
+        │  Zahir::resolve → BackendLease (carries owner_generation)
+        ▼
+Zahir::validate_lease        ← re-check before use; revoke / generation bump / provider swap → rejected
+```
+
+This chain does not cover every declaration. Only content that enters the callable Tool registry (plus provider, special, and memory backends) is folded into descriptors. `Skill`, `Agent`, and other declarations currently go through their own registries and have no matching descriptor adapter (the comment in `src/capability/descriptor.rs` says kinds other than Tool, Ambient, Terminal, and Ui stay descriptive until their owning backend is mounted).
+
+## Adjacent mechanisms: permissions, tool enforcement, and the runtime ledger
+
+The three items below are not part of the capability descriptor, but they are often lumped together under "capability". This section draws the boundary.
+
+### Plugin permissions
+
+An Aleph extension manifest declares its resource needs in the permissions section:
 
 ```toml
 [aleph.permissions]
@@ -54,93 +101,82 @@ shell = false
 background = false
 ```
 
-The permission vocabulary is:
+Permission vocabulary: `network`, `filesystem:read` / `filesystem:write` or full filesystem access, `env`, `shell`, `background`. A `[[aleph.services]]` declaration requires `background = true`. WASM-specific declarations can further restrict workspace prefixes, HTTP endpoints, credentials, rate limits, tool calls, and secret injection.
 
-- `network`
-- `filesystem:read`, `filesystem:write`, or full filesystem access
-- `env`
-- `shell`
-- `background`
+These are declarations and host registration gates (parsed in `src/extension/manifest/`); they do not give an agent unconditional execution rights. Calls still pass through the scoped tool service, tool metadata, approval policy, execution tier, and the sandbox command policy.
 
-A `[[aleph.services]]` declaration requires `background = true`. WASM-specific declarations can further constrain workspace prefixes, HTTP endpoints, credentials, rate limits, tool invocation, and secret injection.
+### Tool enforcement
 
-These are declarations and host-registration gates. They do not grant an agent an unconditional execution right. Calls still pass through the scoped tool service, tool metadata, approval policy, execution tier, and sandbox command policy.
-
-## Tool enforcement
-
-Tool policy is action-aware and uses the tool's declared metadata rather than guessing from a name. The effective permission combines explicit tool rules, agent and channel policy, and the execution tier; the most restrictive applicable rule wins.
-
-The user-facing execution tiers are:
+Tool policy is action-aware and relies on the metadata each tool declares, not on guessing from its name. The effective permission merges explicit tool rules, agent and channel policy, and the execution tier (`src/config/types/policies/exec_tier.rs`); the strictest applicable rule wins.
 
 | Tier | Behavior |
 |---|---|
-| `ask` | Ask before mutating tool calls; unknown tools fail closed |
-| `auto` | Auto-allow idempotent tools; destructive operations still require approval |
-| `full` | Auto-allow except for the independent hard security floor |
+| `ask` | Ask before every mutating operation; unknown tools are denied by default |
+| `auto` | Idempotent tools run automatically; destructive operations still require approval |
+| `full` | Everything runs automatically except the independent safety floor |
 
-`[sandbox.command_policy]` is that hard floor. No execution tier or plugin declaration can lower it. Action-aware approval binds a grant to the concrete command and its fingerprint rather than only to a tool name.
+`[sandbox.command_policy]` (`src/sandbox/command_policy/`) is that hard floor: no execution tier or plugin declaration can lower it. Action-aware approval binds the authorization fingerprint to the concrete command, not just to the tool name. Enforcement happens at the shared scoped-tool gate (`src/tools/scoped/`).
 
-The operator gate is a separate boundary for self-management operations. For example, `hub_install_run`, skill management, and identity operations cannot be enabled by an ordinary chat-tier channel merely because a plugin declared a capability.
+The operator gate is a separate boundary for self-management operations: `hub_install_run`, skill management, and identity operations cannot be enabled on an ordinary chat-tier channel just because a plugin declared the capability.
 
-## Runtime capability ledger
+### Runtime capability ledger
 
-Runtime binaries such as `node`, `uv`, `ffmpeg`, or `playwright-cli` use a different ledger from extension capabilities:
+Runtime binaries such as `node`, `uv`, `ffmpeg`, and `playwright-cli` use a ledger that is separate from extension capabilities:
 
 ```text
 ~/.aleph/runtimes/ledger.json
 ```
 
-`CapabilityLedger` is the persisted source of truth for whether Aleph can use a runtime executable. It does not download or install anything itself. The probe and bootstrap modules perform those operations, then update the ledger.
+`CapabilityLedger` (`src/runtimes/ledger.rs`) is the single persisted source for "can Aleph currently use this runtime executable". It does not download or install anything; probing and bootstrapping (`src/runtimes/ensure.rs`) perform those actions and then update the ledger. Each entry records the capability name, executable path, detected version, last successful probe time, source (`system` or `aleph_managed`), and status (`missing` / `probing` / `bootstrapping` / `ready` / `stale`).
 
-A ledger entry records:
+RPC: `runtimes.list` reads the ledger and runtime specs, `runtimes.refresh` probes known capabilities, and `runtimes.install` accepts a capability name, runs asynchronously, and publishes progress events; the terminal state is persisted in the same `ledger.json` (`src/gateway/handlers/runtimes.rs`). A missing or corrupt ledger is rebuilt rather than trusted.
 
-- capability name
-- executable path
-- detected version
-- last successful probe time
-- source: `system` or `aleph_managed`
-- status: `missing`, `probing`, `bootstrapping`, `ready`, or `stale`
+This ledger is not the Hub catalog, not a Hub trust disclosure, and not a per-plugin capability declaration; it is also unrelated to `CapabilityDescriptor`.
 
-The runtime install flow is:
+## Planned
 
-```text
-load ledger
-  → probe PATH and Aleph-managed paths
-  → resolve dependencies
-  → bootstrap when a supported install spec exists
-  → verify the resulting binary
-  → write Ready state atomically
-```
+> **Status: planned** — blueprint is `docs/research/aleph_modularization_plan.md` (modularization plan); current implementation lives in `src/capability/` and `crates/aleph-slot-api/`.
 
-`runtimes.list` reads the ledger and runtime specifications. `runtimes.refresh` probes known capabilities. `runtimes.install` accepts a capability name, runs asynchronously, and publishes progress events; the final state is persisted in the same `ledger.json`. A missing or corrupt ledger is recreated rather than trusted.
+- **Slot catalog** (blueprint section 3): defines, for each feature position, a fixed slot ID, a contract version, a built-in default implementation, and the allowed replacement backends. Today the code only has the contract types `SlotId` and `ContractVersion` (`crates/aleph-slot-api/src/slot.rs`), and the module comment states explicitly that they only associate and do not authorize.
+- **Replacement mechanism** (blueprint section 4): declarative configuration that replaces a built-in implementation with an MCP, WASM, or plugin backend, with hot activation and rollback. The code has no such configuration surface.
+- **Unified dispatch registry and non-tool slot unification** (blueprint section 8, 8.2): one registry for multiple backends, with non-tool slots brought into the same dispatch. Today `ToolHandlerRegistry` is still the single source of truth for callable Tools, and other slots each take their own path; `src/capability/versioned_registry.rs` only provides an immutable snapshot publishing primitive.
 
-This runtime ledger is not the Hub catalog, not the Hub trust disclosure, and not a per-plugin capability claim. Hub entries carry their own `InstallSpec`, trust tier, version, and optional SHA-256 pin in `hub_catalog.db`.
+See also `docs/research/Everything-externally-composable-is-a-Capability.md` (the umbrella blueprint for Zahir and "everything externally composable is a capability"); the gaps between its "protocol as projection", "reversible / durable effects", and "dependency graph" items and the current implementation are covered in the "Planned" section of [Capability Model](../capabilities/capability-model).
 
-## Security boundaries
+## History: the static capability declaration model
 
-- Manifest declarations are validated before registration.
-- Capability ownership prevents one plugin from registering another plugin's component.
-- Plugin and skill content is scanned for injection and dangerous patterns before untrusted installation.
-- Secrets use the encrypted vault and runtime injection boundary.
-- Tool execution is enforced at a shared scoped-tool choke point.
-- Runtime installation is serialized per capability and records only verified executable state.
+The early capability model was exactly the declaration enum above: a plugin declared in its manifest which kinds of capability it had, and the registrar dispatched them to registries by declaration type. The enum used to be wider and was later trimmed to the current 7 variants; for example, Aleph repository commit `a0d84eb1f` (extension: withdraw dead Channel capability) withdrew a Channel declaration that had no production consumer. Channels, providers, HTTP routes, CLI, and gateway methods no longer have their own variants.
+
+It stopped being sufficient because a static declaration cannot answer questions that only arise at runtime:
+
+- It cannot express runtime change: a capability is replaced, stopped, or moved to a new generation while running, but the declaration stays the same.
+- It cannot be revoked: once registered, a declaration has no unified revocation and disposal path.
+- It cannot guarantee handler freshness: a consumer has no way to know whether the handler it holds is still the current one.
+
+The replacement path in today's code: descriptors carry a `revision` (`src/capability/descriptor.rs`), the ownership tree provides `revoke` / `dispose` / `bump` (`src/capability/ownership.rs`), and the facade uses `BackendLease` plus `validate_lease` to guarantee a re-check before use (`src/capability/facade.rs`). The old enum was not deleted; it still owns the single job of "what a plugin declares".
 
 ## Code locations
 
 - `src/extension/capability.rs` — declaration enum, tiers, and source metadata
+- `src/extension/manifest/adapter.rs` — manifest adapters and the declaration list
 - `src/extension/registrar/` — declaration validation and registration
-- `src/extension/registry/` — plugin registrations
-- `src/extension/manifest/` — permission parsing
+- `src/extension/registry/` — plugin registration
+- `src/capability/descriptor.rs` — runtime capability descriptor
+- `src/capability/ownership.rs` — ownership tree and change notifications
+- `src/capability/zahir_facade.rs` — the live Zahir facade
+- `src/capability/production_init.rs` — startup constraint assembly
+- `crates/aleph-slot-api/` — slot and capability contract crate
 - `src/tools/scoped/` — tool policy enforcement
-- `src/config/types/policies/exec_tier.rs` — execution-tier composition
+- `src/config/types/policies/exec_tier.rs` — execution tier composition
 - `src/sandbox/command_policy/` — hard command floor
 - `src/runtimes/ledger.rs` — persisted runtime ledger
 - `src/runtimes/ensure.rs` — probe, bootstrap, and ledger update orchestration
-- `src/gateway/handlers/runtimes.rs` — runtime list, refresh, and install RPCs
+- `src/gateway/handlers/runtimes.rs` — runtime list, refresh, and install RPC
 
 ## Related pages
 
-- [Extensions](./extensions) — Plugin capabilities and runtimes
+- [Capability Model](../capabilities/capability-model) — reference for descriptors, ownership, policy, and leases
+- [Extensions](./extensions) — plugin capabilities and runtimes
 - [Extension System](./extension-system) — registration flow
-- [Extensions Store](./extensions-store) — trust-gated extension installation
+- [Extension Store](./extensions-store) — trusted extension installation
 - [Security Overview](/docs/en/security/overview) — execution and approval boundaries

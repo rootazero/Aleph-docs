@@ -35,7 +35,7 @@ At cold start, `hub::primer` fills the `aleph-hub` cache slot only when it is em
 
 The catalog layer is not a concurrent federation of independent providers. Installation resolution is a direct lookup of `ExtensionEntry.install_spec` in the local cache. Plugin marketplaces remain a plugin installation backend; they are not additional Hub catalog slots.
 
-The retired MCP preset RPCs `mcp.list_presets` and `mcp.install_preset` are not the discovery path. MCP discovery and installation converge on the Hub catalog.
+The retired MCP preset RPCs are not the discovery path. MCP discovery and installation converge on the Hub catalog.
 
 ## Installed-state reconciliation
 
@@ -127,7 +127,6 @@ The UI uses a thin `extensions.*` façade:
 | `extensions.catalog` | Browse cached entries by kind, category, source ID, or name query |
 | `extensions.installed` | Reconcile live installed state across all three backends |
 | `extensions.disclosure` | Return the pre-install disclosure and scan findings |
-| `extensions.configure` | Validate submitted configuration fields |
 | `extensions.install` | Apply trust acknowledgement, install, verify, and return the pin |
 | `extensions.toggle` | Enable or disable a local installed extension |
 | `extensions.uninstall` | Remove a local installed extension |

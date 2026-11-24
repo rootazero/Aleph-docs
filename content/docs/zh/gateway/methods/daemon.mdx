@@ -13,7 +13,7 @@ description: "守护进程控制和生命周期 RPC 方法"
 | [`daemon.shutdown`](#daemonshutdown) | 优雅关闭网关 |
 | [`daemon.logs`](#daemonlogs) | 按级别 / 行数读取最近日志 |
 
-> `daemon.start` / `daemon.stop` / `daemon.restart` / `daemon.reload` 不是 RPC；守护进程的生命周期由宿主管辖（`aleph-server daemon`、`aleph-server service` 等 CLI 子命令，或 `systemd` / `launchd` 等服务管理器）。
+> 进程启动与服务管理由 CLI 或系统服务管理器负责；Gateway 的优雅关闭接口是 `daemon.shutdown`。见 `src/gateway/handlers/daemon_control.rs`。
 
 ### daemon.status
 

@@ -100,7 +100,7 @@ API 密钥与秘密由 **OS 钥匙串** 保管，AES-256-GCM 加密存放在 `da
 
 ## 会话存储（`data/sessions.db`）
 
-会话事件日志为**单源真值**（`session_events` 表）；`MessageProjector` 把事件物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写。Schema 由 `src/session/events.rs` 与 `src/session/projector.rs` 定义。
+会话事件日志为**单源真值**（`session_events` 表）；`MessageProjector` 把事件物化到 `messages` 表，启动时 `ProjectionReconciler` 回填转写。事件 Schema 由 `src/session/events.rs` 定义；projector 与 reconciler 分别在 `src/gateway/session_projector.rs` 与 `src/gateway/projection_reconciler.rs`。
 
 **会话密钥**使用分层格式，对代理、通道和范围进行编码：
 
@@ -122,7 +122,7 @@ API 密钥与秘密由 **OS 钥匙串** 保管，AES-256-GCM 加密存放在 `da
 - **原始来源**：`memory/raw/` —— 蒸馏输入；笔记层据此回填 `[[wikilink]]` 边
 - **图缓存 / insights**：每次 `GraphRecomputeStage` 后落地到 `notes_graph_cache` / `notes_graph_insights`（spawn_blocking，零 LLM）
 
-LanceDB 与旧 `graph.db` 单文件已被整合。
+LanceDB 与旧的 graph.db 单文件数据库已被整合。
 
 ## 技能 / 插件目录
 
@@ -180,7 +180,7 @@ LanceDB 与旧 `graph.db` 单文件已被整合。
 - `channels.set_agent` —— 绑定通道到指定 agent（**要求 agent 存在**；先前接受不存在 agent 的回归已修复）
 - `agents.bindings` —— 查询当前 agent ↔ channel 绑定
 
-后端为 SQLite `AgentEnvStore`（非 `~/.aleph/projects.json`）；定义在 `src/gateway/agent_env.rs`。
+后端为 SQLite `AgentEnvStore`（非 `~/.aleph/projects.json`）；定义在 `src/gateway/agent_env/`。
 
 ## 身份 / Soul 文件
 

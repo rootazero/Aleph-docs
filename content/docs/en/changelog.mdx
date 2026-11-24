@@ -1,17 +1,169 @@
 ---
 title: "Changelog"
-description: "Release history, milestones, and notable changes in Aleph"
+description: "Release history, milestones, and notable changes in Aleph (through 2026-09-25)"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # Changelog
 
-Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0.
+Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-09-25 (including the two dated entries after `26.9.1`).
 
 <Callout type="info">
   This page is a **documentation-focused** summary derived from Aleph's main repository `CHANGELOG.md` — it surfaces **user-visible** changes (features, CLI/RPC, config, security) and omits pure-internal refactor details. For the full record, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
 </Callout>
+
+---
+
+## 2026-09-25 — Workflow Benchmark round-4 (Budget · Determinism · Fan-in/out · Structured Output)
+
+Evolves workflow orchestration from "declarative + shared dispatcher" into a composite that is budgetable, statically guardable, fan-in/out-capable, and schema-enforceable — without introducing a vm/JS runtime or touching the harness.
+
+### Added
+
+- **WorkflowRunBudget runtime budget** (`src/workflow/budget.rs`) — `WorkflowRunBudget { total: Option<u64>, spent: AtomicU64 }` with `remaining()` / `try_charged(cost)` / `snapshot()`; uncapped uses the `total=None` path (not a `u64::MAX` fake cap); over-spend is refused without touching `spent`. The `materialize` entry reads `WorkflowDef::budget`. This round only wires *where* it is attached, not *how* cost is derived — `cost` is fixed at 1.
+- **Determinism audit** (`src/workflow/determinism.rs`) — `audit_step_prompt(prompt) -> Vec<DeterminismFinding>` is a hand-written char-by-char scan that flags the `{now}` / `{time}` / `{timestamp}` / `{uuid}` / `{guid}` / `{random}` / `{random:N}` / `{rand}` runtime-variable references; double-brace `{{name}}` is out of scope (deterministic literal substitution). Runs as an advisory warn on save/import.
+- **Parallel Step Group** (`src/workflow/def.rs` + `src/workflow/compile.rs`) — `WorkflowStepDef.parallel_group: Option<String>`; sibling steps in the same group share `[workflow_parallel_group, workflow_parallel_index, workflow_parallel_size]` metadata at materialize, with the index taken in declaration order. The dispatcher gains no new parallelism — Aleph already runs independent steps in parallel.
+- **Collect Step** (`src/workflow/collect.rs`) — `WorkflowStepKind::Collect` variant + `collect_from: Vec<String>` + `reduce: Option<CollectReduce>`; `CollectReduce::{Concat | JsonArray | First}`, defaulting to Concat when unset. A collect step does not spawn an agent run; fan-in is achieved by the dispatcher.
+- **`fail_unanswered_clarify` janitor** (`src/teams/dispatcher/schedule/reclaim.rs`) — `TeamDispatcher::fail_unanswered_clarify` (24h grace, disabled by default); pure predicate `should_fail_unanswered_clarify` guards the boundary.
+- **SchemaOutput enforcer** (`src/teams/dispatcher/output_contract.rs`) — `SchemaOutcome::{Ok | ParseError | ValidationError}` + `validate_step_output(task, final_text)`; strips a ` ```json ``` ` fence, then validates with `jsonschema`; `schedule/mod.rs::finalize_step` is the sole entry point.
+
+### Fixed
+
+- **cancel/notified re-notification regression** (`src/teams/dispatcher/schedule/settle.rs`) — `is_cancel_provenance(task)` and `should_rearm_on_reopen(...)` as two pure functions; when `is_cancel_provenance=true` it never re-arms; cancel/rerun_failed/reopen are guarded by regression tests.
+
+---
+
+## 2026-09-21 — Panel & TUI polish round 1 (L1, audit-first)
+
+A one-day polish pass over the Panel and TUI surfaces that followed `[26.9.1]`: eleven Tier-1 pin-down fixes plus a Tier-2 hardening sweep. No protocol changes, no new public surfaces.
+
+### Fixed
+
+- **Panel** (`interfaces/webchat/src/`): the voice-button state machine no longer ghosts the "finish" transition or leaks the long-press timer; an IME composition gate stops Enter from sending during the Chinese candidate window; the attachment `<For>` key is a stable hash; team-chat attachment rejection preserves the tray; `ApprovalCard` and `ask.rs` gain regression tests; reattach retries on the next `connection_epoch`; event string-dispatch gains a static coverage guard.
+- **TUI** (`interfaces/tui/`): `subscribe_runtime_agents` retries on reconnect failure; `SessionKnobs` exposes `model_pin` as a fifth field; the `VERSION` test uses `CARGO_MANIFEST_DIR`; `halt_notice` falls back to `en`; the composer gains a scroll indicator and a sent-history boundary.
+- **Shared / wire**: the user bubble renders sent attachments as chips on both surfaces (`AttachmentMeta` / `TuiAttachment`, via `push_user_message_with_attachments`); `ReasoningBlock` and `UncertaintySignal` stream events are consumed end-to-end on the Panel.
+
+---
+
+## 26.9.1 — Embedded Terminal + Project Rooms Bind to Channels + Subsystem Audit Sweep
+
+Five days, 549 commits, two features and one very large sweep: the terminal becomes a first-class surface, project rooms bind to channel conversations, and a 40-defect audit sweep runs across every subsystem.
+
+### Added
+
+- **Embedded terminal, end to end** (`src/gateway/pty/`, `src/gateway/handlers/pty.rs`) — a character grid with wide-glyph and wrap semantics, scrollback, alternate screen, resize, cursor positioning, erase, C0 and SGR; the screen is held server-side and published as diffs on a 16 ms cadence; `pty.attach` replays into a gap-detecting client. The Panel gains a Terminal nav mode plus a canvas2d grid renderer.
+- **Scoped terminal authority** — `pty.screen` / `pty.exit` delivery is bound to session ownership; spawn cwd is jailed to registered workspaces; daemon-aborting geometry is refused; a `[policies.terminal]` session gate ships live and default-on.
+- **Project rooms bind to channel conversations** (`src/gateway/handlers/projects_channel.rs`, `qa/rooms_channel_bind`) — `projects.channel.bind` / `unbind` / `list`; a roster-gated binding arm; `session_store::rescope` takes a project id. Reachable from `aleph projects` on the CLI, from Panel room settings, and from `project_manage bind_workspace`.
+- **`grep` and `find` become tools** — content search and filename discovery each get their own verb over the shared `.gitignore`-aware walk.
+- **One search implementation** (`src/tools/scoped/search_steer.rs`) — each provider declares what it can express and the claim is pinned to the wire; an explicit provider is honoured; one call can fan out to several backends; the search tool stops discarding four fields.
+- **A history window that loads earlier across clients** — protocol, CLI, TUI, and Panel share one vocabulary.
+- **On-disk session damage repair** — normalizes millisecond `last_active_at` stamps, rebuilds torn `metadata.json` from the transcript, and quarantines what it cannot rebuild.
+- **Windows shell unification** (`src/utils/shell.rs`, `qa/winshell/run.sh`) — pwsh → powershell → cmd ladder, UTF-8 + POSIX exit codes, two argv-ceiling thresholds.
+
+### Fixed
+
+- **SSRF and DNS rebinding closed as a class, not a list** — URL fetches carry policy, protocol-relative and percent-encoded bypasses are closed, the Discord token regex is anchored, and the PII email regex TLD quantifier is capped.
+- **A failed run now reports that it failed** — the exit arm no longer fans all four `HarnessError` variants into `Cancelled`; one halt vocabulary spans protocol, CLI, TUI, and Panel.
+- **The transcript has one order** — two backends each answered "what order?" separately, and two of the disagreeing paths were DELETEs.
+- **`require_operator_tier` was fail-open on a missing `TurnContext`** — now closed.
+- **Idempotency keys are namespaced by `(principal, method)`** — the connect rate limit no longer locks out an entire NAT.
+- **`crate::sync_primitives` is now the only door** — canvas/identity/loop_graph/extension no longer reach past it into `std::sync`.
+- **40 verified defects** across five subsystems + eight rounds of per-module logic audits + 22 numbered fix rounds; reports archived under `review-results/`.
+
+---
+
+## 26.8.27 — Project Rooms Full Face + Waiting on the Wire + Streaming Renderer Rework + CapabilitySlot
+
+Four threads and one correction: project rooms grow a full face, waiting becomes a wire concept, the streaming renderer stops rebuilding everything on every token, and process-global handles migrate to `CapabilitySlot`.
+
+### Added
+
+- **Project rooms, end to end** (`src/gateway/handlers/projects.rs`, `qa/teamchat_rooms`) — `project_manage` is the conversational face; the Panel gains Kanban / Workspace / Memory tabs; `projects.changed` is a push topic gated on the roster; `projects.*` authorization is one shared derivation.
+- **A room roster layer in the prompt** — the model is told who else is in the room, and a delegated child inherits the parent's `<room_context>`.
+- **The waiting phase as its own wire representation** (`src/gateway/event_emitter/types.rs`, `src/gateway/busy_queue/`) — `StreamEvent::RunQueued` and its protocol twin; `TicketGuard::ahead` reports lane position; the busy-input queue is crash-durable.
+- **`CapabilitySlot`** (`src/gateway/security/store/slot.rs`) — `install(v)` writes the value and stamps the outcome as one action; a conditional install's `else` arm must `decline(...)`; `core/capability-wiring` reports three states (not booted / complete / booted with holes).
+- **A streaming renderer that renders only what changed** — the Panel `TypewriterRenderer` (`interfaces/webchat/src/state/typewriter.rs`) mounts once and splits into stable and tail zones; the TUI gains windowed rendering, per-message rendered-line caching, and no `terminal.draw()` on no-op ticks.
+- **Reconnect that reconciles instead of resetting** — the TUI joins the in-flight run; the Panel repairs reconnects at the root.
+- **The protocol owns the receipt codes** — the Panel reads the server's `error_code` instead of matching message keywords.
+- **`note_manage` can read one note by address** — retrieval no longer returns only ranked excerpts truncated to 4k.
+- **Markdown streaming safety** (`interfaces/webchat/src/components/markdown.rs`) — CommonMark fence detection and reference-link-definition boundaries.
+- **The full desktop app keeps its remote target across restarts** — probing `/ready` rather than a bare TCP connect.
+
+### Fixed
+
+- **Eight diagnostics checks answered "I could not look" with "there is nothing there"** — `Presence`/`DirListing` make the third answer an `Err(Finding)`; `Unknown` is deliberately not a `Presence` variant.
+- **The harness line ratchet was disarmed by grant, not drift** — re-measured at 5233.
+- **A single command could take the daemon out through stdin** — `command_text` is bounded.
+- **Windows reserved-name filenames sanitized past the wrong boundary** — the stem rule now cuts at the first `.` or `:`.
+- **A refused transcription endpoint took the daemon down with it** — fixed.
+- **`purge_all` blocked the async runtime** — now falls back to inline execution without a Tokio runtime.
+- **This release's own gates were red before it started** — `cargo fmt --check` failed on 26 files; fixed so clippy could run.
+
+---
+
+## 26.8.23 — Whiteboard Canvas + Per-Principal Spend Budget + Panel Maturity + Multi-User Round 7
+
+The largest release to date (1,461 commits). Four threads: a whiteboard canvas, a per-principal spend ledger, an explicit scope layer, and a Panel maturity pass plus multi-user round 7.
+
+### Added
+
+- **Whiteboard canvas** (`src/canvas/`, `docs/reference/CANVAS.md`) — a four-layer architecture, an optimistic-lock concurrency protocol (revision-keyed batches that rebase), a capability-URL asset face, and an iframe sandbox boundary; the gallery lives in the Panel's left column.
+- **Per-principal spend budget** (`src/config/types/policies/spend.rs`) — a new `[policies.spend]` section, a durable per-period ledger, and a single admission predicate.
+- **A `plan` execution tier and the plan → build handoff** (`src/config/types/policies/exec_tier.rs`) — a read-only planning tier; a human approving via `scratchpad(request_approval)` flips to the restore tier in the same turn.
+- **`/btw` side questions** (`src/gateway/btw/`) — ask mid-run without derailing the run; `BtwTurn` is one shared derivation.
+- **Marketplace browse + Claude Code plugin compatibility** — install-by-name no longer requires already knowing the name.
+- **`workspace_manage` + a drift-proof workspace CLI** (`src/gateway/handlers/workspace.rs`) — `workspace get|update|list --include-archived|unarchive`.
+- **Provider preset pickers** — 56 preset cards collapse into a searchable disclosure.
+- **Browser parity round** — `browser_batch`, `TextGone`, and `Time` wait conditions.
+- **Per-origin extension usage tracking** — Panel usage badges plus an `idle-extensions` doctor check.
+- **Persistent approval grants with a list-and-revoke surface**.
+- **An `<environment_context>` XML envelope** (`src/orchestrator/harness_bridge/prompt_build.rs`).
+- **`memory.retrieve_with_trace` retrieval x-ray** (`src/gateway/handlers/memory/runtime.rs`) + fourteen real-machine QA fixtures (`qa/`).
+
+### Fixed
+
+- **Every `bash` call that omitted `working_dir` was denied on a factory install** — the value now travels on a gateway-owned channel.
+- **The managed browser driver never launched a browser** — 28 subcommands and never `open`.
+- **Slash commands never carried their arguments** — `/model <id>` failed validation on every slash surface.
+- **Ten tools were advertised but not dispatchable** — `plugin_manage` registered on three faces but with no dispatcher arm.
+- **Telegram and Feishu policy configuration was dead** — the gating path silently fell back to defaults after secret migration.
+- **Feishu rate limiting was classified as permanent failure** — the backoff now reads the header the server actually sends.
+- **Memory reads answered from the wrong partition on eight gateway faces** — readers used the bare persona instead of the partition id.
+- **`metadata.json` corruption from non-atomic read-modify-write** — writes are atomic.
+- **A temp-directory leak of 7,623 trees and 4.0 GB** — now an atexit hook.
+
+---
+
+## 26.7.31 — Linux First-Class Desktop + Deliverables Handoff + Correctness Sweep
+
+400 commits. Three threads: Linux becomes a first-class desktop target, the model gets a way to hand over finished work, and a sustained correctness sweep.
+
+### Added
+
+- **Linux AT-SPI2 accessibility layer + native window management** (`desktop/shared/`, `src/builtin_tools/desktop/`) — the four AX tools, set-of-marks, and the password gate now work on Linux; EWMH via `x11rb` plus sway/Hyprland IPC; session type, clipboard, and app launch collapse to one source in `desktop/shared`.
+- **`artifact_publish` and the deliverables surface** (`src/builtin_tools/artifact_publish.rs`, `src/artifacts/`) — the model can publish a finished work product as a rendered document; deliverables pin to the top of the Panel right rail; the session exports as a self-contained zero-`<script>` HTML page.
+- **Per-agent identity + a signed operation ledger** (`src/gateway/security/store/identity.rs`) — each agent gets an Ed25519 keypair; tool executions are recorded on a signed hash chain; an offline `aleph-server identity` verifier.
+- **Dual-era MCP client** — the 2026-07-28 spec removes the `initialize` handshake.
+- **Aleph Hub install chain, wired end to end** (`src/hub/`) — catalog ingest validates entry counts, duplicate ids, and the reserved `local:` namespace.
+- **Dynamic webhook mount table** — `channel.create` / `stop` / `delete` take effect without a restart.
+- **Panel memory vault, rebuilt** — dual-track search, a card list, deep links, a pager, a bulk-action bar, markdown export, and a `notes_citing` evidence chain.
+- **Loop and goal pause/resume** (`src/looping/`, `src/goal/`) — a new `Paused` state; cross-session operations may only lower activity (stop/pause/clear), never arm.
+- **Voice as context** (`src/gateway/voice/`) — the `[voice]` vocabulary is dual-consumed (ASR bias + prompt-side misrecognition hint); TTS gains provider fallback.
+- **`severed-wire-audit` skill** — finds features whose producer and consumer are complete but whose registration, dispatch arm, or subscription is missing.
+
+### Fixed
+
+- **Windows desktop coordinates meant two different things** — a DPI-unaware process read virtualized coordinates while screenshots were unscaled; the 1.5× mismatch is fixed.
+- **macOS reported success for three things it cannot do** — the Escape emergency stop was dead while reported armed; now a `CGEventTap` plus honest failure.
+- **`key_button` bypassed the desktop input gate** — held inputs are now released on the rail they were pressed on.
+- **Manual `/compact` did nothing to the model's context** — now summarizes, checkpoints, and soft-retires a `session_events` prefix without deleting.
+- **The busy-queue ticket was held for the entire agent run** — `Steer`/`Interrupt` were structurally unreachable; fixed.
+- **The environment envelope lied about the working directory** — `cwd`/`os`/`arch`/`shell`/`git` now come only from `RuntimeContext`.
+- **The model pick never reached the wire** — route status now reports the actual next dial order.
+- **`--config` was honoured by one consumer out of nine** — the path is pinned once in `main()`.
+- **Panel remote auth: `devices` is one shared table** — namespace guards are symmetric and per-device revoke is immediate.
+- **CI was not running every integration test** — 19 tests were never isolated from the real `~/.aleph`.
 
 ---
 
@@ -50,7 +202,7 @@ The largest feature drop in a while — 282 commits across three days. Three thr
 - **Extension lifecycle races** — concurrent `reload` is now serialized under the load guard; malformed plugin results are no longer masked as `ServiceResult::ok`; `AuthorInfo` parsing uses the leftmost separator.
 - **Cluster node keys were byte-sliced**, breaking CJK node names — normalization is now Unicode-aware.
 - **macOS capture and recording rails.** Screen recording is cropped to the requested region via `setSourceRect`; completion is verified before reporting success; typed bridge errors are preserved on OCR, window-capture, media, input, and screenshot rails.
-- **Harness ratchet tightened to the current `CEILING`** (guarded by `src/harness/tests/budget.rs:335`) by removing the `DiminishingReturnsDetector` hard stop — a deterministic completion judgment inside the loop, which R10 forbids. The code is the source of truth; any number reproduced in docs is just a copy of `CEILING`.
+- **Harness ratchet tightened to the current `CEILING`** (guarded by `src/harness/tests/budget.rs:795`) by removing the `DiminishingReturnsDetector` hard stop — a deterministic completion judgment inside the loop, which R10 forbids. The code is the source of truth; any number reproduced in docs is just a copy of `CEILING`.
 - **Session and team integrity.** `retire_from` is atomic and shutdown timeouts surface; active team names are unique via a partial index; team protocol text and artifact content are size-capped.
 - **Wire request ids no longer use UUIDs** (atomic counter; the dependency is dropped from `aleph-protocol`); a custom regex that fails to compile no longer discards the valid ones alongside it.
 
@@ -240,18 +392,18 @@ A big multi-day release. Headlines: a brand-new **iMessage channel via BlueBubbl
 
 ---
 
-## 26.7.22+ Rolling Updates (post-VERSION 26.7.21)
+## Rolling Updates Supplement (Historical Snapshot)
 
-> **Unreleased.** The commits since the 26.7.21 release tag roll densely into the next release tag — `VERSION` is still `26.7.21`, but `main` has accumulated ~12,500 commits. This section is a rolling summary from the 26.7.21 baseline, covering seven major work lines.
+> **Historical snapshot.** This section was written early as a rolling summary before the formal version entries (26.7.31 and later) existed, covering earlier cross-release work lines. With the authoritative formal entries now above, this section retains only what 26.7.31 / 26.8.23 / 26.8.27 / 26.9.1 do not formally cover.
 
-### A. Aleph Hub Single Source (`aleph-hub`, replaces legacy `src/store/`)
+### A. Aleph Hub Single Source (`aleph-hub`, replacing the legacy extension-store subsystem)
 
 **New `src/hub/` module** (14 files): `cache.rs`, `catalog_client.rs`, `hub_catalog.rs`, `install.rs`, `official_mcp.rs`, `official_plugins.rs`, `official_skills.rs`, `primer.rs`, `reconcile.rs`, `secrets.rs`, `trust.rs`, `types.rs`, `verify.rs`, `mod.rs`.
 
 - **`hub::primer` cold-start projection**: projects official MCP presets, plugins, and skills into one `ExtensionEntry` cache (`~/.aleph/hub_catalog.db`)
 - **`hub::catalog_client` direct HTTP client**: fetches `https://hub.heyaleph.com/catalog.json`, validates the schema, scans for prompt injection, normalizes entries, and updates the cache
 - **Official MCP presets are visible through `aleph-hub`** without a manual `mcp.add`
-- **Retired**: `mcp.list_presets` / `mcp.install_preset`, the Settings → MCP "Recommended" section, and the legacy `src/store/` module
+- **Retired**: `mcp.list_presets` / `mcp.install_preset`, the Settings → MCP "Recommended" section, and the legacy extension-store module (renamed to `src/hub/` on 2026-06-20)
 
 **Hub built-in tools** are registered in the main tool registry; they are not owned by a separate Hub Agent:
 
@@ -263,32 +415,9 @@ A big multi-day release. Headlines: a brand-new **iMessage channel via BlueBubbl
 | `hub_install_run` | install after trust and user-consent gates pass |
 | `hub_install_verify` | post-install verification |
 
-### B. Artifacts / Deliverables System
+### C. Vault Panel Refactor (`panel/memory` deep) — Memory RPC Behavior Changes
 
-**New `src/artifacts/` + `src/export/` modules** (artifact store + session HTML export + markdown export + page + collect + CSS).
-
-- **`artifact_publish` tool**: lets the model publish finished work products as `Deliverable`
-- **`artifacts.*` RPC** (`handlers/artifacts.rs`, ~650 lines): `read_text` / `export_html` / `list`, 512 KB cap + UTF-8 boundary
-- **`session.export_html` + `artifacts.read_text`**: read-only route lane fix (must not enter Mutate lane)
-- **Telegram / CLI / TUI** with `artifact_publish` must branch by `turn.channel_id` carrying substance; otherwise degrades to banner + auto-open pane
-- **Panel "Deliverables" pane** (`interfaces/webchat/src/components/artifacts/`): replaces old inspector; after 4 review rounds reaches text preview + artifact-driven badge + visible fallbacks
-- **Gateway capability byte route** (`src/gateway/server/artifact_route.rs`) exposes artifacts to remote clients
-
-### C. Vault Panel Refactor (`panel/memory` deep)
-
-13 `panel/memory:` commits + `platform/wide/views/memory/` 11 submodules + `platform/phone/memory/` 7 submodules.
-
-- **Card view** (`cards.rs`, three-state shell: `Loading` / `Empty` / `Content`)
-- **Bulk action bar** (`batch_bar.rs`): archive / export / tag across multiple cards
-- **Dual-track search**: `raw` rows vs `notes` rows; `hits invalidate`; facets chip
-- **Deep link / anchor**: `locate_note` page math correct after page-size selector
-- **Evidence chain / `notes_citing`**: render reverse links into drawer
-- **Provenance** (`provenance.rs`): writer / timestamp / source event triple
-- **Cross-agent selection** (`selection.rs`): atomic consistency, avoids lost updates on concurrent selection
-- **Pager** (`pager.rs`, with page-size selector)
-- **Loadable** (`data.rs` + `loader.rs`): all 4 fetches route through it; failed fetch unrepresentable as empty
-- **Toast** (`toast.rs`): per-push seq identity (module-private slot)
-- **Stats** (`stats.rs`): scoped to single agent; `raw_rows_total = filtered_count` (with regression test pin)
+The panel-refactor portion is folded into the 26.7.31 "Panel memory vault, rebuilt" entry. This retains only the Memory RPC behavior changes not covered by a formal release:
 
 **Memory RPC behavior changes** (`memory.listFacts` / `memory.search`):
 

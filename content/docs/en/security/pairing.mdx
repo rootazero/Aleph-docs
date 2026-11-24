@@ -20,8 +20,8 @@ Two trust-establishment paths:
 | **Device pairing** | Remote Panel / phone / CLI client | `aleph-bt-*` bootstrap ticket exchanged for `aleph-dt-*` device token |
 | **Channel sender pairing** | Unknown Telegram / Discord / iMessage senders | 6-character alphanumeric code (single-source inbox store) |
 
-Both are managed through **RPC** (`pairing.list` / `pairing.approve` /
-`pairing.reject` / `gateway.ticket.create`) — not CLI commands.
+Both are managed through **RPC** (`channel.pairing.list` / `channel.pairing.approve` /
+`channel.pairing.reject` / `gateway.ticket.create`) — not CLI commands.
 
 **Source locations:**
 - Device ticket + token manager: `src/gateway/security/device_token_manager.rs`
@@ -104,7 +104,7 @@ from the local desktop App, which a remote operator would never see.
 
 After successfully exchanging a bootstrap ticket, the handshake returns
 an `aleph-dt-*` device token. The Panel persists it and submits it as
-`connect.device_token` on every subsequent reconnect.
+`connect` handshake's `device_token` param on every subsequent reconnect.
 
 Device tokens:
 
@@ -169,7 +169,7 @@ Sender                        Gateway                         Operator
   │                                │   "New sender on Telegram"   │
   │                                │   "Code: MRKV52"             │
   │                                │                              │
-  │                                │◄── pairing.approve ─────────│
+  │                                │◄── channel.pairing.approve ─│
   │                                │    { channel, code }         │
   │                                │                              │
   │◄── "You're verified!" ─────────│                              │
@@ -200,9 +200,9 @@ beyond that, new requests are refused with `TooManyPending`.
 
 ```bash
 # via aleph-server gateway call
-aleph-server gateway call -p '{"channel":"telegram"}' pairing.list
-aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.approve
-aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' pairing.reject
+aleph-server gateway call -p '{"channel":"telegram"}' channel.pairing.list
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' channel.pairing.approve
+aleph-server gateway call -p '{"channel":"telegram","code":"MRKV52"}' channel.pairing.reject
 ```
 
 Or through the Panel Settings → Pairing UI. **There is no** `aleph pairing
@@ -215,7 +215,7 @@ approve` CLI command — it all goes through RPC.
 | Credential | `aleph-dt-*` device token (long-lived) | Sender ID (inbound router store) |
 | Bootstrap | `aleph-bt-*` ticket (5 min TTL, single-use) | 6-character alphanumeric code |
 | Storage | `devices` table (Panel type) | `pairing_requests` table |
-| Revocation granularity | Single device (`gateway.devices.revoke`) | Sender (`pairing.reject` or `pairing.revoke`) |
+| Revocation granularity | Single device (`gateway.devices.revoke`) | Sender (`channel.pairing.reject` or `channel.pairing.revoke`) |
 | Carrier | WS `/ws` connect handshake (`device_token` param) | Inbound message |
 | Shared secret | Shared Gateway token for recovery only (never in URL/QR) | — |
 
@@ -226,7 +226,9 @@ approve` CLI command — it all goes through RPC.
 `device_token_manager` generates:
 
 - Bootstrap ticket: `uuid` + TTL stamp.
-- Device token: `uuid`, SHA-256-hashed at rest.
+- Device token: `uuid`, SHA-256-hashed at rest (the hash lives in the `token_hash`
+  column of the `tokens` table; the `public_key` column of the `devices` table
+  holds device key material, not the token).
 
 ### Shared Gateway token
 

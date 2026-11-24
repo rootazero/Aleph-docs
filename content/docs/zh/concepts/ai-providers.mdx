@@ -51,15 +51,15 @@ API key 是从加密 vault 加载的仅运行时值，不会由 `ProviderConfig`
 5. 按类型化失败决策原地重试或推进到下一候选。
 6. 记录健康、冷却、负载、用量、实际 provider 与实际 model。
 
-配置的 fallback 名称引用 `[providers]` 中的 key。未配置显式链时，生产链可从实时 provider registry 派生 fallback 成员，因此新增或移除 provider 会影响下一个请求。遍历与 `route_status` 共用 `effective_fallback_names`，所以诊断描述的就是实际使用的链。
+配置的 fallback 名称引用 `[providers]` 中的 key。未配置显式链时，生产链可从实时 provider registry 派生 fallback 成员，因此新增或移除 provider 会影响下一个请求。Fallback 成员由实时 provider registry 派生并物化到遍历的候选节点；`route_witness` 在遍历后记录实际由哪个 provider 服务了每个请求，所以诊断描述的是实际使用的链。
 
 流式候选只能在尚未发出用户可见内容时故障转移。一旦内容到达 sink，emission guard 会停止遍历，避免把第二个 provider 的答案接到第一个 provider 的半截答案后面。
 
-## 实时路由状态
+## 模型选择：能力门控与故障转移遍历
 
-`[route]` 控制本地/云端偏好、可选云端升级、负载均衡、provider target 与速率上限。`RouteHandle` 把完整路由状态存入一个 `ArcSwap`：写入以原子方式发布一个完整 generation，每个请求读取一个一致快照。因此下一个请求要么看到全部旧字段，要么看到全部新字段，不会看到撕裂混合。
+`src/providers/capability_gate.rs` 在故障转移遍历前应用一个 prompt-blind 能力下限：它掉那些在结构上无法服务请求的候选模型（图片输入但模型无视觉、工具定义但模型无 tool-calling、估算输入超过模型上下文窗口）。它只看请求的**形状**，从不看语义意图——模型选择仍由 LLM 决定。该门是 fail-open 的：能力未知的模型被保留，若过滤会掉光所有候选则原样返回。
 
-候选槽位与端点 tier 是不同概念。Primary 槽拥有显式选择的模型；fallback 槽使用各自模型目录。本地/云端 tier 只用于路由策略与成本排序。
+门控之后，故障转移遍历（`src/providers/failover/`）选出实际服务的 provider/model。`src/providers/route_witness.rs` 在遍历后记录 failure-only 的服务归属——它事后报告而非事前预测——并驱动 `ModelResolved { model_info: ModelInfo }`（`ModelInfo.is_fallback`），Panel、TUI、CLI 与频道通知据此渲染。
 
 ## 可靠性与核算
 
@@ -68,7 +68,7 @@ API key 是从加密 vault 加载的仅运行时值，不会由 `ProviderConfig`
 - Provider 错误响应体读取与流空闲间隔均有界。
 - 执行吞吐窗口时会计入 cache read 与 cache creation token。
 - Metering 将成本与用量归属到实际服务的 provider/model。
-- `route_status` 暴露链成员、健康、冷却、负载与路由决策。
+- `route_witness` 记录服务归属（实际由哪个 provider/model 服务），`ModelResolved.is_fallback` 把 fallback 呈现给 UI。
 
 故障转移热路径借用请求对话，而不是为每次尝试克隆完整历史。Provider 重构还删除了约 2,000 行不可达的平行实现，使 `AiProvider`、协议适配器与 failover 路径成为受维护的运行时。
 
@@ -78,9 +78,8 @@ API key 是从加密 vault 加载的仅运行时值，不会由 `ProviderConfig`
 - `src/providers/protocols/` — 协议适配器
 - `src/providers/http_provider.rs` — HTTP 执行与实时流式
 - `src/providers/failover/` — 候选遍历、决策、熔断与冷却
-- `src/providers/route_policy.rs` — 候选门控与排序
-- `src/providers/route_handle.rs` — 原子实时路由快照
-- `src/providers/route_observe.rs` — `route_status` 渲染
+- `src/providers/capability_gate.rs` — prompt-blind 候选门控
+- `src/providers/route_witness.rs` — failure-only 服务归属见证
 - `src/config/types/provider.rs` — `[providers.<name>]` 条目 schema
 
 ## 另请参阅

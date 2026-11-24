@@ -11,7 +11,7 @@ description: "Memory pipeline RPC methods"
 
 Writes stay LLM/tool-driven; the RPC surface is intentionally read-only over Layer 1 + Layer 2, with a handful of bulk-clear endpoints that fail closed (the old "fake success on no-op" shape was deleted — see [Bulk clears](#bulk-clears) below).
 
-Twelve methods are wired in `register_memory_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/memory.rs:28-268`). The handler functions live in `src/gateway/handlers/memory.rs`; the `dreaming.run_now` / `dreaming.list_insights` / `insights.tools` companions are registered directly in `HandlerRegistry::new()`.
+Twelve methods are wired in `register_memory_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/memory.rs`). The handler functions live in `src/gateway/handlers/memory/`; the `dreaming.run_now` / `dreaming.list_insights` / `insights.tools` companions are registered directly in `HandlerRegistry::new()`.
 
 ## Methods
 
@@ -162,14 +162,7 @@ Per-tool usage introspection over `ToolInvocation` raw rows. Read-only; consumed
 
 ## Bulk clears
 
-The two old "fakes that always returned `{ "deletedCount": 0 }`" are **gone** — both now fail closed:
-
-| Method | New behaviour |
-|--------|--------------|
-| `memory.clear` | `INTERNAL_ERROR: Bulk memory clearing is not supported in the notes-based memory model.` |
-| `memory.clearFacts` | `INTERNAL_ERROR: Bulk note clearing is not supported; manage knowledge notes via the note_manage tool.` |
-
-`memory.delete` is the only legal per-row delete. Bulk deletes go through `note_manage` (Layer 2) or never run (Layer 1).
+The current census has no bulk-clear RPC. Use `memory.delete` for per-record deletion, not as a database-wide clear. Knowledge-note management is available separately through the `note_manage` builtin tool (not a Gateway RPC).
 
 ## Built-in chat tools (companion surface)
 

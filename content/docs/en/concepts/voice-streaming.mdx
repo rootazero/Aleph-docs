@@ -153,7 +153,7 @@ Each provider also runs `synth_with_retry`: 5xx / 429 / network timeouts are ret
 ## Deepgram Adapter
 
 - **`/v1/listen`** delta normalization (cloud + WhisperLiveKit share the delta format — WhisperLiveKit exposes a Deepgram-compatible endpoint)
-- **`build_transcriber` factory**: picks the adapter by `voice.provider`; an unknown value falls back to the Deepgram dialect
+- **`build_transcriber` factory**: picks the adapter by the `provider` key in the `[voice.streaming]` table; an unknown value falls back to the Deepgram dialect
 - **ASR-VAD turn segmentation**: Deepgram's built-in `UtteranceEnd` signal is cross-checked with Panel VAD (Panel VAD is authoritative; the `utterance_end` field is advisory only)
 - **Interim noise**: UTF-8 replacement chars `U+FFFD` are dropped from `interim` but kept on `committed` (a streaming decoder's multi-byte-character half-write)
 
@@ -233,7 +233,7 @@ This closes the long-standing "live captions floating on top of the screen but t
 
 ---
 
-## Local Sidecar (`crates/aleph-voice`)
+## Local Provider (`src/gateway/voice/local_provider.rs`)
 
 26.7.x onwards Aleph does **not** ship a built-in local voice model server (R3 light-dependency — pulling in `sherpa-onnx` alone is several MB, and WhisperLiveKit deployment is heavier still). Users run a BYO OpenAI-compatible server such as mlx-audio, configured under `[voice.local]`:
 
@@ -267,7 +267,7 @@ pub struct PtySession {
 }
 ```
 
-`PtyManager` is a process-global singleton (`OnceLock<PtyManager>`), capped at 64 concurrent sessions with FIFO eviction + 10 min TTL; `pty.output` frames are base64-pushed on `events.subscribe("pty.output")` and `pty.exit` on `pty.exit`. **It has nothing to do with voice** — it's the terminal-embed primitive (a Rust port of the long-standing Hermes `pty_bridge.py`), and voice just reuses the `portable-pty` crate (`src/gateway/pty/` sits beside `src/gateway/voice/`, not under it).
+`PtyManager` is a process-global singleton (`OnceLock<PtyManager>`), capped at 64 concurrent sessions with FIFO eviction + 10 min TTL; `pty.screen` frames (bounded diffs) are pushed on `events.subscribe("pty.screen")` and `pty.exit` on `pty.exit`. **It has nothing to do with voice** — it's the terminal-embed primitive (the same thing was implemented in Python in the early Hermes days and has since been rewritten in Rust), and voice just reuses the `portable-pty` crate (`src/gateway/pty/` sits beside `src/gateway/voice/`, not under it).
 
 ---
 
@@ -286,15 +286,23 @@ pub struct PtySession {
 
 ## API Client
 
-```ts
-// interfaces/webchat/src/api/typed/voice.ts
-const stream = await voice.stream.start({ language: "en", sample_rate: 16000 });
-voice.stream.audio({ stream_id: stream.stream_id, frame: pcm_s16le });
-voice.stream.on("delta", (d: TranscriptDelta) => { /* render */ });
-await voice.stream.stop({ stream_id: stream.stream_id });
+The Panel calls the voice RPCs directly from `interfaces/webchat/src/platform/wide/views/voice/mod.rs` via `rpc_call`:
+
+```rust
+// interfaces/webchat/src/platform/wide/views/voice/mod.rs
+let resp = dash
+    .rpc_call(
+        "voice.stream.start",
+        serde_json::json!({ "language": Option::<String>::None }),
+    )
+    .await;
+// per frame:
+dash.rpc_call("voice.stream.audio", serde_json::json!({ "stream_id": id, "pcm_base64": b64 })).await;
+// on close:
+dash.rpc_call("voice.stream.stop", serde_json::json!({ "stream_id": id })).await;
 ```
 
-The `TranscriptDelta` type is provided by `aleph_protocol::voice_text` (shared with the Panel caption reducer and the `voice.format` polish pass — both sides agree on the `committed` / `interim` semantics).
+The delta text is typed by `aleph_protocol::voice_text` (shared with the Panel caption reducer and the `voice.format` polish pass — both sides agree on the `committed` / `interim` semantics).
 
 ---
 
@@ -314,9 +322,8 @@ The `TranscriptDelta` type is provided by `aleph_protocol::voice_text` (shared w
 - `src/gateway/pty/{mod,session,manager}.rs` — embedded terminal (parallel to voice, **not** inside voice)
 - `src/gateway/handlers/voice.rs` — all voice RPCs (~620 lines)
 - `src/config/types/voice_local.rs` — `[voice]` / `[voice.streaming]` / `[voice.format]` config + `normalize_voice_local` (fill defaults / clear on disable)
-- `crates/aleph-voice` — local voice sidecar (sherpa-onnx backend + Ogg/Opus wrapper + manifest model declaration, but Aleph does **not** ship it by default)
 - `interfaces/webchat/src/platform/wide/views/voice/{audio,caption_state,level,machine,mod,orb,sentence,vad,wav,voice_playback}.rs` — 10 Panel submodules
-- `interfaces/webchat/src/api/typed/voice.ts` — Panel-side typed RPC client
+- `interfaces/webchat/src/platform/wide/views/voice/mod.rs` — Panel-side voice RPC client (`voice.stream.*` / `voice.synthesize` via `rpc_call`)
 
 ---
 

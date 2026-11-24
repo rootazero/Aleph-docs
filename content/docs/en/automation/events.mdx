@@ -40,47 +40,66 @@ Both buses feed into the Gateway's event subscription system, which exposes them
 
 ### Streaming Events (`stream.*`)
 
-Emitted during agent response generation. These are the most frequent events and power real-time UIs.
+Emitted during an agent run. These are the most frequent events and power real-time UIs.
 
-| Topic | Description | Key Fields |
+They arrive as **JSON-RPC notifications**: `method` is one of the `stream.*` names and `params` is the event payload itself (no `event` envelope around it). Subscription matching uses that `method` name.
+
+| Method | Description | Key Fields |
 |-------|-------------|------------|
-| `stream.start` | Response streaming begins | `run_id` |
-| `stream.chunk` | Text chunk from the agent | `run_id`, `content` |
-| `stream.tool_start` | Agent is invoking a tool | `run_id`, `tool_name`, `args` |
-| `stream.tool_end` | Tool execution completed | `run_id`, `tool_name`, `result`, `duration_ms` |
-| `stream.thinking` | Reasoning step (chain-of-thought) | `run_id`, `step_type`, `content` |
-| `stream.end` | Response streaming finished | `run_id` |
+| `stream.run_accepted` | Run was accepted | `run_id`, `session_key`, `accepted_at` |
+| `stream.run_queued` | Run was queued | `run_id`, `session_key`, `ahead` |
+| `stream.reasoning` | Reasoning step (chain-of-thought) | `run_id`, `seq`, `content`, `is_complete` |
+| `stream.tool_start` | Agent is invoking a tool | `run_id`, `seq`, `tool_name`, `tool_id`, `params` |
+| `stream.tool_update` | Tool call progress | `run_id`, `seq`, `tool_id`, `progress` |
+| `stream.tool_end` | Tool execution completed | `run_id`, `seq`, `tool_id`, `result`, `duration_ms` |
+| `stream.agent_trace` | Agent internal trace | `run_id`, `seq`, `event` |
+| `stream.response_chunk` | Text chunk from the agent | `run_id`, `seq`, `delta`, `full_text`, `is_final` |
+| `stream.context_gauge` | Context usage | `run_id`, `seq`, `context_tokens`, `context_window`, `total_tokens` |
+| `stream.run_complete` | Run finished | `run_id`, `seq`, `summary`, `total_duration_ms` |
+| `stream.run_error` | Run failed | `run_id`, `seq`, `error`, `error_code` |
+| `stream.ask_user` | Agent asks the user a question | `run_id`, `seq`, `session_key`, `request_id`, `question` |
+| `stream.clarification_ended` | Clarification round ended | `session_key`, `request_id`, `outcome` |
+| `stream.uncertainty_signal` | Agent signals uncertainty | `run_id`, `seq`, `uncertainty`, `suggested_action` |
+| `stream.model_resolved` | Model selected for this run | `run_id`, `seq`, `model_info` |
+| `stream.run_retrying` | Run is being retried | `run_id`, `seq`, `provider`, `attempt`, `max_attempts`, `reason` |
+| `stream.session_updated` | Session metadata updated | `session_key` |
+| `stream.session_user_message` | A user message landed in the session | `session_key`, `author_user_id`, `content`, `timestamp` |
+| `stream.running_set_changed` | The set of running sessions changed | `seq`, `running` |
 
 ### Agent Events (`agent.*`)
 
-Agent run lifecycle — start, completion, error, cancellation.
+Agent registration and binding changes.
 
 | Topic | Description | Key Fields |
 |-------|-------------|------------|
-| `agent.started` | Agent run has started | `run_id`, `session_key` |
-| `agent.completed` | Agent run finished | `run_id`, `session_key`, `tokens_used`, `duration_ms` |
-| `agent.error` | Agent run encountered an error | `run_id`, `error` |
-| `agent.cancelled` | Agent run was cancelled | `run_id` |
+| `agent.lifecycle.registered` | Agent was registered | `agent_id`, `workspace`, `model` |
+| `agent.lifecycle.deleted` | Agent was deleted and its workspace archived | `agent_id`, `workspace_archived` |
+| `agent.lifecycle.bound` | A channel's agent binding was switched | `agent_id`, `channel`, `previous_agent` |
+| `agent.lifecycle.unbound` | A channel's explicit agent binding was cleared | `channel`, `previous_agent` |
+
+The lifecycle of an agent **run** (start, output, end) does not live in this namespace: those frames reach the wire as `stream.*` notifications (see the section above). Each frame also carries an internal `agent.*` topic name, but subscription matching uses the notification's `method`, not that name.
 
 ### Session Events (`session.*`)
 
-Session lifecycle changes.
+Session state and content changes.
 
 | Topic | Description | Key Fields |
 |-------|-------------|------------|
-| `session.created` | New session created | `session_key` |
-| `session.deleted` | Session was deleted | `session_key` |
-| `session.compacted` | Session was compacted | `session_key`, `tokens_before`, `tokens_after` |
+| `session.updated` | Session metadata updated | `session_key` |
+| `session.user.message` | A user message landed in the session transcript | `session_key`, `author_user_id`, `content`, `timestamp`, `seq` |
+| `session.lifecycle.changed` | Session state transition | `session_key`, `old_state`, `new_state`, `reason` |
 
 ### Cron Events (`cron.*`)
 
-Scheduled job execution events.
+Changes to the scheduled job **definition** itself.
 
 | Topic | Description | Key Fields |
 |-------|-------------|------------|
-| `cron.triggered` | Job execution started | `job_id`, `run_id`, `trigger_source` |
-| `cron.completed` | Job finished successfully | `job_id`, `run_id`, `duration_ms` |
-| `cron.failed` | Job failed after all retries | `job_id`, `run_id`, `error` |
+| `cron.job.changed` | Job created, updated, deleted, or only its runtime state changed | `job_id`, `change` |
+
+`change` is one of `created`, `updated`, `deleted`, `state_changed`.
+
+Job **execution results** are not on the event stream: use `cron.runs` for a job's run records (`status` is one of `ok`, `error`, `skipped`, `timeout`) and `cron.status` for the overall picture (`running`, `last_tick_at_ms`, `job_count`, `enabled_count`).
 
 ### Config Events (`config.*`)
 
@@ -88,17 +107,24 @@ Configuration changes.
 
 | Topic | Description | Key Fields |
 |-------|-------------|------------|
-| `config.changed` | Configuration was modified | `changed_keys`, `source` |
-| `config.reloaded` | Configuration reloaded from file | `source` |
+| `config.changed` | A configuration section was modified | `section`, `value` |
+| `config.reloaded` | Configuration file was reloaded | `agents`, `timestamp` |
+| `config.error` | Configuration file failed validation | `error`, `timestamp` |
 
-### Exec Events (`exec.*`)
+### Approval Events (`approval.*`)
 
 Command execution approval flow.
 
 | Topic | Description | Key Fields |
 |-------|-------------|------------|
-| `exec.approval_requested` | Approval needed for a command | `id`, `command`, `risk_level` |
-| `exec.approval_resolved` | Approval decision made | `id`, `decision` |
+| `approval.requested` | A human approval is needed | `approval_id`, `session_key`, `channel_id`, `conversation_id`, `tool_call_id` |
+| `approval.reminder` | An unanswered approval is re-announced | `approval_id`, `session_key` |
+| `approval.resolved` | The approval was decided | `approval_id`, `session_key`, `decision`, `resolved_by` |
+| `approval.expired` | The approval timed out | `approval_id`, `session_key` |
+
+`decision` is one of `allow-once`, `allow-session`, `allow-always`, `deny`.
+
+Approval events use the `approval.*` topics; `exec.*` is the **method** namespace for listing pending approvals and deciding them: `exec.approvals.pending`, `exec.approval.resolve`, `exec.grants.list`, `exec.grant.revoke`.
 
 ### Daemon Events
 
@@ -146,14 +172,28 @@ Events arrive as JSON-RPC notifications (no `id` field):
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "topic": "agent.completed",
+    "topic": "session.lifecycle.changed",
     "data": {
-      "run_id": "run-uuid-123",
       "session_key": "agent:main:main",
-      "tokens_used": 1247,
-      "duration_ms": 5000
+      "old_state": "idle",
+      "new_state": "running"
     },
     "timestamp": 1706400000000
+  }
+}
+```
+
+Streaming frames use the other envelope — `method` is directly one of the `stream.*` names and the payload sits in `params`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "stream.run_complete",
+  "params": {
+    "run_id": "run-uuid-123",
+    "seq": 42,
+    "summary": "done",
+    "total_duration_ms": 5000
   }
 }
 ```
@@ -186,13 +226,14 @@ Event subscription patterns use glob-style matching against the topic string:
 | Pattern | Matches |
 |---------|---------|
 | `stream.*` | All streaming events |
-| `agent.*` | All agent lifecycle events |
+| `agent.*` | Every topic starting with `agent.` (e.g. `agent.lifecycle.registered`) |
+| `session.*` | All session topics |
+| `cron.*` | All cron topics (e.g. `cron.job.changed`) |
 | `*` | Everything |
-| `stream.chunk` | Exact match only |
-| `*.completed` | Any `completed` event across all namespaces |
-| `cron.*` | All cron job events |
+| `stream.response_chunk` | Exact match only |
+| `*.changed` | Two-segment topics ending in `changed` (e.g. `config.changed`) |
 
-The `*` wildcard matches any sequence of non-dot characters. Use `*` alone to subscribe to every event in the system.
+Matching rules: `*` on its own or in trailing position matches every remaining segment; in a middle position it matches exactly one segment; everything else matches segment by segment, exactly. `cron.job.changed` has three segments, so `*.changed` does not match it — use `cron.*` for that.
 
 ## Event Payload Structure
 
@@ -203,10 +244,35 @@ interface EventNotification {
   jsonrpc: "2.0";
   method: "event";
   params: {
-    topic: string;        // e.g. "agent.completed"
+    topic: string;        // e.g. "session.lifecycle.changed"
     data: Record<string, any>;  // event-specific payload
     timestamp: number;    // Unix timestamp in milliseconds
   };
+}
+
+// Streaming frames do not use the envelope above: method is one of the stream.* names
+interface StreamNotification {
+  jsonrpc: "2.0";
+  method: string;         // e.g. "stream.run_complete"
+  params: Record<string, any>;  // frame payload
+}
+```
+
+Both shapes can be normalized into one handler:
+
+```javascript
+function readEvent(frame) {
+  if (frame.method === "event") {
+    return {
+      topic: frame.params.topic,
+      data: frame.params.data,
+      timestamp: frame.params.timestamp
+    };
+  }
+  if (typeof frame.method === "string" && frame.method.startsWith("stream.")) {
+    return { topic: frame.method, data: frame.params, timestamp: null };
+  }
+  return null;
 }
 ```
 
@@ -243,11 +309,10 @@ ws.onopen = () => {
 };
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method === "event") {
-    const { topic, data, timestamp } = event.params;
-    updateDashboard(topic, data, timestamp);
-  }
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
+  updateDashboard(evt.topic, evt.data, evt.timestamp);
 };
 ```
 
@@ -256,22 +321,23 @@ ws.onmessage = (msg) => {
 Watch for errors and failures across the system:
 
 ```javascript
-// Subscribe to failure events
+// Subscribe to failure events: a failed agent run is stream.run_error,
+// a channel error is channel.error, a failed config validation is config.error
 ws.send(JSON.stringify({
   jsonrpc: "2.0",
   id: 1,
   method: "events.subscribe",
-  params: { patterns: ["agent.error", "cron.failed", "*.error"] }
+  params: { patterns: ["stream.run_error", "channel.error", "config.error"] }
 }));
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method === "event") {
-    sendAlert({
-      channel: "#aleph-alerts",
-      text: `[${event.params.topic}] ${JSON.stringify(event.params.data)}`
-    });
-  }
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
+  sendAlert({
+    channel: "#aleph-alerts",
+    text: `[${evt.topic}] ${JSON.stringify(evt.data)}`
+  });
 };
 ```
 
@@ -290,10 +356,11 @@ ws.send(JSON.stringify({
 const toolMetrics = {};
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method !== "event") return;
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
 
-  const { topic, data } = event.params;
+  const { topic, data } = evt;
 
   if (topic === "stream.tool_start") {
     toolMetrics[data.run_id] = {
@@ -325,22 +392,17 @@ ws.send(JSON.stringify({
 }));
 
 ws.onmessage = (msg) => {
-  const event = JSON.parse(msg.data);
-  if (event.method !== "event") return;
+  const frame = JSON.parse(msg.data);
+  const evt = readEvent(frame);
+  if (!evt) return;
 
-  const { topic, data } = event.params;
+  const { topic, data } = evt;
 
-  switch (topic) {
-    case "cron.triggered":
-      setJobStatus(data.job_id, "running", data.trigger_source);
-      break;
-    case "cron.completed":
-      setJobStatus(data.job_id, "completed", `${data.duration_ms}ms`);
-      break;
-    case "cron.failed":
-      setJobStatus(data.job_id, "failed", data.error);
-      alertOnFailure(data.job_id, data.error);
-      break;
+  // cron.job.changed only says the job definition changed
+  // (change: created | updated | deleted | state_changed);
+  // execution results (ok / error / skipped / timeout) come from cron.runs.
+  if (topic === "cron.job.changed") {
+    setJobStatus(data.job_id, data.change);
   }
 };
 ```

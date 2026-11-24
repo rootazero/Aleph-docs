@@ -14,7 +14,7 @@ description: "代理执行和控制 RPC 方法"
 | [`agent.cancel`](#agentcancel) | 取消一个进行中的 run |
 | [`agent.list`](#agentlist) | 列出路由器中已注册的代理 |
 
-> 历史别名 `agent.history` / `agent.clear` / `agent.respondToInput` / `agent.events` 等不是 RPC；会话读取请用 `chat.history` / `chat.clear`，事件订阅请用 [`events.*`](./events)。
+> 会话历史与清理使用 `chat.history` / `chat.clear`；事件订阅使用 [`events.*`](./events)。注册表见 `src/gateway/method_census.rs`。
 
 ### agent.run
 
@@ -157,7 +157,7 @@ description: "代理执行和控制 RPC 方法"
 |-------|-------------|
 | `run.accepted` | run 已入队并启动 |
 | `agent.reasoning` | 思考阶段输出 |
-| `agent.reasoning.block` | 推理块（双过程认知） |
+| `agent.reasoning` | 推理事件，定义见 `src/gateway/events/frame.rs` |
 | `agent.tool.start` | 工具调用开始 |
 | `agent.tool.update` | 工具进度更新 |
 | `agent.tool.end` | 工具调用结束 |

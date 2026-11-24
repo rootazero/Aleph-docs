@@ -52,7 +52,7 @@ pub trait ToolService: Send + Sync + 'static {
 - `Exclusive { scope: Nodes(...) }`：集群节点集合，只有目标节点重叠时冲突；
 - `Exclusive { scope: Sessions(...) }`：本机代理会话集合，不同会话可并行，但与其他资源范围保守地冲突。
 
-`call_concurrency_claim` 根据工具名称和本次输入计算实际声明，因此同一个 `file_ops` 工具的读取、单路径写入和未知操作可以得到不同结果。路径比较按组件进行：`src/a` 与 `src/ab` 不冲突，`src/a` 与 `src/a/b.rs` 冲突；无法提取范围时退化为 `Global`。
+`call_concurrency_claim` 根据工具名称和本次输入计算实际声明，因此同一个 `file_ops` 工具的读取、单路径写入和未知操作可以得到不同结果。路径比较按组件进行：`foo/a` 与 `foo/ab` 不冲突，`foo/a` 与 `foo/a/b.rs` 冲突；无法提取范围时退化为 `Global`。
 
 `partition_parallel_groups` 从左到右生成连续、保持顺序的区间。当前组中的新调用若与任一成员冲突，就开启下一组；组之间串行完成，组内才并发。于是多个读取可以先并发，之后的 `bash` 单独串行，而不同文件或不同节点的有界写入可以保持并行。它不是把所有调用粗略分成一个并发桶和一个串行桶。
 

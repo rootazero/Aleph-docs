@@ -80,7 +80,7 @@ pub struct InProcessActorSessionService {
 
 **位置**：`src/session/in_process.rs`
 
-每个 `SessionActor`（在 `src/session/actor.rs` 定义）在启动时从 SQLite 重放事件，维护内存中的状态（`src/session/state.rs`），并一直处理命令直到关闭。每个 actor 的状态存放在 `src/session/state.rs`；事件类型存放在 `src/session/events.rs`。
+每个 `SessionActor`（在 `src/session/actor.rs` 定义）在启动时从 SQLite 重放事件，跟踪自己的头部序号（`head_seq`）以及 broadcaster / observer 句柄，并一直处理命令直到关闭。把事件日志折叠为读侧状态的逻辑位于 `src/session/reduction.rs` 与 `src/session/projection.rs`；事件类型存放在 `src/session/events.rs`。
 
 ---
 
@@ -166,32 +166,20 @@ pub fn project_messages(
 | 空闲超时 | 30 分钟 |
 | 关闭宽限期 | 5 秒 |
 
-**集成测试**：`tests/session_wake_recovery.rs`
+**测试**：`src/session/in_process.rs` 中的 `wake_writes_session_woken_with_prior_head` 与 `concurrent_wake_and_emit_keeps_session_woken_first`
 
 ---
 
 ## 网关 RPC 关系
 
-网关 `session.*` RPC 方法仍然在 `SessionManager`（`src/gateway/session_manager/`）。一个双写垫片（`src/session/shim.rs`）把每个 `SessionManager` 的追加镜像进 `SessionService`，让 `session_events` 与遗留的 `messages` 表并行保持填充。
+网关 `session.*` RPC 方法仍然位于 `SessionManager`（`src/gateway/session_manager/mod.rs`），它现在是一层兼容层：agent 执行（`agent_loop`）不再直接读写 `SessionManager`，而是走 `SessionService`；消息由 `MessageProjector`（`src/gateway/session_projector.rs`）从 `session_events` 物化。此前把每次 `SessionManager` 追加镜像进 `SessionService` 的双写垫片已作为死代码移除（提交 `db2e5865c`，"session: remove dead dual-write shim"）。
 
 ```
-网关 RPC（session.append、session.get 等）
-        │
-        ▼
-┌─────────────────┐     ┌──────────────────┐
-│  SessionManager │────►│  遗留 messages   │
-│                 │     │  表              │
-└────────┬────────┘     └──────────────────┘
-         │
-         │ 双写垫片（src/session/shim.rs）
-         ▼
-┌─────────────────┐     ┌──────────────────┐
-│  SessionService │────►│  session_events  │
-│                 │     │  表              │
-└─────────────────┘     └──────────────────┘
+agent_loop / AgentHarness ──► SessionService ──► session_events 表
+                                    │
+                                    ▼（读侧）
+网关 RPC（session.append、session.get …）──► SessionManager ◄── MessageProjector
 ```
-
-未来阶段会把网关 RPC 直接迁移到 `SessionService`，届时会移除垫片。
 
 ---
 
@@ -201,7 +189,7 @@ pub fn project_messages(
 |----------|--------|-------|
 | `AgentHarness` | 已就绪 | 读/写历史完全通过 `SessionService` |
 | `SubagentTool` | 已就绪 | 临时子会话用 `SessionService` |
-| 网关 `session.*` RPC | 在 `SessionManager` | 双写垫片镜像进 `SessionService` |
+| 网关 `session.*` RPC | 在 `SessionManager` | 兼容层；消息由 `MessageProjector` 从 `session_events` 物化 |
 | 记忆 / 梦境 / 其他 | 只读采用 | `SessionService::get_events` 可用，按需逐案采用 |
 
 ---
@@ -213,12 +201,11 @@ pub fn project_messages(
 | `src/session/service.rs` | `SessionService` trait 定义 |
 | `src/session/in_process.rs` | `InProcessActorSessionService` 实现 |
 | `src/session/actor.rs` | `SessionActor` —— 每会话 tokio 任务 |
-| `src/session/state.rs` | 每个 actor 的内存状态 |
+| `src/session/reduction.rs` | 事件日志的纯归约（`RunDisposition`、`RunProgress`、悬空调用检测） |
 | `src/session/events.rs` | `SessionEvent` 枚举与辅助类型 |
 | `src/session/store.rs` | SQLite schema 与 `SessionEventStore` trait |
 | `src/session/projection.rs` | `project_messages` 等读侧投影 |
-| `src/session/shim.rs` | `SessionManager` 到 `SessionService` 的双写垫片 |
-| `tests/session_wake_recovery.rs` | 崩溃恢复集成测试 |
+| `src/session/in_process.rs`（`#[cfg(test)]`） | `wake()` / 崩溃恢复测试 |
 
 ---
 

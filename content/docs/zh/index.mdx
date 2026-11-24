@@ -37,36 +37,41 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## 架构
 
 ```
-                          终端
-    ┌────────────────────────────────────────────────────────────┐
-    │ 桌面壳  │   CLI    │ Telegram │ Discord  │ iMessage │ TUI  │
-    │(Tauri v2)│         │          │          │          │      │
-    └────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┴──┬───┘
-         │          │          │          │          │         │
-         │       WebSocket (JSON-RPC 2.0, wss:// 可选)         │
-         │          │          │          │          │         │
-    ┌────▼──────────▼──────────▼──────────▼──────────▼─────────▼───┐
-    │                  Aleph 核心 (aleph-server)                    │
-    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-    │  │  Gateway    │  │  Harness     │  │   Tool Registry      │  │
-    │  │  (TLS/TOFU) │  │ (Think→Act)  │  │ (builtin/MCP/plugin) │  │
-    │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
-    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-    │  │  Thinker    │  │  Session     │  │   Memory + Loop      │  │
-    │  │ (PromptBuilder)│ │ Service      │  │   Graph (governance) │  │
-    │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
-    │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-    │  │  Approval / │  │  Extension   │  │   Heartbeat / Cron   │  │
-    │  │  Guardrails │  │  / Skill     │  │   调度与探测           │  │
-    │  └─────────────┘  └──────────────┘  └──────────────────────┘  │
-    └───────────────────────────────────────────────────────────────┘
-                                  │
-                                  │ 经认证的执行调度
-                                  ▼
-                        集群节点（远程执行体）
+    桌面端                          其他终端
+    ┌────────────────────────────┐  ┌─────┬─────┬──────────┬─────────┬──────────┐
+    │ 桌面宿主进程               │  │ CLI │ TUI │ Telegram │ Discord │ iMessage │
+    │ aleph-nsh-shell            │  └──┬──┴──┬──┴─────┬────┴────┬────┴─────┬────┘
+    │ ┌────────────────────────┐ │     │     │        │         │          │
+    │ │ Panel（Leptos/WASM）   │ │     │     │        │         │          │
+    │ │ 业务 UI 唯一来源       │ │     │     │        │         │          │
+    │ └────────────────────────┘ │     │     │        │         │          │
+    └─────────────┬──────────────┘     │     │        │         │          │
+                  │                    │     │        │         │          │
+                  │                    │     │        │         │          │
+                    WebSocket (JSON-RPC 2.0, wss:// 可选)
+                  ▼                    ▼     ▼        ▼         ▼          ▼
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │                       Aleph 核心 (aleph-server)                        │
+    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+    │  │ Gateway          │  │ Harness          │  │ Tool Registry        │  │
+    │  │ (TLS/TOFU)       │  │ (Think→Act)      │  │ (builtin/MCP/plugin) │  │
+    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+    │  │ Thinker          │  │ Session          │  │ Memory + Loop        │  │
+    │  │ (PromptBuilder)  │  │ Service          │  │ Graph (governance)   │  │
+    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+    │  │ Approval /       │  │ Extension        │  │ Heartbeat / Cron     │  │
+    │  │ Guardrails       │  │ / Skill          │  │ 调度与探测           │  │
+    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+    └────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        经认证的执行调度
+                                        ▼
+                                  集群节点（远程执行体）
 ```
 
-**壳核分离。** 桌面应用是一个薄 Tauri v2 壳——窗口、托盘、通知、自动更新、全局热键。它包含**零业务逻辑和零业务 UI**。所有产品 UI 在由核心提供的 Leptos Panel 中（`http://127.0.0.1:18790`）。所有推理、工具和状态在 `aleph-server` 中。壳可以连接本地核心或远程核心（自签名 TLS + 客户端 TOFU 信任）。
+**壳核分离。** 桌面端是一个薄的原生宿主进程（`aleph-nsh-shell`，源码在 `desktop/nsh-shell/`）：只做窗口、托盘、通知和全局热键等 OS 集成，**不含业务逻辑和业务 UI**。所有产品 UI 在 Leptos Panel 中（源码 `interfaces/webchat/`，由核心提供，默认入口 `http://127.0.0.1:18790`）；所有推理、工具和状态在 `aleph-server` 中。宿主连接**已经在运行**的 Gateway，不托管其生命周期——命令行说明写明 “does not start, stop or reconfigure a service”（`desktop/nsh-shell/src/main.rs`）；仅在显式启用 `embedded-core` feature 时，才会在本地端口无人监听的情况下拉起随包的核心（`desktop/host/src/local_server.rs`）。连接远程核心时必须使用 HTTPS 源。
 
 **第三双生子：会话模式。** `chat` / `work` / `code` 是与 `exec_tier`（执行审批等级）、`think_level`（思考预算）并列的第三个用户可调维度。它**只对工具呈现面**做静态分区（progressive-disclosure + deferred-tool tier），不影响权限——权限仍由 `exec_tier` 与审批门控制。可在面板 composer pill、Settings → Policies 或 `session_set_mode` 工具里切换。
 
@@ -75,7 +80,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## 快速开始
 
 ```bash
-# 从源码构建核心（Rust 1.95+）
+# 从源码构建核心（Rust 1.99+）
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
 cargo build --bin aleph-server --release
@@ -171,7 +176,7 @@ cargo build --bin aleph-server --release
   <Card
     icon="🛠️"
     title="开发"
-    description="从源代码构建（Rust 1.95+）、测试、贡献与设计模式"
+    description="从源代码构建（Rust 1.99+）、测试、贡献与设计模式"
     href="./development/building"
   />
   <Card

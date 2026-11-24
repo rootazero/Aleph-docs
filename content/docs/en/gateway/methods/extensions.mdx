@@ -7,12 +7,14 @@ description: "Unified Extension façade RPC methods (Extensions Store)"
 
 Seven methods are wired in two passes:
 
-- `register_extensions_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/extensions.rs:15-58`) — the four lifecycle / read methods.
+- `register_extensions_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/extensions.rs`) — the four lifecycle / read methods.
 - `register_extensions_install_handlers` (same file, lines 60-98) — the three trust-gated install flow methods, which additionally need the vault and `MarketplaceManager`.
 
 The whole namespace is gated on `hub_catalog.db` opening successfully at boot; if the local cache cannot be created the four lifecycle methods are skipped and a warn is logged. The install-side methods additionally need the `MarketplaceManager` to be constructed.
 
-The two `sources.*` methods documented in earlier versions of this page (`extensions.sources.list` / `refresh`) were **retracted** in the 26.6.22+ Hub convergence — the catalog sources are now an internal concept owned by `AlephHubCatalog`, and operators reach the same outcome through the bundled sync loop + the `extensions.catalog` view.
+## History: the `sources.*` methods were retracted
+
+The two `sources.*` methods documented in earlier versions of this page (list and refresh) were removed in the 26.6.22+ Hub convergence and are no longer in the census — the catalog sources are now an internal concept owned by `AlephHubCatalog`, and operators reach the same outcome through the bundled sync loop + the `extensions.catalog` view.
 
 ## Catalog entry shape
 
@@ -130,7 +132,7 @@ Enable or disable an installed extension. The id must be an `installed (local:)`
 **Response:** `{ "ok": true }`.
 
 Behaviour by kind:
-- `local:mcp:<id>` — `mcp.start_server` / `mcp.stop_server`
+- `local:mcp:<id>` — internally calls `McpManagerHandle::start_server` / `stop_server` (Rust methods, not Gateway RPCs)
 - `local:plugin:<id>` — `ExtensionManager::set_plugin_enabled` (syncs the in-memory registry, then re-checks service status)
 - `local:skill:<id>` — `SkillSystem::update_config` with `SetEnabled(enabled)`
 
@@ -145,7 +147,7 @@ Remove an installed extension and revoke its stored secrets. The id must be an `
 **Response:** `{ "ok": true }`.
 
 Behaviour by kind:
-- `local:mcp:<id>` — `mcp.remove_server`
+- `local:mcp:<id>` — internally calls `McpManagerHandle::remove_server` (a Rust method, not a Gateway RPC)
 - `local:plugin:<id>` — unload runtime + `remove_dir_all` on the plugin directory (a path-traversal guard mirrors `plugins::handlers::manage::is_safe_plugin_name`; relative components like `..` or `/` are rejected)
 - `local:skill:<id>` — `SkillSystem::remove_skill`
 
@@ -161,7 +163,7 @@ A fresh `extensions.reload()` is fired after the remove, so the live `extensions
 | `Plugin` | `plugin.*` / `plugins.*` | `ExtensionManager` + `MarketplaceManager` |
 | `Mcp` | `mcp.*` / `mcp_config.*` | `McpManagerActor` + the `McpManagerHandle` |
 
-A change to a backend (e.g. `mcp.add`) is reflected the next time the Panel re-fetches `extensions.installed` (the bus also emits `tools.changed`).
+A change to a backend (e.g. adding an MCP server via `mcp_config.create`) is reflected the next time the Panel re-fetches `extensions.installed` (the bus also emits `tools.changed`).
 
 ## Capability ledger
 

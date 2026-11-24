@@ -31,7 +31,7 @@ Core design points:
 - Enforcement chokepoint: `src/tools/scoped/` (`dispatch.rs`, `builder.rs`,
   `traits.rs`)
 - Action-aware gate: `src/sandbox/exec_approval/` (`gate.rs`, `action.rs`,
-  `session_memory.rs`, `denial_ledger.rs`)
+  `grants.rs`, `denial_ledger.rs`)
 - Exec tier: `src/config/types/policies/exec_tier.rs`
 - Pending / resolve pairing: `src/exec/manager.rs` (`ExecApprovalManager`)
 - Rendering helper: `src/exec/parser.rs::analyze_shell_command` (render only)
@@ -60,7 +60,7 @@ ApprovalGate (action-aware)
    │
    ├── grant_fingerprint(tool, canonical args)
    │       │
-   │       ├── hit in session_memory? ─► Allow (cached)
+   │       ├── hit in the grant store? ─► Allow (cached)
    │       │
    │       └── otherwise:
    │           Render ApprovalAction (command / op=delete path=…)
@@ -68,10 +68,16 @@ ApprovalGate (action-aware)
    │           │
    │           ├── AllowOnce  ─► this call only
    │           ├── AllowSession ─► this + same fingerprint later
-   │           │                  (cached by fingerprint)
-   │           ├── AllowAlways ─► clamped to AllowSession by clamp_decision
-   │           │                  (no persistent allowlist — button
-   │           │                   is never rendered)
+   │           │                  (GrantScope::Session — in memory,
+   │           │                   keyed by the conversation's SessionKey)
+   │           ├── AllowAlways ─► persistent grant
+   │           │                  (GrantScope::Always — persisted to
+   │           │                   ~/.aleph/approval-grants.json)
+   │           │                  for_confirm_gate only offers this tier
+   │           │                  when the turn is operator-tier and the
+   │           │                  gate is not a floor; the answer is
+   │           │                  narrowed by clamp_decision against the
+   │           │                  request's allowed_decisions
    │           ├── Deny <reason> ─► refuse; reason rendered back to model
    │           └── Timeout ─► refuse (not ledgered)
 ```
@@ -230,7 +236,7 @@ pub enum ApprovalDecisionType {
 
 All approvals flow over WebSocket JSON-RPC:
 
-- Panel → `exec.approval.list` / `exec.approval.resolve {outcome, reason}`
+- Panel → `exec.approvals.pending` / `exec.approval.resolve {outcome, reason}`
   RPC.
 - Channels (Telegram / Discord / iMessage) → the same RPC, rendered as
   inline buttons.
@@ -344,8 +350,8 @@ The **session event log** is the live trail.
 the session service, alongside every other event of the run that
 produced it.
 
-**Do not look for** `src/exec/approval/storage.rs` or `audit.rs` — they
-were deleted together with the `aleph-server audit` CLI on 2026-07-14.
+**Do not look for** `storage.rs` or `audit.rs` under `src/exec/approval/` —
+they were deleted together with the `aleph-server audit` CLI on 2026-07-14.
 Their three SQLite tables (`~/.aleph/approval_audit.db`) had **only test
 helpers as writers**, so an operator running `audit` got zeros and
 concluded nothing had happened — while the real trail sat in the session

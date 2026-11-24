@@ -74,7 +74,7 @@ Gateway / Agent Loop
 
 `notes_vec_map` 表把 `(path, agent_id)` 映射到 vec0 表的 `rowid`，JOIN 时按维度路由到对应 `notes_vec_{dim}` 表。embedder 维度必须与已建表匹配，否则检索时该向量会被 `Reranker` 跳过而非报错。
 
-### Knowledge Note（`src/memory/notes/note.rs`）
+### Knowledge Note（`src/memory/notes/note/`）
 
 ```rust
 pub struct KnowledgeNote {
@@ -146,7 +146,7 @@ SkillOpt 移植（arXiv 2605.23904）的「textual learning rate」：**`EditBud
 
 `consolidate` 用 `batch_consolidate_candidates`（同类别 ≤ 20 个用 LLM 一批决策；> 20 个走 `title_heuristic_candidates`，纯文件名启发式，不调 LLM），单对 `consolidate_pair` 给 LLM 一对 ≤ 600 字符，决策 `MERGE / COEXIST / ABSORB_A / ABSORB_B`；unknown 答案默认 `COEXIST` 保守。
 
-`CompoundIngestor::ingest_batch`（`src/memory/notes/ingest/ingestor.rs`）是 L0 → L1 的主写入路径：
+`CompoundIngestor::ingest_batch`（`src/memory/notes/ingest/ingestor/`）是 L0 → L1 的主写入路径：
 
 ```text
 1. SkillExtension registry.pre_compress fires on_pre_compress（optional）
@@ -191,7 +191,7 @@ SkillOpt 移植（arXiv 2605.23904）的「textual learning rate」：**`EditBud
 
 ---
 
-## 检索（`src/memory/retrieval.rs` + `src/memory/note_retrieval/`）
+## 检索（`src/memory/note_retrieval/`）
 
 `NoteFactRetrieval::retrieve(query, agent_id, k)` 流程：
 
@@ -357,7 +357,7 @@ ScoredFact<MemoryFact>[]（带 provenance 链）
 - **`memory.listFacts`**：返回 `total` + 携带 `tags` / `link_count` / `updated_at` 字段（**之前没有这些字段**）
 - **`memory.search total = filtered count`**（**不是** store total；带回归测试 pin）
 - **`memory.search`** 返回 raw rows only，**永不**返回 notes
-- **`memory.graph`**（`graph.query`）在 scoped fetch 失败时报告 `null` 而非 `0`
+- **`graph.query`** 在 scoped fetch 失败时报告 `null` 而非 `0`
 - **Graph endpoints**：
   - `graph.neighbors` 端点**已退役**（被切掉，`graph.search` 命中携带完整 note 行替代）
 
@@ -393,7 +393,7 @@ ScoredFact<MemoryFact>[]（带 provenance 链）
 
 ### 真实成本与 token 核算
 
-26.7.15+：记忆 Tier-3 硬化 —— 代理范围召回信号、严重度门控的归档、成熟度队列、若干检索 bug 修复。`memory.session_recent_messages` 与 `context_compactor` 是两个 recall 路径，token 总数在 `MemoryBackend` 内累计。
+26.7.15+：记忆 Tier-3 硬化 —— 代理范围召回信号、严重度门控的归档、成熟度队列、若干检索 bug 修复。`session_recent` 槽位与 `ContextCompactor` 是两个 recall 路径，token 总数在 `MemoryBackend` 内累计。
 
 ### 见另请参阅
 

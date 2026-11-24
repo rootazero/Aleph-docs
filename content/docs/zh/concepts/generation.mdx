@@ -204,10 +204,9 @@ let output = provider.generate(request).await.unwrap();
 ## 代码位置
 
 - `src/generation/mod.rs` — `GenerationProvider` trait 和 mock 提供商
-- `src/generation/types.rs` — 请求/输出类型和构建器
+- `src/generation/types/` — 请求/输出类型和构建器
 - `src/generation/error.rs` — `GenerationError` 类型错误
 - `src/generation/registry.rs` — 提供商注册表
-- `src/generation/response_parser.rs` — 自然语言请求解析
 - `src/generation/providers/` — 提供商实现
 
 ## 另请参阅
@@ -227,9 +226,9 @@ let output = provider.generate(request).await.unwrap();
 
 `session.usage` 由 `crate::pricing` 的单一速率卡表计算成本，shell 中重复的 `format_params_*` 价格表已删除——之前存在跨进程漂移。
 
-### VESR 动态模型路由
+### VESR 动态模型路由（已移除）
 
-26.6.29+：替代确定性路由器，`src/routing/recall.rs` 在运行开始时通过 **k-NN over sqlite-vec** 召回一份 per-model 履历，所以模型能看到哪些模型在此类工作上**实际**表现过。包含 per-agent / per-model 终身聚合、USD 成本增强（复用 `crate::pricing`）与子代理路由捕获。
+VESR（动态模型路由）于 26.6.29 引入，现已移除。其 per-model 履历召回逻辑位于 src/routing/recall.rs（**k-NN over sqlite-vec**）；该文件已删除，`src/routing/` 现在仅负责 agent 路由语法（`config.rs` / `identity_links.rs` / `overlay.rs` / `resolve.rs` / `session_key.rs`）。当前模型选择由 `src/providers/capability_gate.rs`（prompt-blind 能力下限）与后续 failover 遍历完成。
 
 ### Provider 预设刷新
 
@@ -237,7 +236,7 @@ let output = provider.generate(request).await.unwrap();
 
 ### Provider 配置段
 
-每个提供商用 `[providers.<name>]` 表配置协议、模型、API key / base_url。多个 provider 可并存，`agents.defaults.model` 与 `models` 故障转移链控制使用顺序。`[provider.<name>]` 是无效写法。
+每个提供商用 `[providers.<name>]` 表配置协议、模型、API key / base_url。多个 provider 可并存，`[agents.defaults]` 表里的 `model` 键与 `models` 故障转移链控制使用顺序。`[provider.<name>]` 是无效写法。
 
 ### 见另请参阅
 

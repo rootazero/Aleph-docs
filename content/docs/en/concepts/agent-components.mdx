@@ -4,8 +4,8 @@ description: "Module map of the Think→Act loop — where the 12 Harness module
 ---
 
 Aleph's Think→Act loop is **not** an "event-handler bus with 6 typed handlers".
-That mental model does not exist in the codebase — there is no `src/components/`
-directory. Each subsystem owns its own crate module; they cooperate through the
+That mental model does not exist in the codebase — there is no monolithic
+`components` directory. Each subsystem owns its own crate module; they cooperate through the
 `AgentHarness` boundary, not through a shared event bus. The split is
 deliberate, rooted in the harness-dissolution work (2026-04 to 2026-07), and
 encoded as R3 / R10 / R11 in the design philosophy.
@@ -17,13 +17,13 @@ encoded as R3 / R10 / R11 in the design philosophy.
 | 3 | Memory                  | `src/memory/`                               | 不动（最干净的一块） |
 | 4 | Context Management      | `src/context/{budget,compact}/`             | 5 处合并到 1 处 |
 | 5 | Prompt Assembly         | `src/thinker/`                              | 历史名保留，不强行改名 |
-| 6 | Tool Calling            | `src/tools/calling/` + `src/providers/bridge.rs` | |
+| 6 | Tool Calling            | `src/tools/text_tool_call.rs` + `src/providers/adapter.rs` | |
 | 7 | State & Checkpointing   | `src/session/`                              | `SessionEventStore` + `replay()` 已经是事件溯源框架 |
 | 8 | Error Handling          | `HarnessError` + 各域 typed error            | 跨模块，无单一容身处 |
 | 9 | Guardrails              | `src/{security,sandbox,approval,pii}/`      | 4 域分立，不强搞 facade |
 | 10 | Verification & Feedback | `src/verification/`                         | 新建，吸收 stop_hooks |
 | 11 | Subagent Orchestration  | `src/{agents,teams,orchestrator,group_chat}/` | 4 域职责正交，不合并 |
-| 12 | Initialization & Env    | `src/init_unified/` + `src/bin/aleph-server/commands/start/` | 见 `docs/reference/BOOT_ASSEMBLY.md` |
+| 12 | Initialization & Env    | `src/bin/aleph-server/commands/start/` | 见 `docs/reference/BOOT_ASSEMBLY.md` |
 
 ## The Thin Core — `src/harness/`
 
@@ -87,14 +87,17 @@ cacheable/transient boundary. The harness's `agent/prompt.rs` calls
 
 - **Scoping** (`src/tools/scoped/`) — runtime allowlist / deny / health
   filtering per request. Mechanical `retain` operations, not LLM-influenced.
-- **Resource claims** (`src/tools/resource_claim.rs`) — each tool self-declares
-  one of `Shared`, `Exclusive{Global}`, `Exclusive{Paths}` so the Act phase
-  knows what can run in parallel. Inter-claim serial, intra-claim concurrent.
+- **Concurrency claims** (`crates/aleph-slot-api/src/concurrency.rs`) — each
+  tool self-declares a `ConcurrencyClaim` of `Shared` or `Exclusive { scope }`,
+  with `ExclusiveScope` variants `Global` / `Paths` / `Nodes` / `Sessions`, so
+  the Act phase knows what can run in parallel. Inter-claim serial,
+  intra-claim concurrent.
 - **Result spill** (`src/tools/{turn_budget, result_store}.rs`) — Layer 3
   spill-to-disk for oversize tool outputs; session-scoped `ToolResultStore`.
-- **Calling** (`src/tools/calling/`) — schema-constrained tool-call
-  parsing/serialization; the harness's `act` consumes `NativeToolCall` from
-  the provider adapter.
+- **Calling** (`src/tools/text_tool_call.rs`) — plain-text tool-call
+  promotion; structured calls arrive as `NativeToolCall`
+  (`crates/aleph-slot-api/src/ai_response.rs`) and the harness's `act`
+  consumes them through the provider adapter.
 
 Concurrent tool batching happens inside the harness's `act` step, not in a
 separate dispatcher; see `parallel_tool_concurrency` on `HarnessDeps`.
@@ -198,15 +201,16 @@ one `Guardrail` facade. The harness mounts each at the appropriate seam:
   outcomes `Pass | Sanitize(Value) | Block`. Applied sequentially in `act`'s
   PASS 0, before the parallel `join_all` (Pi-style validate-then-execute).
 
-`safety.rs`, `truncation_recovery.rs`, `streaming_bridge.rs` are also part of
-the harness's safety surface but live inside `src/harness/agent/`.
+The rest of the harness safety surface lives elsewhere: the guardrails in `src/harness/agent/guardrails.rs`, truncation recovery via the budget escalation modes in `src/context/budget/mod.rs` (`SplitSession` → `CompactToFit`), and reduction of the streamed visible text by `MessageAssembler` in `src/gateway/message_assembly/assembler.rs`.
 
-## Initialisation & Environment — `src/init_unified/`
+## Initialisation & Environment — `src/bin/aleph-server/commands/start/`
 
-See [Boot Assembly](/docs/en/architecture/boot-assembly). Five-phase setup
-runs at `InitializationCoordinator` (`src/init_unified/coordinator.rs`,
-re-exported at `src/lib.rs:99`); runtime boot wired through
-`src/bin/aleph-server/commands/start/` (5 sub-builders, ~6,194 LOC total).
+See [Boot Assembly](/docs/en/architecture/boot-assembly). Startup is wired
+through `src/bin/aleph-server/commands/start/`: `builder/` assembles handler
+registrations, agent init (`builder/agent_init/`) and subsystems
+(`builder/subsystems.rs`); `orchestrator_init.rs`, `helpers.rs`,
+`runtime_warmup.rs`, `bootstrap_factories.rs` and `capability_init.rs` cover
+the remaining boot concerns.
 
 ## What does NOT exist (and why this list is short)
 
@@ -222,17 +226,17 @@ five (or six) `EventHandler`-style subscribers were dissolved as part of the
 - Loop protection (`max_iterations`, `consecutive_failure_cap`, per-tool
   timeouts, verifier veto) is configuration on `HarnessDeps`, not a
   component.
-- Session recording is `src/session/SqliteEventStore`, an event log — the
-  same thing with a different name.
+- Session recording is `SqliteEventStore` (`src/session/store.rs`), an event
+  log — the same thing with a different name.
 
-Deleting the `src/components/` facade removed ~3,000 LOC of dead subscribers
+Deleting that facade removed ~3,000 LOC of dead subscribers
 without changing any external behaviour.
 
 ## Code Locations
 
 - `src/harness/` — Think→Act driver (12 files; budget ratcheted)
 - `src/thinker/` — PromptBuilder + PromptPipeline layers
-- `src/tools/`, `src/builtin_tools/` — `ToolService`, scoping, resource claims
+- `src/tools/`, `src/builtin_tools/` — `ToolService`, scoping, concurrency claims
 - `src/session/` — `SessionService`, `SqliteEventStore`
 - `src/memory/` — facts DB, vector search, recall message assembly
 - `src/context/{budget,compact}/` — pressure sensor + compactor + reactive rescue
@@ -241,7 +245,7 @@ without changing any external behaviour.
 - `src/orchestrator/` — `Orchestrator`, `AgentHarnessRunner`, `HarnessDeps` builders
 - `src/agents/` — `SubagentTool`, `AgentRuntime`, registry
 - `src/teams/`, `src/group_chat/` — multi-agent surfaces
-- `src/init_unified/` — `InitializationCoordinator` + boot-time wiring
+- `src/bin/aleph-server/commands/start/` — startup builder + boot-time wiring
 
 ## See Also
 

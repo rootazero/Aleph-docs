@@ -384,6 +384,20 @@ Add context-aware instructions before tool execution:
 - `require_consent` — consent gate
 - Runtime inventory — list registered hooks
 
+### `hooks_manage` Tool
+
+New built-in tool `hooks_manage` (not part of the chat agent's default tool set — it is held by protected agents):
+
+```rust
+hooks_manage(action: "list")                         // list all hooks
+hooks_manage(action: "get", hook_id)                // details for one hook
+hooks_manage(action: "test", hook_id, event)        // dry-run test
+hooks_manage(action: "enable", hook_id)
+hooks_manage(action: "disable", hook_id)
+hooks_manage(action: "reload")                       // force a reload
+hooks_manage(action: "stats")                        // hit rate / timeouts / consent rate
+```
+
 ### Guardian Judge
 
 26.7.21+: the LLM judge for heartbeat probes — **payload masks secrets**.

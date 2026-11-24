@@ -74,7 +74,7 @@ Vector tables are dimension-keyed virtual tables (initialized in one `db.exec_ba
 
 The `notes_vec_map` table maps `(path, agent_id)` to the `rowid` for the dimension-matched vec0 table; routing at retrieval time uses the embedder's reported dimension, and unmatched vectors are silently skipped by the reranker rather than producing an error.
 
-### Knowledge Note (`src/memory/notes/note.rs`)
+### Knowledge Note (`src/memory/notes/note/`)
 
 ```rust
 pub struct KnowledgeNote {
@@ -146,7 +146,7 @@ A port of SkillOpt's "textual learning rate" (arXiv 2605.23904): **`EditBudget`*
 
 `consolidate` uses `batch_consolidate_candidates` (LLM-batch decision for ≤ 20 candidates in the same category; > 20 uses `title_heuristic_candidates`, a pure filename heuristic with no LLM), and a single `consolidate_pair` sends LLM ≤ 600 chars of two notes for a `MERGE / COEXIST / ABSORB_A / ABSORB_B` decision; unrecognized answers default to `COEXIST` (conservative).
 
-`CompoundIngestor::ingest_batch` (`src/memory/notes/ingest/ingestor.rs`) is the main L0 → L1 write path:
+`CompoundIngestor::ingest_batch` (`src/memory/notes/ingest/ingestor/`) is the main L0 → L1 write path:
 
 ```text
 1. SkillExtension registry.pre_compress fires on_pre_compress (optional)
@@ -191,7 +191,7 @@ A port of SkillOpt's "textual learning rate" (arXiv 2605.23904): **`EditBudget`*
 
 ---
 
-## Retrieval (`src/memory/retrieval.rs` + `src/memory/note_retrieval/`)
+## Retrieval (`src/memory/note_retrieval/`)
 
 `NoteFactRetrieval::retrieve(query, agent_id, k)`:
 
@@ -357,7 +357,7 @@ Before 26.7.x, every `NoteConsolidate` / `NoteUpdate` wrote a `MemoryEvent` (ske
 - **`memory.listFacts`**: returns `total` + carries `tags` / `link_count` / `updated_at` fields (**previously not present**)
 - **`memory.search total = filtered count`** (**not** store total; regression-pinned)
 - **`memory.search`** returns raw rows only, **never** returns notes
-- **`memory.graph`** (`graph.query`) reports `null` (not `0`) on scoped fetch failure
+- **`graph.query`** reports `null` (not `0`) on scoped fetch failure
 - **Graph endpoints**:
   - `graph.neighbors` endpoint **retired** (cut; `graph.search` returns a full note row on hit instead)
 
@@ -393,7 +393,7 @@ List memory entries associated with an app (filtered by `app_key`).
 
 ### Real Cost & Token Accounting
 
-26.7.15+: memory Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort, several retrieval bug fixes. `memory.session_recent_messages` and `context_compactor` are two recall paths, with token totals accumulated inside the `MemoryBackend`.
+26.7.15+: memory Tier-3 hardening — agent-scoped recall signals, severity-gated archival, maturity cohort, several retrieval bug fixes. the `session_recent` slot and `ContextCompactor` are two recall paths, with token totals accumulated inside the `MemoryBackend`.
 
 ### See Also
 

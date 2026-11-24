@@ -1,9 +1,9 @@
 ---
 title: "ClawHub"
-description: "历史参考：ClawHub 在 Hub 目录中以 `via: \"clawhub\"` 来源标签形式存在；`src/clawhub/` 模块已删除。"
+description: "历史参考：ClawHub 在 Hub 目录中以 `via: \"clawhub\"` 来源标签形式存在；独立的 ClawHub 客户端模块已删除。"
 ---
 
-> **已删除——历史参考。** `src/clawhub/` 模块不再存在于源码树中。ClawHub 的专属设置标签页已被移除；其发现职责被纳入[扩展商店](/docs/zh/concepts/extensions-store)，以**扩展**为统一概念，按功能类别浏览技能、插件和 MCP 服务器。
+> **已删除——历史参考。** 独立的 ClawHub 客户端模块（源码树中的顶层 `clawhub` 模块）不再存在于源码树中。ClawHub 的专属设置标签页已被移除；其发现职责被纳入[扩展商店](/docs/zh/concepts/extensions-store)，以**扩展**为统一概念，按功能类别浏览技能、插件和 MCP 服务器。
 
 如今 ClawHub 仍可通过 **Hub 目录的长尾来源标签**访问：`src/hub/types.rs::ExtensionProvenance::via = "clawhub"`（参见 `src/hub/catalog_client.rs::CatalogEntry.via` 的 `via: "clawhub"` wire 形态）。商店代理读取某个 URL / 仓库安装任何已编排源未覆盖的扩展。下文结构仅作为历史参考。
 

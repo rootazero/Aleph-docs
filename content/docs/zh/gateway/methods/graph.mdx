@@ -88,7 +88,7 @@ description: "知识图谱 RPC 方法"
 
 | 方法 | 不作为 RPC 存在的原因 |
 |------|---------------------|
-| `graph.entities` / `graph.add_entity` / `graph.add_relation` / `graph.delete_entity` | 没有独立的 `Entity` 表;图由 `notes_index`(`KnowledgeNote` + wikilink + 相似性边)构建。Panel 调用 `graph.query` 进行渲染,从未有过单实体插入路径。 |
+| 独立实体 CRUD | 没有独立的 `Entity` 表;图由 `notes_index`(`KnowledgeNote` + wikilink + 相似性边)构建。Panel 调用 `graph.query` 进行渲染,从未有过单实体插入路径。 |
 | `graph.neighbors` | 与 `graph.query` 的 `edges` 数组数据相同;Panel 在客户端迭代。 |
 
 `graph.neighbors` 在旧设计文档中偶尔被引用;在运行时它只是 `graph.query` 返回的 `edges` 的一个属性。

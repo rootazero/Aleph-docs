@@ -539,9 +539,9 @@ bin/aleph_server/commands/
 
 ## 26.7.x Addendum
 
-### Rust Toolchain 1.95+
+### Rust Toolchain 1.99+
 
-26.7.x: `rust-version` in `Cargo.toml` has been bumped to **1.95**. Use `rustup install 1.95` or `rust-toolchain.toml` in development.
+The current `rust-version` is **1.99**, and `rust-toolchain.toml` pins the toolchain to `1.99.1` (with `rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target). Use `rustup install 1.99`, or rely on `rust-toolchain.toml`.
 
 ### Harness 12 Files + Line-Count Ratchet
 
@@ -549,7 +549,7 @@ bin/aleph_server/commands/
 
 - Top-level 8 + `agent/` 4 = **12 files** (tests under `tests/` do not count toward the ratchet)
 - Line count gated by `src/harness/tests/budget.rs` ratchet, bound to the `CEILING` constant
-- Current `CEILING` = **5,055** (`src/harness/tests/budget.rs:335`, 2026-07-26 revision); treat any line count reproduced here as a stale copy
+- Current `CEILING` = **5,535** (`src/harness/tests/budget.rs:795`); treat any line count reproduced here as a stale copy
 - The 3 questions before adding code: scaffolding vs cognition? Will a model upgrade still need it? How many real consumers does it have?
 
 ### YAGNI Withdrawal

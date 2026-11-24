@@ -138,15 +138,15 @@ The Telegram interface is split across a small set of focused modules under `src
 | `access.rs` | Coarse DM/group pre-filter (`AccessController`) — only drops obvious traffic |
 | `approval.rs` | `TelegramChannelApprovalCapability` (interactive approval buttons) |
 | `chunking.rs` | Long-message splitting |
-| `delivery.rs` | Outbound send pipeline + rate-limit handling |
+| `delivery.rs` | Outbound send pipeline + rate-limit handling (including sticker sends) |
 | `error_cooldown.rs` | Per-conversation error cooldown + typing circuit breaker |
-| `handlers.rs` | Bot dispatch handlers (commands, callbacks, text) |
+| `handlers.rs` | Bot dispatch handlers (commands, callbacks, text, inbound stickers) |
 | `mention.rs` | `@mention` parsing / stripping |
 | `offset.rs` | Persistent polling offset tracker (shared with iMessage BlueBubbles) |
 | `polling.rs` | Long-polling loop |
 | `reaction_handler.rs` | Processing status reactions (👀 / 👍 / 👎) |
-| `sticker.rs` | Sticker handling |
-| `streaming/` | `EditBased` streaming (lane tracker, orchestrator, telegram event emitter) |
+| `token_fingerprint.rs` | Bot-token fingerprint (dedup + log redaction) |
+| `streaming/` | `EditBased` streaming (lane tracker, orchestrator, reasoning extractor, status controller, telegram event emitter) |
 
 The adapter **does not own** pairing state. It forwards unknown senders to the inbound router, which is the **single source** for access / pairing / allowlist decisions (see [Interfaces Overview](/docs/interfaces/overview)).
 

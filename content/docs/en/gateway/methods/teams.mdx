@@ -5,7 +5,7 @@ description: "Team and multi-agent orchestration RPC methods"
 
 `teams.*` is the per-team CRUD + coordination surface. About thirty methods are wired across two registrations:
 
-- `register_teams_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:207-552`) — store-only handlers, always registered when a `team_store` is constructed.
+- `register_teams_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/agents.rs`) — store-only handlers, always registered when a `team_store` is constructed.
 - Two hand-wired methods inside `agent_init/mod.rs` — `teams.chat.send` and `teams.chat.cancel` — registered only when the team store is present, because they need the `GatewayContext` + execution path to drive a leader run and abort a fan-out tree.
 
 A team's work thread is durable (`CoordTask` board + `team_messages`); live conversational bubbles (leader / member narrative) are streamed over `team.<id>.*` on the event bus and are not queryable as a `teams.*` RPC. On reload, the Panel shows the durable record (tasks + deliverables), not the live narrative.
@@ -241,7 +241,7 @@ Per-task exit journal read surface (the write side is the `task_exit_journal` bu
 
 #### teams.task.pause / resume / retry / skip
 
-Admin-context task controls (any state; reviewer-context tasks use `teams.workflow.{approve,reject,retry}_step` instead).
+Admin-context task controls (any state; reviewer-context tasks use `teams.workflow.{approve,reject}_step` instead).
 
 - `teams.task.pause` — only valid from `pending` / `blocked` / `unsatisfiable`. Stamps `paused_from` so resume can restore the right state. The dispatcher does not claim paused tasks.
 - `teams.task.resume` — only valid from `paused`. Restores the origin status (`waiting_review` for review-parked tasks, otherwise `pending`) and clears the stamp.
@@ -252,43 +252,39 @@ Each takes `task_id`. Responses: `{ "status": "paused" | "pending" | "skipped" }
 
 ### Workflow
 
-#### teams.workflow.approve_step / reject_step / retry_step
+#### teams.workflow.approve_step / reject_step / teams.task.retry
 
-Reviewer-context workflow step review. The latest run is stamped with the verdict; the task is then transitioned to `Completed` / `Failed`. A `comment` (when non-blank) is also appended as a task comment authored by `review:<kind>` (or the explicit `reviewer_id`).
+Reviewer-context workflow step review (`src/gateway/handlers/teams/workflow.rs`). The latest run is stamped with the verdict; the task is then transitioned to `completed` / `failed`. The review is only accepted when the task's current state allows it (a run has produced output); otherwise it returns `INVALID_PARAMS`. If the task is already in the target terminal state the call returns idempotently without writing again. A `comment` (when non-blank) is also appended as a task comment authored by `reviewer_id`, defaulting to `review:<kind>`.
 
-`reviewer_kind` must be one of `user` / `lead_agent` / `auto`.
+`reviewer_kind` must be one of `user` / `lead_agent` / `auto`, and defaults to `user`.
 
 | Method | Parameters | Description |
-|--------|------|------------|------|
-| `teams.workflow.approve_step` | `task_id`, `reviewer_kind`, `reviewer_id?`, `comment?` | `{ "status": "completed" }` |
-| `teams.workflow.reject_step` | `task_id`, `reviewer_kind`, `reviewer_id?`, `comment?` | `{ "status": "failed" }` (the comment is also stored as the task `result` so the next planner can read it) |
-| `teams.workflow.retry_step` | `task_id` | `{ "status": "pending" }` (re-arms the retry budget and releases the leftover lock with its actual holder) |
+|--------|------|------------|
+| `teams.workflow.approve_step` | `task_id`, `reviewer_kind?`, `reviewer_id?`, `comment?`, `grounding?` | `{ "status": "completed" }`. When the task carries `require_grounding: true`, a `grounding` measurement (`kind` is `exit_code` / `numeric` / `line_count`) is required; otherwise the call returns `INVALID_PARAMS` with `grounding_required` |
+| `teams.workflow.reject_step` | `task_id`, `reviewer_kind?`, `reviewer_id?`, `comment?` | `{ "status": "failed" }`. The comment goes only into the task comment thread (for the member redoing the work to read); it is **not** stored as the task `result` |
+| `teams.task.retry` | `task_id` | Admin task control: re-arms the automatic retry budget and clears `result`; not a workflow review method |
 
-#### teams.workflow.export_canvas / import_canvas
+#### team_workflow_canvas: export / import
 
-Workflow canvas as Obsidian JSON Canvas 1.0. The Panel's canvas engine accepts the same wire shape, so the "Workflow" tab is wired straight to this.
+Export/import Obsidian JSON Canvas 1.0 with the `team_workflow_canvas` **builtin tool, not a Gateway RPC method**. The tool lives in `src/builtin_tools/team/workflow_canvas.rs`, the conversion in `src/teams/workflow_canvas.rs`, and the document type is `aleph_protocol::json_canvas::Document`.
 
-`export_canvas`:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `team_id` | string | yes | Team id |
-| `status` | string | no | Same 10-variant vocabulary as `teams.list_tasks` (full 10 variants, unknown id is `INVALID_PARAMS`) |
-| `owner` | string | no | Filter by owner |
-
-**Response:** `{ "team_id", "canvas": { ...CanvasDocument... }, "node_count", "edge_count" }`.
-
-`import_canvas`:
+Tool parameters (`action` is `export` or `import`):
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `team_id` | string | yes | Team id |
-| `canvas` | object | yes | JSON Canvas document (`aleph_protocol::canvas_format::Document`) |
-| `dry_run` | boolean | no | Project without writing |
+| `action` | string | yes | `export` or `import` |
+| `team_id` | string | yes | Team id; an unreachable team fails with "team not found" |
+| `status` | string | no | `export` only: same full 10-variant vocabulary as `teams.list_tasks`; an unknown value is an error |
+| `canvas` | object | required for `import` | The JSON Canvas document to materialize |
+| `dry_run` | boolean | no | `import` only: return the plan without writing (default `false`) |
 
-**Response (dry_run):** `{ "team_id", "planned", "tasks": [ ...{subject, description, blocked_by, metadata}... ] }`.
+There is no `owner` filter parameter.
 
-**Response (live):** `{ "team_id", "created", "tasks": [ ...{id, subject}... ] }`. Edges become `blocked_by`; the algorithm does a topological pass, deferring blockers still in this batch and rewriting canvas-node ids to live task ids.
+**Export result:** `{ "team_id", "canvas": { ...Document... }, "node_count", "edge_count" }`.
+
+**Import result (dry_run):** `{ "team_id", "created", "dry_run": true, "tasks": [ ...{subject, description, blocked_by, metadata}... ] }`, where `created` is the number of planned tasks.
+
+**Import result (live):** `{ "team_id", "created", "dry_run": false, "tasks": [ ...{id, subject}... ] }`. Each text node becomes a task and each edge becomes a `blocked_by` entry; the implementation does a topological pass, deferring blockers that are still pending creation in the same batch and rewriting canvas-node ids to live task ids. A cycle or an unresolvable dependency fails the whole import.
 
 ### ACP members
 

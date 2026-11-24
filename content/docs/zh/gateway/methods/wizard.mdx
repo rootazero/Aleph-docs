@@ -3,7 +3,7 @@ title: "wizard.*"
 description: "设置向导 RPC 方法"
 ---
 
-`wizard.*` 是配置向导的 JSON-RPC 接口。这五个方法在 `HandlerRegistry::new()` 中以 `service_unavailable` 占位符的形式注册,在服务器启动时(`src/bin/aleph-server/commands/start/mod.rs:655-660`)通过 `install_wizard_handlers` 替换为真实处理器。运行时工厂当前只提供 `onboarding` 流;任何其它 `wizard_type` 都会从 `start` 处理函数返回 `Unknown wizard type`。
+`wizard.*` 是配置向导的 JSON-RPC 接口。这五个方法在 `HandlerRegistry::new()` 中以 `service_unavailable` 占位符的形式注册,在服务器启动时(`src/bin/aleph-server/commands/start/mod.rs`)通过 `install_wizard_handlers` 替换为真实处理器。运行时工厂当前只提供 `onboarding` 流;任何其它 `wizard_type` 都会从 `start` 处理函数返回 `Unknown wizard type`。
 
 向导状态本身是进程本地的——重启守护进程会丢弃进行中的会话。已经不再有等价的 CLI 子命令(`aleph wizard` 已被删除);Panel 通过这些 RPC 驱动流程。
 

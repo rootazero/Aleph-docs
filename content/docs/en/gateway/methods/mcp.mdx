@@ -17,23 +17,25 @@ List every configured MCP server and its live status (id, name, transport, statu
 
 **Response:** `{ "servers": [ ...ServerInfo... ] }`. Each `ServerInfo` carries the live `pid`, `uptime_seconds`, and `restart_count` as reported by the MCP actor.
 
-### mcp.add
+### mcp_config.create
 
-Add a new MCP server configuration.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `config` | object | yes | The full `McpManagerConfig` row — see [Config Fields](#config-fields). |
-
-**Response:** `{ "ok": true }` on success; `INTERNAL_ERROR` with the actor's message otherwise.
-
-### mcp.update
-
-Upsert an existing MCP server. Removes the old id and re-adds the new config; on failure, rolls back to the prior config if one existed.
+Create an MCP server configuration. Parameters and handling are defined in `src/gateway/handlers/mcp_config.rs`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `config` | object | yes | The new `McpManagerConfig` row. |
+| `name` | string | yes | Display name used to derive the server id; duplicate ids are rejected |
+| `config` | object | yes | `McpServerConfigJson`; see [Config Fields](#config-fields) |
+
+**Response:** `{ "ok": true }` on success.
+
+### mcp_config.update
+
+Update an existing server and restart it. See `src/gateway/handlers/mcp_config.rs`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Existing server id |
+| `config` | object | yes | `McpServerConfigJson` |
 
 **Response:** `{ "ok": true }` on success.
 
@@ -140,23 +142,17 @@ Cancel a pending approval request. Stub implementation; logs a marker and return
 
 ## Config Fields
 
-`mcp.add` and `mcp.update` take the full `McpManagerConfig` row:
+The `config` parameter of `mcp_config.create` and `mcp_config.update` is `McpServerConfigJson`, defined in `src/gateway/handlers/mcp_config.rs`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `id` | string | yes | Unique server id |
-| `name` | string | yes | Display name |
-| `transport` | string | yes | `stdio` / `http` / `sse` (defaults to `stdio`) |
-| `command` | string | stdio only | Command to run for stdio transport |
-| `args` | string[] | no | Args for the stdio command |
-| `url` | string | http / sse | Endpoint URL |
-| `env` | object | no | Env vars for the stdio process |
-| `requires_runtime` | string | no | `node` / `python` / `bun` etc. |
-| `auto_start` | boolean | no | Defaults to `true` |
-| `timeout_seconds` | number | no | Per-request timeout |
-| `tool_filter` | object | no | Optional allow/deny filter over advertised tools |
-
-The actor silently no-ops on a `McpStdio` install whose `command` is missing on disk (since 26.6.23).
+| `command` | string | yes | stdio command |
+| `args` | string[] | no | Command arguments; empty by default |
+| `env` | object | no | Environment variables; secret values go to the vault |
+| `cwd` | string | no | Working directory |
+| `requires_runtime` | string | no | Required runtime |
+| `timeout_seconds` | number | no | Request timeout in seconds |
+| `enabled` | boolean | no | Defaults to true on creation |
 
 ## `mcp_config.*` (Settings CRUD)
 

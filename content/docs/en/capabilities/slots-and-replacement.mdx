@@ -1,0 +1,176 @@
+---
+title: "Slots and replacement"
+description: "The slot model, contract versions, and the replacement mechanism: what a slot is in Aleph, who may replace what, and how failures behave."
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+This page answers three questions: what shape a "slot" has in Aleph, where the contract version is enforced, and how far "replacement" actually goes today. Slot identity and the Hook@1 contract live in `crates/aleph-slot-api/`; the runtime capability model lives in `src/capability/`.
+
+<Callout type="warn" title="Separate what exists from what is planned">
+  The three-layer model, the slot catalog, and the user-configurable replacement and fallback semantics in the blueprint `docs/research/aleph_modularization_plan.md` sections 2 to 4 **are not implemented**. Everything taken from that blueprint is marked "Status: planned" below; every other paragraph carries a source anchor. For descriptors, ownership, and lease semantics see [Capability model](./capability-model).
+</Callout>
+
+## What a slot is
+
+A "slot" is a **structural unit**: a hook binds to it, a descriptor declares it, and a contract version says which revision of the contract that implementation was written against. All three live in `crates/aleph-slot-api/src/slot.rs`.
+
+### Slot identity
+
+`crates/aleph-slot-api/src/slot.rs` defines the three core types:
+
+- `SlotId(pub String)` — the slot identifier. The module comment is explicit: "The slot is the structural unit a hook is bound to. A slot id is just a string used to correlate facts; it does not parse any privileged syntax, encode a grant, or imply ownership."
+- `ContractVersion(pub u32)` — the contract version this hook implementation is built against.
+- `HookDescriptor` — the typed descriptor of one hook implementation, with the fields `id`, `slot`, `event`, `kind`, `priority`, and `contract_version`, and with `deny_unknown_fields`.
+
+`SlotId` and `ContractVersion` are explicitly labelled **correlation newtypes**: they grant no authority, parse no privileged ID syntax, and authorize or deny nothing. The Authority section of the file header states: "The new types are expressible for any plugin — being expressible is not a grant."
+
+### A slot is not an authorization
+
+Authorization lives elsewhere. In `crates/aleph-slot-api/src/capability.rs`, `CapabilityId{namespace, name}` is only a namespace identifier, and `Service{relation, target}` is a **pure relation edge** — no payload, not callable — whose `ServiceRelation` has exactly three snake_case variants: `Requires`, `Provides`, and `Conflicts`.
+
+`src/capability/descriptor.rs` assembles those pieces into the runtime descriptor: `CapabilityDescriptor` carries `kind` (`CapabilityKind`), `schema` (`SchemaRef`, a version plus a SHA-256 fingerprint), `revision` (`CapabilityRevision`), `lifetime`, `visibility`, `owner`, `services`, `metadata`, and `facets`. A descriptor describes; it grants nothing.
+
+## Contract and contract version
+
+### The version gate
+
+Exactly one contract version is in force: the protocol-side `HOOK_CONTRACT_VERSION`, defined in `shared/protocol/src/hook.rs` with the value `1`.
+
+`ContractVersion` is **not** an alias of `HOOK_CONTRACT_VERSION` — it is an independent newtype, and `crates/aleph-slot-api/src/slot.rs` says so: "This crate does not publish a `CURRENT` alias; callers spell `ContractVersion(HOOK_CONTRACT_VERSION)` directly."
+
+The gate is `validate_hook_request(descriptor, envelope)`, which checks three things in a fixed order:
+
+1. The descriptor's contract_version field must equal the protocol's `HOOK_CONTRACT_VERSION`, otherwise it returns the error text `hook descriptor contract version {} does not match protocol {}`;
+2. The descriptor's event field must equal `envelope.event.event_tag()`, otherwise it returns `hook descriptor event {:?} does not match envelope event tag {:?}`;
+3. the envelope is handed back to the protocol-side `validate_envelope` — directly constructed envelopes with a wrong `version` field or invalid facts (empty `session_id`, a wrong turn-id matrix, mismatched lifecycle context ids) are rejected here.
+
+The gate runs before `Hook::execute`, so an illegitimate descriptor never reaches an implementation. The `Hook` trait has exactly two methods, `descriptor()` and `execute()`, and `execute` has no default implementation — a missing implementation is a compile-time error, not a runtime no-op. The returned `HookResponse` is likewise untrusted until the protocol's `validate_response` accepts it.
+
+The file header of `crates/aleph-slot-api/src/slot.rs` draws one more boundary: the only wire contract is `HookEventTag` (seven variants); the legacy 24-variant `HookEvent` is kept in `crates/aleph-slot-api/src/hooks.rs` for the existing hooks.json / JSON-RPC surface and **never serves as a wire tag** for the new contract — mixing the two is a wire-shape mistake and is rejected by serde before the struct is constructed.
+
+### How the contract crate relates to production code
+
+The file header of `crates/aleph-slot-api/src/slot.rs` states that this module is a **NEW pure contract**, not a migration of the legacy Core `HookContext` / `HookResult` / `HookConfig` / hook executor: the runtime dispatch path, permission gates, lease and grant policy stay in `alephcore` and continue to own those distinct legacy types. Production wiring of the new trait belongs to P0.5 / P2.
+
+Today's state splits into two layers:
+
+- **The type layer is already in production.** `alephcore` depends on `aleph-slot-api` in one direction only (workspace member and dependency declaration in the root `Cargo.toml`), and `src/tools/`, `src/tool_metadata/types/`, `src/builtin_tools/`, `src/providers/`, `src/search/`, `src/browser/`, `src/gateway/`, and `src/memory/runtime/` all reference `aleph_slot_api`. `src/tool_metadata/types/mod.rs`, for instance, points the source of truth for the metadata types at `aleph_slot_api::metadata` and only re-exports them.
+- **The slot identity layer is not wired yet.** The four symbols `SlotId`, `ContractVersion`, `HookDescriptor`, and `validate_hook_request` have **no reference at all** under `src/`, `shared/`, `interfaces/`, or `desktop/` — they exist only in `crates/aleph-slot-api/src/slot.rs` and its tests.
+
+## The capability surface of the contract crate
+
+The modules exported by `crates/aleph-slot-api/src/lib.rs` are the contract coverage. Every one of them is used by production code or by tests:
+
+| Module | Main contents |
+|---|---|
+| `crates/aleph-slot-api/src/ai.rs` | `ToolChoice`, `SystemPromptPart`, `RequestPayload`, `ThinkLevel`, `AiProviderContract` |
+| `crates/aleph-slot-api/src/ai_delta.rs` | `ProviderDelta`, `DeltaSink`, `NoopSink`, `collect_response_deltas` |
+| `crates/aleph-slot-api/src/ai_message.rs` | `UnifiedMessage`, `CacheControl`, `EphemeralTtl`, `ContentBlock`, `transform_messages`, `normalize_tool_pairs` |
+| `crates/aleph-slot-api/src/ai_reasoning.rs` | `ThinkingOrigin`, `ReasoningReplay`, `canonicalize_model_id`, `EndpointClass`, `detect_endpoint_class`, `strips_prior_turn_thinking` |
+| `crates/aleph-slot-api/src/ai_response.rs` | `ProviderResponse`, `NativeToolCall`, `StopReason`, `TokenCost`, `TokenUsage` |
+| `crates/aleph-slot-api/src/approval.rs` | `ApprovalDecisionType`, `ApprovalRequest`, `ApprovalOutcome`, `ApprovalResponse`, `GrantScope`, `ApprovalAction`, `AuthorizationResult`, `RenderedApproval` |
+| `crates/aleph-slot-api/src/cancellation.rs` | `CancellationToken` |
+| `crates/aleph-slot-api/src/channel.rs` | `ChannelId` / `ConversationId` / `UserId` / `MessageId`, `Channel`, `ChannelFactory`, `ChannelConfig`, `ChannelCapabilities`, `InboundMessage` / `OutboundMessage`, `StreamProtocol`, `ChannelHealth` |
+| `crates/aleph-slot-api/src/concurrency.rs` | `ConcurrencyClaim`, `ExclusiveScope`, `claims_conflict`, `batch_parallelizable`, `partition_parallel_groups`, `normalize_path` |
+| `crates/aleph-slot-api/src/descriptor.rs` | `SCHEMA_VERSION`, `ToolCapabilityDescriptor`, `DescriptorError`, `ToolCallIdentity`, `ReplayContractFingerprint`, `canonicalize_services` |
+| `crates/aleph-slot-api/src/embedding.rs` | `EmbeddingProvider` |
+| `crates/aleph-slot-api/src/error.rs` | `AlephError`, `AlephException`, `ErrorClass`, `Result` |
+| `crates/aleph-slot-api/src/error_kind.rs` | `ToolErrorKind`, `classify_error_str`, `classify_tool_error`, `CROSS_BATCH_REFUSED_CAUSE` |
+| `crates/aleph-slot-api/src/handler.rs` | `ToolHandler`, `McpServerFilter` |
+| `crates/aleph-slot-api/src/hooks.rs` | legacy 24-variant `HookEvent`, `HookKind`, `HookPriority`, `HookAction`, `MatchSubject` |
+| `crates/aleph-slot-api/src/metadata.rs` | `ToolCategory`, `ToolDefinition`, `ToolSafetyLevel`, `ToolPriority`, `ToolSource`, `ToolSourceType`, `ChannelType`, `UnifiedTool` |
+| `crates/aleph-slot-api/src/search.rs` | `SearchOptions`, `SearchResult`, `SearchCapabilities`, `SearchProvider`, `Recency`, `MAX_SEARCH_RESULTS` (value 100) |
+| `crates/aleph-slot-api/src/text.rs` | `truncate_text` |
+| `crates/aleph-slot-api/src/tool.rs` | `ToolError`, `RefusedBy`, `ToolDefinition`, `ToolDefinitionMetadata`, `ToolOutput`, `ToolImage`, `to_metadata_form` |
+| `crates/aleph-slot-api/src/webhook.rs` | `WebhookHandler`, `WEBHOOK_ROUTE_PREFIX` (value `/webhook`) |
+| `crates/aleph-slot-api/src/browser/` | the browser contract: `contract.rs`, `effect.rs`, `engine.rs`, `error.rs`, `operations.rs`, `recording.rs`, `routes.rs`, `text.rs`, `types.rs` |
+
+## The three-layer model and the slot catalog
+
+> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §2 three-layer model, §3 slot catalog.
+
+The blueprint splits capabilities into three layers: L1 kernel (not replaceable), L2 default modules, and L3 replacement surface. It gives one table of data slots and one table of behaviour slots, with slot IDs shaped like:
+
+```text
+Data slots (blueprint §3.1)
+  provider.<name>   tool.<name>      search.provider   browser.driver
+  channel.<type>    memory.embedding memory.recall      skill.<name>
+  agent.<name>      prompt.<layer>
+
+Behaviour slots (blueprint §3.2, unified onto Hook@1)
+  tool.pre          tool.post         prompt.assembly
+  context.compaction turn.continue    memory.ingest_filter
+  session.lifecycle
+```
+
+Each table also states its cardinality semantics (single / multiple / chain). The blueprint takes "behaviour slot contracts unified onto Hook@1" as a premise — that matches the direction of `crates/aleph-slot-api/src/slot.rs`, but the catalog itself and the resolver behind it do not exist.
+
+Three things in the current code come closest, and none of them is a slot catalog:
+
+- the primary capability classification is `CapabilityKind` (12 variants) in `src/capability/descriptor.rs`; it is a **classification**, not a replaceable position;
+- the provider side has `ProviderId` and `ProviderState` in `src/capability/provider.rs`, which describe the lifecycle of one backend, not a slot;
+- the behaviour side is registered by `src/extension/hooks/registry.rs`, the legacy hook registry, whose wire form is still the 24-variant `HookEvent`.
+
+## The replacement mechanism
+
+> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §4 replacement mechanism (§4.1 user configuration, §4.2 resolution order, §4.3 activation and hot swap).
+
+The blueprint shape is:
+
+- a user configuration section `[slots."<slot-id>"]` with the keys `use` (values shaped like `builtin:`, `native:`, `wasm:`, `mcp:`, `plugin:`), `mode` (replace / prepend / append / disable), and `fallback`;
+- a five-level resolution order: session-level override > project-level `.aleph/config.toml` > user-level `~/.aleph/config.toml` > plugin manifest claims > builtin; when two declarations at the same level claim the same single-cardinality slot the result is **fail-closed** and lands in `Conflicted`;
+- an activation path of `SlotResolver` → `SlotPlan` (a pure value), with tool slots going through `ToolHandlerRegistry::replace` / `register` / `unregister`, behaviour slots through the hook registry, and process-level slots through `CapabilitySlot<T>`; every application registers a new owner generation in the ownership tree, invalidating older leases on re-check, and configuration hot swap goes through the `slots` branch of `config::live_apply`.
+
+What really exists today is a small part of that: `ToolHandlerRegistry::replace(descriptor, handler)` in `src/tools/registry.rs` already implements "replace the handler and the descriptor in one atomic swap" with exactly the semantics the blueprint describes — callers already holding the previous handler keep their stable `Arc`, subsequent `resolve` sees the new one, and a name that was never registered returns `ToolError::NotFound`. But it is an **internal registry operation**: its callers are the plugin loading and tool registration paths, not user configuration.
+
+`SlotResolver`, `SlotPlan`, the `[slots.*]` configuration section, and the `slots` branch of `config::live_apply` do not exist in the code.
+
+## What can be replaced today
+
+Only four kinds of replacement really exist today:
+
+1. **Tool implementations**: `ToolHandlerRegistry::register` / `replace` / `unregister` in `src/tools/registry.rs`. The registry is built on the immutable publication primitive in `src/capability/versioned_registry.rs` — `transact` publishes a new revision atomically and broadcasts, so subscribers see the change.
+2. **Registry snapshot replacement**: `CapabilityChange` in `src/capability/facade.rs` has the four variants `Registered`, `Replaced`, `Unregistered`, and `Invalidated`, and `CapabilityChangeStream::invalidate_and_resync` emits `Invalidated` when the owner generation advances while keeping the last committed cursor, so a subscriber resyncs instead of restarting from zero.
+3. **Provider replacement by generation invalidation**: `ProviderLifecycle` in `src/capability/provider.rs` allocates a new generation when a **new start begins**, so a lease from an older generation is invalid during a restart and **remains invalid after a replacement**; `ResolveError::StaleProvider` in `src/capability/facade.rs` is the explicit expression of "the provider was stopped or replaced after the lease was issued".
+4. **User-configuration-driven backend swapping**: `McpServerConfig` in `src/config/types/tools.rs` describes a client-side MCP server entry (`command`, `args`, `env`, `cwd`, `requires_runtime`, `timeout_seconds`, `enabled`), so swapping an MCP server in `config.toml` is the only user-driven "change the backend" that exists. On the gateway side the exposure list lives in `McpFaceConfig` in `src/gateway/mcp_face/config.rs`: its `expose` is an allowlist that can take effect hot, while `enabled` only matters when routes are mounted at boot.
+
+There are also two configuration fields that are deliberately refused, also in `src/config/types/tools.rs`: a non-default tool_service.default_timeout_seconds and a non-empty tool_service.per_tool_seconds are rejected while the configuration is parsed, with the error texts `tool_service.default_timeout_seconds is not supported until ToolService consumes it` and `tool_service.per_tool_seconds is not supported until ToolService consumes it`. Those fields are reserved for the ToolService to consume — configuring them is an error, not a silent no-op.
+
+Replacement observation on the diagnostic side is observation only. The four fields `replacement_count`, `applied_replacement_count`, `last_replacement_registry_cursor`, and `last_replacement_tool_ids` in `src/capability/diagnostic_control.rs` are described by the source as pure observation: no dispatcher, resolver, or session path reads them, and they are not persisted — there is no recovery cursor, no log, and no replay.
+
+## Fallback and failure semantics
+
+Today the behaviour is **fail-closed**, with no fallback:
+
+- `validate_hook_request` in `crates/aleph-slot-api/src/slot.rs` rejects at any of its three gates;
+- `PolicyEngine` in `src/capability/policy.rs` defines three gates (visibility, principal, authority) and every method is fail-closed — but its `resolve` is explicitly marked **not mounted in production** by the source comment, and the live path is the facade's own binding, principal, and lifetime checks;
+- after a lease is invalidated, `ResolveError::StaleOwner` / `StaleProvider` in `src/capability/facade.rs` refuses further use;
+- before dispatching a special capability, `src/capability/special.rs` checks that the same record is still current, which is the ABA / lifecycle boundary for stale captures.
+
+> **Status: planned（规划中）** — blueprint `docs/research/aleph_modularization_plan.md` §4.4 fallback and failure semantics.
+
+The blueprint's fallback table is:
+
+- a **resolution-time failure** (no usable implementation can be resolved) falls back to the builtin implementation;
+- a **call-time failure** does not fall back — the error is returned to the model unchanged, because swapping implementations mid-call hides the problem;
+- the memory-embedding kind of slot **never falls back**;
+- a slot that explicitly opts out of fallback does not fall back at resolution time either;
+- a slot that explicitly opts into falling back to the builtin may do so at call time, but it must be marked as served by the builtin and must record an audit event — silent fallback is not allowed.
+
+Nothing in the current code corresponds to any of these rules: there is no "served by the builtin" marker and no fallback audit event.
+
+## Planned versus current
+
+| Blueprint item | Blueprint section | Closest thing in the current code | Status |
+|---|---|---|---|
+| Three-layer model (L1 kernel / L2 default modules / L3 replacement surface) | §2 | `CapabilityKind` / `CapabilityDescriptor` in `src/capability/descriptor.rs`; the owner and lease boundary in `src/capability/ownership.rs`. There is no "replaceable surface" split | Planned |
+| Data slot catalog | §3.1 | `CapabilityId` / `CapabilityKind` in `src/capability/descriptor.rs`; `ProviderId` / `ProviderState` in `src/capability/provider.rs`. There is no slot ID catalog | Planned |
+| Behaviour slot catalog (contracts unified onto Hook@1) | §3.2 | `Hook` / `HookDescriptor` / `validate_hook_request` in `crates/aleph-slot-api/src/slot.rs`; `src/extension/hooks/registry.rs` is the legacy hook registry | Planned (contract written, not wired) |
+| Slot resolution and `SlotPlan` | §4.2 | None | Planned |
+| Hot swap of tools | §4.3 | `ToolHandlerRegistry::replace` in `src/tools/registry.rs` already has atomic replacement semantics, but only internal registration paths call it | Partially landed |
+| Registering a new owner generation on application | §4.3 | the ownership tree and lease re-check in `src/capability/ownership.rs`; generation invalidation in `src/capability/provider.rs` | Partially landed |
+| The `slots` branch of configuration hot swap | §4.3 | None | Planned |
+| Resolution-time / call-time fallback semantics | §4.4 | Fail-closed everywhere, with no builtin fallback and no fallback audit | Planned |
+| Contract major version | §4.5 | `HOOK_CONTRACT_VERSION` in `shared/protocol/src/hook.rs` (value 1); `ContractVersion` in `crates/aleph-slot-api/src/slot.rs` is not an alias of it | Partially landed |
+| Capability authorization (granting / revoking slots) | §5.2 | `GrantScope` / `AuthorizationResult` in `crates/aleph-slot-api/src/approval.rs` are the approval surface; `src/extension/plugin_trust.rs` is load trust, not capability authorization | Planned |

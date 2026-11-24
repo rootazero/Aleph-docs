@@ -453,18 +453,19 @@ To add a new provider that uses an existing protocol:
 
 ### Step 1: Add a Preset
 
-Edit `src/providers/presets.rs` and add an entry to the `PRESETS` HashMap:
+Edit `src/providers/presets/registry.rs` and add a `(&str, ProviderPreset)` tuple to the `PROFILES` slice (it is folded into the `PRESETS` map, with aliases, at lazy init). `ProviderPreset::new` takes the required four-tuple; optional fields use the `with_*` builders defined in `src/providers/presets/mod.rs`:
 
 ```rust
-m.insert(
+(
     "my-provider",
-    ProviderPreset {
-        base_url: "https://api.my-provider.com/v1",
-        protocol: "openai",
-        color: "#ff6600",
-        default_model: "my-model-v1",
-    },
-);
+    ProviderPreset::new(
+        "https://api.my-provider.com/v1", // base_url
+        "openai",                         // protocol
+        "#ff6600",                        // color
+        "my-model-v1",                    // default_model
+    )
+    .with_display("My Provider"),
+),
 ```
 
 ### Step 2: Implement Adapter (Only for New Protocols)
@@ -514,9 +515,9 @@ registry.register("my-protocol", Arc::new(MyProtocol::new(client)))?;
 
 26.7.21+ major: failover no longer clones the whole session; uses an **atomic counter** + an **atomic regen marker** to guard the switch. ~2,000 lines of unreachable provider code were deleted.
 
-### VESR Dynamic Model Routing
+### VESR Dynamic Model Routing (removed)
 
-26.6.29+: replaces the deterministic router. Aleph records every completed run's outcome and recalls a per-model track record at run start (k-NN over sqlite-vec), so the model sees which models have actually performed for this kind of work.
+Introduced in 26.6.29: Aleph recorded every completed run's outcome and recalled a per-model track record at run start (k-NN over sqlite-vec). That implementation (then the recall and experience-store modules under the routing directory) **has been deleted from the repository** — `src/routing/` now handles only the agent-routing grammar. Model selection is currently done by `src/providers/capability_gate.rs` (prompt-blind capability floor) followed by the failover walk; see [Routing](/docs/en/architecture/routing) section 8.
 
 ### Provider Presets Refreshed
 

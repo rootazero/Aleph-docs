@@ -35,8 +35,8 @@ Gateway FlowRequest
 - `flow_spec.rs` — declarative `FlowSpec` / `FlowInput` / `BrainRef` / `SandboxKind` / `SessionStrategy` / `FlowOverrides`
 - `flow_registry.rs` / `resolver.rs` — routing resolution + session resolution
 - `sandbox_factory.rs` — `WorkspaceSandbox` / `DenyAllSandbox` / `WorkspaceBuilder`
-- `deps_builder.rs` — boot-time provider chain / context budget / strategy planner assembly
-- `loader.rs` / `presets/` / `errors.rs` / `flow_run_tool.rs` / `summary_format.rs`
+- `deps_builder/` — boot-time provider chain / context budget / strategy planner assembly (`common.rs` / `context_budget.rs` / `provider_chain.rs` / `stability.rs` / `summary.rs`)
+- `loader.rs` / `presets/` / `errors.rs`
 
 ---
 

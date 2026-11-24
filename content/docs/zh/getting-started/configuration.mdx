@@ -37,7 +37,7 @@ port = 18790
 
 ## 提供商与模型
 
-提供商使用 `[providers.<name>]` 表；`general.default_provider` 和 `general.fallback_providers` 引用这些名称。
+提供商使用 `[providers.<name>]` 表；`[general]` 表中的 `default_provider` 和 `fallback_providers` 引用这些名称。
 
 ```toml
 [general]
@@ -74,7 +74,7 @@ exec_tier = "auto"  # ask / auto / full
 | `mode` | `work` | 静态划分工具呈现面，不改变权限 |
 | `exec_tier` | `auto` | 决定工具审批策略 |
 
-`[sandbox.command_policy]` 是独立的安全硬底，不能被 `full` 降低。思考级别默认是 `minimal`，可由会话与客户端控制；不要把不存在的 `agents.defaults.thinking` 写入配置。
+`[sandbox.command_policy]` 是独立的安全硬底，不能被 `full` 降低。思考级别默认是 `minimal`，可由会话与客户端控制；配置文件中没有设置默认思考级别的字段，不要自行添加。
 
 ## Gateway
 

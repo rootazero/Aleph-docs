@@ -34,7 +34,7 @@ Create a branch from `main` with a descriptive name:
 | `feat/` | New feature | `feat/telegram-voice-messages` |
 | `fix/` | Bug fix | `fix/memory-search-timeout` |
 | `refactor/` | Code restructuring | `refactor/extension-manager-split` |
-| `docs/` | Documentation changes | `docs/tool-system-guide` |
+| `docs/` | Documentation changes | `docs/<topic>` |
 | `test/` | Test additions or fixes | `test/gateway-integration` |
 | `chore/` | Build, CI, dependency updates | `chore/update-tokio-1.36` |
 
@@ -85,11 +85,11 @@ Aleph uses `rustfmt` with the default configuration. Run it before every commit:
 cargo fmt --all
 ```
 
-CI will reject PRs where `cargo fmt --all -- --check` fails.
+CI checks formatting for selected crates; see `.github/workflows/aleph-core-ci.yml` for the exact scope.
 
 ### Linting
 
-Clippy is the standard Rust linter. All warnings are treated as errors in CI:
+Use Clippy for a local check. For the packages and features checked by CI, see `.github/workflows/aleph-core-ci.yml`:
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -188,11 +188,22 @@ Use the module or area being changed:
 | `tools` | Tool system |
 | `extension` | Extension/plugin system |
 | `cli` | CLI application |
-| `desktop` | Desktop (Tauri) application |
+| `desktop` | Desktop host, capability interfaces, and native implementations |
 | `protocol` | Shared protocol types |
 | `docs` | Documentation |
 | `ci` | CI/CD pipeline |
 | `deps` | Dependency updates |
+
+Crates under `desktop/` (see `Cargo.toml` for workspace membership):
+
+| Crate | Responsibility and source |
+|-------|---------------------------|
+| `aleph-desktop` | Shared desktop capability traits (`desktop/shared/Cargo.toml`, `desktop/shared/src/traits/`) |
+| `aleph-desktop-macos` | Native macOS implementation (`desktop/macos/Cargo.toml`) |
+| `aleph-desktop-linux` | Native Linux implementation (`desktop/linux/Cargo.toml`) |
+| `aleph-desktop-windows` | Native Windows implementation (`desktop/windows/Cargo.toml`) |
+| `aleph-nsh-shell` | NSH desktop host (`desktop/nsh-shell/Cargo.toml`) |
+| `aleph-desktop-host` | Host-side helpers (`desktop/host/Cargo.toml`) |
 
 ### Examples
 
@@ -268,15 +279,15 @@ Documentation improvements are always welcome. The docs site is a separate proje
 
 ## License
 
-Aleph is licensed under the **MIT License**. By contributing, you agree that your contributions will be licensed under the same terms.
+Aleph is licensed under the **MIT License** (`LICENSE`). By contributing, you agree that your contributions will be licensed under the same terms.
 
 ---
 
-## 26.7.x Addendum
+## History: 26.7.x Addendum
 
 ### Rust Toolchain 1.95+
 
-26.7.x: `rust-version` in `Cargo.toml` has been bumped to **1.95**. Use `rustup install 1.95` or `rust-toolchain.toml` in development.
+26.7.x: `rust-version` in `Cargo.toml` has been bumped to **1.95**. See [Building](./building) for the current requirement.
 
 ### Harness 12 Files + Line-Count Ratchet
 
@@ -284,7 +295,7 @@ Aleph is licensed under the **MIT License**. By contributing, you agree that you
 
 - Top-level 8 + `agent/` 4 = **12 files** (tests under `tests/` do not count toward the ratchet)
 - Line count gated by `src/harness/tests/budget.rs` ratchet, bound to the `CEILING` constant
-- Current `CEILING` = **5,055** (`src/harness/tests/budget.rs:335`, 2026-07-26 revision); treat any line count reproduced here as a stale copy
+- At the time, `CEILING` = **5,055** (during 26.7.x); the current value is **5,535** (`src/harness/tests/budget.rs:795`); treat any line count reproduced here as a stale copy
 - The 3 questions before adding code: scaffolding vs cognition? Will a model upgrade still need it? How many real consumers does it have?
 
 ### YAGNI Withdrawal

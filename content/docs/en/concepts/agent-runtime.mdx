@@ -30,7 +30,7 @@ FlowOutcome → Gateway renders response
 ```
 
 > Phase 7 (2026-04-21) migrated `SubagentTool` to route through `Orchestrator →
-> HarnessRunner → AgentHarness`. The legacy `src/agent_loop/` path has been deleted;
+> HarnessRunner → AgentHarness`. The legacy src/agent_loop/ path has been deleted;
 > every agent run — top-level or sub-agent — uses the same harness.
 
 ## Design Principles
@@ -131,7 +131,7 @@ the gateway chat path uses — only the wiring differs:
   `cancel.is_cancelled()` at the top of every turn.
 - Sub-agent failure is collected by `AgentRuntime::run` and surfaced as
   `Result<LoopRunResult, String>` — cancellation is an error string, not a
-  boolean on `LoopRunResult` (`src/agents/runtime.rs:28-37`).
+  boolean on `LoopRunResult` (`src/agents/runtime.rs`).
 
 ```
 Main Agent (claude-opus-4) — runs via AgentHarness (Gateway chat)
@@ -207,7 +207,7 @@ exposes `QueueMode`, Pi exposes `streamingBehavior`; Aleph previously hardcoded
 ## See Also
 
 - [Agent Components](/docs/en/concepts/agent-components) — module map of the loop
-- [Orchestrator](./orchestrator) — AgentDef + FlowSpec dispatch
+- [Orchestrator](../architecture/orchestrator) — AgentDef + FlowSpec dispatch
 - [Subagent Tree RPC](/docs/en/gateway/methods/agents) — live subagent tree
 - [Tool Infrastructure](/docs/en/concepts/tool-infrastructure) — resource claims
 - [Harness Architecture](/docs/en/architecture/harness) — thin-harness philosophy

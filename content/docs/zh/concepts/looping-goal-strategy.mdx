@@ -268,7 +268,7 @@ strategy(action: "dumb_write", key, content) // 旁路校验的写入（仅供�
 
 ## 团队 run mode pin
 
-队长（team leader）在 `team.run` 时把 `usage_mode`（chat / work / code）**盖戳**并向子成员继承——`teams.run` 现在**拒绝**子成员发起 `session_set_mode` 工具调用：
+队长（team leader）在团队 run 启动时把 `usage_mode`（chat / work / code）**盖戳**（`run_mode::stamp`）并向子成员继承——团队 run 现在**拒绝**子成员发起 `session_set_mode` 工具调用：
 
 ```rust
 // src/teams/runner.rs
@@ -305,7 +305,7 @@ if turn.is_subagent() {
 - `src/strategy/planner.rs` — `PlannerNode` (tool-free 一次性 LLM) + `plan_strategy` + `try_fire_once`（atomic 防火 race）+ `env_summary` + `PLANNER_SYSTEM` prompt
 - `src/strategy/render.rs` — `render_strategy_summary` / `render_guardrails_only` / `render_workflow_global_frame`（纯函数，cache-friendly 字节确定，**不**含 now_ms / HashMap 迭代）
 - `src/builtin_tools/strategy_manage.rs` — 3 动作 `strategy` 工具
-- `src/teams/runner.rs` — `team.run` 模式盖戳 + subagent mode pin 守卫
+- `src/teams/run_mode.rs` — 团队 run 模式盖戳（`run_mode::stamp`）+ subagent mode pin 守卫
 - `src/gateway/execution_engine/goal_continuation.rs` — `post_run` / `arbitrate_gate` / `block_goal_on_failure` / `rearm_goal_after_busy` / `clear_goal_welded_strategy` 五个执行点
 - `src/gateway/goal_budget.rs` — `tree_tokens`（tree budget 聚合）
 - `src/gateway/execution_engine/goal_wait.rs` — 屏障处理
@@ -334,7 +334,7 @@ settlement-notification 的 stamp 是 `(id, completed_at_ms)`—— `completed_a
 
 ### 团队 run mode pin
 
-`teams.run` 拒绝 subagent `session_set_mode`——「队长盖戳，子成员继承」。`task_review` 接受元数据携带 `[grounding]` 注释（`exit_code` / `numeric` / `line_count`）作为 evidence，**与 loop_graph anchor truth 闭集同词表**。reject 永不要求锚（拒绝天然保守）；无 grounding 证据的 approve 在 `task_review(require_grounding=true)` 下 bounce（`grounding_required`）。
+团队 run 拒绝 subagent `session_set_mode`——「队长盖戳，子成员继承」。`task_review` 接受元数据携带 `[grounding]` 注释（`exit_code` / `numeric` / `line_count`）作为 evidence，**与 loop_graph anchor truth 闭集同词表**。reject 永不要求锚（拒绝天然保守）；无 grounding 证据的 approve 在 `task_review(require_grounding=true)` 下 bounce（`grounding_required`）。
 
 ### 跨任务 / 跨会话 kill switch
 

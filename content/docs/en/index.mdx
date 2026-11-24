@@ -32,36 +32,41 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## Architecture
 
 ```
-                          Terminals
-    ┌────────────────────────────────────────────────────────────┐
-    │ Desktop │   CLI    │ Telegram │ Discord │ iMessage │  TUI  │
-    │(Tauri v2)│         │          │         │          │       │
-    └────┬─────┴────┬─────┴────┬────┴────┬────┴────┬─────┴──┬────┘
-         │          │          │         │         │         │
-         │       WebSocket (JSON-RPC 2.0, optional wss://)    │
-         │          │          │         │         │         │
-    ┌────▼──────────▼──────────▼─────────▼─────────▼─────────▼───┐
-    │                  Aleph Core (aleph-server)                  │
-    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
-    │  │  Gateway    │  │  Harness     │  │  Tool Registry      │ │
-    │  │  (TLS/TOFU) │  │ (Think→Act)  │  │ (builtin/MCP/plugin)│ │
-    │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
-    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
-    │  │  Thinker    │  │  Session     │  │  Memory + Loop      │ │
-    │  │ (PromptBuilder)│ │ Service      │  │  Graph (governance) │ │
-    │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
-    │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
-    │  │  Approval / │  │  Extension   │  │  Heartbeat / Cron   │ │
-    │  │  Guardrails │  │  / Skill     │  │  Schedulers         │ │
-    │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
-    └────────────────────────────────────────────────────────────┘
-                                  │
-                                  │ Authenticated execution dispatch
-                                  ▼
-                        Cluster Nodes (remote executors)
+    Desktop                         Other terminals
+    ┌────────────────────────────┐  ┌─────┬─────┬──────────┬─────────┬──────────┐
+    │ Desktop host process       │  │ CLI │ TUI │ Telegram │ Discord │ iMessage │
+    │ aleph-nsh-shell            │  └──┬──┴──┬──┴─────┬────┴────┬────┴─────┬────┘
+    │ ┌────────────────────────┐ │     │     │        │         │          │
+    │ │ Panel (Leptos/WASM)    │ │     │     │        │         │          │
+    │ │ sole source of UI      │ │     │     │        │         │          │
+    │ └────────────────────────┘ │     │     │        │         │          │
+    └─────────────┬──────────────┘     │     │        │         │          │
+                  │                    │     │        │         │          │
+                  │                    │     │        │         │          │
+                    WebSocket (JSON-RPC 2.0, optional wss://)
+                  ▼                    ▼     ▼        ▼         ▼          ▼
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │                       Aleph Core (aleph-server)                        │
+    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+    │  │ Gateway          │  │ Harness          │  │ Tool Registry        │  │
+    │  │ (TLS/TOFU)       │  │ (Think→Act)      │  │ (builtin/MCP/plugin) │  │
+    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+    │  │ Thinker          │  │ Session          │  │ Memory + Loop        │  │
+    │  │ (PromptBuilder)  │  │ Service          │  │ Graph (governance)   │  │
+    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
+    │  │ Approval /       │  │ Extension        │  │ Heartbeat / Cron     │  │
+    │  │ Guardrails       │  │ / Skill          │  │ Schedulers / probes  │  │
+    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
+    └────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        Authenticated execution dispatch
+                                        ▼
+                                  Cluster Nodes (remote executors)
 ```
 
-**Shell-Core Separation.** The desktop app is a thin Tauri v2 shell — window, tray, notifications, auto-update, global hotkey. It contains **no business logic and no business UI**. All product UI lives in the Leptos Panel (served by the core at `http://127.0.0.1:18790`). All reasoning, tools, and state live in `aleph-server`. The shell can connect to a local core or a remote one (self-signed TLS with client-side TOFU pinning).
+**Shell-Core Separation.** The desktop side is a thin native host process (`aleph-nsh-shell`, source in `desktop/nsh-shell/`): window, tray, notifications and global hotkey — OS integration only, with **no business logic and no business UI**. All product UI lives in the Leptos Panel (source in `interfaces/webchat/`, served by the core at `http://127.0.0.1:18790` by default); all reasoning, tools, and state live in `aleph-server`. The host connects to a Gateway that is **already running** and does not own its lifecycle — its usage text says it “does not start, stop or reconfigure a service” (`desktop/nsh-shell/src/main.rs`); only when the `embedded-core` feature is explicitly enabled does it launch the bundled core, and only if nothing is listening on the local port (`desktop/host/src/local_server.rs`). Connecting to a remote core requires an HTTPS origin.
 
 **The Third Twin: Session Mode.** `chat` / `work` / `code` is the third user-adjustable dimension alongside `exec_tier` (execution approval tier) and `think_level` (thinking budget). It statically partitions the tool *presentation* surface only (progressive-disclosure core set + deferred-tool tier); permissions remain controlled by `exec_tier` and the approval gate. Switchable from the Panel composer pill, from Settings → Policies, or via the `session_set_mode` tool.
 
@@ -70,7 +75,7 @@ import { Cards, Card } from "fumadocs-ui/components/card";
 ## Quick Start
 
 ```bash
-# Build the core from source (Rust 1.95+)
+# Build the core from source (Rust 1.99+)
 git clone https://github.com/rootazero/Aleph.git
 cd Aleph
 cargo build --bin aleph-server --release
@@ -166,7 +171,7 @@ Open `http://127.0.0.1:18790/`, or connect the CLI to `ws://127.0.0.1:18790/ws`.
   <Card
     icon="🛠️"
     title="Development"
-    description="Building from source (Rust 1.95+), testing, contributing, and design patterns"
+    description="Building from source (Rust 1.99+), testing, contributing, and design patterns"
     href="./development/building"
   />
   <Card

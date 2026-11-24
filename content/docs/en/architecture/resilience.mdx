@@ -165,8 +165,6 @@ impl TaskTrace {
 
 `AgentTraceEvent` comes from the `aleph_protocol` crate (unified protocol); `task_id` and `step_index` are written by the dispatcher; `event_kind()` returns a stable string for indexing and filtering.
 
-> The integration test in `src/routing/integration_tests.rs::observer_*` verifies the full trace path: `RoutingAttribution` → `OutcomeObserver::on_trace` → `RoutingExperienceStore::recall` round-trips correctly.
-
 ---
 
 ## Shadow Replay & state recovery
@@ -214,19 +212,25 @@ Read-only operations (file search, code analysis) are safe to retry automaticall
 ## Trace data flow
 
 ```
-Execution: every step writes a TaskTrace
+Execution: every step produces a LoopTraceEvent
     │
     ▼
-harness::trace::TraceSink::on_trace(SessionCompleted { … })
+harness::trace::TraceSink::on_trace (src/harness/trace_sink.rs)
     │
     ▼
-gateway event bus routes to OutcomeObserver (src/routing/observer.rs)
+GatewayTraceSink → TraceFlushHandle → TracePersistence::record
+(src/gateway/execution_engine/trace_sink_adapter.rs, callback.rs)
     │
     ▼
-RoutingExperienceStore.record (src/routing/experience_store.rs, sqlite-vec k-NN)
+task_traces table (INSERT at src/resilience/database/traces.rs:133,
+schema at src/resilience/database/state_database/schema.rs:261)
 ```
 
-`OutcomeObserver` is the VESR write side; `RoutingRecall::build_routing_experience_message` is the read side (once per run, at run-start). They are paired through `RoutingAttribution.task_emb` (`OnceLock<Vec<f32>>`).
+A `TraceSink` implementation **must not block**: the sink is invoked from the harness's async tasks, so blocking there back-pressures the entire harness loop. The production path uses `GatewayTraceSink`, which forwards synchronously into `TracePersistence::record`; that layer spawns one write task per event and keeps its handle for `flush`, so the harness-side call never blocks.
+
+Unattended runs take a different sink, `UnattendedRedactingSink` (`src/gateway/execution_engine/unattended_redacting_sink.rs`): masking happens **once, at the producer**, so `task_traces` rows, channel messages and the WS `agent_trace` mirror all carry the same already-masked content. Replay is done by the trace replay handler (`src/gateway/handlers/trace_replay.rs`), which reads the `task_traces` table and nothing else.
+
+`LoopTraceEvent::SessionCompleted` (`src/harness/trace.rs:59`) is the structured fact for "a run ended": `outcome` / `iterations` / `tool_calls_made` / `total_tokens` / `hit_limit` / `final_text` / `terminate_reason` (`src/orchestrator::dispatch::TerminateReason`, the precise loop-exit cause). Usage aggregation scans the `task_traces` rows whose `event_kind = 'provider_usage'` directly (`aggregate_usage_by_agents`, `src/resilience/database/traces.rs:298`) — there is no separate statistics table.
 
 ---
 

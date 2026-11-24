@@ -1,0 +1,214 @@
+---
+title: "Panel 运行时"
+description: "Panel 内部运行时：装配链、能力快照与发现、模块化 Panel 的可选特性、加载与失败路径、插件模块拿到的窄 ABI，以及能力 UI 表面"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+本页写 Panel 内部怎么跑起来：部件怎么装配、能力快照怎么产生和被接受、插件标签页怎么被加载和卸载、插件模块实际能调用什么。宿主视角（构建、嵌入、宿主与 Panel 的通道）见 [Panel 宿主](./panel)；插件 UI 的对外契约见 [插件 UI](./plugin-ui)。
+
+## Panel 是什么
+
+Panel 是 `interfaces/webchat/` 里的 Rust + Leptos 单页应用（crate `aleph-panel`，库名 `aleph_panel`，编译为 WASM）。所有产品 UI 只有这一个真值源，桌面宿主只提供窗口和系统集成（红线 R2，见 `docs/reference/REDLINES.md`）。
+
+Panel 的代码分成两层：
+
+| 层 | 代码位置 | 是否默认编译 |
+|---|---|---|
+| 常规 Panel | `interfaces/webchat/src/app.rs` 的 `MainContent`，视图在 `interfaces/webchat/src/platform/wide/views/` | 是 |
+| 模块化 Panel | `interfaces/webchat/src/panel/` 整个目录，`interfaces/webchat/src/lib.rs` 里的 `pub mod panel;` | 否，需要 `panel-modular` feature |
+
+<Callout type="warn" title="模块化 Panel 是可选特性">
+`interfaces/webchat/Cargo.toml` 的默认 feature 是 `legacy-terminal`，`panel-modular = []` 是独立的空 feature。默认构建**不包含**模块化 Panel：不带 `panel-modular` 时 `app.rs` 渲染的是常规 `MainContent`，`interfaces/webchat/src/panel/` 下的代码根本不参与编译。本页描述的运行时，只有显式开启 `panel-modular` 时才存在。
+</Callout>
+
+## 装配链
+
+### 四个部件
+
+模块化 Panel 的运行时由四个部件组成：
+
+```text
+PanelShell            interfaces/webchat/src/panel/shell.rs
+  |-- PanelProjection  描述符 -> 可挂载标签页的投影
+  |     `-- TabRegistry  纯成员关系与启用状态
+  |-- PanelLoader      浏览器内加载/卸载插件模块
+  |-- PanelSdk         给插件模块的窄 ABI
+  `-- CapabilitySurface  渲染 Core 持有的能力 UI 表面
+```
+
+- `PanelShell` 的签名是 `pub fn PanelShell(projection: PanelProjection, initial_tab: Option<PanelTabKey>) -> impl IntoView`（`interfaces/webchat/src/panel/shell.rs`）。它自己建 `PanelLoader::new(projection.registry())`，再 `provide_context(host.clone())` 把宿主状态放进 Leptos 上下文——插件模块侧的 SDK 正是靠这个上下文拿到自己的标签页描述符。
+- `PanelProjection` 只持有一个 `registry: TabRegistry`（`interfaces/webchat/src/panel/projection.rs`），不做加载、不碰 DOM。
+- `TabRegistry` 的文件头注释写得很直白：「Pure tab membership and enabled mount projections; no loading or UI effects.」（`interfaces/webchat/src/panel/registry.rs`）
+- `PanelShell` 渲染时把导航按钮交给 `registry.rows()`，把插件挂载点放进 `data-panel-sidebar-root` 和 `data-panel-content-root` 两个 div，把失败状态交给 `PanelLoadStatus` 并提供一个重试按钮（`interfaces/webchat/src/panel/shell.rs`）。
+
+数据流是单向的：
+
+```text
+能力快照  (source.rs / discovery.rs)
+   -> PanelProjection  (projection.rs)   校验描述符
+   -> TabRegistry      (registry.rs)     成员关系 + 启用状态
+   -> PanelLoader      (loader.rs)       按 key 取描述符并挂载
+   -> PanelSdk         (sdk.rs)          模块可见的窄 ABI
+```
+
+### 描述符投影
+
+`PanelProjection` 的职责是把「协议层声明」变成「本会话可以挂载的标签页」：
+
+- `builtins(label)` 构造只有内置条目的投影；`from_snapshot` / `replace_snapshot` 从能力快照构造。
+- `replace_snapshot` 拒绝修订号不大于当前值的快照，返回 `PanelProjectionError::StaleSnapshot`——旧快照不能覆盖新快照。
+- `select_route` 把当前路由投影成 `PanelRoute`：`Legacy`（常规 Panel）、`Modular(PanelTabKey)`（某个插件标签页）、`Unavailable`（没有可挂载的目标）。
+- `PanelProjectionError` 覆盖了描述符、来源、信任、权限、完整性、入口路径、版本、修订号等各类拒绝原因，并有 `reason_code()` 给出稳定原因码（`interfaces/webchat/src/panel/projection.rs`）。
+
+注册表侧的三个投影方法（`interfaces/webchat/src/panel/registry.rs`）：
+
+| 方法 | 含义 |
+|---|---|
+| `rows()` | 全部条目，按 `(order, key.qualified())` 排序，用于渲染导航 |
+| `ordered()` | 只保留 `PanelTabStatus::Enabled` 的条目，用于挂载候选 |
+| `active_after_removal()` | 移除某个 key 后选出下一个可挂载条目 |
+
+`TabRegistry::insert_or_replace` 与 `insert_builtin` 的分工见下文「内置命名空间」。
+
+## 能力快照与发现
+
+### 不可变快照
+
+能力快照的形状定义在协议层 `shared/protocol/src/panel.rs`，Panel 侧的取值入口是 trait `PanelUiCapabilitySource`：
+
+```rust
+pub trait PanelUiCapabilitySource {
+    fn snapshot(&self) -> PanelUiCapabilitySnapshot;
+}
+```
+
+（`interfaces/webchat/src/panel/source.rs`；该文件头注释为「Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.」）
+
+协议层同时定义了快照的组成：
+
+| 类型 | 作用 |
+|---|---|
+| `PanelUiCapabilitySnapshot` | 快照本体：`revision` 加 `declarations` 列表；`new()` 按来源（内置优先于社区）再按 qualified key 排序 |
+| `PanelUiCapabilityOrigin` | 条目来源：`BuiltIn` 或 `Community` |
+| `PanelUiTrust` | 条目信任级别：`Verified` 或 `Trusted` |
+| `PanelTabDescriptor` | 单个标签页的描述符：`key`、`label`、`icon`、`order`、`entry`、`api_major`、`trust`、`permissions`、`status`、`status_detail` |
+| `PanelTabKey` | 标签页身份：`plugin_id` 加 `tab_id`，`qualified()` 拼成带冒号的展示键 |
+| `PanelTabStatus` | 标签页状态：`Enabled`、`Disabled`、`Incompatible`、`Failed` |
+| `PANEL_UI_API_MAJOR` | 插件 UI 的主版本号，当前为 `1` |
+
+快照本身没有写入路径：来源实现只负责产出，投影层只负责读取与校验（`interfaces/webchat/src/panel/source.rs`、`interfaces/webchat/src/panel/projection.rs`）。取值来源有两个具体实现：`BuiltInTerminalSource`（内置终端标签页）和 `FixturePanelUiCapabilitySource`（测试夹具）。内置终端的标签页 id 在 `panel-tab-spike` 构建下是 `terminal-pilot`，否则是 `terminal`；社区夹具快照 `community_fixture_snapshot()` 只在 `panel-tab-spike` 下存在。
+
+### 连接作用域的发现
+
+快照不是一次性拉取的，而是绑定在连接上、按 epoch 与请求代次做栅栏。状态机在 `interfaces/webchat/src/panel/discovery.rs`（文件头注释：「Connection-scoped discovery state for the canonical Panel capability snapshot.」）：
+
+- `PanelDiscoveryStatus`：`Disconnected`、`Loading`、`Ready`、`Error{message}`。
+- `SnapshotUpdate`：`Accepted`、`StaleEpoch`、`StaleRequest`、`StaleRevision`——三种「过期」分别是连接 epoch 变了、请求代次被超越、快照修订号不新。
+- `begin_connection(epoch)` 在新连接建立时开始一次查询：保留上一次的快照供界面继续渲染，同时自增请求代次。
+- `accept_snapshot` 只有在 epoch、请求代次、修订号三者都对得上时才接受，否则返回对应的过期原因。
+- `disconnect` 把状态退回 `Disconnected`，但保留最后一份已知快照。`mark_error` 只在 epoch 与请求代次都对得上、且连接尚未断开时生效；它会清空当前快照，并把状态置为 `Error{message}`。
+
+面板侧的实际调用在 `interfaces/webchat/src/context.rs` 的 `refresh_panel_discovery`，走 Gateway 的 RPC 方法 `panel.capabilities.snapshot`（协议常量 `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`，`shared/protocol/src/panel.rs`）。项目上下文通过另一个方法 `panel.project.select`（`PANEL_PROJECT_SELECT_METHOD`）选择，对应 `PanelProjectSelection` 与 `PanelUiContextSnapshot`（`shared/protocol/src/panel.rs`）。
+
+## 模块化 Panel（可选特性）
+
+### 插件标签页描述符
+
+插件要出现在 Panel 导航里，必须提供一条通过校验的 `PanelTabDescriptor`。校验分两层：
+
+协议层（`shared/protocol/src/panel.rs`）：
+
+- 身份段合法：`valid_identity_segment`、`valid_version_segment`、`valid_path_segment`。
+- 入口必须是相对的单文件路径：`valid_relative_entry` 拒绝空串、以 `/` 开头、含 `\` 或含 `:` 的入口，并要求每一段路径合法。
+- 资源完整性必须可校验：`valid_asset_integrity` 要求 `sha256-` 前缀加 32 字节的 base64 摘要。
+- 权限必须在白名单内：`supported_community_permission` 只放行有限的权限名（例如 `pty.list`、`pty.spawn`、`pty.attach`、`pty.input`、`pty.resize`、`pty.close`、`config.get`、`sessions.list`，以及带具体 topic 的 `events.subscribe`），不接受通配。
+
+注册层（`interfaces/webchat/src/panel/registry.rs`）：
+
+- `validate_descriptor` 要求 `plugin_id`、`tab_id`、`label`、`entry` 都不为空，且 `plugin_id`、`tab_id` 不含 `:`（qualified 键用冒号分隔）；`api_major` 必须等于 `PANEL_UI_API_MAJOR`。
+- 失败返回 `RegistryError`：`BuiltInShadowed`、`DuplicateKey`、`InvalidEntry`。
+
+### 内置命名空间
+
+内置命名空间常量是 `BUILTIN_NAMESPACE = "aleph"`（`interfaces/webchat/src/panel/registry.rs`）：
+
+- `insert_builtin` 是宿主初始化内置条目的唯一入口，只接受 `aleph` 命名空间。
+- `insert_or_replace` 用于插件条目；如果插件试图占用 `aleph` 命名空间，返回 `RegistryError::BuiltInShadowed` 而不是覆盖内置条目。
+
+## 加载与失败
+
+### 加载流程
+
+加载发生在浏览器侧。`interfaces/webchat/src/panel/loader.rs` 的文件头注释说明了边界：「Browser-local loading. The shared host registry is a descriptor projection only.」——注册表只是一份描述符投影，真正的加载、挂载、卸载都在页面里完成。
+
+流程：
+
+1. `PanelLoader::activate(key, sidebar_root, content_root, sdk)` 被调用。找不到对应描述符 → `InvalidDescriptor`；条目状态不是 `Enabled` → `Cancelled`；`api_major` 不匹配 → `UnsupportedApiMajor`。
+2. 浏览器桥接层 `interfaces/webchat/src/panel/loader/browser.rs`（文件头：「WASM-only JS bridge. Never exports DashboardState or transport handles.」）调用页内注册的 `globalThis.__alephLoadPanelModule`。注册点在 `interfaces/webchat/index.html`，实现是 `interfaces/webchat/panel_loader.js` 的 `loadPanelModule`，它要求模块同时提供 `describe` 与 `mount` 两个 ABI 入口，并按 `sha256-` SRI 校验完整性；不匹配 → `IntegrityMismatch`，格式非法 → `InvalidAssetIntegrity`。
+3. 社区模块的入口资源需要一次性凭据（`sdk.asset_credential()`）；凭据获取失败 → `AssetFetchFailed`。导入本身失败 → `ImportFailed`。
+4. 模块挂载失败 → `MountFailed`；卸载失败 → `UnmountFailed`；过程中被取消 → `Cancelled`。
+
+状态机：`PanelLoadStatus` 是 `Idle`、`Loading{key}`、`Mounted{key}`、`Failed{key, error}`；挂载层另有 `PanelMountState`（`Idle`、`Loading{key}`、`Mounted{key, handle}`、`Failed{key, error}`、`Disabled`）以及 `PanelModuleHandle`——它持有一个只执行一次的释放函数，`Drop` 时兜底释放浏览器侧资源（`interfaces/webchat/src/panel/mod.rs`）。
+
+### 失败类型
+
+`PanelLoadError` 的全部变体（`interfaces/webchat/src/panel/loader.rs`）：
+
+| 变体 | 触发条件 |
+|---|---|
+| `ImportFailed` | 模块导入失败 |
+| `AssetFetchFailed` | 入口资源获取失败（含凭据获取失败） |
+| `InvalidAssetIntegrity` | 完整性字段格式非法 |
+| `IntegrityMismatch` | 完整性摘要与实际资源不符 |
+| `InvalidDescriptor` | 注册表里没有对应描述符 |
+| `UnsupportedApiMajor` | `api_major` 与 `PANEL_UI_API_MAJOR` 不一致 |
+| `MountFailed` | 模块挂载抛错 |
+| `UnmountFailed` | 模块卸载抛错 |
+| `Cancelled` | 条目不是 `Enabled`，或加载被取消 |
+
+`deactivate()` 释放当前挂载并作废本次加载的 generation；`reconcile()` 在宿主投影变化后核对当前描述符仍然有效、状态仍是 `Enabled`，否则退化成 `deactivate()`。代码注释明确：撤销只释放 UI，不会去触发 provider 或 session 的生命周期操作（`interfaces/webchat/src/panel/loader.rs`）。
+
+## 插件模块拿到什么
+
+插件模块拿到的是 `PanelSdk`（`interfaces/webchat/src/panel/sdk.rs`）这一层窄 ABI，而不是宿主的内部状态。该文件的注释写得很清楚：
+
+> Browser modules receive only the narrow SDK ABI, never this adapter's private DashboardState or Shell context. Same-origin code is trusted/verified code, not sandboxed by these permission checks.
+
+要点：
+
+- **不是沙箱**。同源代码是被信任或已校验的代码，权限检查只决定「这个调用允不允许」，不提供隔离。同源策略与 `Verified`/`Trusted` 的分级是信任模型的一部分（`shared/protocol/src/panel.rs` 的 `PanelUiTrust`）。
+- `PanelSdk` 私有地持有 `DashboardState`，并通过 `use_context::<PanelHostState>()` 取得宿主上下文。`authorize()` 是 fail-closed 的：拿不到宿主上下文 → `PanelSdkError::Denied`；自己的标签页不在注册表里或状态不是 `Enabled` → 同样 `Denied`；SDK 已被 dispose 或连接已断开 → `PanelSdkError::Disposed`。
+- 公开方法：`invoke`、`subscribe`、`connection`、`navigate`、`theme`、`locale`、`dispose`。浏览器侧真正导出给模块的是 `BrowserPanelSdk`（`interfaces/webchat/src/panel/loader/browser.rs`），只暴露 `invoke`、`subscribe`、`connection`、`navigate`、`theme`、`locale`。
+- `subscribe` 需要权限 `events.subscribe:<topic>` 形式的具体 topic，不接受通配（`interfaces/webchat/src/panel/sdk.rs`）。订阅缓冲上限 256 条事件。
+- 导航受限：`PanelSdkError::InvalidNavigation` 表示导航目标不被允许；方法名不合法是 `PanelSdkError::InvalidMethod`。
+
+## 能力 UI 表面
+
+能力 UI 表面（capability surface）是 Core 持有的 UI 能力在 Panel 里的呈现，跟插件标签页是两套机制：
+
+- 组件在 `interfaces/webchat/src/panel/capability_surface.rs`，订阅常量是 `DISPLAY_TOPIC = "capabilities.ui.display"`。
+- 协议消息在 `shared/protocol/src/capability.rs`：`UiAttachment`（表面 id 加挂载代次）、`UiDisplayMessage`（表面 id、挂载代次、请求 id、文本）、`UiRenderAck`（表面 id、挂载代次、请求 id、是否已渲染）。
+- 流程：Panel 订阅显示事件 → 收到文本 → 渲染 → 在 `requestAnimationFrame` 回调之后发 `capabilities.ui.ack` 确认，让 Core 知道这一帧已经落地。
+- 这套能力的归属在 Core 一侧：命名空间常量 `UI_NAMESPACE = "aleph/ui"` 定义在 `src/capability/ui.rs`，Gateway 侧的实现是 `src/capability/ui_surface.rs`。也就是说，能力 UI 表面由运行时拥有并授权，插件不能自己声明一块核心表面。
+
+插件 UI 的路径（插件标签页、可信级别、宿主授权）见 [插件 UI](./plugin-ui)。
+
+## 规划中
+
+以下条目**尚未实现**，只在本页作为蓝图记录，不要当成现状：
+
+> **状态：规划中** — 蓝图为 `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`。目标形态是单一共享 TSX 源加带 Web 回退的原生组件，由 Core 持有能力与授权；当前 Panel 仍是 Leptos/WASM 单一实现（`interfaces/webchat/src/app.rs`、`interfaces/webchat/src/panel/`）。
+
+> **状态：规划中** — 蓝图见 `docs/research/NSH_ADR-001~009.md` 的 ADR-003：插件 UI 采用 Hybrid 形态。当前实现里插件 UI 通过 `interfaces/webchat/src/panel/loader.rs` 在浏览器侧加载，没有独立的 Hybrid 渲染层。
+
+> **状态：规划中** — 蓝图见 `docs/research/NSH_ADR-001~009.md` 的 ADR-005：受限 TSX。当前 `interfaces/webchat/src/panel/sdk.rs` 只暴露固定的窄 ABI，没有 TSX 表达式求值器。
+
+> **状态：规划中** — 蓝图见 `docs/research/NSH_ADR-001~009.md` 的 ADR-009：动态 UI 包的分发、缓存与回滚。当前只有静态嵌入的 Panel 资源（`src/gateway/control_plane/assets.rs`）与页面内的模块加载（`interfaces/webchat/panel_loader.js`），没有分发与回滚链路。
+
+## 与其它页的关系
+
+- [Panel 宿主](./panel)：宿主视角——构建、嵌入 Gateway、宿主与 Panel 的消息通道、刷新步骤。
+- [插件 UI](./plugin-ui)：插件 UI 的对外契约——插件标签页、可信级别、宿主授权入口。
+- [WebChat](../interfaces/webchat)：Panel 在用户侧呈现的整体形态。
+- [桌面宿主总览](./overview)：NSH 宿主进程与 Gateway 的分工。

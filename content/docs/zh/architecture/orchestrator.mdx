@@ -35,8 +35,8 @@ description: "AgentDef 和 FlowSpec 解析、HarnessDeps 组装，以及分发�
 - `flow_spec.rs` —— 声明式 `FlowSpec` / `FlowInput` / `BrainRef` / `SandboxKind` / `SessionStrategy` / `FlowOverrides`
 - `flow_registry.rs` / `resolver.rs` —— 路由解析 + session 解析
 - `sandbox_factory.rs` —— `WorkspaceSandbox` / `DenyAllSandbox` / `WorkspaceBuilder`
-- `deps_builder.rs` —— 启动期 provider chain / context budget / strategy planner 等依赖装配
-- `loader.rs` / `presets/` / `errors.rs` / `flow_run_tool.rs` / `summary_format.rs`
+- `deps_builder/` —— 启动期 provider chain / context budget / strategy planner 等依赖装配（`common.rs` / `context_budget.rs` / `provider_chain.rs` / `stability.rs` / `summary.rs`）
+- `loader.rs` / `presets/` / `errors.rs`
 
 ---
 

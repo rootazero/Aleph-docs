@@ -1,11 +1,11 @@
 ---
 title: "会话架构"
-description: "SessionKey 分类、SessionService actor 管道、SessionEvent 日志、presence 显式启用、每会话运行注册表，以及模板环境的确定性排序。"
+description: "SessionKey 分类、SessionService actor 管道、SessionEvent 日志、已移除的 presence 上报器、每会话运行注册表，以及模板环境的确定性排序。"
 ---
 
 # 会话架构
 
-会话是每个 Aleph run 的有状态骨干。每个会话都有一个结构化的 `SessionKey`、一条通过 `SessionService` 持久化的仅追加 `SessionEvent` 日志、以及由 `SessionRunRegistry` 强制实施的每会话运行互斥。本页涵盖 key 分类、事件日志、actor 管道、presence 显式启用以及跨切面的生命周期问题。
+会话是每个 Aleph run 的有状态骨干。每个会话都有一个结构化的 `SessionKey`、一条通过 `SessionService` 持久化的仅追加 `SessionEvent` 日志、以及由 `SessionRunRegistry` 强制实施的每会话运行互斥。本页涵盖 key 分类、事件日志、actor 管道、已移除的 presence 上报器的历史以及跨切面的生命周期问题。
 
 关于如何在请求路由时创建会话，请参阅[网关架构](./gateway)。关于会话如何喂入工具链，请参阅[工具链](./harness)。
 
@@ -172,24 +172,11 @@ CREATE TABLE session_events (
 
 ---
 
-## Presence 显式启用
+## 历史：Presence 显式启用（已移除）
 
-`src/tasks/presence/` 把 Slack 风格的主机 presence 快照送到 Gateway 事件总线：
+本页早期版本记载过 `src/tasks/` 下的 `presence` 上报器：它把 Slack 式主机在线快照（`PresenceSnapshot`：主机名、用户名、平台、空闲秒数）以 `host.presence.update` 广播到 Gateway 事件总线，需通过 `PresenceConfig::enabled`（默认 `false`）显式启用。2026-08-09 它与同类的 `mic_level` 上报器一并被移除：这两个主题从未有订阅者（没有渲染端、RPC 或通道消费它们），且广播会白白泄露主机名与操作系统用户名。详见 `src/tasks/mod.rs` 中的注释块。
 
-```rust
-pub struct PresenceSnapshot {
-    pub hostname: String,
-    pub username: String,
-    pub platform: PlatformTag,
-    pub idle_seconds: Option<u64>,
-    pub idle_state: IdleState,
-    pub captured_at: DateTime<Utc>,
-}
-```
-
-`PresenceReporter::spawn` 以 `PresenceConfig::interval_secs`（默认 30 秒）的间隔 tick，通过 `SystemCapability` trait 收集 `(hostname, username, platform, idle_seconds)`，并按 `host.presence.update` 发布 `TopicEvent`。**默认禁用**——`PresenceConfig::enabled = false` 出厂默认关闭，避免在事件总线上泄漏 PII。由运维者按主机显式启用。
-
-brain 位于 `src/tasks/presence/`（策略、调度、发布格式）；limb 留在实现 `SystemCapability` 的 `desktop/` crate 中（与 cron / mic-level 的 brain–limb 分裂一致）。
+能力本身并未丢失：`system_tool` 的 `user_idle_time` 动作可按需回答"键盘前是否有人"，集群节点存活由集群自带的 ping 与空闲看门狗跟踪。`src/gateway/event_visibility.rs` 里的 `host.` 分支被有意保留，作为失败关闭的默认值：此后任何 `host.*` 主题都是 `OperatorOnly`，而不会落入全局广播。
 
 ---
 
@@ -217,7 +204,7 @@ fn carryover_filename(job_id: &str) -> String {
 envs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
 ```
 
-`cluster.environments_list` handler 还会把在线节点排在离线节点之前，再按字母序。早先未排序的 `HashMap` 迭代会把注册表顺序泄漏到 Panel / node_list 视图；确定性排序由 `list_environments_is_sorted_by_name_then_id` 与 `environments_list_orders_online_before_offline_and_by_name` 锁定。
+`environments.list` handler(`src/gateway/handlers/cluster.rs`)还会把在线节点排在离线节点之前，再按字母序。早先未排序的 `HashMap` 迭代会把注册表顺序泄漏到 Panel / node_list 视图；确定性排序由 `list_environments_is_sorted_by_name_then_id` 与 `environments_list_orders_online_before_offline_and_by_name` 锁定。
 
 ---
 
@@ -231,11 +218,11 @@ envs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
 
 | 方法 | 说明 |
 |--------|-------------|
-| `session.get` | 获取会话信息 |
-| `session.list` | 列出会话（按活动、agent 等过滤） |
-| `session.history` | 获取消息历史（遗留投影） |
+| `sessions.preview` | 获取会话预览/摘要信息（`session.get` 不存在） |
+| `sessions.list` | 列出会话（按活动、agent 等过滤） |
+| `sessions.history` | 获取消息历史（遗留投影） |
 | `session.compact` | 触发压缩 |
-| `session.delete` | 删除会话 |
+| `sessions.delete` | 删除会话 |
 
 ---
 

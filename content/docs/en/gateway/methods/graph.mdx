@@ -88,7 +88,7 @@ The following methods are described in earlier versions of this page but are **n
 
 | Method | Why it is not an RPC |
 |--------|---------------------|
-| `graph.entities` / `graph.add_entity` / `graph.add_relation` / `graph.delete_entity` | There is no free-standing `Entity` table; the graph is built from the `notes_index` (`KnowledgeNote` + wikilinks + similarity edges). The Panel calls `graph.query` for a render and never had a single-entity insert path. |
+| Standalone entity CRUD | There is no free-standing `Entity` table; the graph is built from the `notes_index` (`KnowledgeNote` + wikilinks + similarity edges). The Panel calls `graph.query` for a render and never had a single-entity insert path. |
 | `graph.neighbors` | Surfaces the same data as the `edges` of `graph.query`; the Panel iterates the edges client-side. |
 
 `graph.neighbors` is occasionally referenced in older design docs; in the runtime it is just a property of the `edges` array returned by `graph.query`.

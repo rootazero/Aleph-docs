@@ -45,7 +45,7 @@ The floors are env-overridable with `ALEPH_GATEWAY_TOOLS_ALLOW`.
 |-----------|------|----------|-------------|
 | `tool_name` | string | yes | Canonical tool name (e.g. `memory_search`, `note_manage`) |
 | `arguments` | object | no | JSON arguments forwarded to the tool (schema depends on the tool) |
-| `agent_id` | string | no | When supplied, folded into `arguments.agent_id` unless already present |
+| `agent_id` | string | no | When supplied, folded into `arguments` → `agent_id` unless already present |
 
 **Response (success):** `{ "ok": true, "tool_name", "result" }`.
 
@@ -89,7 +89,7 @@ Every `ToolSource` is bucketed into one of six source ids. The taxonomy is share
 |-----------|----------------|----------|
 | `native` | `ToolSource::Native` | Hard-coded builtin capabilities |
 | `builtin` | `ToolSource::Builtin` | `BUILTIN_TOOL_DEFINITIONS` loop entries |
-| `mcp:<server>` | `ToolSource::Mcp { server }` | Ex-`mcp.add`'d servers (e.g. `mcp:github`) |
+| `mcp:<server>` | `ToolSource::Mcp { server }` | Ex-`mcp_config.create`'d servers (e.g. `mcp:github`) |
 | `skill:<id>` | `ToolSource::Skill { id }` | `skill_read` etc. |
 | `plugin:<plugin_id>` | `ToolSource::Plugin { plugin_id }` | Plugin-registered tools |
 | `custom` | `ToolSource::Custom { .. }` | User-defined |

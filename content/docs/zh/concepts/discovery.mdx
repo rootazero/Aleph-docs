@@ -56,7 +56,7 @@ pub struct DiscoveryManager {
 | 方法 | 说明 |
 |---|---|
 | `with_defaults()` | 用当前目录 + 默认深度构建 |
-| `find_config_files(filename)` | 自下而上查找 `<filename>`（如 `aleph.jsonc`），返回 `[global, …project]`，项目级后写 |
+| `find_config_files(filename)` | 自下而上查找 `<filename>`（如 `config.toml`），返回 `[global, …project]`，项目级后写 |
 | `discover_skill_dirs()` / `discover_command_dirs()` / `discover_agent_dirs()` | 在每个扫描根的 `<root>/<component>/` 下扫子目录 |
 | `discover_plugins()` | 只扫 `~/.aleph/plugins/`（含 monorepo 一层深度） |
 | `discover_plugins_with_extra(parents)` | 同时扫每个项目级 `<project>/.aleph/plugins/` |
@@ -98,7 +98,7 @@ pub enum DiscoverySource {
 
 ```rust
 let manager = DiscoveryManager::with_defaults()?;
-let configs = manager.find_config_files("aleph.jsonc")?;
+let configs = manager.find_config_files("config.toml")?;
 // 从 working_dir 向上找到 git 根（或深度上限），按 [global, …project] 返回
 ```
 

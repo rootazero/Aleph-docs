@@ -41,7 +41,7 @@ The iMessage adapter lives under `src/gateway/interfaces/imessage/`:
 |--------|----------------|
 | `mod.rs` | `IMessageChannel`, capability defaults, factory wiring |
 | `config.rs` | `IMessageConfig`, `DmPolicy`, `GroupPolicy` |
-| `db.rs` | `MessagesDb` — read-only SQLite wrapper around `chat.db` |
+| `db.rs` | `MessagesDb` — read-only SQLite wrapper around the Messages database (default `~/Library/Messages/chat.db`) |
 | `sender.rs` | AppleScript-driven outbound send |
 | `target.rs` | Target normalization (`normalize_phone`, `parse_target`, `IMessageTarget`, `Service`) |
 | `reaction.rs` | Tapback code ↔ emoji mapping (single source for both transports) |
@@ -248,7 +248,7 @@ The **pairing** policy uses the gateway's single `PairingStore`. An operator gen
 
 The polling loop runs in a background Tokio task:
 
-1. **Open database** — `chat.db` is opened read-only (`SQLITE_OPEN_READ_ONLY`)
+1. **Open database** — the Messages database is opened read-only (`SQLITE_OPEN_READ_ONLY`)
 2. **Record last ROWID** — On startup, the current max ROWID is the baseline
 3. **Poll loop** — Every `poll_interval_ms`:
    - Query for messages with `ROWID > last_seen` and `is_from_me = 0`
@@ -318,9 +318,9 @@ Attachments are detected via the `cache_has_attachments` flag in the message tab
 | Field | Source |
 |-------|--------|
 | `id` | Attachment GUID |
-| `mime_type` | From `attachment.mime_type` (local) or BlueBubbles `TransferName` |
-| `filename` | From `attachment.filename` or `transfer_name` |
-| `size` | From `attachment.total_bytes` |
+| `mime_type` | local: the `mime_type` field of `AttachmentInfo`; BlueBubbles: the MIME type returned by the server |
+| `filename` | local: the `transfer_name` field of `AttachmentInfo`, falling back to the basename of its `filename` field; BlueBubbles: not set |
+| `size` | local: the `total_bytes` field of `AttachmentInfo`; BlueBubbles: not set |
 
 ### Sending Attachments
 
@@ -337,7 +337,7 @@ The `chat_identifier` is typically the phone number for DMs or an internal ID fo
 
 ## Database Schema (Local Transport)
 
-Aleph reads from three primary tables in `chat.db`:
+Aleph reads from three primary tables in the Messages database:
 
 ### `message` Table
 

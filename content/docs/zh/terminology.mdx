@@ -107,12 +107,40 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Plugin.install (unified)** | 插件统一入口 | `plugin.install` 不再猜测来源；按源（市场 / 压缩包 / 路径）分类统一处理 |
 | **Plugin Marketplace** | 插件市场 | 列入 `plugin.marketplace.list` / `plugin.marketplace.add` 的可索引目录 |
 
+## 桌面宿主与 Panel
+
+| English | 中文 | 定义 |
+|---------|---------|------------|
+| **NSH** | NSH | Aleph 桌面端的目标形态：原生桌面宿主 crate `aleph-nsh-shell`（`desktop/nsh-shell/`），基于 nsh 0.6.0（`nsh-core` / `nsh-base` / `nsh-engine` 锁定 `=0.6.0`） |
+| **Desktop Host** | 桌面宿主 | 薄原生壳：只提供窗口容器、托盘、全局热键、通知、凭据存取、登录项状态读取等系统级集成；**不持有任何聊天或会话投影**（`desktop/nsh-shell/src/shell_host.rs`） |
+| **Panel** | 面板 | 业务界面的唯一真值源：Rust + Leptos/WASM，代码在 `interfaces/webchat/`；NSH 托管的就是这一个 Panel，不是第二套业务 UI |
+| **Panel Runtime** | 面板运行时 | Panel 内部的模块化运行时（`interfaces/webchat/src/panel/`）：`TabRegistry` / `PanelProjection` / `PanelLoader` / `PanelSdk`；`panel-modular` 是 opt-in feature |
+| **Legacy Shell** | 旧桌面壳 | 过渡期遗留的 Tauri v2 应用（`desktop/shell/`）：自带 daemon supervisor、托盘、自动更新、深链、热键、菜单、通知。**最终会删除** |
+| **embedded-core** | 内嵌核心 | NSH 的编译期可选特性（默认关）：本地目标且端口确实空闲时，允许启动同目录随包的 `aleph-server`；端口已被占用时只做兼容性检查，不接管已有服务 |
+| **aleph:// deep link** | aleph:// 深链 | NSH 注册的 URL scheme；当前只识别精确的 `aleph://open`（打开 Chat），其余 `aleph://` URL 被忽略 |
+
+## 能力模型与插槽
+
+| English | 中文 | 定义 |
+|---------|---------|------------|
+| **Capability** | 能力 | `src/capability/` 的能力模型主体：带 kind、facet、schema、归属与后端绑定的可解析描述符；取代旧扩展模型里的同名概念（见下表「Capability（扩展期）」） |
+| **Capability（扩展期）** | 能力（扩展期） | 旧扩展模型里的权限声明（文件系统 / 网络 / 进程），对应 `src/extension/` 的历史结构；现已被上述能力模型取代 |
+| **CapabilityKind** | 能力种类 | 能力的类别枚举（`src/capability/descriptor.rs`） |
+| **CapabilityFacet** | 能力面 | 描述符上声明的侧面（如权限、UI 暴露、事件受众） |
+| **SchemaRef** | 模式引用 | 能力输入输出所引用的结构契约（`src/capability/descriptor.rs`） |
+| **OwnerGeneration / FencingToken** | 属主世代 / 围栏令牌 | 归属的世代号与围栏令牌：防止旧属主在回收后继续生效（`src/capability/ownership.rs`） |
+| **OwnershipChange** | 归属变更 | 能力归属的变更事件 |
+| **Backend / BackendLease** | 后端 / 后端租约 | 能力的实际实现来源及其租约；`BackendSourceEvidence` 记录来源证据（`src/capability/backend.rs`、`facade.rs`） |
+| **PolicyDenial** | 策略拒绝 | 策略引擎拒绝一次能力调用的结果（`src/capability/policy_runtime.rs`） |
+| **Zahir** | Zahir | 能力解析与分发的唯一活动宿主：`ZahirFacade`（`src/capability/zahir_facade.rs`）组合工具后端适配器（可调用工具的唯一真值源）与 `OwnershipTree`（归属 / 撤销 / 释放的唯一真值源），不持有第二套描述符或处理器表 |
+| **Slot API** | 插槽 API | `crates/aleph-slot-api/`：插槽契约的唯一权威（错误、文本、工具、搜索 / 嵌入、频道、审批、取消、webhook、AI provider）。**无 I/O、无平台、无 LLM**，依赖方向单向：`alephcore → aleph-slot-api` |
+
 ## 安全
 
 | English | 中文 | 定义 |
 |---------|---------|------------|
 | **Sandbox** | 沙箱 | 带有能力强制执行的每会话执行隔离 |
-| **Capability** | 能力 | 权限声明（文件系统、网络、进程） |
+| **Capability（扩展期）** | 能力（扩展期） | 旧扩展模型里的权限声明（文件系统、网络、进程）；现已被 `src/capability/` 的能力模型取代，见[能力模型](/docs/zh/capabilities/capability-model) |
 | **Capability Ledger** | 能力账本 | 每次安装时从磁盘重建的可见能力清单（用于安装前披露） |
 | **Approval Gate** | 审批门 | 提升权限的人机回环审批 |
 | **fail-closed** | 失败关闭 | 缺失策略文件或默认值不一致时拒绝授权（`permissive_default` 必须等于 `Default::default()`） |
@@ -140,6 +168,12 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Session Key** | 会话密钥 | 会话的唯一标识符（例如 `agent:main:main`） |
 | **Event Bus** | 事件总线 | 用于实时事件分发的发布/订阅系统；`broadcast::RecvError::Lagged` 必须恢复而非永久死亡 |
 | **JSON-RPC** | JSON-RPC | 基于 WebSocket 的请求/响应协议 |
+| **Protocol v1** | 协议 v1 | 带版本协商的新传输协议：4 字节大端长度前缀分帧 + `system.hello` 握手（`shared/protocol/src/framing.rs`、`shared/protocol/src/system_hello.rs`） |
+| **Frame** | 帧 | 长度前缀 + 负载的传输单元；默认单帧上限 `DEFAULT_MAX_PAYLOAD_BYTES = 8_388_608`（8 MiB） |
+| **system.hello** | system.hello | 连接建立后的握手请求：协商协议次版本与特性；major 不匹配返回 `INVALID_PARAMS` |
+| **Desktop IPC** | 桌面 IPC | Unix socket 上的只读传输（`--desktop-ipc <socket>`），`src/gateway/server/connection/local_ipc.rs` |
+| **Web v1** | Web v1 | 原生 TLS 的新传输：`POST /v1/session` + `GET /v1/ws`，`src/gateway/server/connection/web_v1.rs` |
+| **Legacy /ws** | 旧 /ws 入口 | 无版本号的旧 WebSocket 入口（`ws://127.0.0.1:18790/ws`），不使用长度前缀分帧 |
 | **Trace** | 追踪 | 用于可观察性的执行事件流 |
 | **Error Receipt** | 错误回执 | 网关返回给客户端的**单一来源**用户可读错误；原始错误链不外泄 |
 | **Dead Letter** | 死信 | channel.* 未能成功下发的消息，可在 Panel 内重投递 |
@@ -257,19 +291,19 @@ description: "Aleph 概念的标准化术语和翻译"
 |----------|-------------|--------|
 | OTAF | Think→Act | 架构从 OTAF 改为 Harness |
 | Agent Loop | Harness | 统一在 Harness 术语下 |
-| `src/agent_loop/` | `src/harness/` | 工具链迁移；旧目录已删除 |
+| agent-loop 模块目录 | `src/harness/` | 工具链迁移；旧目录已删除（agent 运行时现由 `src/agents/runtime.rs` 承载） |
 | LanceDB | SQLite + sqlite-vec | 存储后端更改 |
 | JSON5 config | TOML config | 配置格式更改 |
 | `aleph` 二进制文件 | `aleph-server` | 二进制文件重命名 |
 | Skill System v1 | Skill System v2 | 完全重写 |
 | EvolutionTracker | Registry | 旧技能系统的一部分 |
 | SolidificationDetector | EligibilityService | 旧技能系统的一部分 |
-| SubagentTool | （保留为子代理生成工具） | 与 `FlowRunTool`（`src/orchestrator/flow_run_tool.rs`）并存；前者负责子代理 spawn，后者负责流程编排 |
+| SubagentTool | （保留为子代理生成工具，`src/agents/subagent_tool/`） | 流程侧没有独立的 FlowRunTool 工具：流程编排改为声明式 `FlowSpec`（`src/orchestrator/flow_spec.rs`）经 `FlowRegistry`（`src/orchestrator/flow_registry.rs`）解析派发 |
 | LoopToolRegistry | ToolService | 统一工具外观 |
 | ClawHub 设置标签页 | 扩展商店 | ClawHub 降级为长尾；设置标签页已移除 |
 | `teams.run` | `teams.chat.send` / 协调任务 | 该方法从不存在——团队使用聊天线程 + 任务 |
 | `coordination: sequential\|parallel\|hierarchical` | 团队战略协调（队长先行规划） | 协调模式纯属虚构 |
-| DiminishingReturnsDetector | （已移除） | harness ratchet 收紧至当前 `CEILING`（`src/harness/tests/budget.rs:335`）；该硬停违反 R10 |
+| DiminishingReturnsDetector | （已移除） | harness ratchet 收紧至当前 `CEILING`（`src/harness/tests/budget.rs:795`）；该硬停违反 R10 |
 | Telegram 本地 pairing store | 路由器单源 pairing store | 频道本地 store 从未生效 |
 | Discord 平行嵌套配置层 | 路由器单源配置 | 平行层已删除 |
 | Provider 故障转移深克隆全会话 | 原子 regen marker + 单次克隆 | 性能/正确性修复 |

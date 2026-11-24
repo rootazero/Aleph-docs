@@ -144,7 +144,7 @@ SQLite 数据库提供 CRUD 操作：
 
 - `src/resilience/mod.rs` — 模块概览
 - `src/resilience/types.rs` — 核心类型 (AgentTask, TaskTrace 等)
-- `src/resilience/database/state_database.rs` — SQLite CRUD 操作
+- `src/resilience/database/state_database/` — SQLite CRUD 操作
 - `src/resilience/database/migration.rs` — 模式版本控制
 
 ## 另请参阅
@@ -159,7 +159,7 @@ SQLite 数据库提供 CRUD 操作：
 
 ### Guardian Judge payload 隐藏密钥
 
-26.7.21+：`GuardianApprovalRequester`（LLM 判官，位于 `src/approval/guardian_requester.rs`）向判官 LLM 发送的 action 描述走 `SecretMasker`（`src/exec/masker`）屏蔽密钥——摘要与每个解析出的命令段都过同一 masker，避免被遮蔽的摘要遮不住 argv 中残留的 bearer / basic-auth / 通用密码赋值。判官失败也有熔断（重复 judge 调用错误超时直接升级到人，跳过 judge 调用）。
+26.7.21+：`GuardianApprovalRequester`（LLM 判官，位于 `src/approval/guardian_requester.rs`）向判官 LLM 发送的 action 描述走 `SecretMasker`（`src/exec/masker.rs`）屏蔽密钥——摘要与每个解析出的命令段都过同一 masker，避免被遮蔽的摘要遮不住 argv 中残留的 bearer / basic-auth / 通用密码赋值。判官失败也有熔断（重复 judge 调用错误超时直接升级到人，跳过 judge 调用）。
 
 ### Heartbeat 拒绝危险工具
 

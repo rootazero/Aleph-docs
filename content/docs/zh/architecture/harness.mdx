@@ -93,7 +93,7 @@ pub enum HarnessError {
 
 ## 源映射
 
-`src/harness/` 由 `tests/budget.rs` 棘轮锁定为 **12 文件**（`CEILING = 5055`，2026-07-26）。第 13 个文件或任何行数增长都会让 `cargo test -p alephcore --lib` 失败。
+`src/harness/` 由 `src/harness/tests/budget.rs` 棘轮锁定为 **12 文件**（`CEILING = 5535`）。第 13 个文件或任何行数增长都会让 `cargo test -p alephcore --lib` 失败。
 
 | 文件 | 角色 |
 |------|------|

@@ -3,7 +3,7 @@ title: "ClawHub"
 description: "ClawHub（clawhub.ai）的历史参考 —— 其 HTTP 客户端已从 Aleph 退役。"
 ---
 
-> **状态（2026-07）：ClawHub 不再作为一等源可达。** 专属的 `src/clawhub/` 模块已退役；指向它的 Settings 标签页被移除并并入 Settings → Advanced。ClawHub 内容的浏览、搜索、安装现统一通过[扩展商店](./extensions-store)进行，后者门面化 **aleph-hub** 目录（`https://hub.heyaleph.com/catalog.json`）以及 Claude / Aleph 插件市场、Official MCP Registry、Docker MCP Catalog。当前源码中 `clawhub` 仅以两种方式出现：作为 `HubCatalog` 条目上的 `via` 来源标签（当某 artifact 可溯源到 OpenClaw 上游时），以及作为 `markdown_skill` 加载器仍识别的 OpenClaw `ClawHub` SKILL.md 元数据命名空间（兼容旧式安装）。本页仅作历史参考保留。
+> **状态（2026-07）：ClawHub 不再作为一等源可达。** 专属的 src/clawhub/ 模块已退役；指向它的 Settings 标签页被移除并并入 Settings → Advanced。ClawHub 内容的浏览、搜索、安装现统一通过[扩展商店](./extensions-store)进行，后者门面化 **aleph-hub** 目录（`https://hub.heyaleph.com/catalog.json`）以及 Claude / Aleph 插件市场、Official MCP Registry、Docker MCP Catalog。当前源码中 `clawhub` 仅以两种方式出现：作为 `HubCatalog` 条目上的 `via` 来源标签（当某 artifact 可溯源到 OpenClaw 上游时），以及作为 `markdown_skill` 加载器仍识别的 OpenClaw `ClawHub` SKILL.md 元数据命名空间（兼容旧式安装）。本页仅作历史参考保留。
 
 ## 设计理念（历史）
 
@@ -142,7 +142,7 @@ ClawHub HTTP 客户端本身已不在 `src/` 中；没有 `clawhub.*` 网关 RPC
 
 ## 代码位置
 
-- 历史模块：`src/clawhub/`（已移除） —— `client.rs`、`types.rs`
+- 历史模块：src/clawhub/（已移除） —— `client.rs`、`types.rs`
 - 当前出现位置：`src/hub/catalog_client.rs`、`src/hub/types.rs`、`src/tools/markdown_skill/spec.rs`、`src/skill/guard.rs`
 
 ## 另请参阅

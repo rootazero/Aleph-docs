@@ -103,7 +103,7 @@ artifact_store.put(session_key, ArtifactOrigin::Deliverable, spec).await?;
 |------|------|
 | `artifacts.list` | 列出当前会话的所有 artifact（按 `origin` 过滤可选） |
 | `artifacts.read_text` | 读取文本 blob（**512 KB cap**，UTF-8 边界裁剪，**纯读路由**——不应进 Mutate lane） |
-| `artifacts.publish` | 写入一个 `Deliverable`（仅供 `artifact_publish` 工具调用） |
+| `session.export_html` | 把会话转写导出为自包含 HTML（详见下节「Session HTML 导出」） |
 
 **Gateway capability byte route**（`src/gateway/server/artifact_route.rs`）让远端客户端经认证 WS 也能读取——
 
@@ -131,12 +131,12 @@ capability 在 path 上：路径 `/artifact/{cap}/{id}/{filename}`，**绝不在
 - **files.rs**：项目树折叠成 artifact 面板的二级 section
 - **preview.rs**：in-pane 文本预览（不离开会话）
 
-`interfaces/webchat/src/api/typed/artifacts.ts` 提供类型化客户端：
+`interfaces/webchat/src/api/artifacts.rs` 提供 Panel 端类型化 RPC 客户端（`ArtifactsApi`）：
 
-```ts
-const list = await artifacts.list({ session_key, origin_filter: "deliverable" });
-const text = await artifacts.read_text({ session_key, id });
-const artifact = await artifacts.publish({ session_key, name, mime_type, content_base64 });
+```rust
+let items = ArtifactsApi::list(&state, session_key).await?;
+let preview = ArtifactsApi::read_text(&state, session_key, id).await?;
+let exported = ArtifactsApi::export_html(&state, session_key).await?;
 ```
 
 ## Session HTML 导出
@@ -144,7 +144,7 @@ const artifact = await artifacts.publish({ session_key, name, mime_type, content
 `src/export/`（`collect.rs`、`document.rs`、`export.css`、`markdown.rs`、`mod.rs`、`page.rs`、`session_html.rs`）提供：
 
 - **`session.export_html`**：把会话转写导出为独立 HTML（自包含 CSS）
-- **`session.export_markdown`**：纯函数式 markdown 导出（便于外部脚本再处理）
+- **`render_markdown`**（`markdown.rs`）：把消息 markdown 文本渲染为 HTML（导出文档内部使用，非 RPC）
 - **`export.css`**：导出文档的样式（与 Panel 主题对齐）
 - `collect_artifacts` / `render_document_html` / `page.rs`：artifact 内联字节（双层预算 `MAX_INLINE_ARTIFACT_BYTES = 4 MiB` / `MAX_INLINE_TOTAL_BYTES = 24 MiB`）
 
@@ -174,7 +174,7 @@ pub enum ArtifactError {
 - `src/gateway/handlers/artifacts.rs` — 3 个 RPC（~650 行）
 - `src/gateway/server/artifact_route.rs` — `ArtifactRouteState` + `artifact_routes()` + capability 解码（防 cap 持有者枚举别人的 id）
 - `interfaces/webchat/src/components/artifacts/{mod,deliverable,files,preview,row}.rs` — Panel 5 个子模块
-- `interfaces/webchat/src/api/artifacts.ts` — Panel 端类型化 RPC 客户端
+- `interfaces/webchat/src/api/artifacts.rs` — Panel 端类型化 RPC 客户端
 
 ## 关键约束与契约
 

@@ -3,7 +3,7 @@ title: "providers.*"
 description: "AI model provider configuration RPC methods"
 ---
 
-`providers.*` is the LLM provider CRUD surface. Twelve methods are registered via `register_config_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/settings.rs:260-404`) once the live `Config` is loaded. The `create` / `update` / `delete` / `setDefault` paths have two registrations each — a base handler plus a `_hot` variant — but the registry only ever exposes the hot variant; the `multi_registry` decides which is wired at boot, and a `None` registry falls back to the config-only path. The OAuth methods are registered separately through `register_oauth_handlers` next to the OAuth state cell.
+`providers.*` is the LLM provider CRUD surface. Twelve methods are registered via `register_config_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/settings.rs`) once the live `Config` is loaded. The `create` / `update` / `delete` / `setDefault` paths have two registrations each — a base handler plus a `_hot` variant — but the registry only ever exposes the hot variant; the `multi_registry` decides which is wired at boot, and a `None` registry falls back to the config-only path. The OAuth methods are registered separately through `register_oauth_handlers` next to the OAuth state cell.
 
 The companion sub-namespaces (`embedding_providers.*`, `generation_providers.*`, `rerank_config.*`, `runtimes.*`, `moa.*`, `routing_rules.*`, `voice.*`, `browser_config.*`, `fetch_config.*`, `search_config.*`, `memory_config.*`, `general_config.*`, `behavior_config.*`, `execution_config.*`, `route_config.*`, `generation_config.*`, `security_config.*`, `acp.*`) are also wired by the same `register_config_handlers` call. They follow the same vault-backed config pattern; only `acp.*` is conditional on a built `AcpAdapterManager`.
 
@@ -199,7 +199,7 @@ Read the current OAuth state. If the cached token is expired, attempts a refresh
 | `search_config.*` | `get` / `update` / `test` / `deleteBackend` |
 | `memory_config.*` | `get` / `update` / `retrieve_with_trace` |
 | `general_config.*` / `behavior_config.*` / `execution_config.*` / `route_config.*` / `generation_config.*` / `security_config.*` | `get` / `update` |
-| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown` (only if an `AcpAdapterManager` was built) |
+| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `acp.sessions.list` / `acp.sessions.cancel` / `acp.sessions.shutdown` (they belong to the `acp.*` namespace, not the top-level `sessions.*`; `cancel` is a cooperative fire-and-forget cancel, `shutdown` kills the ACP session for (harness, cwd, name) and is idempotent; only if an `AcpAdapterManager` was built) |
 
 Each sub-namespace follows the same vault-backed pattern (API keys and secrets live in `ai:<name>` / `embed:<id>` / `gen:<id>` / `web_fetch:<backend>` / `search:<backend>`, never in the persisted config).
 

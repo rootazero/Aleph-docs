@@ -1,260 +1,849 @@
 ---
-title: "Methods Reference"
-description: "Overview of all Gateway RPC method namespaces"
+title: "Method reference"
+description: "Gateway method census and Open / Admin classifications"
 ---
 
-The Aleph Gateway exposes its functionality through namespaced JSON-RPC 2.0 methods. Each namespace groups related operations, and every method follows the same request/response conventions. The namespace registry lives in [`src/gateway/handlers/mod.rs`](../../../reference/GATEWAY.md) and `src/bin/aleph-server/commands/start/builder/handlers/` on the boot path.
+Use this index to find Gateway method names, role classifications, and existing reference pages.
 
-## Request Format
+## What the census records
 
-All RPC requests use the JSON-RPC 2.0 envelope:
+`RPC_METHOD_CENSUS` in `src/gateway/method_census.rs` is a static test audit table, not a runtime discovery API. It records registered methods and `Class::Open` / `Class::Admin`, with tests comparing registrations and runtime rulings. Every name and classification below comes directly from that table; purpose labels explain names, not parameter or behavior contracts. Runtime classification is authoritative in `src/gateway/method_admin.rs`.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "method": "namespace.method",
-  "params": { ... }
-}
+## Namespaces
+
+Groups use the first prefix actually present in code. `agent` / `agents`, `session` / `sessions`, and `channel` / `channels` remain distinct; methods without a dot have their own groups. Source: `src/gateway/method_census.rs`.
+
+## Open versus Admin
+
+`Open` means the role gate does not require operator privileges; it does not bypass authentication, session ownership, resource policy, or transport restrictions. `Admin` requires operator privileges. An authenticated member calling an Admin method receives `AUTH_REQUIRED` (-32000) with the message below. See `src/gateway/method_admin.rs`, `src/gateway/server/connection/dispatch.rs`, and `shared/protocol/src/jsonrpc.rs`.
+
+```text
+Not authorized: this method requires operator privileges
 ```
 
-- `id` can be a string, number, or `null` (`null` for notifications)
-- `method` follows the `namespace.action` naming convention
-- `params` is an optional JSON object specific to each method
+To check a method locally, search the census and classification function in the code repository:
 
-## Response Format
-
-**Success:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "result": { ... }
-}
+```bash
+rg -n '"chat.send"' src/gateway/method_census.rs
+rg -n 'method_requires_admin|MEMBER_CARVE_OUTS|ADMIN_PREFIXES' src/gateway/method_admin.rs
 ```
 
-**Error:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "error": {
-    "code": -32601,
-    "message": "Method not found",
-    "data": null
-  }
-}
-```
+## Method index
 
-## Error Codes
+Name and classification source for every table: `src/gateway/method_census.rs`. Reference links lead to related family pages, which may not cover every method; “—” means no matching reference page yet. This list does not promise availability over every transport; see `src/gateway/server/connection/local_ipc.rs` and [Protocol v1](../protocol-v1) for ingress restrictions.
 
-| Code | Name | Description |
-|------|------|-------------|
-| -32700 | Parse error | Malformed JSON |
-| -32600 | Invalid Request | Missing required fields |
-| -32601 | Method not found | Unknown method name |
-| -32602 | Invalid params | Bad or missing parameters |
-| -32603 | Internal error | Server-side failure |
-| -32000 | Auth required | No credentials provided |
-| -32001 | Auth failed | Invalid token or signature |
-| -32002 | Permission denied | Insufficient permissions |
-| -32003 | Rate limited | Too many requests |
-| -32004 | Resource not found | Requested entity does not exist |
-| -32005 | Timeout | Operation timed out |
-| -32006 | Tool error | Tool execution failed |
+### acp
 
-## Method Namespaces
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `acp.create` | Admin | Create (acp) | — |
+| `acp.delete` | Admin | Delete (acp) | — |
+| `acp.get` | Admin | Get (acp) | — |
+| `acp.list` | Admin | List (acp) | — |
+| `acp.presets` | Admin | Presets (acp) | — |
+| `acp.presets_meta` | Admin | Presets meta (acp) | — |
+| `acp.sessions.cancel` | Admin | Cancel (acp.sessions) | — |
+| `acp.sessions.list` | Admin | List (acp.sessions) | — |
+| `acp.sessions.shutdown` | Admin | Shutdown (acp.sessions) | — |
+| `acp.set_enabled` | Admin | Set enabled (acp) | — |
+| `acp.test` | Admin | Test (acp) | — |
+| `acp.update` | Admin | Update (acp) | — |
 
-The table below groups namespaces by topic. Per-method signatures and examples live on each sub-page.
+### activity
 
-### Agent Execution
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `activity.stats` | Open | Stats (activity) | [runs](./runs) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `agent.*` | `run` / `status` / `cancel` / `list` | Agent execution control (see [agent.*](./agent)) |
-| `chat.*` | `send` / `abort` / `history` / `clear` / `rewind` / `context_estimate` | Chat interface (`chat.send` shares the execution adapter with `agent.run`) |
-| `run.*` | (stream.* events under `events.*`) | Run-lifecycle events (`run.accepted`, ...) |
+### agent
 
-### Configuration
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `agent.cancel` | Open | Cancel (agent) | [agent](./agent) |
+| `agent.list` | Open | List (agent) | [agent](./agent) |
+| `agent.resume` | Open | Resume (agent) | [agent](./agent) |
+| `agent.run` | Open | Run (agent) | [agent](./agent) |
+| `agent.status` | Open | Status (agent) | [agent](./agent) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `config.*` | `schema` / `get` / `patch` / `reload` / `path` / `validate` / `get_full_config` / `reload_with_subsystems` / `get_tool_permissions` / `update_tool_permissions` | Runtime config (see [config.*](./config)) |
-| `behavior_config.*` | `get` / `update` | Agent behaviour settings |
-| `browser_config.*` | `get` / `update` | Browser automation settings |
-| `execution_config.*` | `get` / `update` | Execution settings |
-| `fetch_config.*` | `get` / `update` / `test` | Web fetch settings |
-| `general_config.*` | `get` / `update` | General settings |
-| `generation_config.*` | `get` / `update` | Generation settings |
-| `memory_config.*` | `get` / `update` | Memory system settings |
-| `rerank_config.*` | `get` / `update` / `test` | Reranker configuration |
-| `route_config.*` | `get` / `update` | Routing settings |
-| `routing_rules.*` | `list` / `get` / `create` / `update` / `delete` / `move` | Task routing rules |
-| `search_config.*` | `get` / `update` / `test` / `deleteBackend` | Search backend configuration |
-| `security_config.*` | `get` / `update` / `list_devices` / `revoke_device` | Security settings |
+### agents
 
-### Identity
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `agents.bindings` | Admin | Bindings (agents) | [agent](./agent) |
+| `agents.create` | Admin | Create (agents) | [agent](./agent) |
+| `agents.delete` | Admin | Delete (agents) | [agent](./agent) |
+| `agents.files.delete` | Admin | Delete (agents.files) | [agent](./agent) |
+| `agents.files.get` | Admin | Get (agents.files) | [agent](./agent) |
+| `agents.files.list` | Admin | List (agents.files) | [agent](./agent) |
+| `agents.files.set` | Admin | Set (agents.files) | [agent](./agent) |
+| `agents.get` | Open | Get (agents) | [agent](./agent) |
+| `agents.list` | Open | List (agents) | [agent](./agent) |
+| `agents.set_default` | Admin | Set default (agents) | [agent](./agent) |
+| `agents.teams` | Admin | Teams (agents) | [agent](./agent) |
+| `agents.tools_schema` | Admin | Tools schema (agents) | [agent](./agent) |
+| `agents.update` | Admin | Update (agents) | [agent](./agent) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `identity.*` | `get` / `set` / `clear` / `list` | Identity / soul file management (see [identity.*](./identity)) |
+### artifacts
 
-### Scheduling & Services
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `artifacts.list` | Open | List (artifacts) | [workspace](./workspace) |
+| `artifacts.read_text` | Open | Read text (artifacts) | [workspace](./workspace) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `cron.*` | `list` / `get` / `create` / `update` / `delete` / `status` / `run` / `runs` / `toggle` | Scheduled jobs (see [cron.*](./cron)) |
-| `heartbeat.*` | `list` / `get` / `create` / `update` / `delete` / `toggle` / `wake` / `runs` | Heartbeat probe tasks |
-| `services.*` | `start` / `stop` / `list` / `status` | Background services (see [services.*](./services)) |
-| `daemon.*` | `status` / `shutdown` / `logs` | Gateway daemon control (see [daemon.*](./daemon)) |
-| `logs.*` | `getLevel` / `setLevel` / `getDirectory` | Log management (see [logs.*](./logs)) |
+### behavior_config
 
-### Events
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `behavior_config.get` | Admin | Get (behavior_config) | [config](./config) |
+| `behavior_config.update` | Admin | Update (behavior_config) | [config](./config) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `events.*` | `subscribe` / `unsubscribe` / `list` | Topic subscriptions (see [events.*](./events)) |
-| `event` | (notification) | Delivered event frame `{topic, data, timestamp}` |
-| `trace.*` | `list` / `get` / `by_runs` | Trace replay (requires state.db; otherwise `SERVICE_UNAVAILABLE`) |
-| `activity.*` | `stats` | Activity statistics |
+### browser
 
-### Memory & Knowledge
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `browser.viewer.grant.issue` | Open | Issue (browser.viewer.grant) | [browser](./browser) |
+| `browser.viewer.grant.revoke` | Open | Revoke (browser.viewer.grant) | [browser](./browser) |
+| `browser.viewer.resource.decide` | Open | Decide (browser.viewer.resource) | [browser](./browser) |
+| `browser.viewer.resource.list` | Open | List (browser.viewer.resource) | [browser](./browser) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `memory.*` | `search` / `delete` / `clear` / `listFacts` / `clearFacts` / `stats` / `compress` / `reembed` / `reembed.cancel` / `retrieve_with_trace` / `appList` / `list_corrections` / `trace` | Memory system |
-| `graph.*` | `query` / `node_detail` / `search` / `update_note` / `rename_note` / `delete_note` | Knowledge graph |
+### browser_config
 
-### Agents, Files, Tools
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `browser_config.get` | Admin | Get (browser_config) | [config](./config) |
+| `browser_config.update` | Admin | Update (browser_config) | [config](./config) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `agents.*` | `list` / `get` / `create` / `update` / `delete` / `set_default` / `files.list` / `files.get` / `files.set` / `files.delete` / `tools_schema` / `teams` / `bindings` | Agent CRUD and file management |
-| `tools.*` | `catalog` / `effective` / `invoke` / `cancel_call` / `in_flight` | Tool visibility and invocation |
-| `commands.*` | `list` / `execute` | Command discovery and execution |
+### bundled
 
-### Skills, Plugins, Extensions
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `bundled.sync` | Admin | Sync (bundled) | [plugins](./plugins) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `skills.*` | `status` / `update` / `install_dep` / `remove` / `install` | Skill management |
-| `bundled.sync` | — | Bundled-skill sync |
-| `plugin.*` | `list` / `install` / `installFromZip` / `uninstall` / `update` / `enable` / `disable` / `load` / `unload` / `reload` / `callTool` / `executeCommand` | Plugin lifecycle (canonical namespace) |
-| `plugins.*` | `list` / `install` / `installFromZip` / `uninstall` / `enable` / `disable` / `load` / `unload` / `callTool` / `executeCommand` | Plugin lifecycle (legacy namespace, kept for compatibility) |
-| `plugin.marketplace.*` | `list` / `add` / `update` / `remove` / `install` | Plugin marketplace |
-| `extensions.*` | `catalog` / `installed` / `toggle` / `uninstall` / `disclosure` / `configure` / `install` | Unified Extensions Store facade |
+### canvas
 
-### Providers / Generation / Embedding
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `canvas.apply` | Open | Apply (canvas) | [workspace](./workspace) |
+| `canvas.asset.get` | Open | Get (canvas.asset) | [workspace](./workspace) |
+| `canvas.asset.put` | Open | Put (canvas.asset) | [workspace](./workspace) |
+| `canvas.create` | Open | Create (canvas) | [workspace](./workspace) |
+| `canvas.delete` | Open | Delete (canvas) | [workspace](./workspace) |
+| `canvas.get` | Open | Get (canvas) | [workspace](./workspace) |
+| `canvas.list` | Open | List (canvas) | [workspace](./workspace) |
+| `canvas.selection.set` | Open | Set (canvas.selection) | [workspace](./workspace) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `needsSetup` / `healthcheck` / `modelsRefresh` / `catalog` / `oauthLogin` / `oauthLogout` / `oauthStatus` | AI provider management |
-| `generation_providers.*` | `list` / `get` / `create` / `update` / `delete` / `setDefault` / `test` / `voices` / `list_presets` | Media generation providers |
-| `embedding_providers.*` | `list` / `get` / `add` / `update` / `remove` / `setActive` / `test` / `presets` | Embedding providers |
+### capabilities
 
-### MCP / ACP
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `capabilities.describe` | Open | Describe (capabilities) | — |
+| `capabilities.terminal.invoke` | Admin | Invoke (capabilities.terminal) | — |
+| `capabilities.ui.ack` | Open | Ack (capabilities.ui) | — |
+| `capabilities.ui.attach` | Open | Attach (capabilities.ui) | — |
+| `capabilities.ui.detach` | Open | Detach (capabilities.ui) | — |
+| `capabilities.ui.invoke` | Open | Invoke (capabilities.ui) | — |
+| `capabilities.ui.submit_input` | Open | Submit input (capabilities.ui) | — |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `mcp.*` | `list_pending_approvals` / `respond_approval` / `cancel_approval` | MCP approval handling |
-| `mcp_config.*` | `list` / `get` / `create` / `update` / `delete` / `migrate_unified_to_actor` | MCP server configuration |
-| `acp.*` | `list` / `get` / `create` / `update` / `delete` / `test` / `set_enabled` / `presets` / `presets_meta` / `sessions.list` / `sessions.cancel` / `sessions.shutdown` | ACP harness configuration |
+### channel
 
-### Channels / Sessions
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `channel.create` | Admin | Create (channel) | [channels](./channels) |
+| `channel.delete` | Admin | Delete (channel) | [channels](./channels) |
+| `channel.pairing.approve` | Admin | Approve (channel.pairing) | [channels](./channels) |
+| `channel.pairing.approved` | Admin | Approved (channel.pairing) | [channels](./channels) |
+| `channel.pairing.list` | Admin | List (channel.pairing) | [channels](./channels) |
+| `channel.pairing.reject` | Admin | Reject (channel.pairing) | [channels](./channels) |
+| `channel.pairing.revoke` | Admin | Revoke (channel.pairing) | [channels](./channels) |
+| `channel.pairing_data` | Admin | Pairing data (channel) | [channels](./channels) |
+| `channel.send` | Admin | Send (channel) | [channels](./channels) |
+| `channel.start` | Admin | Start (channel) | [channels](./channels) |
+| `channel.stop` | Admin | Stop (channel) | [channels](./channels) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `channel.*` | `start` / `stop` / `pairing_data` / `send` / `create` / `delete` / `list` / `status` / `health` / `dead_letters` / `redrive_dead_letters` | Per-channel operations |
-| `channels.*` | `list` / `status` / `set_agent` | Channel listing and status |
-| `sessions.*` | `list` / `history` / `reset` / `delete` / `new` / `set_topic` / `patch` / `preview` / `compaction.list` / `compaction.restore` / `compaction.branch` | Session lifecycle (plural namespace) |
-| `session.*` | `usage` / `compact` / `truncate` | Session operations (singular namespace, partially requires SessionStore) |
+### channels
 
-### Teams / Group Chat / Subagent
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `channels.list` | Admin | List (channels) | [channels](./channels) |
+| `channels.set_agent` | Admin | Set agent (channels) | [channels](./channels) |
+| `channels.status` | Admin | Status (channels) | [channels](./channels) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `teams.*` | `create` / `get` / `list` / `rename` / `disband` / `delete` / `chat.send` / `chat.cancel` / `chat.thread` / `chat.history` / `create_task` / `update_task` / `list_tasks` / `task.trace` / `snapshot.*` / `workflow.*` / `acp_member.*` / `usage` | Team management |
-| `group_chat.*` | `start` / `continue` / `mention` / `end` / `list` / `history` | Multi-agent group chat |
-| `subagent.tree` | — | Subagent tree snapshot |
-| `a2a_delegate` / `a2a_*` | — | A2A subagent tools |
+### chat
 
-### Runtimes / Workspace / Projects
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `chat.abort` | Open | Abort (chat) | [chat](./chat) |
+| `chat.clear` | Open | Clear (chat) | [chat](./chat) |
+| `chat.context_estimate` | Open | Context estimate (chat) | [chat](./chat) |
+| `chat.history` | Open | History (chat) | [chat](./chat) |
+| `chat.rewind` | Open | Rewind (chat) | [chat](./chat) |
+| `chat.send` | Open | Send (chat) | [chat](./chat) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `runtimes.*` | `list` / `refresh` / `install` | Runtime capability management |
-| `workspace.*` | `create` / `list` / `get` / `update` / `archive` | Workspace isolation |
-| `projects.*` | `list` / `add` / `create_blank` / `remove` / `touch` / `get` | Project catalogue |
-| `agents.bindings` | — | agent ↔ channel bindings |
+### clarification
 
-### Wizard / Hooks
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `clarification.pending` | Open | Pending (clarification) | [agent](./agent) |
+| `clarification.resolve` | Open | Resolve (clarification) | [agent](./agent) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `wizard.*` | `start` / `next` / `answer` / `cancel` / `status` | Multi-step configuration wizard (no corresponding CLI subcommand) |
-| `hooks.*` | `list` / `registry` / `add` / `remove` / `reload` / `events` | `~/.aleph/hooks.json` admin |
+### cluster
 
-### Gateway-Side / System
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `cluster.deregister` | Admin | Deregister (cluster) | [teams](./teams) |
+| `cluster.enroll` | Admin | Enroll (cluster) | [teams](./teams) |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `health` | — | Health check |
-| `echo` | — | Echo test |
-| `version` | — | Server version |
-| `system.info` | — | System metrics (CPU, memory, disk, uptime) |
-| `request.state` | — | Per-request state read/write |
-| `gateway.identity.get` | — | Gateway-side instance identity |
-| `gateway.metrics.lanes` | — | LaneManager semaphore gauges |
-| `gateway.metrics.run_concurrency` | — | AgentRunManager concurrency gauges |
-| `gateway.credentials` | — | Gateway credential info |
-| `gateway.ticket.*` / `gateway.token.*` / `gateway.devices.*` | — | Pairing and credential admin |
-| `pty.*` | `spawn` / `input` / `resize` / `close` / `list` | Embedded interactive terminal |
+### commands
 
-### Other
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `commands.list` | Open | List (commands) | — |
 
-| Namespace | Methods | Description |
-|-----------|---------|-------------|
-| `auth.*` / `pairing.*` / `devices.*` | `connect` / `approve` / `reject` / `list` / `revoke` / `show_token` / `reset_token` / `list_sessions` / `revoke_session` | Authentication and device management |
-| `secrets.*` | `list` / `set` / `delete` / `verify` / `providers` | Vault management |
-| `exec_approvals.*` | `request` / `resolve` / `pending` | Exec approval |
-| `clarification.*` | `resolve` / `pending` | `ask_user` clarification |
-| `fs.*` | `home_dir` / `list_dir` / `create_dir` / `read_file` / `allowed_roots` | Sandboxed fs operations |
-| `insights.tools` | — | Memory tool introspection (requires MemoryBackend) |
-| `dreaming.run_now` | — | Eager-trigger dreaming |
+### config
 
-## Placeholders & Status Codes
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `config.get` | Admin | Get (config) | [config](./config) |
+| `config.get_tool_permissions` | Open | Get tool permissions (config) | [config](./config) |
+| `config.patch` | Admin | Patch (config) | [config](./config) |
+| `config.path` | Admin | Path (config) | [config](./config) |
+| `config.reload` | Admin | Reload (config) | [config](./config) |
+| `config.schema` | Admin | Schema (config) | [config](./config) |
+| `config.update_tool_permissions` | Admin | Update tool permissions (config) | [config](./config) |
+| `config.validate` | Admin | Validate (config) | [config](./config) |
 
-`HandlerRegistry::new()` in `src/gateway/handlers/mod.rs` pre-registers a set of methods so `METHOD_NOT_FOUND` is deterministic:
+### connect
 
-- **Ready immediately** — `health` / `echo` / `version` / `system.info` / `request.state` / `config.schema` / `logs.getLevel` / `logs.setLevel` / `logs.getDirectory` / `services.*` / `pty.*` / `plugins.*` / `plugin.*` / `hooks.*` / `mcp.list_pending_approvals` / `mcp.respond_approval` / `mcp.cancel_approval` / `skills.*` / `bundled.sync` / `daemon.logs`
-- **Stub until boot overrides** — `cron.*` / `heartbeat.*` / `chat.send` / `chat.abort` / `chat.history` / `chat.clear` / `session.usage` / `session.compact` / `session.truncate` / `workspace.*` / `channels.set_agent` / `agents.bindings` / `groups_*` / `daemon.status` / `daemon.shutdown` / `teams.*` / `agents.*` / `runtimes.*` / `tools.*` / `insights.tools` / `gateway.identity.get` / `gateway.metrics.*` / `gateway.credentials` / `trace.*` / `wizard.*`
-- **Not registered (METHOD_NOT_FOUND until injected)** — `identity.get` / `identity.set` / `identity.clear` / `identity.list` (must go through `register_identity_handlers`); `graph.*` (must go through `register_graph_handlers`)
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `connect` | Open | Connect | — |
 
-Stubs are overridden by the corresponding `register_*_handlers` call on the boot path (`src/bin/aleph-server/commands/start/builder/handlers/`) before the first request is served.
+### context
 
-## Common Patterns
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `context.breakdown` | Open | Breakdown (context) | [chat](./chat) |
 
-### Pagination
+### cron
 
-Methods that return lists accept optional `limit` / `offset` (exact semantics vary per method; see each sub-page):
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `cron.create` | Admin | Create (cron) | [cron](./cron) |
+| `cron.delete` | Admin | Delete (cron) | [cron](./cron) |
+| `cron.get` | Admin | Get (cron) | [cron](./cron) |
+| `cron.list` | Admin | List (cron) | [cron](./cron) |
+| `cron.run` | Admin | Run (cron) | [cron](./cron) |
+| `cron.runs` | Admin | Runs (cron) | [cron](./cron) |
+| `cron.status` | Admin | Status (cron) | [cron](./cron) |
+| `cron.toggle` | Admin | Toggle (cron) | [cron](./cron) |
+| `cron.update` | Admin | Update (cron) | [cron](./cron) |
 
-```json
-{ "jsonrpc": "2.0", "id": 1, "method": "cron.list", "params": { "limit": 20, "offset": 0 } }
-```
+### daemon
 
-### Streaming Events
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `daemon.logs` | Admin | Logs (daemon) | [daemon](./daemon) |
+| `daemon.shutdown` | Admin | Shutdown (daemon) | [daemon](./daemon) |
+| `daemon.status` | Admin | Status (daemon) | [daemon](./daemon) |
 
-`agent.run` and `chat.send` emit events on the `stream.*` and `agent.*` topics. Subscribe first:
+### diagnostics
 
-```json
-{ "jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": { "topics": ["agent.*"] } }
-{ "jsonrpc": "2.0", "id": 2, "method": "agent.run", "params": { "input": "Hello" } }
-{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "agent.response.chunk", "data": { "content": "Hi!" } } }
-```
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `diagnostics.run` | Admin | Run (diagnostics) | — |
 
-See [events.*](./events).
+### discord
 
-## See Also
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `discord.audit_permissions` | Admin | Audit permissions (discord) | [channels](./channels) |
+| `discord.list_channels` | Admin | List channels (discord) | [channels](./channels) |
+| `discord.list_guilds` | Admin | List guilds (discord) | [channels](./channels) |
+| `discord.validate_token` | Admin | Validate token (discord) | [channels](./channels) |
 
-- [Protocol](../protocol) — JSON-RPC 2.0 transport details
-- [Authentication](../auth) — Token management and device pairing
+### dreaming
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `dreaming.list_insights` | Open | List insights (dreaming) | [memory](./memory) |
+| `dreaming.run_now` | Admin | Run now (dreaming) | [memory](./memory) |
+
+### echo
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `echo` | Open | Echo | — |
+
+### embedding_providers
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `embedding_providers.add` | Admin | Add (embedding_providers) | [providers](./providers) |
+| `embedding_providers.get` | Admin | Get (embedding_providers) | [providers](./providers) |
+| `embedding_providers.list` | Admin | List (embedding_providers) | [providers](./providers) |
+| `embedding_providers.presets` | Admin | Presets (embedding_providers) | [providers](./providers) |
+| `embedding_providers.remove` | Admin | Remove (embedding_providers) | [providers](./providers) |
+| `embedding_providers.setActive` | Admin | Set Active (embedding_providers) | [providers](./providers) |
+| `embedding_providers.test` | Admin | Test (embedding_providers) | [providers](./providers) |
+| `embedding_providers.update` | Admin | Update (embedding_providers) | [providers](./providers) |
+
+### environments
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `environments.list` | Admin | List (environments) | [teams](./teams) |
+
+### exec
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `exec.approval.resolve` | Open | Resolve (exec.approval) | [exec](./exec) |
+| `exec.approvals.pending` | Open | Pending (exec.approvals) | [exec](./exec) |
+| `exec.grant.revoke` | Open | Revoke (exec.grant) | [exec](./exec) |
+| `exec.grants.list` | Open | List (exec.grants) | [exec](./exec) |
+
+### execution_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `execution_config.get` | Admin | Get (execution_config) | [config](./config) |
+| `execution_config.update` | Admin | Update (execution_config) | [config](./config) |
+
+### extensions
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `extensions.catalog` | Admin | Catalog (extensions) | [extensions](./extensions) |
+| `extensions.disclosure` | Admin | Disclosure (extensions) | [extensions](./extensions) |
+| `extensions.install` | Admin | Install (extensions) | [extensions](./extensions) |
+| `extensions.installed` | Admin | Installed (extensions) | [extensions](./extensions) |
+| `extensions.toggle` | Admin | Toggle (extensions) | [extensions](./extensions) |
+| `extensions.uninstall` | Admin | Uninstall (extensions) | [extensions](./extensions) |
+
+### fetch_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `fetch_config.get` | Admin | Get (fetch_config) | [config](./config) |
+| `fetch_config.test` | Admin | Test (fetch_config) | [config](./config) |
+| `fetch_config.update` | Admin | Update (fetch_config) | [config](./config) |
+
+### fs
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `fs.allowed_roots` | Open | Allowed roots (fs) | [workspace](./workspace) |
+| `fs.create_dir` | Open | Create dir (fs) | [workspace](./workspace) |
+| `fs.home_dir` | Open | Home dir (fs) | [workspace](./workspace) |
+| `fs.list_dir` | Open | List dir (fs) | [workspace](./workspace) |
+| `fs.read_file` | Open | Read file (fs) | [workspace](./workspace) |
+
+### gateway
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `gateway.credentials` | Admin | Credentials (gateway) | — |
+| `gateway.devices.list` | Admin | List (gateway.devices) | — |
+| `gateway.devices.revoke` | Admin | Revoke (gateway.devices) | — |
+| `gateway.flow.reload` | Admin | Reload (gateway.flow) | — |
+| `gateway.identity.get` | Admin | Get (gateway.identity) | — |
+| `gateway.metrics.lanes` | Admin | Lanes (gateway.metrics) | — |
+| `gateway.metrics.run_concurrency` | Open | Run concurrency (gateway.metrics) | — |
+| `gateway.metrics.subagent_concurrency` | Admin | Subagent concurrency (gateway.metrics) | — |
+| `gateway.ticket.create` | Admin | Create (gateway.ticket) | — |
+| `gateway.ticket.list` | Admin | List (gateway.ticket) | — |
+| `gateway.ticket.revoke` | Admin | Revoke (gateway.ticket) | — |
+| `gateway.token.current` | Admin | Current (gateway.token) | — |
+| `gateway.token.rotate` | Admin | Rotate (gateway.token) | — |
+
+### general_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `general_config.get` | Admin | Get (general_config) | [config](./config) |
+| `general_config.update` | Admin | Update (general_config) | [config](./config) |
+
+### generation_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `generation_config.get` | Admin | Get (generation_config) | [config](./config) |
+| `generation_config.update` | Admin | Update (generation_config) | [config](./config) |
+
+### generation_providers
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `generation_providers.create` | Admin | Create (generation_providers) | [providers](./providers) |
+| `generation_providers.delete` | Admin | Delete (generation_providers) | [providers](./providers) |
+| `generation_providers.get` | Admin | Get (generation_providers) | [providers](./providers) |
+| `generation_providers.list` | Admin | List (generation_providers) | [providers](./providers) |
+| `generation_providers.list_presets` | Admin | List presets (generation_providers) | [providers](./providers) |
+| `generation_providers.setDefault` | Admin | Set Default (generation_providers) | [providers](./providers) |
+| `generation_providers.test` | Admin | Test (generation_providers) | [providers](./providers) |
+| `generation_providers.update` | Admin | Update (generation_providers) | [providers](./providers) |
+| `generation_providers.voices` | Admin | Voices (generation_providers) | [providers](./providers) |
+
+### goal
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `goal.list` | Open | List (goal) | [graph](./graph) |
+
+### graph
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `graph.delete_note` | Open | Delete note (graph) | [graph](./graph) |
+| `graph.node_detail` | Open | Node detail (graph) | [graph](./graph) |
+| `graph.query` | Open | Query (graph) | [graph](./graph) |
+| `graph.rename_note` | Open | Rename note (graph) | [graph](./graph) |
+| `graph.search` | Open | Search (graph) | [graph](./graph) |
+| `graph.update_note` | Open | Update note (graph) | [graph](./graph) |
+
+### group_chat
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `group_chat.continue` | Open | Continue (group_chat) | [group_chat](./group_chat) |
+| `group_chat.end` | Open | End (group_chat) | [group_chat](./group_chat) |
+| `group_chat.history` | Open | History (group_chat) | [group_chat](./group_chat) |
+| `group_chat.list` | Open | List (group_chat) | [group_chat](./group_chat) |
+| `group_chat.mention` | Open | Mention (group_chat) | [group_chat](./group_chat) |
+| `group_chat.start` | Open | Start (group_chat) | [group_chat](./group_chat) |
+
+### health
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `health` | Open | Health | — |
+
+### heartbeat
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `heartbeat.create` | Admin | Create (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.delete` | Admin | Delete (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.get` | Open | Get (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.list` | Open | List (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.runs` | Open | Runs (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.toggle` | Admin | Toggle (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.update` | Admin | Update (heartbeat) | [heartbeat](./heartbeat) |
+| `heartbeat.wake` | Admin | Wake (heartbeat) | [heartbeat](./heartbeat) |
+
+### hooks
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `hooks.add` | Admin | Add (hooks) | — |
+| `hooks.events` | Admin | Events (hooks) | — |
+| `hooks.list` | Admin | List (hooks) | — |
+| `hooks.registry` | Admin | Registry (hooks) | — |
+| `hooks.reload` | Admin | Reload (hooks) | — |
+| `hooks.remove` | Admin | Remove (hooks) | — |
+
+### identity
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `identity.clear` | Admin | Clear (identity) | [identity](./identity) |
+| `identity.get` | Admin | Get (identity) | [identity](./identity) |
+| `identity.list` | Admin | List (identity) | [identity](./identity) |
+| `identity.set` | Admin | Set (identity) | [identity](./identity) |
+
+### insights
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `insights.tools` | Open | Tools (insights) | [memory](./memory) |
+
+### logs
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `logs.getDirectory` | Admin | Get Directory (logs) | [logs](./logs) |
+| `logs.getLevel` | Admin | Get Level (logs) | [logs](./logs) |
+| `logs.setLevel` | Admin | Set Level (logs) | [logs](./logs) |
+
+### loop
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `loop.list` | Open | List (loop) | [arena](./arena) |
+
+### mcp
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `mcp.cancel_approval` | Admin | Cancel approval (mcp) | [mcp](./mcp) |
+| `mcp.list` | Admin | List (mcp) | [mcp](./mcp) |
+| `mcp.list_pending_approvals` | Admin | List pending approvals (mcp) | [mcp](./mcp) |
+| `mcp.respond_approval` | Admin | Respond approval (mcp) | [mcp](./mcp) |
+
+### mcp_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `mcp_config.create` | Admin | Create (mcp_config) | [config](./config) |
+| `mcp_config.delete` | Admin | Delete (mcp_config) | [config](./config) |
+| `mcp_config.get` | Admin | Get (mcp_config) | [config](./config) |
+| `mcp_config.list` | Admin | List (mcp_config) | [config](./config) |
+| `mcp_config.update` | Admin | Update (mcp_config) | [config](./config) |
+
+### memory
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `memory.compress` | Admin | Compress (memory) | [memory](./memory) |
+| `memory.curated.list` | Open | List (memory.curated) | [memory](./memory) |
+| `memory.curated.remove` | Open | Remove (memory.curated) | [memory](./memory) |
+| `memory.curated.replace` | Open | Replace (memory.curated) | [memory](./memory) |
+| `memory.delete` | Open | Delete (memory) | [memory](./memory) |
+| `memory.listFacts` | Open | List Facts (memory) | [memory](./memory) |
+| `memory.list_corrections` | Open | List corrections (memory) | [memory](./memory) |
+| `memory.reembed` | Admin | Reembed (memory) | [memory](./memory) |
+| `memory.reembed.cancel` | Admin | Cancel (memory.reembed) | [memory](./memory) |
+| `memory.retrieve_with_trace` | Open | Retrieve with trace (memory) | [memory](./memory) |
+| `memory.search` | Open | Search (memory) | [memory](./memory) |
+| `memory.sessions.get` | Open | Get (memory.sessions) | [memory](./memory) |
+| `memory.sessions.list` | Open | List (memory.sessions) | [memory](./memory) |
+| `memory.sessions.search` | Open | Search (memory.sessions) | [memory](./memory) |
+| `memory.sessions.update_compression` | Open | Update compression (memory.sessions) | [memory](./memory) |
+| `memory.stats` | Open | Stats (memory) | [memory](./memory) |
+| `memory.trace` | Open | Trace (memory) | [memory](./memory) |
+
+### memory_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `memory_config.get` | Admin | Get (memory_config) | [config](./config) |
+| `memory_config.update` | Admin | Update (memory_config) | [config](./config) |
+
+### panel
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `panel.capabilities.snapshot` | Open | Snapshot (panel.capabilities) | — |
+| `panel.project.select` | Open | Select (panel.project) | — |
+
+### plugin
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `plugin.install` | Admin | Install (plugin) | [plugins](./plugins) |
+| `plugin.marketplace.add` | Admin | Add (plugin.marketplace) | [plugins](./plugins) |
+| `plugin.marketplace.browse` | Admin | Browse (plugin.marketplace) | [plugins](./plugins) |
+| `plugin.marketplace.install` | Admin | Install (plugin.marketplace) | [plugins](./plugins) |
+| `plugin.marketplace.list` | Admin | List (plugin.marketplace) | [plugins](./plugins) |
+| `plugin.marketplace.remove` | Admin | Remove (plugin.marketplace) | [plugins](./plugins) |
+| `plugin.marketplace.update` | Admin | Update (plugin.marketplace) | [plugins](./plugins) |
+| `plugin.reload` | Admin | Reload (plugin) | [plugins](./plugins) |
+| `plugin.uninstall` | Admin | Uninstall (plugin) | [plugins](./plugins) |
+| `plugin.update` | Admin | Update (plugin) | [plugins](./plugins) |
+
+### plugins
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `plugins.callTool` | Admin | Call Tool (plugins) | [plugins](./plugins) |
+| `plugins.disable` | Admin | Disable (plugins) | [plugins](./plugins) |
+| `plugins.enable` | Admin | Enable (plugins) | [plugins](./plugins) |
+| `plugins.install` | Admin | Install (plugins) | [plugins](./plugins) |
+| `plugins.installFromZip` | Admin | Install From Zip (plugins) | [plugins](./plugins) |
+| `plugins.list` | Admin | List (plugins) | [plugins](./plugins) |
+| `plugins.uninstall` | Admin | Uninstall (plugins) | [plugins](./plugins) |
+
+### projects
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `projects.add` | Open | Add (projects) | [workspace](./workspace) |
+| `projects.archive` | Open | Archive (projects) | [workspace](./workspace) |
+| `projects.bind_workspace` | Open | Bind workspace (projects) | [workspace](./workspace) |
+| `projects.channel.bind` | Admin | Bind (projects.channel) | [workspace](./workspace) |
+| `projects.channel.list` | Open | List (projects.channel) | [workspace](./workspace) |
+| `projects.channel.unbind` | Admin | Unbind (projects.channel) | [workspace](./workspace) |
+| `projects.create` | Open | Create (projects) | [workspace](./workspace) |
+| `projects.create_blank` | Open | Create blank (projects) | [workspace](./workspace) |
+| `projects.get` | Open | Get (projects) | [workspace](./workspace) |
+| `projects.list` | Open | List (projects) | [workspace](./workspace) |
+| `projects.member.add` | Open | Add (projects.member) | [workspace](./workspace) |
+| `projects.member.list` | Open | List (projects.member) | [workspace](./workspace) |
+| `projects.member.remove` | Open | Remove (projects.member) | [workspace](./workspace) |
+| `projects.remove` | Open | Remove (projects) | [workspace](./workspace) |
+| `projects.rename` | Open | Rename (projects) | [workspace](./workspace) |
+| `projects.room_session` | Open | Room session (projects) | [workspace](./workspace) |
+| `projects.touch` | Open | Touch (projects) | [workspace](./workspace) |
+| `projects.workspace.list` | Open | List (projects.workspace) | [workspace](./workspace) |
+| `projects.workspace.read` | Open | Read (projects.workspace) | [workspace](./workspace) |
+
+### providers
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `providers.catalog` | Admin | Catalog (providers) | [providers](./providers) |
+| `providers.create` | Admin | Create (providers) | [providers](./providers) |
+| `providers.delete` | Admin | Delete (providers) | [providers](./providers) |
+| `providers.get` | Admin | Get (providers) | [providers](./providers) |
+| `providers.healthcheck` | Admin | Healthcheck (providers) | [providers](./providers) |
+| `providers.list` | Admin | List (providers) | [providers](./providers) |
+| `providers.modelsRefresh` | Admin | Models Refresh (providers) | [providers](./providers) |
+| `providers.oauthLogin` | Admin | Oauth Login (providers) | [providers](./providers) |
+| `providers.oauthLogout` | Admin | Oauth Logout (providers) | [providers](./providers) |
+| `providers.oauthStatus` | Admin | Oauth Status (providers) | [providers](./providers) |
+| `providers.setDefault` | Admin | Set Default (providers) | [providers](./providers) |
+| `providers.test` | Admin | Test (providers) | [providers](./providers) |
+| `providers.update` | Admin | Update (providers) | [providers](./providers) |
+
+### pty
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `pty.attach` | Admin | Attach (pty) | — |
+| `pty.close` | Admin | Close (pty) | — |
+| `pty.input` | Admin | Input (pty) | — |
+| `pty.list` | Admin | List (pty) | — |
+| `pty.resize` | Admin | Resize (pty) | — |
+| `pty.spawn` | Admin | Spawn (pty) | — |
+
+### request
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `request.state` | Open | State (request) | [events](./events) |
+
+### rerank_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `rerank_config.get` | Admin | Get (rerank_config) | [config](./config) |
+| `rerank_config.test` | Admin | Test (rerank_config) | [config](./config) |
+| `rerank_config.update` | Admin | Update (rerank_config) | [config](./config) |
+
+### runtimes
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `runtimes.install` | Admin | Install (runtimes) | — |
+| `runtimes.list` | Admin | List (runtimes) | — |
+| `runtimes.refresh` | Admin | Refresh (runtimes) | — |
+
+### search_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `search_config.deleteBackend` | Admin | Delete Backend (search_config) | [config](./config) |
+| `search_config.get` | Admin | Get (search_config) | [config](./config) |
+| `search_config.test` | Admin | Test (search_config) | [config](./config) |
+| `search_config.update` | Admin | Update (search_config) | [config](./config) |
+
+### secrets
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `secrets.delete` | Admin | Delete (secrets) | — |
+| `secrets.list` | Admin | List (secrets) | — |
+| `secrets.providers` | Admin | Providers (secrets) | — |
+| `secrets.set` | Admin | Set (secrets) | — |
+| `secrets.verify` | Admin | Verify (secrets) | — |
+
+### security
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `security.audit.query` | Admin | Query (security.audit) | — |
+
+### security_config
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `security_config.get` | Admin | Get (security_config) | [config](./config) |
+| `security_config.update` | Admin | Update (security_config) | [config](./config) |
+
+### services
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `services.list` | Admin | List (services) | [services](./services) |
+| `services.start` | Admin | Start (services) | [services](./services) |
+| `services.status` | Admin | Status (services) | [services](./services) |
+| `services.stop` | Admin | Stop (services) | [services](./services) |
+
+### session
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `session.compact` | Open | Compact (session) | [session](./session) |
+| `session.create` | Open | Create (session) | [session](./session) |
+| `session.export_html` | Open | Export html (session) | [session](./session) |
+| `session.truncate` | Open | Truncate (session) | [session](./session) |
+| `session.usage` | Open | Usage (session) | [session](./session) |
+
+### sessions
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `sessions.compaction.branch` | Open | Branch (sessions.compaction) | [session](./session) |
+| `sessions.compaction.list` | Open | List (sessions.compaction) | [session](./session) |
+| `sessions.compaction.restore` | Open | Restore (sessions.compaction) | [session](./session) |
+| `sessions.delete` | Open | Delete (sessions) | [session](./session) |
+| `sessions.history` | Open | History (sessions) | [session](./session) |
+| `sessions.list` | Open | List (sessions) | [session](./session) |
+| `sessions.new` | Open | New (sessions) | [session](./session) |
+| `sessions.patch` | Open | Patch (sessions) | [session](./session) |
+| `sessions.preview` | Open | Preview (sessions) | [session](./session) |
+| `sessions.reset` | Open | Reset (sessions) | [session](./session) |
+| `sessions.set_project_root` | Open | Set project root (sessions) | [session](./session) |
+| `sessions.set_topic` | Open | Set topic (sessions) | [session](./session) |
+
+### skills
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `skills.install` | Admin | Install (skills) | [skills](./skills) |
+| `skills.install_dep` | Admin | Install dep (skills) | [skills](./skills) |
+| `skills.remove` | Admin | Remove (skills) | [skills](./skills) |
+| `skills.status` | Admin | Status (skills) | [skills](./skills) |
+| `skills.update` | Admin | Update (skills) | [skills](./skills) |
+
+### spend
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `spend.query` | Admin | Query (spend) | — |
+
+### subagent
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `subagent.tree` | Open | Tree (subagent) | [agent](./agent) |
+
+### system
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `system.hello` | Open | Hello (system) | — |
+| `system.info` | Open | Info (system) | — |
+
+### teams
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `teams.acp_member.add` | Open | Add (teams.acp_member) | [teams](./teams) |
+| `teams.acp_member.list` | Open | List (teams.acp_member) | [teams](./teams) |
+| `teams.acp_member.remove` | Open | Remove (teams.acp_member) | [teams](./teams) |
+| `teams.add_task_comment` | Open | Add task comment (teams) | [teams](./teams) |
+| `teams.chat.cancel` | Open | Cancel (teams.chat) | [teams](./teams) |
+| `teams.chat.history` | Open | History (teams.chat) | [teams](./teams) |
+| `teams.chat.send` | Open | Send (teams.chat) | [teams](./teams) |
+| `teams.chat.thread` | Open | Thread (teams.chat) | [teams](./teams) |
+| `teams.create` | Open | Create (teams) | [teams](./teams) |
+| `teams.create_task` | Open | Create task (teams) | [teams](./teams) |
+| `teams.delete` | Open | Delete (teams) | [teams](./teams) |
+| `teams.disband` | Open | Disband (teams) | [teams](./teams) |
+| `teams.get` | Open | Get (teams) | [teams](./teams) |
+| `teams.list` | Open | List (teams) | [teams](./teams) |
+| `teams.list_task_comments` | Open | List task comments (teams) | [teams](./teams) |
+| `teams.list_task_events` | Open | List task events (teams) | [teams](./teams) |
+| `teams.list_task_runs` | Open | List task runs (teams) | [teams](./teams) |
+| `teams.list_tasks` | Open | List tasks (teams) | [teams](./teams) |
+| `teams.list_templates` | Open | List templates (teams) | [teams](./teams) |
+| `teams.rename` | Open | Rename (teams) | [teams](./teams) |
+| `teams.snapshot.create` | Open | Create (teams.snapshot) | [teams](./teams) |
+| `teams.snapshot.delete` | Open | Delete (teams.snapshot) | [teams](./teams) |
+| `teams.snapshot.get` | Open | Get (teams.snapshot) | [teams](./teams) |
+| `teams.snapshot.list` | Open | List (teams.snapshot) | [teams](./teams) |
+| `teams.snapshot.restore` | Open | Restore (teams.snapshot) | [teams](./teams) |
+| `teams.task.journal.get` | Open | Get (teams.task.journal) | [teams](./teams) |
+| `teams.task.journal.list` | Open | List (teams.task.journal) | [teams](./teams) |
+| `teams.task.pause` | Open | Pause (teams.task) | [teams](./teams) |
+| `teams.task.resume` | Open | Resume (teams.task) | [teams](./teams) |
+| `teams.task.retry` | Open | Retry (teams.task) | [teams](./teams) |
+| `teams.task.skip` | Open | Skip (teams.task) | [teams](./teams) |
+| `teams.task.trace` | Open | Trace (teams.task) | [teams](./teams) |
+| `teams.update_task` | Open | Update task (teams) | [teams](./teams) |
+| `teams.usage` | Open | Usage (teams) | [teams](./teams) |
+| `teams.workflow.approve_step` | Open | Approve step (teams.workflow) | [teams](./teams) |
+| `teams.workflow.reject_step` | Open | Reject step (teams.workflow) | [teams](./teams) |
+
+### telecom
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `telecom.approval.pending` | Admin | Pending (telecom.approval) | [channels](./channels) |
+| `telecom.approval.request` | Admin | Request (telecom.approval) | [channels](./channels) |
+| `telecom.approval.resolve` | Admin | Resolve (telecom.approval) | [channels](./channels) |
+| `telecom.approval.review` | Admin | Review (telecom.approval) | [channels](./channels) |
+
+### tools
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `tools.cancel_call` | Admin | Cancel call (tools) | [tools](./tools) |
+| `tools.catalog` | Admin | Catalog (tools) | [tools](./tools) |
+| `tools.effective` | Admin | Effective (tools) | [tools](./tools) |
+| `tools.in_flight` | Admin | In flight (tools) | [tools](./tools) |
+| `tools.invoke` | Open | Invoke (tools) | [tools](./tools) |
+
+### trace
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `trace.by_runs` | Open | By runs (trace) | [runs](./runs) |
+| `trace.get` | Admin | Get (trace) | [runs](./runs) |
+| `trace.list` | Admin | List (trace) | [runs](./runs) |
+| `trace.tool_output` | Open | Tool output (trace) | [runs](./runs) |
+
+### users
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `users.create` | Admin | Create (users) | [identity](./identity) |
+| `users.get` | Admin | Get (users) | [identity](./identity) |
+| `users.list` | Open | List (users) | [identity](./identity) |
+| `users.me` | Open | Me (users) | [identity](./identity) |
+| `users.update` | Admin | Update (users) | [identity](./identity) |
+
+### version
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `version` | Open | Version | — |
+
+### voice
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `voice.format` | Open | Format (voice) | — |
+| `voice.record_start` | Open | Record start (voice) | — |
+| `voice.record_stop` | Open | Record stop (voice) | — |
+| `voice.stream.audio` | Open | Audio (voice.stream) | — |
+| `voice.stream.start` | Open | Start (voice.stream) | — |
+| `voice.stream.stop` | Open | Stop (voice.stream) | — |
+| `voice.synthesize` | Open | Synthesize (voice) | — |
+| `voice.transcribe` | Open | Transcribe (voice) | — |
+
+### wizard
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `wizard.answer` | Admin | Answer (wizard) | [wizard](./wizard) |
+| `wizard.cancel` | Admin | Cancel (wizard) | [wizard](./wizard) |
+| `wizard.next` | Admin | Next (wizard) | [wizard](./wizard) |
+| `wizard.start` | Admin | Start (wizard) | [wizard](./wizard) |
+| `wizard.status` | Admin | Status (wizard) | [wizard](./wizard) |
+
+### workspace
+
+| Method | Class | Purpose (name gloss) | Reference |
+|---|---|---|---|
+| `workspace.archive` | Admin | Archive (workspace) | [workspace](./workspace) |
+| `workspace.create` | Admin | Create (workspace) | [workspace](./workspace) |
+| `workspace.get` | Admin | Get (workspace) | [workspace](./workspace) |
+| `workspace.list` | Admin | List (workspace) | [workspace](./workspace) |
+| `workspace.unarchive` | Admin | Unarchive (workspace) | [workspace](./workspace) |
+| `workspace.update` | Admin | Update (workspace) | [workspace](./workspace) |
+
+## Relationship to the old index
+
+[JSON-RPC protocol](../../api/jsonrpc) now covers envelopes, error codes, and notifications only. This page owns the method index and follows `src/gateway/method_census.rs`.

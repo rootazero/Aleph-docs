@@ -3,7 +3,7 @@ title: "heartbeat.*"
 description: "Heartbeat task RPC methods"
 ---
 
-`heartbeat.*` is the lifecycle surface for the daemon-side heartbeat scheduler. All eight methods are registered through `register_heartbeat_handlers` once a `SharedHeartbeatService` is constructed at server boot (`src/bin/aleph-server/commands/start/builder/handlers/agents.rs:142-196`); if the service is not constructed (e.g. simulated mode without a scheduler), the JSON-RPC methods are absent and calls return `Method not found`.
+`heartbeat.*` is the lifecycle surface for the daemon-side heartbeat scheduler. All eight methods are registered through `register_heartbeat_handlers` once a `SharedHeartbeatService` is constructed at server boot (`src/bin/aleph-server/commands/start/builder/handlers/agents.rs`); if the service is not constructed (e.g. simulated mode without a scheduler), the JSON-RPC methods are absent and calls return `Method not found`.
 
 Each method has two variants in source — a real handler backed by `HeartbeatService` and a `_stub` that returns a fixed empty response. Only the real handlers are wired at boot.
 

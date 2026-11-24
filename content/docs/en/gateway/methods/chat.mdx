@@ -1,0 +1,93 @@
+---
+title: "chat.*"
+description: "High-level RPC methods for chat clients: send, abort, history, clear, rewind and context estimate"
+---
+
+`chat.*` are **high-level wrappers for chat-facing clients**, implemented in `src/gateway/handlers/chat.rs`. They are not a second execution engine — they reuse the execution adapter behind [`agent.*`](./agent) (`AgentRunManager`), narrowing the parameters and responses into shapes that fit chat.
+
+The full set lives in `RPC_METHOD_CENSUS` (`src/gateway/method_census.rs`); all six methods are `Class::Open`:
+
+| Method | Purpose |
+|---|---|
+| `chat.send` | Send a message (wraps `agent.run`) |
+| `chat.abort` | Abort the current generation |
+| `chat.history` | Read the chat history |
+| `chat.clear` | Clear the chat history |
+| `chat.rewind` | Drop the conversation from a given event seq onward (server half of edit-and-resend) |
+| `chat.context_estimate` | Estimate the next prompt's context occupancy |
+
+## chat.send
+
+Sends a message. **The parameter shape is identical to `agent.run`** — both share `AgentRunParams`, and there is no second field-by-field copy in the code (the historical `SendParams` is gone); the `input` field also accepts `message` as an alias.
+
+**Response:** `{ "run_id": String, "session_key": String, "streaming": bool }`.
+
+Streaming deltas are not returned inline to the caller; they arrive as events. See [Gateway Events](./events).
+
+## chat.abort
+
+Aborts an in-flight generation.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `run_id` | string | yes | Run id to abort |
+| `session_key` | string | no | Session whose waiting backlog should be abandoned along with the run |
+
+`session_key` is optional so older clients keep working, but a client that omits it stops one run and leaves the lane loaded: cancelling frees the session slot, the lane wakes its front waiter, and the messages the user just said they did not want start firing one full agent run at a time.
+
+## chat.history
+
+Reads the chat history.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_key` | string | yes | Canonical session key |
+| `limit` | number | no | Maximum number of messages; omitted means all |
+
+**Response:** an array of messages. Each message (`ChatMessage`) carries `role`, `content`, `timestamp` (ISO 8601), plus optional `run_id`, `context_tokens`, `context_window`, `total_tokens` and `speaker_id`. Optional fields are omitted when absent rather than serialized as `null`.
+
+`context_tokens` / `context_window` / `total_tokens` are persisted on assistant turns, so the Panel gauge re-projects on reload.
+
+## chat.clear
+
+Clears the chat history of a session.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_key` | string | yes | Session to clear |
+
+Clearing retires the corresponding part of the authoritative event log (the same family of semantics as `sessions.reset`, `sessions.delete` and `chat.rewind`), so the removed conversation cannot reappear through replay, BM25 search or the projection reconciler on the next boot.
+
+## chat.rewind
+
+Rewinds the conversation from a given event seq — the server half of "edit and resend".
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_key` | string | yes | Session to rewind |
+| `seq` | number | yes | First event seq to retire — INCLUSIVE |
+
+Semantics in detail:
+
+- Events with `seq >= this` leave the live conversation (event log) and their projected rows are deleted from the transcript; everything with `seq < this` survives untouched, as do transcript rows that were never projected from an event (boot-time orphan notices, legacy rows).
+- The caller passes the seq of the message it wants to **replace**, taken from the id that message already carries: the projector writes row ids as `"{session_key}:{seq}"` (see `src/session/projection.rs`). To edit-and-resend a user message, rewind at that message's seq — it and everything after it disappear — then `chat.send` the new text.
+- `chat.rewind` **never** appends the replacement itself.
+- `seq` must be `>= 1` (the first append lands at seq 1).
+
+## chat.context_estimate
+
+Estimates the next prompt's context occupancy for a session, so the gauge can show `≈N%`. Returns `null` when core cannot resolve the session or model; the Panel then keeps the gauge hidden.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_key` | string | yes | Session to estimate |
+
+**Response:** `{ "used_tokens": Number, "window_tokens": Number }`, or `null`.
+
+`used_tokens` is derived from the addressed session's whole event log and `window_tokens` from the model that session is pinned to, so the method discloses more than a token count: an ungated caller learns which model another user runs and roughly how much they have said to it. It is therefore subject to the `KeyChecked` treatment in `src/gateway/method_visibility.rs`: only callers who can see the session get an estimate.
+
+A denial reuses this method's own `null` rather than an error code that would exist only for denials.
+
+## Visibility
+
+All six methods are `Treatment::KeyChecked` in `src/gateway/method_visibility.rs` — whether a call succeeds depends on the caller's visibility into the target session, not on the method being public. See [JSON-RPC error model](/docs/en/api/jsonrpc).

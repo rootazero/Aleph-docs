@@ -14,7 +14,7 @@ description: "Identity and soul management RPC methods"
 | [`identity.clear`](#identityclear) | Remove an identity file (revert to default persona) |
 | [`identity.list`](#identitylist) | List existence / size of every identity file |
 
-> Historical references to `identity.sign` / `identity.verify` / `identity.rotate` are not RPCs. The sign / verify chain lives in `src/gateway/security/crypto.rs` for internal delegation only and is **not** exposed via JSON-RPC.
+> Signing, verification, and key rotation are not RPCs in this namespace. Internal delegation cryptography lives in `src/gateway/security/crypto.rs`.
 
 ## Identity File Catalogue
 

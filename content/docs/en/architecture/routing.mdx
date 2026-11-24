@@ -1,6 +1,6 @@
 ---
 title: "Routing System"
-description: "Aleph's real routing layer: session-key resolution (SessionKey), DmScope isolation, hierarchical RouteBinding matching, two-stage command/keyword routing rules, runtime overlay, provider failover, and VESR."
+description: "Aleph's real routing layer: session-key resolution (SessionKey), DmScope isolation, hierarchical RouteBinding matching, two-stage command/keyword routing rules, runtime overlay, and the provider failover chain."
 ---
 
 > **This page describes Aleph's real routing layer (`src/routing/` + `src/config/types/routing.rs`)**, not a generic web routing framework.
@@ -279,56 +279,25 @@ process_clipboard / inbound message
 
 ---
 
-## 7. Context-aware inference (`[smart_matching]`)
+## 7. History: context-aware inference (`[smart_matching]`, removed)
 
-`SmartMatchingConfig` (`src/config/types/smart_flow.rs`) defines a four-layer semantic matcher:
+Earlier revisions of this page documented a four-layer semantic matcher configured by a `[smart_matching]` section (`SmartMatchingConfig`: command fast path, weighted keywords, context rules, AI fallback, with `[[smart_matching.context_rules]]` / `[[smart_matching.keyword_rules]]` tables). That section was deprecated and inert, and was cut from the config schema in commit `54a12d89b` ("config: cut deprecated inert sections (smart_flow, smart_matching, dispatcher, subagent, evolution, media)"). A `[smart_matching]` block in a config file is no longer parsed.
 
-| Layer | Name | Threshold field | Purpose |
-|---|---|---|---|
-| 1 | Fast path (command/regex) | `command_confidence = 1.0` | First-match-stops |
-| 2 | Keyword matching | `keyword_threshold = 0.7` | Weighted scoring |
-| 3 | Context-aware inference | `enable_context_inference = true` | Multi-turn, app context, time context |
-| 4 | AI detection fallback | `ai_threshold = 0.6` | AI-first |
-
-Layer 3 (context-aware) is configured via `context_rules: Vec<ContextRuleConfig>`:
-
-```toml
-[smart_matching]
-enabled = true
-enable_context_inference = true
-
-[[smart_matching.context_rules]]
-id = "complete-pending-language"
-condition_type = "pending_param"     # pending_param | app_context | time_context | conversation
-param_name = "target_lang"
-intent = "translation"
-action_type = "complete_param"       # complete_param | add_capability | set_provider | add_prompt
-use_input_as_value = true
-
-[[smart_matching.context_rules]]
-id = "weekend-tone"
-condition_type = "time_context"
-days_of_week = [0, 6]                # 0=Sun, 6=Sat
-action_type = "add_prompt"
-system_prompt = "Use a casual tone on weekends."
-```
-
-Layer 2 uses weighted keywords via `[[smart_matching.keyword_rules]]` (`"keyword"` or `"keyword:1.5"`), match modes `any | all | weighted`.
+What actually runs today is the two-stage command + keyword matching in section 6, driven by `RoutingRuleConfig` (section 5). There is no separate context-inference layer; contextual decisions are made by the model inside the harness loop.
 
 ---
 
-## 8. Provider failover and VESR
+## 8. Provider failover
 
-After routing picks a provider, the actual "which model can do the work" judgment lives in `routing/recall.rs` and VESR:
+After routing picks a provider, "which model to use, and where to fall back when it fails" is decided by the provider failover chain — **not in `src/routing/`**.
 
-- **`ProviderAvailability`** (`recall.rs`) — predicate `Fn(&str) -> ProviderStatus` compiled once at boot from config + vault
-- **`ProviderStatus::Available | Deconfigured | Unknown`** — render-time gate; unknown ids (e.g. `""`, `"failover"`, `"(dynamic)"`) fail OPEN, never penalizing what we cannot identify
-- **`RoutingRecall::build_routing_experience_message`** — called **exactly once per run** at run-start: embed the user query, backfill `RoutingAttribution::task_emb`, recall k-NN neighbors, mark unavailable-provider entries (O4: mark, not filter), fence-wrap via `wrap_memory_context`
-- **`RoutingExperienceStore`** (`experience_store.rs`) — sqlite-vec k-NN over recorded sessions to recall **measured-good** models for the task
-- **`RoutingAttribution`** (`mod.rs`) — per-run handle correlating run-start recall (writes `task_emb`) with the completion observer (reads it). One per run; lives in the gateway run loop, outside the harness
-- **`OutcomeObserver`** (`observer.rs`) — `TraceSink::SessionCompleted` → write to the routing experience table (tokens / cost / model / provider / agent_id)
+- **Chain assembly**: `build_failover_chain` in `src/orchestrator/deps_builder/provider_chain.rs` assembles `[primary, ...[fallback_provider].chain]` into one global chain at boot and wraps it in a `FailoverProvider`. The primary slot stays **live** — every call reads `default_provider.current()`, so a UI default-provider swap takes effect on the next turn (hot-reload semantics preserved). Every configured provider's `models` list feeds the catalog, so the chain can also fail over *between models of one provider*.
+- **Explicit provider / model routes**: `agent_overrides` pins the named provider as primary and appends the whole global chain as its single fallback node ("pin + fall-through"). All chains share one `FailoverHealth`, so one provider's outage is visible everywhere. The primary provider gets no override entry — explicitly selecting it is equivalent to the default route. A provider that fails to construct, and a chain entry matching the primary or absent from `[providers]`, are skipped with a warn log.
+- **Circuit breaking and cooldowns**: `FailoverHealth` in `src/providers/failover/health.rs` keeps a per-provider `CircuitState`: `Closed` (requests flow through) → `Open` (skip this provider) → `HalfOpen` (one probe after the cooldown expires). `CIRCUIT_OPEN_THRESHOLD = 3` consecutive failures open the breaker, with `MAX_COOLDOWN = 600s` as the hard ceiling. There are also `ModelCooldown` (provider + model granularity) and `ProviderCooldown` (provider granularity) windows, injected through `FailoverProvider::with_model_cooldown` / `with_provider_cooldown`.
+- **Retry or give up**: `decide` in `src/providers/failover/decision.rs` decides whether one failed attempt retries in place, advances the chain, or fails outright. The classifier is `classify` in `src/providers/llm_retry.rs`, returning `RetryVerdict::{Retry, Fatal, CompactAndRetry, Fallback}`. A bare transient error backs off by `DEFAULT_TRANSIENT_DELAY = 300ms`, with `MAX_RETRY_DELAY = 30s` as the ceiling for a single in-place wait. A transient *server overload* (429 "please wait a moment", 529) gets a deeper wait budget capped at `MAX_OVERLOAD_RETRY_DELAY = 120s`, so a server-issued `Retry-After` can be ridden out in full. Account/quota 429s classify as `Fatal` — no in-place retry, the chain advances instead.
+- **Failure bookkeeping**: `strike_for` files one failure as `FailureKind::Permanent` or `Transient` — a permanent failure (a dead credential) trips the breaker at once, everything else needs `CIRCUIT_OPEN_THRESHOLD` strikes. Rate-limit faults carry an extra cooldown window; other faults carry none, so a single network blip never sidelines a provider.
 
-See [AI Providers](/docs/en/concepts/ai-providers) for the full model-recall surface.
+See [AI Providers](/docs/en/concepts/ai-providers) for the configuration surface.
 
 ---
 
@@ -359,7 +328,7 @@ See [Loop / Goal / Strategy](/docs/en/concepts/looping-goal-strategy) and [Cron 
 | `routing_rules.delete` | Delete (non-builtin only) |
 | `route_config.get` / `update` | Whole `[route_config]` block |
 | `channels.set_agent` | Bind a channel to a specific agent (**26.7.15+ validates that the agent exists**) |
-| `agent.resolve_session` | Resolve any inbound metadata into a `SessionKey` |
+| `resolve_session_key_with_agent` (internal fn, not an RPC) | Resolve any inbound metadata into a `SessionKey` |
 | `gateway_route` | Tool: report which agent the message would reach, with `OverlaySource` |
 
 Full RPC listings: [Gateway methods · config-routing](/docs/en/gateway/methods/config) and [Gateway methods · session](/docs/en/gateway/methods/session).
@@ -375,10 +344,17 @@ src/routing/
 ├── resolve.rs            # resolve_route + scope_satisfied + session_keys_for
 ├── config.rs             # RouteBinding / MatchRule / SessionConfig / binding_problems
 ├── identity_links.rs     # resolve_linked_peer_id + validate_identity_links
-├── overlay.rs            # overlay_route + RuntimeOverlay + OverlaySource
-├── recall.rs             # RoutingRecall + ProviderAvailability + provider_availability_from_config
-├── experience_store.rs   # VESR store (k-NN over sqlite-vec)
-└── observer.rs           # OutcomeObserver + outcome_from_session_completed
+└── overlay.rs            # overlay_route + RuntimeOverlay + OverlaySource
+
+src/providers/failover/     # provider fallback chain (section 8)
+├── mod.rs                # FailoverProvider + threshold constants
+├── provider.rs           # FailoverProvider: walk the chain, inject cooldown windows
+├── health.rs             # FailoverHealth / CircuitState / ModelCooldown / ProviderCooldown
+├── decision.rs           # decide / strike_for / FailureKind / Decision
+└── tests.rs
+
+src/orchestrator/deps_builder/
+└── provider_chain.rs     # build_failover_chain: global chain + agent_overrides
 
 src/command/
 ├── mod.rs                # CommandParser entry
@@ -395,6 +371,6 @@ src/tool_metadata/registry/
 
 - [Session mode](/docs/en/architecture/overview#the-third-twin-session-mode) — `session_mode` static partition
 - [Loop / Goal / Strategy](/docs/en/concepts/looping-goal-strategy) — composite-key namespaces
-- [AI Providers](/docs/en/concepts/ai-providers) — provider failover + VESR
+- [AI Providers](/docs/en/concepts/ai-providers) — provider failover chain
 - [Config `route_config.*`](/docs/en/getting-started/configuration) — full fields
 - [Gateway methods · config-routing](/docs/en/gateway/methods/config) — RPC

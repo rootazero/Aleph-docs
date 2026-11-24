@@ -1,256 +1,64 @@
 ---
 title: "安全概览"
-description: "纵深防御 —— 网络边界、TLS、执行审批门、沙箱、签名账本"
+description: "Gateway 认证、执行审批、沙箱和审计各自负责什么。"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
+本页说明 Gateway 如何识别调用者，以及工具权限、执行审批、沙箱和审计如何分别约束操作。
 
 ## 安全架构
 
-Aleph 的安全模型建立在几层独立运行的防御之上。一层失败不会让其他层崩溃。
+| 层 | 负责什么 | 实现 |
+|----|----------|------|
+| 入口 | 检查连接传输、来源、凭据或 Unix socket 对端 | `src/gateway/server/connection/`、`src/gateway/origin_policy.rs` |
+| 工具权限 | 在分发时应用工具权限和执行级别 | `src/tools/scoped/` |
+| 执行审批 | 把操作员决策绑定到本次操作，而不是只看工具名 | `src/sandbox/exec_approval/` |
+| 沙箱 | 按工作区和能力限制执行，并应用平台沙箱 | `src/sandbox/workspace/`、`src/sandbox/platforms/` |
+| 审计 | 保存安全事件、审批决策及签名身份记录 | `src/security/audit.rs`、`src/tools/scoped/dispatch.rs`、`src/identity/` |
 
-```
-Layer 1 — 网络边界 + Gateway 凭证
-├─ 默认绑定 loopback，操作员零配置
-├─ 远程连接必须出示凭证之一：
-│   • 设备 token（aleph-dt-*，长生命周期）
-│   • 启动票（aleph-bt-*，5 分钟单次）
-│   • 共享 Gateway token（aleph-<uuid>，HMAC-hashed）
-├─ 失败关闭（per-connect gate）
-└─ 原生 TLS + TOFU 客户端信任
+## 网络边界与 Gateway 凭据
 
-Layer 2 — 工具权限
-├─ ScopedToolService 合并（global → agent → channel）
-├─ Exec tier（Ask / Auto / Full）—— 按 ToolFacts 元数据
-├─ [policies.tool_permissions] 显式条目胜出
-└─ [sandbox.command_policy] 硬线底线
+Gateway 默认在环回地址上监听。兼容 `/ws` 只对未带设备凭据的直连环回提供隐式 `operator` 授权；远端需要有效设备令牌、引导票或旧共享令牌。非环回明文连接默认被拒绝；可用原生 TLS 或为兼容入口配置受信 TLS 代理。浏览器通过来源检查并不意味着通过身份验证（`src/gateway/config.rs`、`src/gateway/server/mod.rs`、`src/gateway/server/connection/upgrade.rs`、`src/gateway/handlers/connect.rs`）。
 
-Layer 3 — 执行审批
-├─ action-aware 审批门（ApprovalAction）
-├─ 授权指纹键绑定在规范化参数上
-├─ 120 秒超时 ⇒ 拒绝（不写入 denial ledger）
-└─ /deny <reason> 把原因回传到模型
+默认连接地址不是所有入口共同的信任模型。Desktop IPC 通过 Unix socket 校验对端；Web v1 使用原生 TLS、同源检查与设备会话。两者均只开放有限的只读 RPC（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。详见[网关认证](../gateway/auth)和 [IPC 协议](./ipc)。
 
-Layer 4 — 沙箱
-├─ WorkspaceSandbox（六步管道）
-├─ 平台原生强制：
-│   • macOS — sandbox-exec + Seatbelt
-│   • Linux — bwrap + Landlock + seccomp-bpf + cgroup v2
-│   • Windows — AppContainer + RestrictedToken + JobObject
-├─ [sandbox.command_policy] 硬线命令过滤
-└─ SSRF 引擎 + 解析规范化
+### 远程 TLS 与客户端信任
 
-Layer 5 — 审计
-├─ session event log（ToolCallApproved / ToolCallDenied）
-└─ 每 agent 签名账本（Ed25519 hash chain）
-```
-
-## 网络边界 + Gateway token
-
-信任边界就是网络边界，由单一共享 **Gateway token** 守卫。
-
-| 配置 | 含义 |
-|------|------|
-| `host = "127.0.0.1"`（默认） | 只允许本机进程；零配置操作员 |
-| `host = "0.0.0.0"` | 远端设备可以到达 socket，但**必须**出示有效凭证 |
-
-Loopback 始终免密（`is_loopback` ⇒ operator），远端连接必须出示凭证
-之一，按优先级：
-
-1. **设备 token**（`aleph-dt-*`）—— 长生命周期，绑定到一台已配对设备，
-   SHA-256-hashed 存储。
-2. **启动票**（`aleph-bt-*`）—— 5 分钟单次，配对过程中换取设备 token。
-3. **共享 Gateway token**（`aleph-<uuid>`）—— 启动时由
-   `SharedTokenManager` 生成，HMAC-hashed，常数时间验证。
-
-有效凭证 = 完整操作员权限（与本机相同）；缺失或无效 ⇒ 被登录墙挡住
-（WS 分发拒绝除 `connect` 之外的所有方法）。
-
-### 远程连接的传输加密（TLS）
-
-loopback 永远是明文 `ws://`（零配置桌面 / CLI / 同机代理），不变。
-对**非 loopback** 绑定 Aleph 现在是失败关闭：
-
-- **启动门**（`check_network_exposure`）：非 loopback 绑定且没有原生
-  TLS / 没有受信代理 / `allow_insecure_remote = false` 的配置 **拒绝启动**。
-- **每连接门**（`refuse_insecure_remote`）：远端客户端的 leg 未加密时，
-  WS upgrade 处用 `426 Upgrade Required` 拒绝。
-
-三种满足方式：
-
-| 层级 | 方式 |
-|------|------|
-| ① | 同机 Caddy / nginx 反向代理（推荐；需要域名） |
-| ② | 原生自签名 TLS（无域名；客户端走 TOFU） |
-| ③ | 原生 TLS + 操作员提供的 PEM（域名，无代理） |
-
-`allow_insecure_remote = true` 是逃生口 —— 启动门和每连接门同时撤销，
-恢复 pre-hardening 行为。仅用于受信任、隔离的 LAN。
-
-## 远程连接 TLS（客户端信任）
-
-Tier ② 自签名 TLS 的客户端信任走 **Trust-on-First-Use（TOFU）**
-（`src/gateway/cert_trust.rs`）：
-
-- 共享决策核心 + 已固定的 TOFU 信任存储（`~/.aleph/data/security.db`）
-- SHA-256 指纹 + SAN / Subject 解析
-- 审批 splash 页面（指纹 + SAN + TOFU / change 警告）
-- pending-cert 状态 + approve / reject Tauri 命令
-- macOS WKWebView `respondsToSelector` 缓存失效；绝对 URL 跳转信任审批页
-- iOS Keychain trust store + 决策镜像（与 macOS 共享决策状态）
-
-新出现的接口 IP 触发证书 regen（new fingerprint ⇒ re-trust once）；
-`sans.txt` sidecar 跟踪 SAN 覆盖，使 churn 最小。
+Gateway 可加载指定证书，也可生成自签证书。传输加密与调用者授权是两道检查；使用自签证书仍需让客户端信任该证书。NSH 的远端 `--connect` 目标必须使用 HTTPS（`src/gateway/tls.rs`、`src/gateway/server/connection/upgrade.rs`、`desktop/nsh-shell/src/main.rs`、`shared/client/src/connection_target.rs`）。
 
 ## 配对
 
-Aleph 现在区分两类配对请求：
+### 设备配对
 
-### 设备配对（远程桌面 / 手机 / CLI）
+`gateway.ticket.create` 创建一次性引导票；兼容 `/ws` 的 `connect.bootstrap_ticket` 可兑换设备令牌，用于后续重连。Web v1 的交换要求票绑定主体。撤销一个设备用 `gateway.devices.revoke`；共享令牌轮换会撤销 Panel 设备凭据（`src/gateway/handlers/gateway_ticket.rs`、`src/gateway/handlers/connect.rs`、`src/gateway/security/device_token_manager.rs`、`src/gateway/server/connection/web_v1.rs`、`src/gateway/handlers/gateway_devices.rs`、`src/gateway/handlers/gateway_token.rs`）。
 
-1. 远端 Panel 在 Settings → Security → "Pair new device" 上
-   `gateway.ticket.create` 请求一个启动票（`aleph-bt-*`）。
-2. URL 由服务端解析（`gateway.ticket.create` 返回 `urls`，从
-   `tls::discover_interface_ips`）—— 不要让 Panel 用
-   `window.location` 自己拼，localhost 生成时永远是
-   `http://127.0.0.1:<port>/…`。
-3. Panel 把启动票以 `connect.bootstrap_ticket` 提交，握手换出一个新
-   `device_token`（`aleph-dt-*`），持久化供后续重连使用。
-4. 撤销：`gateway.token.rotate`（重新生成共享 token，撤销所有配对设备并
-   关闭远端 socket）或 `gateway.devices.revoke {device_id}`（仅撤销
-   一台设备，立即把它的 socket 关闭并退回登录墙，WS 4001
-   `device_revoked`）。
+### 频道发送者配对
 
-无头核心用 `aleph-server pair` 直接 mint 一个票（打开 0600
-`security.db`，WAL —— 不需要 daemon 运行）。`aleph-server
-bootstrap-token` 打印共享 Gateway token 用于恢复。
-
-### 频道发送者配对（Telegram / Discord / iMessage 未知发送者）
-
-走更轻量的流程 —— 在 inbound router 的**单一**配对存储
-（`src/gateway/pairing_store.rs`）里生成一个 **6 字符字母数字代码**，操作
-员通过 RPC `pairing.list` / `pairing.approve` 批准（**不是** `aleph
-pairing approve` CLI）。
-
-`[routing] pairing_code_expiry_secs` 控制过期（默认 24 h，`0` = 不过期）。
-
-### 设备与频道配对的差异
-
-- **设备**：长生命周期凭证（device_token），可单独撤销，永远不放在 URL /
-  QR 里（只有单次启动票走这些通道）。
-- **频道发送者**：单次或短期授权（inbound router 配对存储），通过 RPC
-  管理。
+未知发送者的频道配对与 Gateway 设备身份无关。配对码由独立存储管理，操作员用 `pairing.list` 查看请求，再用 `pairing.approve` 或 `pairing.reject` 处理（`src/gateway/pairing_store.rs`、`src/gateway/handlers/pairing.rs`）。
 
 ## 工具权限
 
-限制 *agent 能做什么*（不是 *谁能连接*）由
-**`ScopedToolService`**（`src/tools/scoped/`）处理 —— 它不读
-`IdentityContext`，按三层合并 `ToolPermissionsConfig`（**global → agent →
-channel**，最严格胜出）。这与连接信任正交。
-
-按同一强制点，按此顺序组合三层：
-
-1. **`[policies.tool_permissions]`** —— 按工具的 `allow` / `ask` / `deny`，
-   精确名或 glob。显式条目胜出 tier。
-2. **Exec tier**（`Ask` / `Auto` / `Full`）—— 读取 `ToolFacts` 的
-   `idempotent` / `requires_approval`，**不**读工具名。默认 fail-closed：
-   一个 Aleph 没听过的工具是非幂等的 ⇒ `Ask` tier 下必拦。
-3. **`[sandbox.command_policy]`** —— 硬线命令底线，任何 tier 任何权限
-   条目都不能降低它。
-
-`Deny` 把工具从模型视角隐藏**且**拒绝调用；`Ask` 路由到审批门。
+`ScopedToolService` 合并全局、agent 和频道工具权限，分发时结合显式 `allow` / `ask` / `deny` 和执行级别。`ToolFacts` 提供是否幂等、是否需要审批等元数据；命令硬拒绝由沙箱命令策略处理，不因 Gateway 已认证而放行（`src/tools/scoped/`、`src/sandbox/command_policy/`）。
 
 ## 执行审批门
 
-action-aware 审批门（`src/sandbox/exec_approval/`）：
-
-- 看到的是 *这次调用*（`ApprovalAction`），不是工具名。
-- 授权指纹 = `grant_fingerprint(tool, 规范化参数)` —— 用**原始**规范化
-  参数，**不**用脱敏摘要（脱敏会把不同密钥塌成同一占位符，让一个授权
-  覆盖另一个密钥）。
-- 决策：`AllowOnce` / `AllowSession` / `AllowAlways`（`AllowAlways` 由
-  `ExecApprovalManager::clamp_decision` 收紧到 `AllowSession` —— 没有
-  持久的允许列表）。
-- 120 秒超时 ⇒ **拒绝**（`ApprovalOutcome::is_approved` 排除 `Timeout`），
-  不写入 denial ledger。
-- `/deny <reason>`（频道）或 `exec.approval.resolve {reason}`（RPC）让
-  原因随 `ExecApprovalRecord.deny_reason` 流回模型 —— 渲染为
-  `The user said: "…"`（**显示层**，denial ledger 仍按指纹键控）。
+Panel 上的审批控件让操作员允许或拒绝待处理的敏感调用，并经 `exec.approval.resolve` 发送决策（`interfaces/webchat/src/components/approval_card.rs`、`interfaces/webchat/src/api/exec_approval.rs`、`src/gateway/handlers/exec_approvals.rs`）。审批门通过 `ApprovalAction` 将授权绑定到工具与原始的规范化参数；用户可见的脱敏摘要不参与授权指纹计算（`src/sandbox/exec_approval/action.rs`）。
 
 ## 沙箱
 
-`WorkspaceSandbox`（`src/sandbox/workspace.rs`）是 exec-class 工具
-与 OS 之间的唯一 seam，**六步**管道：
-
-1. **Session resolve** —— 懒创建 `~/.aleph/workspaces/<session_hash>/`。
-2. **cwd validate** —— 规范化 + `starts_with(&ws.cwd)`；symlink 不能
-   逃出（BUB-3 hardening）。
-3. **Capability check** —— `SandboxCapabilities::is_within`；越界走
-   `ApprovalGate`，会话内缓存已批准的升级。
-4. **Profile generate** —— 平台原生（SBPL / bwrap args / AppContainer
-   profile）。
-5. **Run** —— 通过 `OsSandboxDriver`；默认 60 s 超时 + 1 MiB 输出预算。
-6. **Audit** —— `tracing::info!` 到 `capability_ledger`。
-
-命令策略层（`src/sandbox/command_policy/`）**先于** OS 沙箱运行：
-确定性 hard-filter，覆盖 fork bomb、`rm -rf /` / `rm -rf //` / `/.`、
-`dd of=/dev/...`、`mkfs`、shadow-copy 破坏、`powershell -EncodedCommand`
-解码、Windows raw disk 写入等。
-
-平台支持：
-
-| OS | 强制机制 |
-|----|---------|
-| macOS | `sandbox-exec` + Seatbelt profile + AllowHosts 走 managed proxy |
-| Linux | bwrap + Landlock（≥ 5.13）+ seccomp-bpf + cgroup v2 资源限制 |
-| Windows | AppContainer（首选）→ RestrictedToken + Low IL → 基础 JobObject 三级软降级 |
-
-Linux/Windows 上的 `NetworkPolicy::AllowHosts` 通过 netns→UDS→loopback
-bridge（Linux，Phase B）或 AppContainer capability SID（Windows）实现
-—— 这两种 OS 的 raw-`AllowHosts` 仍然以可读性好的拒绝消息硬失败。
+`WorkspaceSandbox` 根据工作区和能力约束执行。命令策略先过滤明确禁止的命令，不能用审批绕过。平台实现位于 `src/sandbox/platforms/macos/`、`src/sandbox/platforms/linux/` 和 `src/sandbox/platforms/windows/`；各平台机制与限制见[沙箱](./sandboxing)（`src/sandbox/workspace/`、`src/sandbox/command_policy/`）。
 
 ## 审计
 
-**Session event log** 是审批决策的活档
-（`tools/scoped/dispatch.rs::record_approval_decision` 写
-`ToolCallApproved` / `ToolCallDenied`）。通过 session service 查，与产生
-该决策的 run 的其它事件一起。
+- 安全审计记录包括兼容 WS 的远端认证失败和未授权请求洪泛（`src/security/audit.rs`、`src/gateway/server/connection/mod.rs`）。
+- 工具分发可把 `ToolCallApproved`、`ToolCallDenied` 写入会话事件（`src/tools/scoped/dispatch.rs`）。
+- Agent 签名账本用 Ed25519 签名和哈希链记录与 agent 身份关联的操作（`src/identity/`）。
 
-**签名 agent 账本**（`src/identity/`，2026-07-25 落地，2026-07-26
-加固）回答 *谁，可证明*：
-- 每 agent Ed25519 密钥对（公钥 + 指纹在 `security.db`，私钥在加密 vault）；
-- 每个**变更**工具调用、每个拒绝、每个审批决策都追加到该 agent 自己的
-  hash-chained、**已签名**链；
-- `agent_identity`（工具，operator-gated）和 `aleph-server identity`
-  （CLI，只读，独立进程）可以读。
+## 跨进程状态保护
 
-委托子 agent 是自己签名链上的主角色（不是父链的一行）—— 它持有自己的
-Ed25519 密钥，在自己的链上签名。注入点在 `AllowlistToolService`，由
-spawner 从子 `AgentDef` 构建。
-
-## 跨流程安全保证（Spec C）
-
-原始的 `.shared_token` 损坏事件有结构性原因：两个 `aleph-server`
-进程写同一 `~/.aleph/data/` 文件没有防护。Spec C 通过四层保护关闭这个
-缺口：
-
-- **单例锁**：`aleph-server start` 通过 `flock()` 在所有其它状态前获取
-  `~/.aleph/data/aleph.lock`。第二个 `start` 以 code 64 + 持有者 PID 干净
-  退出。
-- **Vault 写入**：`secrets.vault` 的每次写入通过 `vault_io::VaultIo`，
-  fcntl 排他锁 + `tempfile + persist` 原子重命名。
-- **JSON 状态写入**：`acp_sessions.json` 等走 `atomic_io::write_atomic`。
-- **SQLite 连接**：`open_sqlite_safe` 设 `journal_mode=WAL`、
-  `busy_timeout=5000`、`synchronous=NORMAL`。
-- **CLI dispatch**：每个 CLI 子命令声明一个 `CommandPolicy`（NoLock /
-  LockOnly / LockOrIpc），走 `with_policy` / `run_no_lock`。当 server 持有
-  单例锁时，写子命令前转到 `/v1/admin/*` IPC 端点（token rotation 自愈
-  通过一次 401 重试）。
+Aleph 用实例锁保护服务启动；Vault 与 JSON 文件有各自的原子写入路径；SQLite 使用统一的安全打开辅助函数。CLI 通过 `CommandPolicy` 区分不取锁、取锁或走管理 IPC 的命令（`src/utils/instance_lock.rs`、`src/utils/vault_io.rs`、`src/utils/atomic_io.rs`、`src/utils/sqlite_open.rs`、`src/cli/policy.rs`）。
 
 ## 另请参阅
 
-- [执行审批](/docs/zh/security/exec-approval) —— `exec_tier` + action-aware
-  审批门
-- [配对](/docs/zh/security/pairing) —— 设备与频道发送者信任建立
-- [沙箱](/docs/zh/security/sandboxing) —— OS 级隔离
-- [IPC](/docs/zh/security/ipc) —— WebSocket 控制平面 + JSON-RPC
+- [执行审批](./exec-approval)：审批门和决策。
+- [配对](./pairing)：设备与频道发送者的区别。
+- [IPC 协议](./ipc)：入口和来源校验。

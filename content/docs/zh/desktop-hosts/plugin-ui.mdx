@@ -1,0 +1,153 @@
+---
+title: "插件 UI"
+description: "插件能否带 UI、能带什么样的 UI、由谁渲染与授权：Panel 标签页、能力 UI 表面，以及规划中的混合插件 UI"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+本页回答插件作者最常问的三个问题：插件能不能带 UI，能带什么样的 UI，边界在哪里。
+
+## 定位
+
+插件 UI 属于 [Panel](./panel) 的职责范围。所有产品 UI 只有一个呈现源，桌面宿主只做平台与协议适配，Core 保持唯一的业务事实与授权权威（红线 R2，`docs/reference/REDLINES.md`；宿主「只承载 webview，不含业务 UI」见 `docs/reference/DESKTOP_SHELL.md`）。因此插件贡献 UI 的方式是在 Panel 内扩展，而不是往宿主进程里塞代码。
+
+当前代码里有两条与插件 UI 相关的现状通道：
+
+| 通道 | 作用 | 入口 |
+|---|---|---|
+| 插件 Panel 标签页 | 插件声明一个标签页，Core 发布其不可变资源，Panel 按需加载 | `src/extension/panel_publication/mod.rs` |
+| 能力 UI 表面（UI surface） | 一个由 Core 持有的显示/输入能力，Panel 负责渲染并回执 | `src/capability/ui_surface.rs` |
+
+<Callout type="warn" title="Panel 侧默认未编译">
+
+Panel 侧加载插件标签页和渲染能力 UI 表面的代码全部位于 `interfaces/webchat/src/panel/`，整个模块只在 opt-in feature `panel-modular` 下编译（`interfaces/webchat/src/lib.rs` 的 `#[cfg(feature = "panel-modular")]`；`interfaces/webchat/Cargo.toml` 中默认 feature 是 `legacy-terminal`，且 `panel-modular` 要求 `--no-default-features`）。默认构建的 Panel 不会加载插件标签页。Gateway 与 Core 侧的发布、资源路由和 UI 表面方法没有 feature 门控。
+
+</Callout>
+
+## 现状：插件 Panel 标签页
+
+### 清单声明
+
+插件清单通过可选字段 `panel` 声明一个标签页（`src/extension/manifest/types.rs` 的 `PanelUiManifest`）。字段如下：
+
+| 字段 | 含义 |
+|---|---|
+| `tab_id`、`label`、`icon`、`order` | 标签页标识与呈现 |
+| `entry` | 入口模块路径 |
+| `api_major` | Panel UI API 主版本，当前必须为 `PANEL_UI_API_MAJOR = 1`（`shared/protocol/src/panel.rs`） |
+| `permissions` | 请求的权限列表 |
+| `asset_integrity` | 入口资源完整性，格式为 `sha256-` 加 base64 摘要 |
+
+校验失败返回带前缀的错误码：`panel.invalid_identity`、`panel.invalid_presentation`、`panel.incompatible_api`、`panel.invalid_entry`、`panel.invalid_integrity`（`src/extension/manifest/types.rs`）。
+
+社区插件可请求的权限是一个固定白名单（`shared/protocol/src/panel.rs` 的 `supported_community_permission`）：`pty.list`、`pty.spawn`、`pty.attach`、`pty.input`、`pty.resize`、`pty.close`、`config.get`、`events.subscribe:pty.screen`、`events.subscribe:pty.exit`、`sessions.list`。
+
+### 发布链
+
+```
+插件清单 panel 字段
+  -> 准入（admission.rs）：在锁外读取入口文件并校验
+  -> 发布仓库（PanelAssetPublicationStore）：提交不可变的一代资源
+  -> 能力快照（PanelUiCapabilitySnapshot）：按可见性范围过滤
+  -> Gateway 鉴权路由 /tabs/{*entry}：交付模块字节
+  -> Panel：发现快照、按需加载模块
+```
+
+- 准入（`src/extension/panel_publication/admission.rs`）：入口文件先规范化路径，再拒绝根目录之外的路径（`panel.asset_outside_root`）、非普通文件、超出上限的文件（`panel.asset_entry_limit`）和完整性不匹配（`panel.asset_integrity_mismatch`）。单个入口上限 `ENTRY_LIMIT` 为 4 MiB，一代资源总量上限 `GENERATION_LIMIT` 为 64 MiB。
+- 发布仓库（`src/extension/panel_publication/mod.rs`）：资源身份 `PanelAssetIdentity` 由 `plugin_id`、`plugin_version`、`tab_id`、`source_revision` 组成。替换时修订号不大于当前值即拒绝（`Stale`），每一代资源一经提交不再修改。只有满足以下条件的声明会被发布：来源为社区（`Community`）、信任级别为 `Trusted`、状态为已启用、`public_base` 为 `./tabs/`、入口位于 `./tabs/<plugin_id>/<version>/` 之下。
+- 资源路由（`src/gateway/server/panel_asset_route.rs`）：挂载 `/tabs`、`/tabs/`、`/tabs/{*entry}`，是单独的鉴权 HTTP 入口。即使 Core 管理器尚未就绪也会挂载，此时直接拒绝请求，而不是回落到 SPA 页面（`src/gateway/server/mod.rs`）。
+- Panel 侧（`interfaces/webchat/src/panel/`）：`discovery.rs` 按连接发现能力快照，`source.rs` 只持有不可变快照，`loader.rs` 在浏览器内加载模块，`sdk.rs` 是给模块的窄 SDK。
+
+### 信任边界
+
+插件模块拿到的只是一组窄 SDK ABI，接触不到 Panel 内部的 `DashboardState` 或 Shell 上下文。但 `interfaces/webchat/src/panel/sdk.rs` 的文件头明确写了这一点的边界：同源代码是受信任、已校验的代码，**并没有**被这些权限检查沙箱化。
+
+<Callout type="info" title="安全含义">
+
+权限白名单约束的是 SDK 能调什么，不是模块能做什么。社区插件标签页能被加载，前提是它在发布环节已经被标为 `Trusted` 且完整性校验通过。不要把插件标签页理解为隔离的沙箱。
+
+</Callout>
+
+## 现状：能力 UI 表面
+
+### 描述符与操作
+
+`src/capability/ui.rs` 定义了 UI 能力的类型化契约：命名空间 `UI_NAMESPACE = "aleph/ui"`，能力 ID 为 `aleph/ui` 下的 `surface`，种类 `CapabilityKind::Ui`，生命周期 `LifetimeScope::Runtime`，属主 `OwnerRef::Runtime`，形态为可调用（Callable）。调用参数的 schema 只有两种操作：
+
+```text
+{ "operation": "display", "text": "..." }
+{ "operation": "input" }
+```
+
+错误类型 `UiError` 的变体为 `Closed`、`InvalidInput`、`Poisoned`、`Unavailable`、`StaleAttachment`、`QueueFull`、`Busy`、`RenderFailed`、`Timeout`、`Cancelled`。
+
+### 由 Core 持有的传输
+
+`src/capability/ui_surface.rs` 的 `UiSurface` 是服务器持有、一次只渲染一帧的 UI 表面：
+
+| 方法 | 行为 |
+|---|---|
+| `display` | 发送一帧文本；超过 `MAX_UI_TEXT_BYTES` 拒绝；附着的连接不对返回 `StaleAttachment` |
+| `ack` | 接收 Panel 的渲染回执；`rendered = false` 返回 `RenderFailed` |
+| `submit_input` | 写入输入事件；队列达到 `MAX_UI_QUEUE` 返回 `QueueFull` |
+| `input` | 从队列取出一个输入事件 |
+| `close` | 关闭表面 |
+
+协议常量在 `shared/protocol/src/capability.rs`：`MAX_UI_TEXT_BYTES = 65_536`、`MAX_UI_KEY_BYTES = 256`、`MAX_UI_QUEUE = 128`、`UI_ACK_TIMEOUT_MS = 5_000`。附着标识是 `UiAttachment { surface_id, mount_generation }`；输入事件 `UiInputEvent` 只有 `KeyDown { key }` 和 `MouseDown { x, y, button }` 两种。
+
+### Gateway 方法
+
+Gateway 只负责 JSON-RPC 与调用方/会话校验，表面、待确认回执和输入队列都留在 Core（`src/gateway/capability_ui.rs`）。方法为 `capabilities.ui.attach`、`capabilities.ui.invoke`、`capabilities.ui.ack`、`capabilities.ui.submit_input`、`capabilities.ui.detach`（`src/gateway/method_visibility.rs`），显示帧通过主题 `capabilities.ui.display` 推送。Panel 侧渲染在 `interfaces/webchat/src/panel/capability_surface.rs`，同样受 `panel-modular` 门控。
+
+能力本身的模型见 [能力系统](../concepts/capability-system)。
+
+## 规划中：混合插件 UI
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 的 ADR-003（2026-11 快照，文件声明其规定目标架构，不代表当前仓库已具备）；当前实现见 `src/extension/panel_publication/mod.rs` 与 `src/capability/ui_surface.rs`。
+
+ADR-003 把插件拆成两部分：服务器侧的 Core 部分，和桌面侧的 UI 模块（UI 清单、TSX 模块、视图定义），后者运行在 NSH Runtime 中，经 UI Bridge 与客户端连接。设计要点：
+
+- UI 清单里的能力声明是**请求**，不是授权；每个副作用都由服务器授权。
+- 两部分通过 `plugin_id`、版本和 API 版本关联；Core 部分缺失时 UI 降级。
+- 验收要求：不绕过能力内核，卸载时释放资源，拒绝不兼容的版本。
+
+## 规划中：受限 TSX 的边界
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 的 ADR-005（2026-11 快照）；当前实现见 `interfaces/webchat/src/panel/sdk.rs`（同源受信代码，非沙箱）。
+
+ADR-005 规定插件视图以受限 TSX 运行在隔离的视图容器中。
+
+| 允许 | 禁止 |
+|---|---|
+| 在容器内渲染视图 | shell、进程、文件系统、网络访问 |
+| 使用白名单内的原生组件 | 注册任意 Rust 原生组件 |
+| 通过受限的 UI Bridge 交互 | 操作全局窗口与布局、读取其他视图的状态 |
+| 读取任务上下文 | 自行授予能力、修改策略/审批/信任、注入 prompt、工具 schema 或事件处理器 |
+
+为什么要限制：信任分三级（Trusted UI、Generated UI、Untrusted UI，最后一级禁止运行），每个视图带属主、范围、配额和过期时间，销毁时清理。ADR 特别指出 TSX 沙箱并不会让原生组件自动变安全，审批仍由服务器重新校验。
+
+## 规划中：动态 UI 分发
+
+> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 的 ADR-009（2026-11 快照，ADR 状态为 Proposed）；当前实现见 `src/extension/panel_publication/admission.rs`。
+
+ADR-009 要求 UI 以不可变、可校验的制品分发。制品元数据包括 `package_id`、`package_version`、`ui_api_version`、`minimum_host_version`、`entry`、`content_digest`、`signature`、`component_requirements`、`capability_requirements`、`resource_limits`；宿主按内容寻址缓存，可回滚到已校验的旧制品，但不会自动回滚服务器侧数据。签名与信任模型见同文件的 ADR-008。
+
+## Panel 与宿主的责任切分
+
+| 职责 | 负责方 | 现状锚点 |
+|---|---|---|
+| 渲染插件标签页与能力 UI 表面 | Panel | `interfaces/webchat/src/panel/shell.rs` |
+| 发布插件资源、保存 UI 表面状态 | Core | `src/extension/panel_publication/mod.rs`、`src/capability/ui_surface.rs` |
+| 鉴权交付资源、转发 UI 方法 | Gateway | `src/gateway/server/panel_asset_route.rs`、`src/gateway/capability_ui.rs` |
+| 授权副作用 | Core | `docs/reference/REDLINES.md`（R2） |
+| 托盘菜单、全局快捷键、系统通知 | NSH 宿主 | `desktop/nsh-shell/src/main.rs` |
+| 凭据存储 | NSH 宿主（Panel 通过 `CredentialCall` 请求） | `desktop/nsh-shell/src/credentials.rs`、`shared/protocol/src/panel_shell.rs` |
+| 承载 Panel 的窗口容器 | NSH 宿主 | `desktop/nsh-shell/src/shell_host.rs` |
+
+宿主侧的细节见 [桌面宿主概览](./overview)。
+
+## 历史：独立 UI 处理器的移除
+
+`src/capability/ui.rs` 旁边曾有一个同步的旧版 UI 处理器和一个内存中的显示/输入桩。2026-11-20 的断线审计确认没有任何生产路径注册过这个处理器，因此连同桩一起移除（审计记录 `review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`，CUI-02）。此后唯一的 UI 能力路径是 `src/capability/ui_surface.rs` 加上 Gateway 的 `src/gateway/capability_ui.rs`。
+
+插件 Panel 标签页的发布链（`src/extension/panel_publication/`）不是被替代的旧模型，它与能力 UI 表面是并存的两条通道。

@@ -1,0 +1,321 @@
+---
+title: "Capability 模型"
+description: "运行时能力描述符、所有权、可见性、策略与后端解析的参考：能力如何被描述、授权、撤销与失效。"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+本页解决一个问题：Aleph 运行时里的一个「能力」（capability）由什么构成，它怎么被授权、怎么被撤销，以及消费方怎样避免拿到陈旧的 handler。代码位于 `src/capability/`（39 个文件）与契约 crate `crates/aleph-slot-api/`。
+
+<Callout type="warn" title="先读这一条">
+  `src/capability/` 里有若干模块**写好了、测过了，但没有挂到生产路径上**（见下文「挂载状态」）。
+  本页每一处「现状」都对应一条已挂载的代码路径；未挂载的部分单独标明，不当作运行时行为。
+</Callout>
+
+## 能力是什么
+
+一个运行时能力 = 一份**描述符**（`CapabilityDescriptor`）+ 一个**所有者**（`OwnerRef`）+ 一份**可见性范围**（`VisibilityScope`）+ 若干**契约面**（`CapabilityFacet`）。
+
+描述符只描述，不授予权限。授权靠所有权绑定、策略与租约（lease）完成。这一点写在 `src/capability/descriptor.rs` 的模块注释里：描述符是「kind-agnostic capability contract」，Tool 与 special capability 后端提供可执行的适配器，其余 kind 在对应后端挂载前只是描述性的。
+
+```text
+CapabilityDescriptor ──描述──▶ 能力是什么（id / kind / schema / facets）
+OwnershipTree        ──绑定──▶ 谁拥有它、第几代（owner / generation）
+Zahir::resolve       ──签发──▶ BackendLease（带 owner_generation 的租约）
+Zahir::validate_lease──复核──▶ 使用前再检查一次，失效即拒绝
+```
+
+## 描述符
+
+### 字段
+
+`CapabilityDescriptor`（`src/capability/descriptor.rs`）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `id` | `CapabilityId` | `{namespace, name}`，如 Tool 的命名空间 `aleph/tools`（`TOOL_NAMESPACE`，`src/capability/backend.rs`） |
+| `kind` | `CapabilityKind` | 主分类，见下 |
+| `schema` | `SchemaRef` | schema 版本 + SHA-256 指纹 |
+| `revision` | `CapabilityRevision` | 单调递增的修订号，由所属注册表在每次成功变更时赋值 |
+| `lifetime` | `LifetimeScope` | 所有者绑定能活多久 |
+| `visibility` | `VisibilityScope` | 谁能看见它 |
+| `owner` | `OwnerRef` | 谁拥有它 |
+| `services` | `Vec<Service>` | 关系边：`requires` / `provides` / `conflicts` |
+| `metadata` | `ProjectionMetadata` | 投影元数据，见下面的提醒 |
+| `facets` | `CapabilityFacets` | 行为面位集合 |
+
+`CapabilityId`、`Service`、`ServiceRelation` 定义在 `crates/aleph-slot-api/src/capability.rs`，由描述符模块重新导出。`Service` 是纯关系边：不带数据、不可调用。
+
+### CapabilityKind 与 CapabilityFacet
+
+`CapabilityKind` 有 12 个变体：
+
+```rust
+pub enum CapabilityKind { Tool, Ambient, Terminal, Ui, Skill, Agent, Task, Resource, EventSource, Subscription, Plugin, Hook }
+```
+
+（源码里每个变体独占一行，这里为排版压成一行。）`CapabilityKind::UI` 是 `Ui` 的兼容拼写。
+
+Tool、Ambient、Terminal、Ui 有可执行的能力层适配器；其余 kind 在所属后端挂载之前只是描述性的（`src/capability/descriptor.rs` 注释）。
+
+`CapabilityFacet` 是与 kind 正交的行为轴，有 5 个变体：`Callable`、`EventSource`、`Subscription`、`ProviderLifecycle`、`ExternalEffect`。一个 provider 可以同时暴露事件源和可调用操作，而不必假装整个 provider 是 `Tool`。
+
+`CapabilityFacets(u8)` 是 5 位的位集合，提供 `new` / `with` / `contains`；描述符上用 `supports(facet)` 查询。facets 只是描述性元数据，provider、owner 与 descriptor 的权威仍在各自来源。
+
+### SchemaRef 与指纹
+
+```rust
+pub struct SchemaRef {
+    pub version: u32,
+    pub fingerprint: [u8; 32],
+}
+```
+
+`fingerprint` 是规范化输入 schema 的 SHA-256，由 `capability::backend::to_descriptor`（`src/capability/backend.rs`）计算。键顺序不同、内容相同的 schema 得到相同指纹；schema 变了，指纹就变。`validate_lease` 用指纹判断租约对应的描述符是否还是原来那一份。
+
+### 不要误用 ProjectionMetadata.surface
+
+<Callout type="warn" title="surface 在生产里恒为 None">
+  `ProjectionMetadata.surface` 在生产环境**从不被填充**：2026-11-20 的 severed-wire 审计（SW-08，自 2026-10-30 的 C03-8 起一直未关闭，见 `review-results/sev-wire-2026-11-20/cap-core-REPORT.md`）确认，本该给它命名的投影层本身没有挂载，所以每个描述符都带 `None`。
+  消费方**不得**把这个字段当成「已投影」标记。`Zahir::project`（`src/capability/zahir_facade.rs`）返回的 `Projection.metadata` 也是 `ProjectionMetadata::default()`。
+</Callout>
+
+## 所有权与生命周期
+
+### 生命周期范围与 owner
+
+`LifetimeScope`（`src/capability/ownership.rs`）有 5 个变体，从最长到最短：
+
+| 变体 | 含义 |
+|---|---|
+| `Runtime` | 绑定到进程，活满整个运行时 |
+| `Session` | 绑定到一个会话 |
+| `Run` | 绑定到一次运行 |
+| `Task` | 绑定到一个任务 |
+| `External` | 由外部拥有，不在本进程的生命周期模型内 |
+
+`OwnerRef` 说明谁拥有一个能力绑定：`Runtime`、`Session(SessionKey)`、`Run(RunId)`、`Task(TaskId)`。
+
+<Callout type="info">
+  目前代码库里**还没有**统一的 run-id / task-id 类型。`RunId(pub String)` 与 `TaskId(pub String)` 是 `ownership.rs` 里的临时包装，注释明确要求一旦出现规范类型就对齐过去。
+</Callout>
+
+`OwnershipTree` 在这些范围之上组织成一棵五层树：Runtime → Session → Run → Task → EffectClaim（`ownership.rs` 注释）。两条正交的轴：`LifetimeScope` 是 RAII 轴（绑定活多久），`VisibilityScope` 是 ACL 轴（谁能看见）。
+
+### OwnerGeneration 与 FencingToken
+
+- `OwnerGeneration(pub u64)`：每个绑定一个当前代。租约只在它记录的代与绑定当前代相同时有效；重新签发所有权或抬高生命周期范围会改变这个代。
+- `FencingToken(u64)`：字段私有、`Copy`。唯一的构造点是 owner 层的 `pub(crate) fn new(nonce: u64)`，计数器的单调性是 owner 层的契约；每次 `claim` 铸造一个新令牌，所以陈旧租约无法把旧令牌冒充成有效的。
+
+`OwnershipTree` 的变更操作：
+
+| 方法 | 作用 |
+|---|---|
+| `bump(scope)` | 抬高 owner nonce，把该范围及以下所有绑定重写为新的代，并把其上的 claim 清空；返回 `Result<OwnerGeneration, OwnershipError>`，计数器耗尽时报 `GenerationExhausted` |
+| `rotate_capability(id)` | 对一个能力的所有绑定换代并清空 claim |
+| `revoke(id)` | 不可逆：移除该能力的所有绑定，并把 id 加入「已撤销」集合 |
+| `dispose(scope)` | 不可逆：移除该范围及以下所有绑定，并把范围加入「已处置」集合 |
+
+撤销与处置一旦发生就无法撤回，之后任何 `resolve` / `claim` 都会被拒绝。
+
+### OwnershipChange：观察者可见的唯一副作用面
+
+```rust
+pub enum OwnershipChange {
+    Bumped { generation: OwnerGeneration, scope: LifetimeScope },
+    Rotated { capability: CapabilityId, generation: OwnerGeneration },
+    Revoked { capability: CapabilityId },
+    Disposed { scope: LifetimeScope },
+}
+```
+
+（源码为多行写法，这里压缩。）它在 `OwnershipTree` 自己的互斥锁内、与状态变更同一个临界区里发出，是树的变更方法**唯一**对观察者可见的副作用面。订阅用 `OwnershipTree::subscribe_changes`，它**不经过**全局事件总线、会话事件存储或审批权威。订阅是纯观察：不改状态、不推进 nonce、不注册绑定；接收方落后时会得到滞后计数，应据此从新快照重新对账。
+
+## 可见性
+
+`VisibilityScope`（`src/capability/ownership.rs`）有 6 个字段，**全部是 `Option`，`None` 表示该维度不受限**，所以 `VisibilityScope::default()` 是「到处可见」：
+
+| 字段 | 类型 |
+|---|---|
+| `principal` | `Option<String>` |
+| `workspace` | `Option<String>` |
+| `session` | `Option<SessionKey>` |
+| `allowed_kinds` | `Option<Vec<String>>` |
+| `allowed_ids` | `Option<Vec<String>>` |
+| `approval` | `Option<String>` |
+
+`allowed_kinds` 与 `allowed_ids` 故意用 `String` 而不是 `CapabilityKind`：`ownership` 模块不能依赖 `descriptor::CapabilityKind`，否则 `descriptor` ↔ `ownership` 成环；字符串在描述时才与 kind / name 的拼写比较。
+
+## 策略
+
+### 活路径：门面内的绑定校验
+
+当前生产里实际生效的准入路径在 `ZahirFacade`（`src/capability/zahir_facade.rs`）内：
+
+- `resolve` 查 `OwnershipTree` 里的绑定。没有绑定且 id 已撤销返回 `ResolveError::Revoked`，没有绑定而未撤销返回 `NotVisible`；成功时把当时的 owner 与 owner generation 写进 `BackendLease`。
+- `validate_lease` 重新核对：provider 代没变、描述符的 `id` / `revision` / `schema.fingerprint` 没变，并通过 `OwnershipTree::with_current_bindings` 确认绑定仍然是租约记录的那个（被撤销 → `Revoked`；绑定缺失或已处置 → `Unknown`；代或绑定不一致 → `StaleOwner`）。
+
+### 三闸模型
+
+`PolicyEngine`（`src/capability/policy.rs`）定义了三闸模型，每个方法都 fail-closed，任一闸拒绝即整个请求被拒：
+
+1. **可见性闸**：请求的可见性范围是否与描述符允许的一致。
+2. **主体闸**：请求主体是否与绑定的 owner 一致。
+3. **权限闸**：绑定是否存活、未撤销、未处置、代与期望相同。
+
+`PolicyEngine::resolve` 通过后签发 opaque 的 `CapabilityLease`，字段均为 `pub(crate)`，调用方无法自己伪造；之后用 `PolicyEngine::validate_lease` 复核。
+
+<Callout type="warn" title="三闸里的 resolve 没有挂到生产">
+  `policy.rs` 的注释写明（2026-11-20 severed-wire 审计）：`PolicyEngine::resolve` 在生产里**没有调用点**，依附于它的 `validate_visibility_scope` 也是如此，所以 `VisibilityScope` 的 `allowed_kinds` / `allowed_ids` / `approval` / `workspace` / `session` 这些维度目前**没有在运行时被强制**，源码称之为「known gap, not an intended behaviour」。
+  这个方法被保留而不是删除，因为它是唯一实现了这五个维度检查的地方；接线与否是产品决策，不是清理工作。
+</Callout>
+
+### 启动期约束（已挂载）
+
+`PolicyEngine` 在生产里的实际角色是承载**启动期约束**。`build_capability_policy`（`src/capability/production_init.rs`）用共享的 `OwnershipTree` 与 `config.policies.capability_constraints` 组装 `PolicyEngine::with_shared_tree`；`aleph-server` 启动时调用它（`src/bin/aleph-server/commands/start/capability_init.rs`）。该函数的注释说明它是「pure assembly, not authorization or a second ownership authority」。
+
+约束按能力 id 配置，每条规则可含时间窗口、资源上限和必需条件：
+
+```toml
+[policies.capability_constraints."aleph/tools/example"]
+required_conditions = { provider_ready = true }
+```
+
+规则结构见 `src/config/types/policies/capability_constraints.rs`：`time`（`start_hour` / `end_hour`）、`resource`（`unit` 为 `active_calls` 或 `pty_sessions`，加 `max_active`）、`required_conditions`（名称到布尔值）。结构体 `deny_unknown_fields`，未知键会被拒绝。违反约束时由 `ConstraintViolation`（`src/capability/constraints.rs`）报告，例如 `TimeWindowClosed`、`ResourceLimitExceeded`、`ConditionNotMet`。
+
+### PolicyDenial
+
+`PolicyDenial` 的变体与错误文本（`src/capability/policy.rs`，原样）：
+
+| 变体 | 文本 |
+|---|---|
+| `InvalidConstraints { reason }` | `invalid capability constraints: {reason}` |
+| `AttachmentUnavailable { id }` | `capability restriction attachment unavailable: {id:?}` |
+| `ConstraintDenied { reason }` | `capability constraint denied: {reason}` |
+| `NotFound` | `capability not found` |
+| `Revoked` | `capability revoked` |
+| `Disposed` | `lifetime disposed` |
+| `PrincipalMismatch { expected, actual }` | `principal mismatch: expected {expected:?}, got {actual:?}` |
+| `VisibilityMismatch` | `visibility scope mismatch` |
+| `GenerationMismatch { expected, actual }` | `generation mismatch: expected {expected:?}, got {actual:?}` |
+| `ApprovalRequired { context }` | `approval required: {context}` |
+| `KindNotAllowed { kind }` | `kind not allowed: {kind}` |
+| `IdNotAllowed { id }` | `id not allowed: {id}` |
+
+## 效果声明
+
+```rust
+pub struct EffectClaim {
+    pub request_id: String,
+    pub fence: FencingToken,
+    pub owner: OwnerRef,
+}
+```
+
+`OwnershipTree::claim` 对某个能力绑定记录一次 claim 并铸造新的 `fence`。如果绑定已撤销、所属生命周期已处置、owner 不匹配或 fence 计数器耗尽，返回 `None`。`claim_state` 给出 `ClaimState::Active` 或 `Unknown`：`Active` 表示 claim 所依附的绑定仍存活、未撤销、未处置，且自 claim 以来没有被重新签发；撤销、处置、父级 bump 失效或根本没有这条 claim，都归入 `Unknown`。
+
+`src/capability/effect_claim.rs` 是针对 `SessionEvent::EffectClaim*` 事件历史的纯 reducer（状态 `Prepared` / `Claimed` / `Invoking` / `Succeeded` / `Failed` / `Unknown`），对重复的活跃 claim 与非法迁移保持 fail-closed。
+
+<Callout type="warn" title="effect_claim 尚未接线">
+  `effect_claim.rs` 头注释写明：生产里没有构造 `SessionEvent::EffectClaim*` 的位置，所以这个 reducer 除了自己的测试外没有生产者也没有消费者，是有记录的延期（见 `AGENTS.md` 的 Capability Phase 4 一节），不是静默的死模块。因此「用 fence 把重复提交识别为重复」目前是 reducer 与 `OwnershipTree` 层面的契约，不是端到端生效的行为。
+</Callout>
+
+## 后端证据与解析
+
+### BackendSourceEvidence
+
+`BackendSourceEvidence`（`src/capability/facade.rs`）说明一份租约来自哪类后端，来源身份与 kind 相关，Resource 不会伪造 Tool 条目：
+
+| 变体 | 载荷 |
+|---|---|
+| `Tool` | `canonical_entry: CanonicalEntryLease`、`provider_generation: u64` |
+| `Provider` | `provider_id: ProviderId`、`provider_generation: u64` |
+| `MemoryResource` | `Weak<MemoryRuntime>`（用 `Weak` 以免延长 memory runtime 的生命周期） |
+| `Special` | `capture: CapturedSpecialEntry`、`provider_generation: u64` |
+
+### BackendLease 与 ResolveError
+
+```rust
+pub struct BackendLease {
+    pub descriptor: CapabilityDescriptor,
+    pub owner_generation: OwnerGeneration,
+    pub owner: OwnerRef,
+    pub source: BackendSourceEvidence,
+    // required_resources 为 pub(crate)，此处省略
+}
+```
+
+规则只有一条，但不能违反：**消费方必须在 owner generation 变化的那一刻把租约视为失效，fail-closed，绝不使用陈旧的 handler。** 租约里同时记录 `owner`，因为仅凭代无法区分「所有权转移」与「绑定未变」。`resolve` 返回的是租约，不是活的 handler；使用前再用 `validate_lease` 复核。
+
+`ResolveError` 是闭集：
+
+| 变体 | 含义 |
+|---|---|
+| `Unknown` | 查找未命中、绑定缺失（且未撤销）、描述符新鲜度不符或任何无法归类的失败 |
+| `NotVisible` | 调用方的 `Reference.visibility` 下该 id 没有绑定（仅 resolve） |
+| `Revoked` | 绑定已撤销 |
+| `StaleOwner` | 租约的 `owner_generation` 落后于当前代（仅 validate） |
+| `StaleProvider` | 租约签发后 provider 实例被停止或替换 |
+
+`StaleOwner` 不会出现在 resolve 阶段：刚签发的租约带的就是当时读到的代，构造时不可能陈旧。
+
+### 快照与变更流
+
+- `CapabilitySnapshot { capabilities, committed_cursor }`：内容在快照生命周期内**冻结**。之后的变更不会改写已持有的快照，而是产生新快照或一个 `CapabilityChange::Invalidated` 事件。
+- `Cursor(pub u64)`：单调的订阅位置，`0` 表示从头开始。注意 `ZahirFacade::subscribe` 忽略调用方传入的 cursor：这个同步、以快照为锚的 API 没有重放，所以从快照位置起算，传入的 cursor 若领先于快照则 fail-closed 回到快照 cursor。
+- `CapabilityChangeStream`：纯值状态机，不持有存储、注册表或订阅接线；提供 `from_snapshot`、`append`、`append_cohort`、`invalidate_and_resync`，历史只保留最近 256 条变更。
+- `invalidate_and_resync(snapshot, delta)`：丢弃 cursor 不超过旧位置的陈旧尾部、对与已见变更完全相同的条目去重，先压入一个 `Invalidated`，再按原顺序追加存活的增量，cursor 推进到各方最大值且**永不回退**。仅当快照的 cursor 小于订阅方当前位置（重同步来源落后）时返回 `false`，此时流不被修改（fail-closed）。
+
+`CapabilityChange` 的变体：`Registered`、`Replaced`、`Unregistered`（均带 `id` 与 `revision`）与 `Invalidated`。
+
+## Zahir
+
+`Zahir` 是 `src/capability/facade.rs` 里的 trait：所有消费方（UI、MCP 投影、ACP JSON 投影）读取能力都走这一个面。它从不直接调用能力，只做描述（`describe`）、解析成租约（`resolve` / `validate_lease`）、订阅变更（`subscribe`）、投影（`project`），再加唯一一个会运行 provider 激活钩子的入口 `activate`。
+
+`ZahirFacade`（`src/capability/zahir_facade.rs`，模块注释「The one live Zahir host」）是它唯一的活实现，由 `ProjectionHost::mount*`（`src/capability/projection_host.rs`）构造，`aleph-server` 启动时调用 `ProjectionHost::mount_with_runtime_and_events`（`src/bin/aleph-server/commands/start/mod.rs`）。它组合：
+
+- `ToolBackendAdapter`：内层 `crate::tools::registry::ToolHandlerRegistry` 是**唯一的可调用 Tool 真值源**；
+- `Arc<OwnershipTree>`：**唯一的 owner / revoke / dispose 来源**。
+
+此外字段里还有 provider 适配器、可选的 `MemoryRuntime`、`PolicyEngine`、special 能力注册表与事件流。它**不持有**第二份 descriptor map、handler map 或 owner 计数器。
+
+注册表的广播是实时通知的 tap（256 槽，滞后会丢），不是持久恢复来源。`subscribe` 把广播同步排空成纯 `CapabilityChangeStream`；滞后的接收方从新快照重同步并发出 `CapabilityChange::Invalidated`，而不是假装投递了每个事件。持久恢复只认 `SessionEventStore`（`AGENTS.md` Capability Phase 4 一节）。
+
+## 挂载状态
+
+下表只列 2026-11-20 severed-wire 审计在源码头注释里留下记录的模块（`review-results/sev-wire-2026-11-20/`）：
+
+| 模块 | 状态 | 依据 |
+|---|---|---|
+| `src/capability/zahir_facade.rs` | 已挂载（Tool / provider / special / memory 解析） | 模块注释；`aleph-server` 启动经 `ProjectionHost` 构造 |
+| `src/capability/production_init.rs` | 已挂载（启动期约束） | `src/bin/aleph-server/commands/start/capability_init.rs` 调用 |
+| `src/capability/ui.rs`、`ui_surface.rs` | 已挂载（`aleph/ui` 命名空间） | `ui.rs` 头注释 |
+| `PolicyEngine::resolve` | 未挂载 | `policy.rs` 注释 |
+| `src/capability/ambient.rs` | 有意延期，未挂载 | 头注释：暴露进程 / 用户身份与环境变量是安全面决策 |
+| `src/capability/audit.rs` | 未挂载 | 头注释：无生产读取方；活路径是 `src/gateway/capability_events.rs` |
+| `src/capability/grant.rs` | 未挂载 | 头注释：沙箱审批走自己的 `GrantStore`（`src/sandbox/exec_approval/grants.rs`） |
+| `src/capability/effect_claim.rs` | 未接线 | 头注释：无生产 `EffectClaim*` 构造点 |
+
+### 能力 UI 表面
+
+`src/capability/ui.rs` 与 `ui_surface.rs` 是**运行时拥有**的 `aleph/ui` 表面能力（`UI_NAMESPACE = "aleph/ui"`），实时 UI 路径是 `capability::ui_surface` 加网关的 `capability_ui` 面（负责渲染与输入传输）。它与插件 UI **无关**：插件 UI 走 `src/extension/panel_publication/`。
+
+## 与旧模型的关系
+
+旧模型是「插件声明自己有哪种能力」：`src/extension/capability.rs` 的 `CapabilityDeclaration` 枚举，仍被插件清单适配器使用，但只是静态声明。新模型是「运行时把能力描述符化，并让授权、撤销、失效都走同一条路径」。两者的对照与关系图见 [能力与插件](../concepts/capability-system)。
+
+## 历史：已删除的 legacy UI 处理器
+
+2026-11-20 的 severed-wire 审计删除了 `src/capability/ui.rs` 里从未在生产注册过的 legacy UI handler，以及内存里的 display / input 桩：没有任何生产路径注册过那个同步 handler，整条「legacy UI handler」分支是一根断线（`review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`，CUI-02）。`ui.rs` 现在只保留类型化的 UI 能力契约（命名空间、schema 与网关发布的描述符）。
+
+## 规划中
+
+> **状态：规划中** — 以下三项来自蓝图 `docs/research/Everything-externally-composable-is-a-Capability.md`，不是现状。
+
+| 设计意图 | 蓝图章节 | 当前最接近的实现 |
+|---|---|---|
+| **协议即投影**：一份描述，多个出口；新协议只是新增一个 adapter，不动 Core | 第十二节「协议是投影」 | `TransportTarget`（`Mcp` / `AcpJson` / `StateDatabase`）与 `Zahir::project`（`src/capability/facade.rs`），但 `Projection` 只带能力 id 列表，且 `ProjectionMetadata.surface` 恒为 `None`（见上） |
+| **可逆 / 持久效果分类**：owner 释放时统一撤销；跨不可逆边界的 effect 走「落盘意图 → 执行 → 落盘结果」三明治 | 第九节「Reversible Effects 与 Durable Effects」，9.4 | `CapabilityFacet::ExternalEffect`、`EffectClaim` 与 `OwnershipTree::dispose`（`src/capability/ownership.rs`）；reducer `src/capability/effect_claim.rs` 尚未接线 |
+| **依赖图**：声明依赖，用于装配顺序、撤销顺序与 `doctor` 诊断；依赖不可用时返回结构化「暂不可用」错误 | 第十节「Dependency Graph」，10.2 | `Service` 关系边（`requires` / `provides` / `conflicts`）与 `BackendLease` 的 `required_resources`（`src/capability/facade.rs`）；没有独立的依赖图，也没有 `doctor` 诊断 |
+
+槽位目录、替换机制与统一分发注册表在另一份蓝图 `docs/research/aleph_modularization_plan.md`（第 3、4、8 节）里，见 [能力与插件](../concepts/capability-system) 的「规划中」一节。

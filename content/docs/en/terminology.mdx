@@ -107,12 +107,40 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Plugin.install (unified)** | 插件统一入口 | `plugin.install` no longer guesses source; classifies the source (marketplace / zip / path) and routes uniformly |
 | **Plugin Marketplace** | 插件市场 | Indexable directory exposed via `plugin.marketplace.list` / `plugin.marketplace.add` |
 
+## Desktop Hosts and the Panel
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **NSH** | NSH | The target shape of the Aleph desktop end: the native desktop host crate `aleph-nsh-shell` (`desktop/nsh-shell/`), built on nsh 0.6.0 (`nsh-core` / `nsh-base` / `nsh-engine` all pinned to `=0.6.0`) |
+| **Desktop Host** | 桌面宿主 | A thin native shell: window container, tray, global hotkey, notifications, credential storage, login-item status — and **no chat or session projection of its own** (`desktop/nsh-shell/src/shell_host.rs`) |
+| **Panel** | 面板 | The single source of truth for the business UI: Rust + Leptos/WASM in `interfaces/webchat/`. NSH hosts this one Panel; it is not a second business UI |
+| **Panel Runtime** | 面板运行时 | The modular runtime inside the Panel (`interfaces/webchat/src/panel/`): `TabRegistry` / `PanelProjection` / `PanelLoader` / `PanelSdk`; `panel-modular` is an opt-in feature |
+| **Legacy Shell** | 旧桌面壳 | The transition-era Tauri v2 app (`desktop/shell/`): its own daemon supervisor, tray, auto-update, deep links, hotkey, menus, notifications. **It will be removed** |
+| **embedded-core** | 内嵌核心 | An opt-in NSH compile-time feature (off by default): on a local target with the port genuinely free, it may start the bundled `aleph-server` next to the host; when the port is taken it only checks compatibility and never takes over an existing service |
+| **aleph:// deep link** | aleph:// 深链 | The URL scheme NSH registers; today only the exact `aleph://open` is recognised (opens Chat), every other `aleph://` URL is ignored |
+
+## Capability Model and Slots
+
+| English | Chinese | Definition |
+|---------|---------|------------|
+| **Capability** | 能力 | The subject of the capability model in `src/capability/`: a resolvable descriptor carrying kind, facets, schema, ownership and a backend binding; it supersedes the same-named concept of the old extension model (see "Capability (extension era)" below) |
+| **Capability (extension era)** | 能力（扩展期） | The old extension model's permission declaration (filesystem / network / process), backed by the historical structures in `src/extension/`; now superseded by the capability model above |
+| **CapabilityKind** | 能力种类 | The kind enum of a capability (`src/capability/descriptor.rs`) |
+| **CapabilityFacet** | 能力面 | A facet declared on a descriptor (e.g. permissions, UI exposure, event audience) |
+| **SchemaRef** | 模式引用 | The structural contract a capability's inputs and outputs refer to (`src/capability/descriptor.rs`) |
+| **OwnerGeneration / FencingToken** | 属主世代 / 围栏令牌 | The owner's generation number and fencing token, which stop a retired owner from staying effective (`src/capability/ownership.rs`) |
+| **OwnershipChange** | 归属变更 | The event emitted when a capability's ownership changes |
+| **Backend / BackendLease** | 后端 / 后端租约 | Where a capability is actually implemented, and the lease on it; `BackendSourceEvidence` records the source evidence (`src/capability/backend.rs`, `facade.rs`) |
+| **PolicyDenial** | 策略拒绝 | The result of the policy engine refusing a capability call (`src/capability/policy_runtime.rs`) |
+| **Zahir** | Zahir | The one live host for capability resolution and dispatch: `ZahirFacade` (`src/capability/zahir_facade.rs`) composes the tool backend adapter (the single source of truth for callable tools) with the `OwnershipTree` (the single source of truth for ownership / revocation / disposal), and keeps no second descriptor or handler map |
+| **Slot API** | 插槽 API | `crates/aleph-slot-api/`: the pure contract authority for the slot API (error, text, tool, search / embedding, channel, approval, cancellation, webhook, AI provider). **No I/O, no platform, no LLM**, with a one-way dependency: `alephcore → aleph-slot-api` |
+
 ## Security
 
 | English | Chinese | Definition |
 |---------|---------|------------|
 | **Sandbox** | 沙箱 | Per-session execution isolation with capability enforcement |
-| **Capability** | 能力 | Permission declaration (filesystem, network, process) |
+| **Capability (extension era)** | 能力（扩展期） | The old extension model's permission declaration (filesystem, network, process); now superseded by the capability model in `src/capability/`, see [Capability Model](/docs/en/capabilities/capability-model) |
 | **Capability Ledger** | 能力账本 | Per-install visible capability list rebuilt from disk (used in pre-install disclosure) |
 | **Approval Gate** | 审批门 | Human-in-the-loop approval for elevated permissions |
 | **fail-closed** | 失败关闭 | Refuses authorization when a policy file is missing or `permissive_default` disagrees with `Default::default()` |
@@ -140,6 +168,12 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Session Key** | 会话密钥 | Unique identifier for a session (e.g., `agent:main:main`) |
 | **Event Bus** | 事件总线 | Pub/sub system for real-time event distribution; `broadcast::RecvError::Lagged` must recover rather than die permanently |
 | **JSON-RPC** | JSON-RPC | Request/response protocol over WebSocket |
+| **Protocol v1** | 协议 v1 | The new transport protocol with version negotiation: 4-byte big-endian length-prefixed framing plus the `system.hello` handshake (`shared/protocol/src/framing.rs`, `shared/protocol/src/system_hello.rs`) |
+| **Frame** | 帧 | The transport unit: length prefix plus payload; the default per-frame cap is `DEFAULT_MAX_PAYLOAD_BYTES = 8_388_608` (8 MiB) |
+| **system.hello** | system.hello | The handshake request sent once a connection is established: negotiates the protocol minor version and features; a major mismatch returns `INVALID_PARAMS` |
+| **Desktop IPC** | 桌面 IPC | The read-only transport over a Unix socket (`--desktop-ipc <socket>`), `src/gateway/server/connection/local_ipc.rs` |
+| **Web v1** | Web v1 | The new transport over native TLS: `POST /v1/session` plus `GET /v1/ws`, `src/gateway/server/connection/web_v1.rs` |
+| **Legacy /ws** | 旧 /ws 入口 | The old unversioned WebSocket entry point (`ws://127.0.0.1:18790/ws`); it does not use length-prefixed framing |
 | **Trace** | 追踪 | Execution event stream for observability |
 | **Error Receipt** | 错误回执 | Single-sourced user-readable error returned by the gateway; the raw error chain never leaks out |
 | **Dead Letter** | 死信 | Messages that failed to deliver via channel.*; re-drivable from the Panel |
@@ -257,19 +291,19 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 |----------|-------------|--------|
 | OTAF | Think→Act | Architecture changed from OTAF to Harness |
 | Agent Loop | Harness | Unified under Harness terminology |
-| `src/agent_loop/` | `src/harness/` | Harness migration; the old directory has been removed |
+| agent-loop module directory | `src/harness/` | Harness migration; the old directory has been removed (the agent runtime now lives in `src/agents/runtime.rs`) |
 | LanceDB | SQLite + sqlite-vec | Storage backend changed |
 | JSON5 config | TOML config | Config format changed |
 | `aleph` binary | `aleph-server` | Binary renamed |
 | Skill System v1 | Skill System v2 | Complete rewrite |
 | EvolutionTracker | Registry | Part of old skill system |
 | SolidificationDetector | EligibilityService | Part of old skill system |
-| SubagentTool | (retained as the sub-agent spawn tool) | Coexists with `FlowRunTool` (`src/orchestrator/flow_run_tool.rs`); the former handles sub-agent spawn, the latter handles flow orchestration |
+| SubagentTool | (retained as the sub-agent spawn tool, `src/agents/subagent_tool/`) | There is no separate FlowRunTool on the flow side: flow orchestration is declarative `FlowSpec` (`src/orchestrator/flow_spec.rs`) resolved and dispatched through `FlowRegistry` (`src/orchestrator/flow_registry.rs`) |
 | LoopToolRegistry | ToolService | Unified tool façade |
 | ClawHub settings tab | Extensions Store | ClawHub demoted to long-tail; settings tab removed |
-| `teams.run` | `teams.chat.send` / Coord Tasks | Method never existed — teams use the chat thread + tasks |
+| `teams.run` | `teams.chat.send` / Coord Tasks | Not a method — teams use the chat thread + tasks |
 | `coordination: sequential\|parallel\|hierarchical` | Team Strata (leader-first planning) | Coordination modes were fictional |
-| DiminishingReturnsDetector | (removed) | Harness ratchet tightened to the current `CEILING` (`src/harness/tests/budget.rs:335`); the hard stop inside the loop violates R10 |
+| DiminishingReturnsDetector | (removed) | Harness ratchet tightened to the current `CEILING` (`src/harness/tests/budget.rs:795`); the hard stop inside the loop violates R10 |
 | Telegram local pairing store | Router-singleton pairing store | Channel-local store never took effect |
 | Discord parallel nested config layers | Router-singleton config | Parallel layers removed |
 | Provider failover deep-clone whole session | Atomic regen marker + single clone | Performance and correctness fix |

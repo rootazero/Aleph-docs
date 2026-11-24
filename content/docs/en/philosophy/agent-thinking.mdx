@@ -27,7 +27,7 @@ Every agent interaction follows the **Think → Act** loop. This is the fundamen
      (model's explicit stop → done)
 ```
 
-> The historical OTAF (Observe–Think–Act–Feedback) is retired — `src/agent_loop/` was deleted during the Harness migration (Phases 6/7). The Harness now only carries Think→Act turn scheduling; **it does no reasoning** (R10's "Dumb Loop").
+> The historical OTAF (Observe–Think–Act–Feedback) is retired — the old agent-loop module directory was deleted during the Harness migration (Phases 6/7). The Harness now only carries Think→Act turn scheduling; **it does no reasoning** (R10's "Dumb Loop"). The agent runtime now lives in `AgentRuntime` (`src/agents/runtime.rs`).
 
 ### Think
 

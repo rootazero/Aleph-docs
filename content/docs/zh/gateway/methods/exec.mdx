@@ -3,7 +3,7 @@ title: "exec.*"
 description: "执行审批 RPC 方法"
 ---
 
-`exec.*` 是运行时执行等级门控的审批接口。运行时仅提供**两个真实 JSON-RPC 方法**(`exec.approval.resolve`、`exec.approvals.pending`);其余的审批 UX——`exec.approval.request`、审批卡、Ask / Auto / Full 切换——都内嵌在**代理循环**中,通过 `chat.send` 或 `agent.run` 触发,而不是本命名空间。
+`exec.*` 是运行时执行等级门控的审批接口。运行时仅提供**两个真实 JSON-RPC 方法**(`exec.approval.resolve`、`exec.approvals.pending`);其余的审批 UX——审批卡的触发、审批卡、Ask / Auto / Full 切换——都内嵌在**代理循环**中,通过 `chat.send` 或 `agent.run` 触发,而不是本命名空间。
 
 26.7.15+ 引入的 Ask/Auto/Full 执行等级门控在 `src/tools/scoped/` 中(动作感知的审批卡,以及绕过斜杠快路径、`tools.invoke` 和后台延续的拦截);相关接线细节见 `docs/superpowers/specs/2026-05-21-gateway-robustness-kit-design.md`。本页面仅记录 RPC 接口。
 
@@ -32,13 +32,13 @@ description: "执行审批 RPC 方法"
 
 ## 不作为 RPC 存在的方法
 
-老版本中本页描述但**未在当前 alpeh-server 上注册**的方法:
+以下审批 UX 概念不是独立 RPC；当前注册项见 `src/gateway/method_census.rs`:
 
-| 方法 | 不作为 RPC 存在的原因 |
+| UX 操作 | 不作为 RPC 存在的原因 |
 |------|---------------------|
-| `exec.approval.request` | 模型从不主动调用——`src/tools/scoped/` 中的动作感知门控在工具元数据提示需要确认时,直接在事件总线上抛出审批卡。 |
-| `exec.approvals.get` | 没有"审批配置"可读——授权是内存中的一次性 / 会话级产物,无磁盘形态。 |
-| `exec.approvals.set` | 同上,没有可写的配置。 |
+| 审批卡的触发 | 模型从不主动调用——`src/tools/scoped/` 中的动作感知门控在工具元数据提示需要确认时,直接在事件总线上抛出审批卡。 |
+| 读取审批配置 | 没有"审批配置"可读——授权是内存中的一次性 / 会话级产物,无磁盘形态。 |
+| 写入审批配置 | 同上,没有可写的配置。 |
 
 客户端若想程序化驱动流程,唯一的合法入口是 `exec.approval.resolve`(回答一张卡)和 `exec.approvals.pending`(枚举开放中的卡)。
 

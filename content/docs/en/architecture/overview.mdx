@@ -15,11 +15,11 @@ Aleph's architecture is built on four principles that govern every design decisi
 
 1. **Single-Core Multi-Terminal** — One `aleph-server` process powers every interface. Whether you chat via the desktop app, CLI, Telegram, or Discord, the same core handles all reasoning, tool execution, and state management.
 
-2. **Shell-Core Separation** — The desktop app is a *thin native shell* (Tauri v2). It owns the window, tray, notifications, and OS integrations — but **zero business logic and zero business UI**. All product UI lives in the Leptos Panel served by the core. All reasoning, tools, and state live in `aleph-server`. The shell can connect to a local core or a remote one over Tailnet/VPN.
+2. **Shell-Core Separation** — The desktop app is a *thin native host* (NSH, `desktop/nsh-shell`). It owns the window, tray, notifications, and OS integrations — but **zero business logic and zero business UI**. All product UI lives in the Leptos Panel (`interfaces/webchat`) served by the core. All reasoning, tools, and state live in `aleph-server`. The host connects to an existing local or remote core (HTTPS for remote) and does not own its lifetime.
 
-3. **Gateway Interoperability** — Every terminal speaks the same authenticated WebSocket protocol (`JSON-RPC 2.0` over `ws://`). A CLI tool, a Telegram bot, and the desktop shell all call identical methods on the same Gateway.
+3. **Gateway Interoperability** — Every terminal speaks the same authenticated WebSocket protocol (`JSON-RPC 2.0` over `ws://`). A CLI tool, a Telegram bot, and the Panel hosted by the desktop host all call identical methods on the same Gateway.
 
-4. **Access Control** — Every connection is authenticated. The desktop shell reads a shared token from the core's security database. Remote connections use the same token mechanism. Guest sessions carry restricted scopes. See [Identity and Security](#identity-and-security) for details.
+4. **Access Control** — Every connection is authenticated. The desktop host stores and presents device credentials through a native credential channel (`desktop/nsh-shell/src/credentials.rs`). Remote connections are authenticated as well. Guest sessions carry restricted scopes. See [Identity and Security](#identity-and-security) for details.
 
 > **From "many channels" to "many bodies."** Single-Core Multi-Terminal gives one brain many I/O channels. [Cluster Federation](./cluster) extends the same principle to many *execution bodies*: a single center core orchestrates work across several machines (nodes) — while the cluster still has exactly one mind.
 
@@ -29,95 +29,102 @@ Aleph's architecture is built on four principles that govern every design decisi
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           INTERFACE LAYER (I/O)                               │
+│                            INTERFACE LAYER (I/O)                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
-│  │ Desktop  │  │   CLI    │  │ Telegram │  │ Discord  │  │  TUI     │      │
-│  │  Shell   │  │          │  │Interface │  │Interface │  │          │      │
-│  │(Tauri v2)│  │          │  │          │  │          │  │          │      │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘      │
-│       │             │             │             │             │             │
-│       └─────────────┴─────────────┴─────────────┴─────────────┘             │
-│                                   │                                          │
-│                    WebSocket (JSON-RPC 2.0) + Auth Token                    │
-│                          ws://127.0.0.1:18790/ws                             │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                              GATEWAY LAYER                                   │
-│                         (Control Plane + Routing)                           │
+│  ┌───────────────────────────┐  ┌─────┐  ┌─────┐  ┌─────────┐  ┌─────────┐  │
+│  │    Desktop Host (NSH)     │  │ CLI │  │ TUI │  │Telegram │  │ Discord │  │
+│  │      aleph-nsh-shell      │  │     │  │     │  │Interface│  │Interface│  │
+│  │ ┌───────────────────────┐ │  └──┬──┘  └──┬──┘  └────┬────┘  └────┬────┘  │
+│  │ │     Panel (WASM)      │ │     │        │          │            │       │
+│  │ │  interfaces/webchat   │ │     │        │          │            │       │
+│  │ └───────────────────────┘ │     │        │          │            │       │
+│  └─────────────┬─────────────┘     │        │          │            │       │
+│                │                   │        │          │            │       │
+│                └───────────────────┴─┬──────┴──────────┴────────────┘       │
+│                                      │                                      │
+│                    WebSocket (JSON-RPC 2.0) + auth token                    │
+│                           ws://127.0.0.1:18790/ws                           │
+│   Panel assets are embedded in aleph-server; the host only runs a WebView   │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                GATEWAY LAYER                                │
+│                          (Control Plane + Routing)                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │   Router    │  │  Session    │  │   Event     │  │  Security   │        │
-│  │  (JSON-RPC) │  │  Manager    │  │    Bus      │  │  (Auth)     │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │ Interface   │  │   Config    │  │  Webhooks   │  │    Cron     │        │
-│  │  Registry   │  │ Hot Reload  │  │             │  │  Scheduler  │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘        │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                           ORCHESTRATOR LAYER                                 │
-│                  (AgentDef + FlowSpec Resolution + Dispatch)                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │   Router    │  │   Session   │  │  Event Bus  │  │  Security   │         │
+│  │ (JSON-RPC)  │  │   Manager   │  │             │  │   (Auth)    │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘         │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │  Interface  │  │   Config    │  │  Webhooks   │  │    Cron     │         │
+│  │  Registry   │  │ Hot Reload  │  │             │  │  Scheduler  │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘         │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                             ORCHESTRATOR LAYER                              │
+│                 (AgentDef + FlowSpec Resolution + Dispatch)                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        Orchestrator                                  │   │
-│  │  Resolves AgentDef + FlowSpec, builds HarnessDeps, dispatches       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                              HARNESS LAYER                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                             Orchestrator                              │  │
+│  │       Resolve AgentDef + FlowSpec, build HarnessDeps, dispatch        │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                HARNESS LAYER                                │
 │                        (Think→Act Loop + Stop-Hooks)                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                         AgentHarness                                 │   │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐   │   │
-│  │  │ Context │→ │  Think  │→ │   Act   │→ │Stop-Hook│→ │ Compact │   │   │
-│  │  │ (Budget)│  │(Thinker)│  │ (Tools) │  │  Check  │  │ (Budget)│   │   │
-│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘  └─────────┘   │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                      │
-│  │  ToolService │  │    Guards    │  │   Overflow   │                      │
-│  │  (Tool Exec) │  │  (Safety)    │  │  Detector    │                      │
-│  └──────────────┘  └──────────────┘  └──────────────┘                      │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┴─────────────────────────────────────────┐
-│                            STORAGE LAYER                                     │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                             AgentHarness                              │  │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐      │  │
+│  │  │ Context │→ │  Think  │→ │   Act   │→ │Stop-Hook│→ │ Compact │      │  │
+│  │  │(Budget) │  │(Thinker)│  │ (Tools) │  │  Check  │  │(Budget) │      │  │
+│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘  └─────────┘      │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │ ToolService  │  │    Guards    │  │   Overflow   │  │Desktop Layer │     │
+│  │ (tool exec)  │  │   (safety)   │  │   Detector   │  │ (desktop/*)  │     │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘     │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+┌──────────────────────────────────────┴──────────────────────────────────────┐
+│                                STORAGE LAYER                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  ┌────────────────────────────┐  ┌────────────────┐  ┌─────────────────┐    │
-│  │  Memory (SQLite+sqlite-vec)│  │ Resilience     │  │  Config Store   │    │
-│  │  ┌──────┐ ┌───────┐        │  │   (SQLite)     │  │  ┌─────┐┌────┐ │    │
-│  │  │Facts │ │ Graph │        │  │  ┌──────────┐  │  │  │TOML ││Keys│ │    │
-│  │  │+Vec  │ │ Nodes │        │  │  │  State   │  │  │  │File ││    │ │    │
-│  │  │+FTS  │ │ Edges │        │  │  │ Database │  │  │  └─────┘└────┘ │    │
-│  │  └──────┘ └───────┘        │  │  └──────────┘  │  └─────────────────┘    │
-│  └────────────────────────────┘  └────────────────┘                         │
+│  ┌────────────────────────────┐   ┌────────────────┐   ┌─────────────────┐  │
+│  │ Memory (SQLite+sqlite-vec) │   │   Resilience   │   │  Config Store   │  │
+│  │  ┌──────┐ ┌───────┐        │   │    (SQLite)    │   │  ┌─────┐ ┌────┐ │  │
+│  │  │Facts │ │ Graph │        │   │  ┌──────────┐  │   │  │TOML │ │Keys│ │  │
+│  │  │ +Vec │ │ Nodes │        │   │  │  State   │  │   │  │File │ │    │ │  │
+│  │  │ +FTS │ │ Edges │        │   │  │    DB    │  │   │  └─────┘ └────┘ │  │
+│  │  └──────┘ └───────┘        │   │  └──────────┘  │   └─────────────────┘  │
+│  └────────────────────────────┘   └────────────────┘                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Layer 1: Interface
 
-The topmost layer contains all client applications. Every client — whether the desktop shell, terminal CLI, or a Telegram/Discord bot — connects to the same Gateway via a single authenticated WebSocket endpoint at `ws://127.0.0.1:18790/ws`. Communication uses JSON-RPC 2.0, meaning every client speaks the same protocol regardless of platform.
+The topmost layer contains all client applications. Every client — the Panel hosted by the desktop host, the terminal CLI / TUI, or a Telegram/Discord bot — connects to the same Gateway and speaks the same JSON-RPC 2.0 protocol. The established entry point is the authenticated WebSocket endpoint `ws://127.0.0.1:18790/ws` (route registered in `src/gateway/server/mod.rs`).
 
-**Desktop Shell (Tauri v2).** The native desktop app is the "last-mile native shell." It provides:
-- Native window + webview hosting the Leptos Panel (`http://127.0.0.1:18790`)
-- System tray with "Quit" and "Quit & Stop Aleph" options
-- OS notifications via WebSocket event bridge
-- Global summon hotkey (`CmdOrCtrl+Shift+A`)
-- `aleph://` URL scheme for deep links
-- Background auto-update checker
-- Launch-at-login
-- Daemon lifecycle supervision (relaunches core if it crashes)
+**Desktop host (NSH).** The native desktop host is the "last-mile native shell": `desktop/nsh-shell`, crate `aleph-nsh-shell`, built on nsh 0.6.0 (`desktop/nsh-shell/Cargo.toml`). It provides:
+- A native window + WebView hosting the Gateway-served Leptos Panel (`http://127.0.0.1:18790` for the local target, see `shared/client/src/connection_target.rs`)
+- A system tray (`set_tray` in `desktop/nsh-shell/src/main.rs`)
+- OS notifications forwarded through the Panel bridge (`desktop/nsh-shell/src/panel_bridge.rs`, protocol types in `shared/protocol/src/panel_shell.rs`)
+- A global summon hotkey (default `mod+shift+a`; `ALEPH_SHELL_HOTKEY=disabled` turns it off)
+- The `aleph://` URL scheme for deep links (`.url_schemes(["aleph"])` in `main.rs`)
+- A read-only login-item status query (`--autostart-status`, `desktop/nsh-shell/src/autostart.rs`); the host never writes the login item
+- Native storage of device credentials (`desktop/nsh-shell/src/credentials.rs`)
 
-Crucially, the shell contains **no business logic and no business UI**. All product UI (chat, memory, settings) lives in the Panel (WASM, served by the core). All reasoning, tools, and state live in `aleph-server`. This separation means:
-- The shell can be updated independently of the core
-- The core can run headless on a server while the shell connects remotely
-- The same core serves the desktop shell, CLI, and messaging bots simultaneously
+NSH has no auto-updater and no daemon supervisor — it does not own the Gateway's lifetime. Platform acceptance status is tracked in `docs/reference/DESKTOP_SHELL.md`: only macOS has local acceptance evidence so far, and NSH has no release pipeline yet.
 
-**Remote Core Support.** The desktop shell can connect to a remote `aleph-server` over Tailnet or VPN. The Panel's directory picker browses the *server's* filesystem via JSON-RPC (`fs.*`), ensuring correct semantics for remote deployments. Authentication uses a shared token injected by the shell at startup (read from `~/.aleph/data/security.db` via the core's `bootstrap-token` subcommand).
+Crucially, the host contains **no business logic and no business UI**. All product UI (chat, memory, settings) lives in the Panel (`interfaces/webchat`, WASM served by the core); NSH hosts the same Panel rather than a second business UI (`docs/reference/DESKTOP_SHELL.md`). All reasoning, tools, and state live in `aleph-server`. This separation means:
+- The host can be updated independently of the core
+- The core can run headless on a server while the host connects remotely
+- The same core serves the desktop host, CLI, and messaging bots simultaneously
+
+**Connect, do not own.** The host connects to an existing Gateway; it does not start, stop, or reconfigure a service (help text in `main.rs`). The one exception is the `embedded-core` feature, which is off by default: when enabled, the local target runs an admission check through `aleph-desktop-host` before opening the Panel, and only launches the sibling `aleph-server` binary when `127.0.0.1:18790` refuses connections (`ensure_compatible_ready` in `desktop/host/src/local_server.rs`). If the port is held by another process or a Gateway is already running, the host neither takes it over nor stops it.
+
+**Remote Core Support.** The host can connect to a remote `aleph-server` with `--connect <origin>`; a remote origin must use HTTPS. The Panel's directory picker browses the *server's* filesystem via JSON-RPC (`fs.*`, see `src/gateway/lane.rs`), ensuring correct semantics for remote deployments. The host does not read the core's security database; it stores and presents credentials through `credentials.rs`, while the `aleph-server bootstrap-token` subcommand (`src/bin/aleph-server/commands/bootstrap_token.rs`) stays on the core side.
 
 ### Layer 2: Gateway
 
@@ -185,7 +192,7 @@ The following diagram shows how Rust modules depend on each other at compile tim
 
 ## Core Modules
 
-> As of 26.7.22+ the `aleph-server` process holds **70 `src/<module>` directories plus 6 top-level `.rs` files** (`canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`). The table below is grouped by purpose and stays in sync with the `src/` tree.
+> The `aleph-server` process currently holds **69 `src/<module>` directories (including `bin/`) plus 6 top-level `.rs` files** (`json_canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`). The table below is grouped by purpose and stays in sync with the `src/` tree.
 
 | Module | Path | Purpose |
 |--------|------|---------|
@@ -194,7 +201,7 @@ The following diagram shows how Rust modules depend on each other at compile tim
 | **harness** | `src/harness/` | Think→Act loop, stop-hooks, context budget, compaction, `HarnessDeps` struct |
 | **agents** | `src/agents/` | Agent runtime, subagent spawning, `think_level` resolution, model binding |
 | **thinker** | `src/thinker/` | LLM interaction, prompt assembly (`PromptBuilder` / `PromptPipeline`), layer registry |
-| **tool_metadata** | `src/tool_metadata/` | Tool metadata + risk + unified index + slash aliases (replaces the retired `src/dispatcher/`) |
+| **tool_metadata** | `src/tool_metadata/` | Tool metadata + risk + unified index + slash aliases (replaces the retired standalone dispatcher module) |
 | **providers** | `src/providers/` | AI provider implementations + failover chain + MoA aggregator |
 | **tools** | `src/tools/` | `AlephTool` trait, tool server, scoped tool service, turn budget |
 | **builtin_tools** | `src/builtin_tools/` | Built-in tools (`hub/` absorbs `store/`, `skill_reader/`, `browser_tools/` per-action) |
@@ -211,10 +218,9 @@ The following diagram shows how Rust modules depend on each other at compile tim
 | **looping** | `src/looping/` | Loop subsystem (in-process `LoopRegistry` + state machine) |
 | **goal** | `src/goal/` | Goal subsystem (persistent `GoalStore` + objective gate + TreeBudget) |
 | **strategy** | `src/strategy/` | Strategy subsystem (composite-keyed `StrategyStore` + planner + renderer) |
-| **hub** | `src/hub/` | **Aleph Hub single source** (replaces the retired `src/store/`) — `primer` / `catalog_client` / `official_*` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
+| **hub** | `src/hub/` | **Aleph Hub single source** (replaces the retired standalone store module) — `primer` / `catalog_client` / `official_*` / `install` / `reconcile` / `trust` / `verify` / `secrets` |
 | **artifacts** | `src/artifacts/` | Artifact store (`ArtifactStore` + `MAX_ARTIFACT_BYTES = 50 MB` + 4 `ArtifactOrigin`s) |
 | **export** | `src/export/` | session HTML / Markdown export + CSS + collect + page + document |
-| **clipboard** | `src/clipboard/` | Clipboard context (10s) + multimodal image extraction |
 | **projects** | `src/projects/` | Project store (`projects.json` + lock) |
 | **vision** | `src/vision/` | Vision subsystem (claude / OpenAI-compat / multimodal) |
 | **a2a** | `src/a2a/` | A2A protocol adapter |
@@ -223,9 +229,7 @@ The following diagram shows how Rust modules depend on each other at compile tim
 | **browser** | `src/browser/` | Browser automation (secret guard / PII single source) |
 | **cluster** | `src/cluster/` | Single-center node federation — reverse RPC, node registry, `node_invoke` / `node_file` |
 | **command** | `src/command/` | Lightweight command-completion aggregator (top-level `mod.rs` / `parser.rs`) |
-| **components** | `src/components/` | Shared domain types (only `types`; the legacy EventHandler chain was removed during the Harness migration) |
 | **context** | `src/context/` | Context management (`ContextBudget` / `ContextCompactor` / `PreflightPipeline`) |
-| **core** | `src/core/` | Core types and primitives |
 | **diagnostics** | `src/diagnostics/` | Diagnostics utilities |
 | **discovery** | `src/discovery/` | Service discovery |
 | **domain** | `src/domain/` | Shared domain types |
@@ -235,7 +239,6 @@ The following diagram shows how Rust modules depend on each other at compile tim
 | **group_chat** | `src/group_chat/` | Group chat management |
 | **guardrails** | `src/guardrails/` | Guardrail registry (input / output / tool-call) |
 | **identity** | `src/identity/` | Agent identity and signing |
-| **init_unified** | `src/init_unified/` | One-shot install coordinator (5 phases: dirs / config / DB / runtimes / skills) |
 | **logging** | `src/logging/` | Logging infrastructure |
 | **markdown** | `src/markdown/` | Markdown processing |
 | **media** | `src/media/` | Media processing |
@@ -254,6 +257,14 @@ The following diagram shows how Rust modules depend on each other at compile tim
 | **utils** | `src/utils/` | Utilities |
 | **verification** | `src/verification/` | Verifier chain (`StopHookVerifier` / `ToolLoopVerifier` / model robustness profile) |
 | **wizard** | `src/wizard/` | Wizard flows (RPC-driven `wizard.next` sessions; no CLI `aleph wizard` subcommand) |
+| **executor** | `src/executor/` | Built-in tool registry (`builtin_registry/`) + the `ToolRegistry` trait; the desktop platform implementation is injected here at the composition root per target OS |
+| **capability** | `src/capability/` | Process-global capability handles that can report whether they were installed; activation / audit / census |
+| **clarification** | `src/clarification/` | Human-in-the-loop clarification: a parked agent turn asks the human and interprets the answer |
+| **scope** | `src/scope/` | Scope vocabulary and ambient attribution for data isolation |
+| **spend** | `src/spend/` | Per-principal and machine-total USD spend ceilings |
+| **canvas** | `src/canvas/` | Whiteboard canvas core: file-backed store + per-canvas write locks + optimistic `revision` checks |
+| **bundled** | `src/bundled/` | Official skills and plugins embedded at compile time, extracted to `~/.aleph/` on startup |
+| **cli** | `src/cli/` | Server-side CLI support (`endpoint` / `ipc_client` / `policy`) |
 
 ---
 
@@ -435,6 +446,9 @@ The Aleph repository is organized as a Cargo workspace:
 ```
 aleph/
 ├── Cargo.toml              # Workspace root + alephcore package
+├── justfile                # Build / check / test entry points
+├── config.search.example.toml
+├── CHANGELOG.md
 ├── src/                    # alephcore library + aleph-server binary
 │   ├── lib.rs              # Library crate entrypoint
 │   ├── bin/
@@ -451,16 +465,14 @@ aleph/
 │   ├── sandbox/            # WorkspaceSandbox, OsSandboxDriver
 │   ├── session/            # SessionService, append-only event log
 │   ├── workflow/           # Declarative workflow templates, compilation, .workflow.js interop
-│   └── ...                 # 50+ additional modules
+│   └── ...                 # Remaining modules: see the Core Modules table above
 ├── desktop/
-│   ├── shell/              # Tauri v2 native desktop app (thin shell)
-│   │   ├── src/            # Window, tray, daemon lifecycle, notifications
-│   │   ├── splash/         # Launch splash screen
-│   │   └── binaries/       # Bundled aleph-server + bridge binaries
-│   ├── shared/             # DesktopCapability trait + IPC protocol
-│   ├── macos/              # macOS native bridge (Swift)
-│   ├── linux/              # Linux native bridge
-│   └── windows/            # Windows native bridge
+│   ├── nsh-shell/          # Desktop host aleph-nsh-shell (NSH 0.6.0, thin shell)
+│   ├── host/               # aleph-desktop-host: local Gateway admission probe
+│   ├── shared/             # aleph-desktop: DesktopPlatform + *Capability traits, Swift helper client
+│   ├── macos/              # macOS platform implementation (bridge/ is the Swift helper)
+│   ├── linux/              # Linux platform implementation
+│   └── windows/            # Windows platform implementation
 ├── shared/
 │   ├── protocol/           # Shared types (aleph-protocol crate)
 │   ├── logging/            # Logging infrastructure
@@ -469,10 +481,12 @@ aleph/
 ├── interfaces/
 │   ├── cli/                # Terminal client
 │   ├── tui/                # TUI client
-│   └── webchat/            # Web-based chat interface (WASM)
+│   └── webchat/            # Panel (Leptos/WASM), embedded into aleph-server via rust_embed
 ├── docs/                   # Architecture docs and design specs
 └── plugins/                # Plugin examples and SDK
 ```
+
+The `desktop/shell/` directory that still exists in the repository is the legacy host kept for the transition. It will be removed, and this site no longer documents it.
 
 The workspace root `Cargo.toml` defines shared dependency versions so all members stay in sync.
 
@@ -658,7 +672,7 @@ It gives the four single-loop failure modes (Goodhart, reference blindness, ring
 
 ### Full Module Inventory
 
-The `aleph-server` process holds **~70 `src/<module>` directories plus 6 top-level `.rs` files** (`canvas_io.rs` / `sync_primitives.rs` / `pricing.rs` / `event_handler.rs` / `lib.rs` / `error.rs`). See the `src/` directory tree.
+The `aleph-server` process holds 69 `src/<module>` directories plus 6 top-level `.rs` files. Top-level modules **added** / **reorganized** after 26.7.22+:
 
 ### See Also
 

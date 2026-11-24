@@ -1,0 +1,72 @@
+---
+title: "Plugin Packages and Manifests"
+description: "Find the supported manifest formats, normalized fields, and loading boundaries, and distinguish them from the planned package format."
+---
+
+This page describes how a plugin directory declares metadata and resources, how Aleph reads those declarations, and which parts of the package format are still planned.
+
+## Plugin directories and loading boundaries
+
+Aleph loads plugins by directory. A manifest describes the plugin and its components; resources such as its entry file live inside that directory. A manifest is not always required: if no known manifest matches, the reader can try auto-discovery (`src/extension/manifest/adapter.rs`, `src/extension/manifest/mod.rs`, `src/extension/manifest/types.rs`).
+
+Parsing, registration, and execution are separate steps. A manifest adapter produces the parsed output, `PluginRegistry` stores plugin registrations, and `WasmRuntime` provides WASM execution. A successful parse does not admit the plugin for loading (`src/extension/manifest/adapter.rs`, `src/extension/lifecycle.rs`, `src/extension/registry/mod.rs`, `src/extension/runtime/mod.rs`). See [Extensions](../concepts/extensions) for installation locations, lifecycle, and usage, and [Plugin Methods](../gateway/methods/plugins) for the RPC surface.
+
+## Current manifest formats
+
+Prefer `.claude-plugin/plugin.toml` for new packages. The directory metadata reader looks for the following candidates in order. A parse error in a selected file does not fall through to the next candidate (`src/extension/manifest/mod.rs`).
+
+| Candidate | Purpose and source |
+|---|---|
+| `.claude-plugin/plugin.toml` | Preferred Claude Code-style TOML (`src/extension/manifest/cc_plugin_toml.rs`). |
+| `.claude-plugin/plugin.json` | Read-only compatibility with Claude Code manifests (`src/extension/manifest/cc_plugin_json.rs`). |
+| `aleph.plugin.toml` | Deprecated Aleph-native TOML; logs a migration warning. `parse_aleph_plugin_toml` and `parse_aleph_plugin_toml_sync` read the file and pass it to `parse_aleph_plugin_toml_content` (`src/extension/manifest/mod.rs`, `src/extension/manifest/toml_types.rs`). |
+
+`ALEPH_PLUGIN_MANIFEST` is still defined as `aleph.plugin.json`, but that file is not a candidate in the current directory metadata reader. The native TOML filename uses dots: `aleph.plugin.toml`. Do not infer the on-disk spelling from the underscores in the Rust function names (`src/extension/manifest/mod.rs`, `src/extension/manifest/toml_types.rs`).
+
+The table lists fields on the parsed `PluginManifest`, not keys to copy into a manifest file. A Rust field does not necessarily have a file key of the same name or imply that the corresponding feature gets registered (`src/extension/manifest/types.rs`, `src/extension/manifest/declared_sections.rs`).
+
+| Purpose | Normalized fields |
+|---|---|
+| Identity and entry | `id`, `name`, optional `version` and `description`, `kind`, and relative `entry`. `root_dir` is set during parsing and is not serialized. |
+| Configuration and permissions | `config_schema`, `config_ui_hints`, `permissions`. |
+| V2 declarations | `tools_v2`, `hooks_v2`, `commands_v2`, `services_v2`, `prompt_v2`, `capabilities_v2`. |
+| WASM constraints | `wasm_capabilities`, `wasm_resource_limits`. |
+| Other optional declarations | `aleph_extensions`, `panel` (`Option<PanelUiManifest>`), and `memory_manifest` (the normalized memory extension section). |
+
+## Panel declarations
+
+`panel` is explicit and optional. The plugin's generic `entry` does not imply a Panel declaration (`src/extension/manifest/types.rs`).
+
+| `PanelUiManifest` field | Meaning |
+|---|---|
+| `tab_id`, `label`, `icon`, `order` | Tab identity, display label, icon, and ordering. |
+| `entry` | Relative module entry for the tab. |
+| `api_major` | Must match `PANEL_UI_API_MAJOR`, currently `1`. |
+| `permissions` | Requested Panel permissions, checked against the community permission set. |
+| `asset_integrity` | Entry integrity in SHA-256 SRI form: `sha256-` followed by a Base64 digest. |
+
+See `src/extension/manifest/types.rs` and `shared/protocol/src/panel.rs` for fields and validation. The declaration does not publish the tab by itself: admission reads and verifies the entry within bounded limits (4 MiB per entry and 64 MiB per generation), Core commits an immutable publication generation, and the authenticated Gateway route `/tabs/{*entry}` serves the assets. Panel fetches the ES module from the same origin and loads it with a narrow SDK (`src/extension/panel_publication/admission.rs`, `src/extension/panel_publication/mod.rs`, `src/gateway/server/panel_asset_route.rs`, `interfaces/webchat/panel_loader.js`, `interfaces/webchat/src/panel/sdk.rs`). See [Plugin UI](../desktop-hosts/plugin-ui) for publication and host details.
+
+## Configuration, permissions, and origin trust
+
+| Checkpoint | Role | Source |
+|---|---|---|
+| Configuration structure | `config_schema` describes configuration in JSON Schema, and `ConfigUiHint` provides field presentation hints. `validate_config_schema_declaration` checks the schema declaration; `validate_config_against_schema` checks values against it. | `src/extension/manifest/types.rs`, `src/extension/manifest/config_validation.rs` |
+| Permissions and declaration translation | `PluginPermission` represents plugin permissions. `declared_capabilities` translates manifest sections to capability declarations; for example, declared background services are skipped without the `background` permission. | `src/extension/manifest/types.rs`, `src/extension/manifest/declared_sections.rs` |
+| Origin admission | `OwnerTrustPolicy` decides whether a plugin ID may load from a given origin. In restrictive mode, `Bundled` and `Config` pass; `Workspace`, `Global`, and `ClaudeCache` need an allowlisted ID. Lifecycle admission applies the policy before checking activation status. | `src/extension/plugin_trust.rs`, `src/extension/lifecycle.rs` |
+
+## Claude Code and pi compatibility
+
+Current Claude Code compatibility reads `.claude-plugin/plugin.toml` and `.claude-plugin/plugin.json`; these parsers do not take `package.json` as input. The TOML `[aleph]` table and JSON `aleph` object can supply Aleph-specific declarations that populate `AlephExtensions` and other normalized fields (`src/extension/manifest/cc_plugin_toml.rs`, `src/extension/manifest/cc_plugin_json.rs`, `src/extension/manifest/declared_sections.rs`).
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §10 proposes broader Claude Code hook translation and pi compatibility through npm resource import and a sidecar. Existing manifest parsing does not deliver those features or let compatible plugins bypass admission or authorization.
+
+## Distributions, marketplaces, and observability
+
+The current marketplace supports GitHub and local sources and uses the marketplace installer for installation (`src/extension/marketplace/mod.rs`, `src/extension/marketplace/github_source.rs`, `src/extension/marketplace/local_source.rs`, `src/extension/marketplace/installer.rs`). See [Extensions](../concepts/extensions) and [Plugin Methods](../gateway/methods/plugins) for marketplace usage and management.
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §9 proposes assembly mechanisms for default and custom distributions; §11 proposes unified diagnostics for slot providers, fallback reasons, and grant status. A successful marketplace installation does not show that those diagnostics are available.
+
+## Package format blueprint
+
+> **Status: planned** — `docs/research/aleph_modularization_plan.md` §12 uses the hyphenated `aleph-plugin.toml` to illustrate a package contract version, components (`components`), slot claims (`claims`), and hook declarations (`hooks`). It is not a current filename or a working template. See `src/extension/manifest/mod.rs` and `src/extension/manifest/toml_types.rs` for current parser entry points.

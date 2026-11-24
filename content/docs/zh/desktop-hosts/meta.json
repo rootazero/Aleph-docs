@@ -1,0 +1,9 @@
+{
+  "title": "桌面宿主",
+  "pages": [
+    "overview",
+    "panel",
+    "panel-runtime",
+    "plugin-ui"
+  ]
+}

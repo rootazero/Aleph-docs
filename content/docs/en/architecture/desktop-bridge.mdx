@@ -1,231 +1,181 @@
 ---
-title: "Desktop Bridge"
-description: "JSON-RPC protocol over stdio between aleph-server (Rust) and the aleph-bridge (Swift) helper"
+title: "Desktop capability layer"
+description: "The desktop capability library compiled into aleph-server: capability traits, three platform implementations, the JSON-RPC channel to the macOS Swift helper, failure handling, and tool orchestration"
 ---
 
-The Desktop Bridge gives Aleph physical-world capabilities: taking screenshots, reading screen text via OCR, clicking buttons, typing text, managing windows, and rendering canvas overlays. It is the primary implementation of the "Muscles" limb in the [1-2-3-4 model](./1-2-3-4-model).
+import { Callout } from "fumadocs-ui/components/callout";
 
-## Architecture
+This page explains how Aleph takes screenshots, reads the accessibility tree, synthesizes input, and reaches calendars and contacts: which crates define and implement these capabilities, which process they run in, which calls are handed to a native platform helper, and how failures are recovered.
 
-The bridge follows the Brain-Limb separation principle (redline R1): the Rust Core never calls platform-specific APIs directly. Instead, it spawns a long-lived `aleph-bridge` Swift child process (via `tokio::process::Command`) that links `AVFoundation`, `Vision`, `Accessibility`, and `CoreGraphics`, and exchanges JSON-RPC 2.0 requests on the child's stdin/stdout. Stderr is forwarded to the Rust tracing subscriber.
+## What the desktop capability layer is
 
-```
-┌──────────────────────┐       stdio (line-delimited JSON-RPC 2.0)
-│     aleph-server     │  ──stdin─────────────────────────────▶   ┌──────────────────────┐
-│     (Brain)          │                                            │   aleph-bridge       │
-│                      │  ◀──stdout────────────────────────────────│   (Swift helper)     │
-│  SwiftBridge client  │                                            │                      │
-│  (desktop/shared/    │  stderr── tracing logs ──────────────────▶│  AppKit / Vision /   │
-│   src/bridge/)       │                                            │  CoreGraphics / ...  │
-└──────────────────────┘                                            └──────────────────────┘
-        Rust Core                                                       Native Platform
-```
+The desktop capability layer is a set of Rust libraries **compiled directly into `aleph-server`**, not a separate process:
 
-The bridge runs **headless** on every desktop OS that Aleph targets; the helper process exposes its capabilities through the JSON-RPC surface, never through a UI.
-
-This separation means:
-
-- The Core can run on a headless server with no desktop capabilities
-- Desktop capabilities can be upgraded independently of the Core
-- Platform-specific code is isolated in the Swift helper, not in `src/builtin_tools/desktop/`
-
-## Spawn lifecycle
-
-The `SwiftBridge` client (`desktop/shared/src/bridge/client.rs`) spawns the helper lazily on the first call. A `Supervisor` (`desktop/shared/src/bridge/supervisor.rs`) watches the child via `stdout` EOF — when the helper closes stdout the supervisor drains the inflight table, resets the state slot, and records the crash in the shared `SpawnGate`. The respawn ladder is `1s → 2s → 4s → 8s → 16s`, capped at 30 s.
-
-After **five crashes within a ten-minute window** the bridge enters **disabled mode**: all subsequent calls return `DesktopError::BridgeDisabled` immediately and no further respawns are attempted until the server restarts. A spawn request that arrives inside the backoff window (but below the disable threshold) returns `DesktopError::BridgeBackoff` *without* spawning — pacing the restarts so a crash/spawn-failure loop never burns the window in milliseconds.
-
-The helper installs a parent-death watchdog: it polls `getppid()` and exits cleanly if the parent PID changes, preventing zombie helper processes when the server crashes.
-
-### Per-call RPC timeout
-
-Crash recovery only fires when the helper closes stdout (EOF). A helper that accepts a request and then *hangs* — stuck in a native API, deadlocked — keeps stdout open, so the reader loop never observes EOF. To stop such a helper from wedging an agent turn indefinitely, every RPC is bounded by a per-call deadline:
-
-- `SwiftBridge::call` spends **the deadline the protocol declares for that method** (`methods::suggested_timeout_ms` → `bridge::client::rpc_timeout_for`). Resolution is: an exact per-method override, else the namespace default, else the client's `DEFAULT_RPC_TIMEOUT` (60 s) for a method outside every known namespace.
-- `SwiftBridge::call_with_timeout` takes an explicit deadline, and is for operations whose length is a function of their *arguments*: `camera.clip` and `audio.record` pass `requested_duration + 30 s`; `speech.transcribe_file` passes a flat 300 s.
-
-Deadlines live next to the method constants they belong to (`shared/protocol/src/desktop_bridge/methods/*.rs`, `DEFAULT_TIMEOUT_MS` + `TIMEOUT_OVERRIDES_MS`). Current values:
-
-| Namespace | Default | Overrides |
+| crate | Path | Role |
 |---|---|---|
-| `ax.*` | 15 s | `query_focused` 3 s |
-| `bridge.*` | 5 s | `ping` 2 s |
-| `input.*` | 2 s | `click` / `double_click` 5 s |
-| `media.*` | 60 s | `camera.snap` 10 s, `audio.list_devices` 5 s, `audio.mic_meter` 2 s, `audio.record_stop` 15 s |
-| `perm.*` | 10 s | — |
-| `pim.*` | 60 s | — |
-| `screen.*` | 10 s | `ocr` 20 s, `list_displays` 5 s |
+| `aleph-desktop` | `desktop/shared/` | Capability traits, shared implementations, the Swift helper client |
+| `aleph-desktop-macos` | `desktop/macos/` | macOS implementation |
+| `aleph-desktop-linux` | `desktop/linux/` | Linux implementation |
+| `aleph-desktop-windows` | `desktop/windows/` | Windows implementation |
 
-On timeout the caller receives `DesktopError::BridgeTimeout`, the in-flight slot is dropped (no leak), and the helper is **left running** — only that one call fails. A late reply from a merely-slow helper is discarded by the reader.
+In the root `Cargo.toml`, `alephcore` depends on `aleph-desktop` directly and on each platform crate per target OS. The platform object is constructed in-process (`src/executor/builtin_registry/builder/constructor/mod.rs`, `src/bin/aleph-server/commands/start/builder/handlers/settings.rs`).
 
-## Protocol
+Capabilities are exposed through the aggregate trait `DesktopPlatform` (`desktop/shared/src/platform.rs`). Its `ax()` and `power()` return `Option`, so a platform can declare that it does not provide them.
 
-Every interaction follows JSON-RPC 2.0 over a line-delimited stdio stream. Each request writes one JSON line to the child's stdin; each response is one JSON line on stdout. The protocol schemas live in `shared/protocol/src/desktop_bridge/`:
+<Callout type="info" title="Not the Panel bridge">
 
-- `envelope.rs` — `Message` / `Request` / `RpcError`
-- `errors.rs` — wire codes (`ERR_TIMEOUT`, `ERR_HELPER_CRASHED`, `ERR_NOT_IMPLEMENTED`, `ERR_PERMISSION_DENIED`, `ERR_BRIDGE_DISABLED`, `ERR_PLATFORM`)
-- `methods/{ax,bridge,input,media,perm,pim,screen}.rs` — per-namespace schemas and deadlines
+On this page, "bridge" means the JSON-RPC channel between `aleph-server` and the macOS Swift helper. The desktop host's `desktop/nsh-shell/src/panel_bridge.rs`, which talks to the Panel, is a different thing; see [Panel host](../desktop-hosts/panel).
 
-### Request format
+</Callout>
 
-```json
-{
-    "jsonrpc": "2.0",
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "method": "screen.capture",
-    "params": {
-        "region": { "x": 0, "y": 0, "width": 1920, "height": 1080 }
-    }
-}
-```
+## Capability inventory
 
-### Response format
+All traits are defined in `desktop/shared/src/traits/`. The implementation columns only state that a trait implementation exists; per-method completeness on Linux and Windows was not verified in this pass.
 
-```json
-{
-    "jsonrpc": "2.0",
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "result": {
-        "png_base64": "iVBORw0KGgo...",
-        "width": 2560,
-        "height": 1600
-    }
-}
-```
+| Capability | Trait (file) | macOS | Linux | Windows |
+|---|---|---|---|---|
+| Screen: capture, OCR, pointer and keyboard input, windows and apps, clipboard, displays | `ScreenCapability` (`screen.rs`) | `desktop/macos/src/screen.rs` (`MacOSScreen`, via the Swift helper; screenshots can fall back to `NativeScreen`) | `desktop/shared/src/native_screen.rs` (`NativeScreen`) | `desktop/shared/src/native_screen.rs` (`NativeScreen`) |
+| Accessibility tree | `AccessibilityCapability` (`ax.rs`) | `desktop/macos/src/ax.rs` (`BridgeAccessibility`, forwards to the Swift helper) | `desktop/linux/src/ax/mod.rs` (AT-SPI2; `ax()` returns `None` without an AT-SPI registry) | `desktop/windows/src/ax.rs` (UI Automation) |
+| Media: camera, audio recording, speech transcription | `MediaCapability` (`media.rs`) | `desktop/macos/src/lib.rs` (via the Swift helper) | `desktop/linux/src/media.rs` | `desktop/windows/src/media.rs` |
+| Permissions | `PermissionCapability` (`permission.rs`) | `desktop/macos/src/permission.rs` | `desktop/linux/src/permission.rs` | `desktop/windows/src/permission.rs` |
+| PIM: notes, calendar, reminders, contacts, mail | `PimCapability` (`pim.rs`) | `desktop/macos/src/pim.rs` (via the Swift helper) | `desktop/linux/src/pim.rs` | `desktop/windows/src/pim.rs` |
+| Automation: scripts, shortcuts | `AutomationCapability` (`automation.rs`) | `desktop/macos/src/automation.rs` | `desktop/linux/src/automation.rs` | `desktop/windows/src/automation.rs` |
+| System: launch/quit apps, open paths, notifications, clipboard, system info, idle time | `SystemCapability` (`system.rs`) | `desktop/macos/src/system/mod.rs` | `desktop/linux/src/system.rs` | `desktop/windows/src/system.rs` |
+| Power: inhibit sleep | `PowerCapability` (`power.rs`) | `desktop/macos/src/sleep_inhibitor.rs` | `desktop/linux/src/sleep_inhibitor.rs` | `desktop/windows/src/sleep_inhibitor.rs` |
 
-### Error format
+## Two implementation paths
 
-```json
-{
-    "jsonrpc": "2.0",
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "error": {
-        "code": -32002,
-        "message": "not implemented: pim.mail.send"
-    }
-}
-```
+### In-process Rust implementations
 
-Server-defined codes (`errors.rs`) carry semantics the caller needs to distinguish — most importantly `-32002 NotImplemented` (the method exists, the capability is deliberately absent, e.g. `pim.mail.*` on macOS) vs `-32601 MethodNotFound` (a real wiring gap). `-32001 PermissionDenied` carries a `PermissionGuide` in `data` so the LLM can surface the deep link, the human-readable steps, and the rationale.
+Most capabilities execute inside the `aleph-server` process. On macOS, for example, the system capability uses native objc2 calls (`desktop/macos/src/system/mod.rs`), automation shells out to `osascript` and the `shortcuts` CLI (`desktop/macos/src/automation.rs`), and sleep inhibition uses an IOPMAssertion (`desktop/macos/src/sleep_inhibitor.rs`). Linux and Windows have no resident helper process; their implementations live in the platform crates and call system APIs or system command-line tools as needed. `docs/reference/DESKTOP_BRIDGE.md` makes this split a design decision: lightweight paths such as clipboard, app launch, window enumeration, and screen recording stay in-process in `aleph-desktop`.
 
-## Capabilities
+### Delegation to the Swift helper
 
-The bridge exposes capabilities in seven namespaces. The full per-method surface lives in `shared/protocol/src/desktop_bridge/methods/`; this table summarises the most-used methods grouped by capability area.
+Only macOS hands the heavier capture and recognition work to a Swift helper process: camera, audio, Vision OCR, speech, EventKit, contacts, and similar (`docs/reference/DESKTOP_BRIDGE.md`). The Swift package lives in `desktop/macos/bridge/`, and a comment in `desktop/macos/src/pim.rs` states that the PIM implementation delegates to the `aleph-bridge` Swift CLI through the long-lived JSON-RPC client. That client, `SwiftBridge`, is defined in `desktop/shared/src/bridge/client.rs` and is used only by the macOS crate.
 
-### `screen.*` — Perception
+Each `aleph-server` process owns one shared helper instance, started on first use (`SHARED_BRIDGE` in `desktop/macos/src/lib.rs`). The helper binary is resolved in this order (`resolve_helper_path` in the same file):
 
-| Method | Returns | Notes |
-|---|---|---|
-| `screen.capture` | Base64 PNG, pixel `width`/`height`, optional `window_bounds` + `scale` | Honors a `region` (pixels), an explicit `display_id`, or a `window_id` (cropped to the window's frame). The macOS limb uses `ScreenCaptureKit` with a fallback to `xcap`. |
-| `screen.ocr` | Extracted text | Vision's accurate recognizer over a full-display capture. No fallback transport. |
-| `screen.list_displays` | Display metadata | Enumeration only. |
+1. The `ALEPH_BRIDGE_PATH` environment variable
+2. `~/.aleph/helpers/AlephBridge`
+3. Next to the current executable
+4. The development build output: `.build/release/AlephBridge` inside the Swift package `desktop/macos/bridge/`
 
-### `ax.*` — Accessibility (macOS / Windows UIA / Linux AT-SPI)
+The helper has exactly one mode: it starts with no arguments, speaks JSON-RPC over stdin/stdout, and exits on stdin EOF or parent death (`desktop/macos/bridge/Sources/AlephBridge/main.swift`).
 
-| Method | Notes |
-|---|---|
-| `ax.query_focused` | Element currently holding keyboard focus. macOS helper takes a `pid` so the answer reflects the *target* app's `AXFocusedUIElement`, not whatever the *system* is focused on. Used on the hot path by the `type_text` focus gate. |
-| `ax.query_tree` | Full subtree rooted at a given `pid` (or the frontmost app). Bounded by `max_nodes`, not the clock. |
-| `ax.query_by_role` | Collect every element matching an AX role string. |
-| `ax.set_value` | Write a value into a semantic element (text field, etc.). |
-| `ax.perform_action` | Trigger an AX action (e.g. `AXPress` on a button). |
-| `ax.mutation` | Notification frame the helper sends when the AX tree changes. |
+### Protocol
 
-### `input.*` — Pointer / keyboard / clipboard
-
-| Method | Notes |
-|---|---|
-| `input.click` / `input.double_click` / `input.drag` / `input.hover` / `input.scroll` | Coordinate or ref-based pointer actions. |
-| `input.type_text` / `input.key_combo` / `input.key_button` | Keyboard delivery into the focused element. |
-| `input.clipboard_read` / `input.clipboard_write` | Clipboard I/O. |
-
-### `window.*` — Window / app management
-
-`window.list`, `window.focus`, `window.move`, `window.resize`, `window.launch`, `window.quit`, `window.restart`. macOS resolves a `CGWindowID` to its `AXUIElement` window by geometry (`desktop/shared/src/action/window_ax.rs`); `osascript` is the fallback when AX refuses.
-
-### `media.*` — Camera / audio / speech
-
-`media.camera.snap`, `media.camera.clip`, `media.audio.{list_devices,mic_meter,record,record_stop}`, `media.speech.transcribe_file`.
-
-### `perm.*` — Permission introspection
-
-Read-only — `perm.list`, `perm.status`, `perm.request`. The helper exposes TCC permission state and lets callers request a grant so the OS can pop the system prompt.
-
-### `pim.*` — Contacts / mail / calendar (where the platform has them)
-
-`pim.contacts.*`, `pim.mail.*`, `pim.calendar.*`. macOS returns `NotImplemented` for these today.
-
-## Error Handling
-
-`DesktopError` (`desktop/shared/src/error.rs`) is the typed surface the Rust caller sees:
+The protocol is defined in `shared/protocol/src/desktop_bridge/` as line-delimited JSON-RPC 2.0. Envelope types (`shared/protocol/src/desktop_bridge/envelope.rs`):
 
 ```rust
-pub enum DesktopError {
-    NotAvailable(String),       // capability missing on this platform / config
-    ScreenCapture(String),      // capture / crop failed
-    InputFailed(String),        // pointer / keyboard failed
-    OcrFailed(String),          // OCR processing failed
-    WindowFailed(String),       // window management failed
-    NotImplemented(String),     // method exists, capability deliberately absent
-    BridgeFailed(String),       // helper crashed / unexpected output
-    BridgeTimeout(String),      // helper accepted the call, did not reply in time
-    BridgeBackoff(String),      // spawn cooling down inside restart-backoff window
-    BridgeDisabled(String),     // >5 crashes inside 10-minute restart window
-    PlatformError(String),      // underlying OS error (e.g. IOPMAssertion)
-    PermissionDenied { kind, guide }, // TCC denied; `guide` carries deep link + steps
-}
+Request       { jsonrpc, id: u64, method, params: Option<Value> }
+Response      { jsonrpc, id: u64, result }
+ErrorResponse { jsonrpc, id: Option<u64>, error: RpcError }
+RpcError      { code: i32, message, data: Option<Value> }
+Notification  { jsonrpc, method, params }
 ```
 
-Server-defined codes are mapped to typed variants inside `SwiftBridge` (`shared/bridge/client.rs::map_rpc_error`) so callers see the difference between "the helper is unresponsive" (`BridgeTimeout`), "the helper is crash-looping" (`BridgeBackoff` / `BridgeDisabled`), and "the OS refused" (`PermissionDenied`).
+Request IDs are increasing `u64` values.
 
-## Source map
+Server-defined error codes (`shared/protocol/src/desktop_bridge/errors.rs`):
 
-| Path | Role |
-|------|------|
-| `src/builtin_tools/desktop/` | LLM-facing tool: `DesktopTool` + `DesktopArgs` (the `action`-discriminated surface the model calls). |
-| `desktop/shared/src/bridge/client.rs` | `SwiftBridge` — RPC client + per-call timeout + crash recovery. |
-| `desktop/shared/src/bridge/supervisor.rs` | `SpawnGate` + restart ladder + disabled latch. |
-| `desktop/shared/src/perception/{screenshot,screen_record,ocr_*}.rs` | Cross-platform capture pipelines. |
-| `desktop/shared/src/action/window_ax.rs` | macOS public-AX window resolver (CGWindowID → AX by geometry). |
-| `desktop/shared/src/error.rs` | `DesktopError` enum. |
-| `shared/protocol/src/desktop_bridge/` | Wire schemas: `envelope.rs`, `errors.rs`, `methods/{ax,bridge,input,media,perm,pim,screen}.rs`. |
-| `desktop/macos/src/{screen,ax,automation,pim}.rs` | macOS limb (ScreenCaptureKit, Vision, Accessibility). |
+| Constant | Value | Client maps to `DesktopError` |
+|---|---|---|
+| `ERR_PERMISSION_DENIED` | -32001 | `PermissionDenied { kind, guide }`; `BridgeFailed` when `data` does not parse as a guide |
+| `ERR_NOT_IMPLEMENTED` | -32002 | `NotImplemented` |
+| `ERR_PLATFORM` | -32003 | `PlatformError` |
+| `ERR_TIMEOUT` | -32004 | `BridgeTimeout` |
+| `ERR_HELPER_CRASHED` | -32005 | `BridgeFailed` |
+| `ERR_BRIDGE_DISABLED` | -32006 | `BridgeDisabled` |
 
----
+The mapping function is `map_bridge_error` in `desktop/shared/src/bridge/client.rs`; unknown codes also become `BridgeFailed`.
 
-## 26.7.x Addendum
+Methods fall into seven namespaces (`shared/protocol/src/desktop_bridge/methods/`). Each namespace has a default timeout, and some methods override it:
 
-### macOS Screen Recording Fixes
+| Namespace | Methods | Default timeout | Overrides |
+|---|---|---|---|
+| `bridge.*` | `bridge.handshake`, `bridge.ping` | 5 s | `ping` 2 s |
+| `ax.*` | `query_focused`, `query_tree`, `query_by_role`, `set_value`, `perform_action`; notification `ax.mutation` | 15 s | `query_focused` 3 s |
+| `input.*` | `click`, `double_click`, `type_text`, `key_combo`, `key_button`, `scroll`, `drag`, `hover`, `cursor_position`, `mouse_button` | 2 s | `click`, `double_click` 5 s |
+| `media.*` | `media.camera.snap`, `media.camera.clip`, `media.audio.list_devices`, `media.audio.record`, `media.audio.record_start`, `media.audio.record_stop`, `media.speech.transcribe_file` | 60 s | `media.camera.snap` 10 s, `media.audio.list_devices` 5 s, `media.audio.record_stop` 15 s |
+| `perm.*` | `perm.check`, `perm.guide`, `perm.open_settings` | 10 s | — |
+| `pim.*` | 24 methods in five groups: `notes`, `calendar`, `reminders`, `contacts`, `mail` | 60 s | — |
+| `screen.*` | `screen.capture`, `screen.ocr`, `screen.list_displays` | 10 s | `ocr` 20 s, `list_displays` 5 s |
 
-26.7.21+ (`desktop/shared/src/perception/screen_record.rs`):
+`input.*` supports two delivery modes, `DELIVERY_TARGETED = "targeted"` and `DELIVERY_GLOBAL = "global"` (`shared/protocol/src/desktop_bridge/methods/input.rs`). Window and clipboard operations do not use the helper protocol; they run in-process.
 
-- Screen capture cropped to the requested region via `setSourceRect` (physical pixels, not display points; the region is converted through the surface's `scale`).
-- Completion verified to have produced output before reporting success — a zero-byte stream used to be reported as a successful capture.
-- Typed bridge errors preserved on the OCR / window-capture / media / input / screen rails instead of being flattened to a generic `BridgeFailed`.
-- `screen_record` serialization errors propagate instead of becoming `null`.
+## Helper lifecycle and failure handling
 
-### macOS Window Targeting
+### Lazy start
 
-26.7.21+ public AX window resolver (`desktop/shared/src/action/window_ax.rs`): `CGWindowID` → `AXUIElement` by matching the AX window whose position+size equals that window's global bounds (from `CGWindowListCopyWindowInfo`). AX and `CGWindowList` both report top-left-origin global points, so the geometry compares directly. **No private symbols** (`_AXUIElementGetWindow`) are used. `osascript` is the fallback when AX refuses — `focus_window` raises the *specific* target window, not whichever window happens to share its title.
+`SwiftBridge::ensure_running` (`desktop/shared/src/bridge/client.rs`) starts the helper on the first call: all three standard streams are piped, `kill_on_drop(true)` is set, and the helper gets its own process group. Its stderr is forwarded line by line to the tracing target `bridge_stderr`. The handshake protocol version is `BRIDGE_PROTOCOL_VERSION = 2`. The check and the spawn happen under one state lock, so the helper is never spawned twice.
 
-### Per-call RPC Timeouts Are Now Real
+When the reader loop sees EOF on the helper's stdout, it drains in-flight requests, resets the state slot, and records a crash; a generation counter stops a stale reader from touching a newer helper's state. A failed spawn also counts as a crash.
 
-Previously the deadline constants existed for years as ten free-floating `SUGGESTED_TIMEOUT_MS*` with **zero consumers** — every call rode the 60 s catch-all. The two that hurt were `ax.query_focused` (the `type_text` focus gate issues it before every keystroke batch — 3 s intended, 60 s actual) and `screen.capture` (which has an `xcap` fallback on macOS, so the deadline was exactly how long a wedged helper delayed a capture that would have succeeded instantly on the other transport). Now every method inherits a sane budget from its namespace, with overrides where they earn their keep.
+### Backoff and disable
 
-### Spawn pacing closes a burn-through window
+Backoff and disable logic lives in `desktop/shared/src/bridge/supervisor.rs`; the client constructs it as `SpawnGate::new(5, 10 min)`:
 
-Earlier the supervisor computed the backoff delay and then discarded it, leaving the ladder inert — a crash/spawn-failure loop could burn through the 10-minute restart window in milliseconds. `ensure_running` now asks `SpawnGate` whether enough time has elapsed and returns `BridgeBackoff` *without spawning* during the cool-down.
+| Mechanism | Behavior in code |
+|---|---|
+| Backoff ladder | `Backoff::next_delay`: 1 s, 2 s, 4 s, 8 s, 16 s, then capped at 30 s |
+| Ladder reset | If a helper that lived at least `STABLE_UPTIME` (10 s) dies, the ladder restarts; a successful spawn alone does not reset it |
+| Calls during backoff | No spawn happens; the call returns `DesktopError::BridgeBackoff` with a message like `helper recovering; retry in Ns` |
+| Disable threshold | When failures within the 10-minute window **exceed** 5, i.e. on the 6th failure, the bridge is disabled |
+| Calls after disable | Return `DesktopError::BridgeDisabled("restart threshold exceeded")` immediately until the server restarts |
 
-### iOS WKWebView / Keychain
+### Per-call timeouts
 
-26.7.18+ certificate-trust adapter + iOS Keychain trust store + decision mirror.
+A helper that hangs without closing stdout never produces EOF, so every call has a deadline. `SwiftBridge::call` resolves it through `rpc_timeout_for`: the per-method override first, then the namespace default (`suggested_timeout_ms` in `shared/protocol/src/desktop_bridge/methods/mod.rs`), and finally `DEFAULT_RPC_TIMEOUT` (1 minute). A timeout returns `BridgeTimeout` and leaves the helper running.
 
-### Bridge Protocol Stable
+Calls whose duration depends on their arguments pass an explicit deadline through `call_with_timeout` (`desktop/macos/src/lib.rs`): `media.camera.clip` and `media.audio.record` use the requested duration plus `CAPTURE_TIMEOUT_MARGIN_SECS` (30 s), and `media.speech.transcribe_file` uses `SPEECH_TRANSCRIBE_TIMEOUT` (5 minutes).
 
-The stdio JSON-RPC 2.0 interface is stable. See [Architecture 1-2-3-4 Model](/docs/en/architecture/1-2-3-4-model).
+### Parent-death watchdog
 
-### See Also
+The `aleph-server` SIGTERM handler calls `std::process::exit`, which bypasses Rust `Drop`, so the helper's stdin is not guaranteed to close. The helper therefore carries a watchdog (`desktop/macos/bridge/Sources/AlephBridge/RPC/ParentWatch.swift`):
 
-- [Architectural Redlines R1](/docs/en/philosophy/redlines#r1-brain-limb-separation) — platform-bridge constraint
-- [Browser Automation](/docs/en/concepts/browser-automation) — desktop tools
-- [Gateway Protocol TLS](/docs/en/gateway/protocol#tls--tofu) — self-signed + TOFU
+- Fast path: a `DispatchSource` process-exit event (kqueue) on the parent PID, with a re-check after registration to close the race;
+- Backstop: every 10 s it checks `getppid() <= 1`; if true it prints `aleph-bridge: parent died, exiting` and calls `exit(0)`.
+
+### Error types
+
+`DesktopError` (`desktop/shared/src/error.rs`) has the variants `NotAvailable`, `ScreenCapture`, `InputFailed`, `OcrFailed`, `WindowFailed`, `NotImplemented`, `BridgeFailed`, `BridgeTimeout`, `BridgeBackoff`, `BridgeDisabled`, `PlatformError`, and `PermissionDenied { kind, guide }`. Callers use them to tell "helper unresponsive", "helper in a crash loop", and "OS permission not granted" apart.
+
+## Tool orchestration layer
+
+`src/builtin_tools/desktop/` is the agent-facing tool orchestration. It runs inside `aleph-server` and reaches platform capabilities only through `DesktopPlatform`, never calling system APIs directly:
+
+| File | Responsibility |
+|---|---|
+| `mod.rs`, `types.rs` | `DesktopTool` and the argument type `DesktopArgs` |
+| `native.rs` | Pointer and keyboard actions; picks the input rail |
+| `ax.rs` | Three read-only accessibility queries over `DesktopPlatform::ax()` |
+| `observe.rs` | Post-action observation |
+| `gui_locate.rs` | Natural-language description to screen coordinates (`desktop_gui_locate`) |
+| `set_of_marks.rs` | Set-of-marks screenshots (`desktop_som`) |
+| `verify_state.rs` | Tri-state postcondition checks against the accessibility tree |
+| `focus_gate.rs` | Focus pre-flight before `type_text` |
+| `perm.rs` | Permission checks (`desktop_check_permissions`) |
+
+### Two input rails
+
+`enum Rail { Targeted(i32), Global }` in `src/builtin_tools/desktop/native.rs` separates two delivery modes:
+
+- **Targeted**: events go only into one target process's queue and do not move the user's cursor. Naming `pid`, `app`, or `window_id` in the arguments selects the targeted rail.
+- **Global**: events go through the system-wide HID event tap and move the user's cursor.
+
+On a platform that supports targeted input, the global pointer is refused by default unless `[desktop] allow_global_pointer = true` is configured (`src/config/types/desktop.rs`). The refusal is a deliberate fail-closed choice; there is no silent fallback to the global rail. Targeted-input support is reported by `supports_targeted_input`: the trait default returns `false` and every `*_targeted` method defaults to `NotImplemented` (`desktop/shared/src/traits/screen.rs`); currently only macOS returns `true` (`desktop/macos/src/screen.rs`).
+
+## Redline mapping
+
+Redline R1, "absolute separation of brain and limbs", forbids calling platform system APIs directly in `src`: Core defines capability contracts only, and the platform side provides the physical implementation (`docs/reference/REDLINES.md`; see also [Redlines](../philosophy/redlines)).
+
+- `src/builtin_tools/desktop/` is tool orchestration that depends only on the `DesktopPlatform` trait, so it does not violate R1.
+- All platform implementations live in `desktop/{macos,linux,windows}`. `docs/reference/DESKTOP_BRIDGE.md` states that `src/` in `alephcore` never links AVFoundation, Vision, AppKit, CoreGraphics, or Speech.
+- R1 has one explicit exception: process-isolation kernel operations must be issued in place by the parent that spawns the child (`docs/reference/REDLINES.md`). That code is not part of the desktop capability layer.
+
+## History: the standalone aleph-bridge process
+
+- The Swift helper originally worked as a CLI invoked once per call through subcommands. A comment in `ParentWatch.swift` still mentions this one-shot subcommand mode, but the current `AlephBridge/main.swift` keeps only the JSON-RPC mode.
+- A set of commits on 2026-04-24 turned it into a long-lived child process: `7ed5a051d` split the bridge into its own module inside `desktop/shared`, `92533821d` introduced the long-lived `SwiftBridge` client (line-delimited JSON-RPC over stdin/stdout), and `1fc069a49` added backoff restarts and the disabled mode.
+- Today the helper carries only the heavier capture and recognition work on macOS; macOS media no longer has a Rust-side AVFoundation implementation and always goes through the helper (`desktop/macos/src/lib.rs`).
+- On 2026-08-09 the `media.audio.mic_meter` method and its timeout override were removed (comment in `shared/protocol/src/desktop_bridge/methods/media.rs`).

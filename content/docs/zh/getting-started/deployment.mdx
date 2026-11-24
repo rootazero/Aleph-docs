@@ -126,7 +126,7 @@ aleph.example.com {
 
 当前源码树没有维护 Dockerfile 或 Compose 文件，因此本页不把示例容器配方声明为官方支持的部署产物。自建镜像时至少需要：
 
-1. 使用 Rust 1.95+ 构建 `aleph-server`；
+1. 使用 Rust 1.99+ 构建 `aleph-server`；
 2. 持久化 `ALEPH_HOME`；
 3. 将容器内 `[gateway].host` 设为 `0.0.0.0`；
 4. 只在宿主机环回地址发布端口，或在前方部署 TLS 代理；

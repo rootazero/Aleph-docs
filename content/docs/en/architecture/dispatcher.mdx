@@ -9,7 +9,7 @@ The Dispatcher is the `Orchestrator` — the seam between the Gateway's chat ing
 
 **Location**: `src/orchestrator/dispatch.rs`
 
-> **Note**: There is no `src/dispatcher/` directory. The historical Dispatcher module — `ToolRegistry`, `RiskEvaluator`, `ToolIndex`, `HydrationResult` — was dissolved during the Phase 6/7 harness migration. Tool aggregation now lives in `src/tools/registry.rs`, the executor lives in `src/executor/`, and tool-call guardrails live in `src/tools/scoped/`.
+> **Note**: There is no standalone dispatcher module in the source tree. The historical Dispatcher module — `ToolRegistry`, `RiskEvaluator`, `ToolIndex`, `HydrationResult` — was dissolved during the Phase 6/7 harness migration. Tool aggregation now lives in `src/tools/registry.rs`, the executor lives in `src/executor/`, and tool-call guardrails live in `src/tools/scoped/`.
 
 ---
 

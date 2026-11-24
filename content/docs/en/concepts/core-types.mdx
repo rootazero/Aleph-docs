@@ -1,24 +1,17 @@
 ---
 title: "Core Types"
-description: "Shared type definitions used across the Aleph codebase — MediaAttachment, CapturedContext, CompressionStats, and MemoryEntry."
+description: "Where Aleph's shared data types live today, and the removed src/core module they replaced."
 ---
 
-The `core` module provides pure data types that are shared across all layers of Aleph. It has no business logic, no platform-specific code, and only external dependency is `serde` plus standard-library containers.
+Aleph has no single `core` module. Shared data types now live in their owning modules — the canonical current list is the 26.7.x Addendum below. The pre-26.7 src/core/ module (`MediaAttachment`, `CapturedContext`, `CompressionStats`, `MemoryEntry`) was removed and is recorded under History.
 
-## Design Philosophy
+## History: src/core module
 
-The `core` module follows the principle of **high cohesion and zero coupling**. Every type in this module is a pure data container with derived implementations for `Debug`, `Clone`, `Serialize`, and `Deserialize`. There are no methods beyond simple field access — business logic lives in the modules that consume these types.
+The src/core/ module was a pure data container — no business logic, no platform-specific code, only `serde` plus std containers — designed for high cohesion and zero coupling. It was removed as its types migrated to owning modules or were dropped entirely. The four types it held are recorded below for reference.
 
-This design ensures that:
-- Types can be shared between the server, desktop bridge, and client interfaces without pulling in heavy dependencies
-- Serialization contracts are stable and versioned via `serde`
-- The module compiles quickly and never blocks other modules
+### MediaAttachment
 
----
-
-## MediaAttachment
-
-Multimodal content support for images, documents, and video from clipboard or file uploads (`src/core/types.rs`).
+Multimodal content support for images, documents, and video from clipboard or file uploads (formerly src/core/types.rs; the unified `MediaType` now lives at `src/media/types.rs`).
 
 ```rust
 pub enum MediaType {
@@ -39,20 +32,14 @@ pub struct MediaAttachment {
 }
 ```
 
-The `encoding` field determines how to interpret `data`:
+- `ContentEncoding::Base64` — binary content encoded as Base64 (images, PDFs)
+- `ContentEncoding::Utf8` — plain text content (markdown, extracted text)
 
-- `ContentEncoding::Base64` — Binary content encoded as Base64 (images, PDFs)
-- `ContentEncoding::Utf8` — Plain text content (markdown, extracted text)
+`MediaAttachment` carried a `Debug` impl that rewrote `data` to `<REDACTED: N bytes>` to keep payloads out of logs. Both `MediaType` and `ContentEncoding` were `#[non_exhaustive]`.
 
-`MediaAttachment` carries a `Debug` impl that rewrites `data` to `<REDACTED: N bytes>` to keep payloads out of logs. Both `MediaType` and `ContentEncoding` are `#[non_exhaustive]`, so adding new variants is non-breaking.
+### CapturedContext
 
-**Usage:** Used by `CapturedContext` to pass clipboard content from the Desktop Bridge to the Thinker, and by tool outputs that generate or receive files.
-
----
-
-## CapturedContext
-
-Context from the user's active application, bridged from the native desktop layer (`src/core/types.rs`).
+Context from the user's active application, bridged from the native desktop layer (formerly src/core/types.rs).
 
 ```rust
 pub struct CapturedContext {
@@ -62,18 +49,15 @@ pub struct CapturedContext {
 }
 ```
 
-**Fields:**
-- `window_title` — Title of the active window (e.g., "Notes.app", "VS Code")
-- `attachments` — Clipboard content (images, files) captured at the moment of interaction
-- `session_id` — Session identifier for multi-turn conversations
+- `window_title` — title of the active window
+- `attachments` — clipboard content (images, files) captured at interaction time
+- `session_id` — session identifier for multi-turn conversations
 
-**Usage:** Injected into the prompt context when the user interacts via the Desktop Bridge, giving the AI awareness of what the user is currently working on.
+The Desktop Bridge's `CapturedContext` injection was removed; clipboard capture is now handled by `src/builtin_tools/system_tool.rs` (clipboard_read / clipboard_write) and the desktop submodule.
 
----
+### CompressionStats
 
-## CompressionStats
-
-Statistics about the memory compression state, used by the Settings UI to display memory health (`src/core/types.rs`).
+Statistics about the memory compression state, used by the Settings UI to display memory health (formerly src/core/types.rs).
 
 ```rust
 pub struct CompressionStats {
@@ -84,19 +68,14 @@ pub struct CompressionStats {
 }
 ```
 
-**Fields:**
-- `total_raw_memories` — Layer 1: raw user messages stored before compression
-- `total_facts` — Layer 2: compressed facts extracted from memories
-- `valid_facts` — Non-invalidated facts still considered active
-- `facts_by_type` — Breakdown by type (preference, plan, learning, etc.); a `BTreeMap` rather than a `HashMap` to give deterministic iteration order
+- `total_raw_memories` — Layer 1 raw user messages
+- `total_facts` — Layer 2 compressed facts
+- `valid_facts` — non-invalidated active facts
+- `facts_by_type` — breakdown by type (preference, plan, learning, …); `BTreeMap` for deterministic iteration order
 
-**Usage:** Queried by the Gateway's config handlers to populate the memory dashboard in the Panel UI.
+### MemoryEntry
 
----
-
-## MemoryEntry
-
-A memory record returned by the Memory system's API, suitable for serialization to clients (`src/core/types.rs`).
+A memory record returned by the Memory system's API for serialization to clients. The current wire projection lives at `src/gateway/handlers/memory/mod.rs` with fields `id` / `agent_id` / `content` / `session_id` / `timestamp` — the old `window_title` / `user_input` / `ai_output` / `similarity_score` fields were dropped because `RawMemory` stores a single `content` field, so `ai_output` and `window_title` were always empty strings.
 
 ```rust
 pub struct MemoryEntry {
@@ -109,15 +88,11 @@ pub struct MemoryEntry {
 }
 ```
 
-`similarity_score` is filtered through `deserialize_with = "deserialize_finite_f32_opt"` — NaN/Inf values in payloads would poison the sort/rank downstream, so dropping them at deserialization is safer than keeping an invalid score.
+The `similarity_score` field was filtered through `deserialize_with = "deserialize_finite_f32_opt"` to drop NaN/Inf values at deserialization.
 
-**Usage:** Returned by memory search queries. The `similarity_score` field is populated when the entry is retrieved via vector search, indicating relevance to the query.
+> The internal long-term-memory record is a separate `crate::memory::MemoryEntry` (src/memory/context/mod.rs) with `embedding` / `namespace` / `agent` / `context: ContextAnchor` fields for storage.
 
-> The internal long-term-memory record is a separate `crate::memory::MemoryEntry` (`src/memory/context/mod.rs`) with `embedding` / `namespace` / `agent` / `context: ContextAnchor` fields for storage. The `core::MemoryEntry` described here is its wire/panel-facing projection.
-
----
-
-## Where These Types Are Used
+### Where These Types Were Used
 
 | Type | Used By | Purpose |
 |---|---|---|
@@ -126,17 +101,19 @@ pub struct MemoryEntry {
 | `CompressionStats` | Memory, Gateway, Panel UI | Memory health display |
 | `MemoryEntry` | Memory, Gateway | API response serialization |
 
+### Code Location
+
+- src/core/mod.rs — module entry point, re-exports
+- src/core/types.rs — type definitions
+
+(both removed)
+
 ---
-
-## Code Location
-
-- `src/core/mod.rs` — Module entry point, re-exports
-- `src/core/types.rs` — Type definitions
 
 ## See Also
 
 - [Memory System](./memory) — How memories are stored and compressed
-- [Desktop Bridge](./desktop-bridge) — How CapturedContext is captured from native apps
+- [Desktop Bridge](../architecture/desktop-bridge) — How native window/clipboard context is captured
 - [Thinker](./thinker) — How context is injected into prompts
 
 ---
@@ -152,7 +129,7 @@ pub struct MemoryEntry {
 - **`GoalStatus` / `Goal` / `GoalStore`** (`src/goal/types.rs`) — 26.7.x new goal subsystem. `GoalStatus` is `Active` / `Paused` / `Blocked` / `Complete`; `PursuitMode` is `Passive` / `Active { max_iterations }`; `GateOutcome` splits the maker/checker confirmation (`Unchecked` / `Passed`).
 - **`ArtifactRecord`** (`src/artifacts/store.rs`) — the artifact-store record type; `MAX_ARTIFACT_BYTES = 50 MiB` and `MAX_ARTIFACTS_PER_SESSION = 200` are the gates, rooted at `<aleph_data_dir>/artifacts`.
 - **`AgentKeystore` / `AgentLedger` / `LedgerRecord` / `LedgerAction` / `LedgerOutcome` / `ChainReport` / `as_actor` / `current_actor`** (`src/identity/{keystore,ledger,record,verify,actor}.rs`) — per-agent Ed25519 key, hash-chained signed ledger, and the "act as" `task_local` for sub-agent / delegation attribution.
-- **`NoteRelationArg`** (`src/builtin_tools/note_manage.rs`) — typed relation edge; an input arg of the `note_manage` tool. The read side is the `note_graph_query` tool (`src/builtin_tools/note_graph_query.rs`).
+- **`NoteRelationArg`** (`src/builtin_tools/note_manage/args.rs`) — typed relation edge; an input arg of the `note_manage` tool. The read side is the `note_graph_query` tool (`src/builtin_tools/note_graph_query.rs`).
 - **`CapabilityLedger`** (`src/runtimes/ledger.rs`) — per-install visible capability list rebuilt from disk (underpins `plugin.install` / `runtimes.install`); persisted as JSON.
 
 ### See Also

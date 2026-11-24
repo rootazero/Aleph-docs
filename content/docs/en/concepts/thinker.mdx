@@ -202,42 +202,19 @@ impl PromptPipeline {
 }
 ```
 
-`ProviderRenderStyle` (`xml` / `fenced` / `inline`) decides per-layer wrapping by provider — `PromptPipeline::render_section(layer, ctx, style)` is the single chokepoint.
+Each layer self-renders into the shared output buffer through `PromptLayer::inject(&mut String, &LayerInput)`; there is no separate per-provider wrapping chokepoint. XML escaping / wrapping helpers live in `src/thinker/xml_util.rs` (`escape_xml` / `escape_xml_attr` / `push_text_element` / `push_block_with_attrs`).
 
 ---
 
-## Streaming State Machine
+## History: Streaming state machine
 
-`thinker::streaming` provides the per-token state machine `BlockState`:
-
-```rust
-pub struct BlockState {
-    pub buffer: String,
-    pub current_block: Option<BlockType>,
-}
-
-impl BlockState {
-    pub fn feed(&mut self, token: &str) -> Vec<BlockEvent> { /* ... */ }
-}
-```
-
-`BlockType` has five variants: `Text` / `ToolCall` / `Code` / `Thinking` / `Image`. `BlockState::feed` parses an incoming token and emits `BlockEvent`s (new block / current block continues / current block ends). The Panel-side renders the two-stage caption with this state machine (see `interfaces/webchat/src/views/chat/state/streaming.rs`).
+The early `thinker::streaming` module provided a per-token `BlockState` state machine (`BlockType`: `Text` / `ToolCall` / `Code` / `Thinking` / `Image`; `BlockEvent`: new block / continue / end) so the Panel could render a two-stage caption during streamed responses. That module and its streaming renderer were removed — there is no per-token caption state machine anymore.
 
 ---
 
-## Provider-Specific Rendering
+## History: Provider-specific rendering
 
-Different providers parse the same content differently — Anthropic wants XML, OpenAI wants fenced code, Ollama wants plain text. `PromptLayer::render` returns plain text (**without** `<example>` / `` ``` `` wrapping); the wrapping is decided by `PromptPipeline::render_section` per `ProviderRenderStyle`:
-
-```rust
-pub enum ProviderRenderStyle { Xml, Fenced, Inline }
-```
-
-- **Anthropic / XML**: each layer is wrapped in `<section name="<layer_name>">…</section>`; inner content is **not** re-escaped
-- **OpenAI / Fenced**: each layer is wrapped in `` ```<layer_name>\n…\n``` ``; `` ``` `` inside content must be re-escaped
-- **Ollama / Inline**: each layer is plain text with a single-line `--- <layer_name> ---` heading
-
-`style_for_provider(provider_name)` is called once at pipeline assembly; the result is cached on the pipeline struct.
+The early `ProviderRenderStyle` enum (`Xml` / `Fenced` / `Inline`) picked per-layer wrapping by provider, with a `render_section` chokepoint and a `style_for_provider(provider_name)` helper caching the choice at pipeline assembly. That rendering model was removed: each `PromptLayer` now self-wraps through `inject(&mut String, &LayerInput)` using the shared helpers in `src/thinker/xml_util.rs`; there is no per-provider wrapping style anymore.
 
 ---
 
@@ -247,16 +224,14 @@ pub enum ProviderRenderStyle { Xml, Fenced, Inline }
 - `src/thinker/prompt_pipeline.rs` — `PromptPipeline` and layer assembly
 - `src/thinker/prompt_contract.rs` — `reachable_layers` / `scaffold_bytes_ratchet` / `whitelist_disabled`
 - `src/thinker/prompt_layer.rs` — `PromptLayer` trait + `Box<dyn PromptLayer>` wrapping
-- `src/thinker/render_style.rs` — `ProviderRenderStyle` three variants
-- `src/thinker/streaming.rs` — `BlockState` streaming state machine
 - `src/thinker/soul.rs` — soul.md parsing
 - `src/thinker/identity_files.rs` — identity files injection
 - `src/thinker/context.rs` — `ThinkerContext` field definitions
 - `src/thinker/runtime_context.rs` — `RuntimeContextLayer` (priority 1720, the only dynamic SYSTEM layer)
 - `src/thinker/nudges.rs` — 9 model-facing prompt strings (`MAX_STEPS_HINT` / `MAX_OUTPUT_TOKENS_RESUME_NUDGE` / `INTERRUPTION_NOTE` etc.), centralized after the harness purged them
 - `src/thinker/security_context.rs` — `SecurityLayer`
-- `src/thinker/curated_memory.rs` — `CuratedMemoryLayer` (assembles the stable segment of `MemoryEnvelope`)
-- `src/thinker/recall_context.rs` — `RecallContext` and transient-tail assembly
+- `src/thinker/layers/curated_memory.rs` — `CuratedMemoryLayer` (assembles the stable segment of `MemoryEnvelope`)
+- `src/orchestrator/harness_bridge/prompt_build.rs` — transient-tail / recall-context assembly (carried by `HarnessDeps::recall_context`, `src/harness/deps.rs`)
 - `src/thinker/project_instructions.rs` — various layer helpers
 - `src/thinker/xml_util.rs` — XML escaping / wrapping
 - `src/thinker/interaction.rs` — `InteractionManifest` channel-capability awareness
@@ -294,4 +269,4 @@ pub enum ProviderRenderStyle { Xml, Fenced, Inline }
 - [Skill System](/docs/en/concepts/skill-system) — `skill_instructions` layer source
 - [Architecture: Harness section](/docs/en/architecture/harness) — layer assembly location
 - [Thinker source](https://github.com/rootazero/Aleph/blob/main/src/thinker) — full layer list
-- [R10 byte-budget test](https://github.com/rootazero/Aleph/blob/main/src/harness/tests/budget.rs) — shared `CEILING = 5055` ruler
+- [R10 byte-budget test](https://github.com/rootazero/Aleph/blob/main/src/harness/tests/budget.rs) — shared `CEILING = 5535` ruler

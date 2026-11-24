@@ -51,15 +51,15 @@ For each request, the provider layer:
 5. Retries or advances according to the typed failure decision.
 6. Records health, cooldown, load, usage, serving provider, and serving model.
 
-Configured fallback names reference keys in `[providers]`. If no explicit chain is configured, the production chain can derive fallback membership from the live provider registry; provider additions and removals then affect the next request. `effective_fallback_names` is shared by the walk and `route_status`, so diagnostics describe the chain that is actually used.
+Configured fallback names reference keys in `[providers]`. If no explicit chain is configured, the production chain can derive fallback membership from the live provider registry; provider additions and removals then affect the next request. Fallback membership is derived from the live provider registry and materialized into the walk's candidate nodes; `route_witness` records which provider actually served each request after the walk, so diagnostics describe the chain that was actually used.
 
 A streaming candidate may fail over only before user-visible content has been emitted. Once content has reached the sink, the emission guard stops the walk rather than appending a second provider's answer to a partial first answer.
 
-## Live Route State
+## Model Selection: Capability Gate and Failover Walk
 
-`[route]` controls local/cloud preference, optional cloud escalation, load balancing, provider targets, and rate ceilings. `RouteHandle` stores the entire route state in one `ArcSwap`: a write publishes one generation atomically, and each request reads one coherent snapshot. The next request therefore sees either all old fields or all new fields, never a torn mixture.
+`src/providers/capability_gate.rs` applies a prompt-blind capability floor before the failover walk: it drops candidate models that structurally cannot serve the request (no vision for image input, no tool-calling for tool definitions, or a context window too small for the estimated input). It reasons about the request's shape, never its semantic intent — the LLM still owns model choice. The gate is fail-open: models with unknown capabilities are kept, and if filtering would drop every candidate the original list is returned unchanged.
 
-Candidate slot and endpoint tier are separate concepts. The primary slot owns an explicitly selected model; fallback slots use their own model catalogs. Local/cloud tier is used only for route policy and cost ordering.
+After gating, the failover walk (`src/providers/failover/`) selects the actual serving provider/model. `src/providers/route_witness.rs` records the failure-only serving attribution after the walk — it reports rather than predicts — and drives `ModelResolved { model_info: ModelInfo }` (`ModelInfo.is_fallback`), which Panel, TUI, CLI, and channel notices render.
 
 ## Reliability and Accounting
 
@@ -68,7 +68,7 @@ Candidate slot and endpoint tier are separate concepts. The primary slot owns an
 - Provider response body reads and streaming idle gaps are bounded.
 - Cache read and creation tokens are included when enforcing throughput windows.
 - Metering attributes cost and usage to the actual serving provider/model.
-- `route_status` exposes chain membership, health, cooldown, load, and route decisions.
+- `route_witness` records serving attribution (which provider/model actually served), and `ModelResolved.is_fallback` surfaces fallback to the UI.
 
 The failover hot path borrows the request conversation instead of cloning the complete history for every attempt. The provider refactor also removed roughly 2,000 lines of unreachable parallel provider code, leaving the `AiProvider`/protocol-adapter/failover path as the maintained runtime.
 
@@ -78,9 +78,8 @@ The failover hot path borrows the request conversation instead of cloning the co
 - `src/providers/protocols/` — protocol adapters
 - `src/providers/http_provider.rs` — HTTP execution and live streaming
 - `src/providers/failover/` — candidate walk, decisions, circuits, and cooldowns
-- `src/providers/route_policy.rs` — candidate gating and ordering
-- `src/providers/route_handle.rs` — atomic live route snapshots
-- `src/providers/route_observe.rs` — `route_status` rendering
+- `src/providers/capability_gate.rs` — prompt-blind candidate gating
+- `src/providers/route_witness.rs` — failure-only serving attribution witness
 - `src/config/types/provider.rs` — `[providers.<name>]` entry schema
 
 ## See Also

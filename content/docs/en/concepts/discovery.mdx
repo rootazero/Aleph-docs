@@ -56,7 +56,7 @@ Key entry points:
 | Method | Description |
 |---|---|
 | `with_defaults()` | Build with the current directory + default depth |
-| `find_config_files(filename)` | Walk upward for `<filename>` (e.g. `aleph.jsonc`); returns `[global, …project]` — project entries come last and win |
+| `find_config_files(filename)` | Walk upward for `<filename>` (e.g. `config.toml`); returns `[global, …project]` — project entries come last and win |
 | `discover_skill_dirs()` / `discover_command_dirs()` / `discover_agent_dirs()` | Enumerate child directories under each scan root's `<root>/<component>/` |
 | `discover_plugins()` | Scan `~/.aleph/plugins/` only (with monorepo one-level descent) |
 | `discover_plugins_with_extra(parents)` | Also scan each project-level `<project>/.aleph/plugins/` |
@@ -98,7 +98,7 @@ pub enum DiscoverySource {
 
 ```rust
 let manager = DiscoveryManager::with_defaults()?;
-let configs = manager.find_config_files("aleph.jsonc")?;
+let configs = manager.find_config_files("config.toml")?;
 // Walks from working_dir up to the git root (or max_upward_depth),
 // returning [global, …project].
 ```

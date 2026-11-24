@@ -3,7 +3,7 @@ title: "plugins.*"
 description: "插件管理 RPC 方法"
 ---
 
-`plugins.*` 和规范的单数 `plugin.*` 命名空间是运行时插件宿主的两个面。两者都在 `HandlerRegistry::new()`(`src/gateway/handlers/mod.rs:287-310`)中注册,因此无论 MCP manager 是否启动都存在。
+`plugins.*` 和规范的单数 `plugin.*` 命名空间是运行时插件宿主的两个面。两者都在 `HandlerRegistry::new()`(`src/gateway/handlers/mod.rs`)中注册,因此无论 MCP manager 是否启动都存在。
 
 - `plugins.*` 是**遗留**命名空间,为向后兼容旧客户端保留。
 - `plugin.*` 是**规范**的单数命名空间;`plugin.install` 在服务端对来源分类(市场 / git URL / 本地路径 / `.zip`)并相应路由。
@@ -40,7 +40,7 @@ description: "插件管理 RPC 方法"
 
 **响应:** `{ "installedNames": [] }`(处理函数不枚举解压出的名字,使用 `plugins.list` 刷新)。
 
-### plugins.unload
+### plugins.uninstall
 
 卸载已加载的插件并删除其目录。**先**在运行时下线,再删除目录,这样 `services.stop` 或临时 MCP 服务器在关闭时仍能运行。
 
@@ -50,25 +50,25 @@ description: "插件管理 RPC 方法"
 
 **响应:** `{ "ok": true }`。
 
-### plugins.load
+### plugin.reload
 
-从目录解析清单并加载插件到运行时(Node.js / WASM)。
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `path` | string | 是 | 包含 `aleph.plugin.json` 或带 `aleph` 字段的 `package.json` 的插件目录路径 |
-
-**响应:** `{ "pluginId": "<id>", "name": "<name>", "kind": "Mcp|Wasm|Static" }`。
-
-### plugins.unload
-
-`plugins.load` 的反操作:从运行时注销插件。工具和钩子可能仍出现在注册表中;使用 `plugins.unload` 删除目录。
+对已安装插件重新加载清单和运行时,不是从任意目录首次加载。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `pluginId` | string | 是 | 插件 id |
+| `pluginId` | string | 是 | 已安装插件 id |
 
-**响应:** `{ "ok": true }`。
+**响应:** `{ "ok": true, "pluginId", "status" }`。
+
+### plugins.disable（保留安装）
+
+只需停用运行时而不删除目录时,使用 `plugins.disable`,不要调用旧的 load/unload 名称。它创建 `.disabled` 标记并拆除运行时;恢复发现使用 `plugins.enable`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 插件 id |
+
+**响应:** `{ "ok": true }`。删除安装目录则使用 `plugins.uninstall`。
 
 ### plugins.enable
 
@@ -159,13 +159,13 @@ description: "插件管理 RPC 方法"
 
 与 `plugins.enable` / `plugins.disable` 同形。**响应:** `{ "ok": true }`。
 
-### plugin.load / plugin.unload / plugin.reload
+### plugin.reload（运行时重载）
+
+当前 census 只提供 `plugin.reload` 作为运行时重载入口;首次安装使用 `plugin.install`,停用使用 `plugins.disable`,删除使用 `plugin.uninstall`。它们不是等价操作。
 
 | 方法 | 参数 | 说明 |
 |------|------|------|
-| `plugin.load` | `path` | 解析并加载目录中的插件;返回 `{ "pluginId", "name", "kind" }` |
-| `plugin.unload` | `pluginId` | 卸载运行时插件;返回 `{ "ok": true }` |
-| `plugin.reload` | `pluginId` | 热重载:重新解析清单,重新注册能力;返回 `{ "ok": true, "pluginId" }` |
+| `plugin.reload` | `pluginId` | 重新加载已安装插件;返回 `{ "ok": true, "pluginId", "status" }` |
 
 ### plugin.callTool / plugin.executeCommand
 

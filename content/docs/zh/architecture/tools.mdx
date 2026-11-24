@@ -16,63 +16,49 @@ description: "ToolService 外观、中间件栈、AlephTool trait、自动模式
 ```rust
 #[async_trait]
 pub trait ToolService: Send + Sync + 'static {
-    /// 通过名称和 JSON 输入执行工具。
+    /// 按名称执行工具，输入为 JSON。
     async fn execute(&self, name: &str, input: Value) -> Result<ToolOutput, ToolError>;
 
-    /// 列出所有当前可用工具。
+    /// 列出当前展示给模型的工具。
     async fn list(&self) -> Vec<ToolDefinition>;
+
+    /// 模型可以合法调用的全部工具：`list()` 加上延迟层
+    ///（不出现在工具数组中，但仍可执行）。默认等于 `list()`。
+    async fn dispatchable_list(&self) -> Vec<ToolDefinition> { self.list().await }
 
     /// 获取单个工具的定义。
     async fn describe(&self, name: &str) -> Option<ToolDefinition>;
+
+    /* … schema 缓存与刷新信号相关方法 … */
 }
 ```
 
-**位置**: `src/tools/service.rs`
+**位置**：`src/tools/service.rs`
 
-外观在启动时由 `src/tools/facade.rs` 中的 `build_tool_service()` 构建。它在 `CoreDispatch` 周围连接中间件层的装饰链，将调用路由到实际工具处理程序。返回的 `Arc<dyn ToolService>` 是代理循环持有的；共享的 `Arc<ToolRegistry>` 被线程化到 `McpClient` 和 `ExtensionManager` 中，以便动态工具注册扩展同一注册表。
-
----
-
-## 中间件栈
-
-每个工具调用都通过五层中间件栈，从外到内：
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  ExecAuditLayer                                         │
-│  • 跟踪工具调用（开始 / 成功 / 错误）                    │
-│  • 在 ToolOutput 元数据中记录 latency_ms                │
-├─────────────────────────────────────────────────────────┤
-│  PermissionLayer                                        │
-│  • SmartFilter 分类：允许 / 确认 / 拒绝                  │
-│  • 危险工具的 ApprovalGate 确认                          │
-│  • 通过 set_smart_filter 在运行时可交换                  │
-├─────────────────────────────────────────────────────────┤
-│  ContextRuleLayer                                       │
-│  • ContextRule 评估：允许 / 拒绝 / 重写                  │
-│  • 默认空；通过 set_rules 接线规则                       │
-├─────────────────────────────────────────────────────────┤
-│  TimeoutLayer                                           │
-│  • 默认超时 + 配置中的每个工具覆盖                        │
-│  • 超时时发出 ToolError::Timeout                        │
-├─────────────────────────────────────────────────────────┤
-│  CoreDispatch → ToolRegistry                            │
-│  • 用于无锁读取的 ArcSwap 支持快照                       │
-│  • 路由到 BuiltinHandler / McpHandler / ExtHandler      │
-└─────────────────────────────────────────────────────────┘
-```
-
-**位置**: `src/tools/middleware/`
-
-每层都实现 `ToolService` 并包装下一层，因此 `execute()` 向内委托，`list()`/`describe()` 透明传递。堆栈在构建后不可变，除了 `PermissionLayer` 和 `ContextRuleLayer` 设置器，它们通过 `ArcSwap` 原子交换其策略。
-
-### CoreDispatch
-
-在堆栈底部，`CoreDispatch` 持有 `Arc<ToolRegistry>` 并通过注册表的 `ArcSwap` 快照路由 `execute` / `list` / `describe`。快照在 *await* 处理程序之前释放，以便并发的 `register`/`unregister` 调用永远不会阻塞正在进行的执行。
-
-**位置**: `src/tools/dispatch.rs`
+生产实现是 `ScopedToolService`（`src/tools/scoped/mod.rs`），由网关围绕 `LoopToolRegistry`（外加可选的 `SubagentTool` 与 hook 执行器）构建。`NullToolService`（`src/tools/null.rs`）只是 `AgentHarnessRunner.tool_service` 的失败关闭兜底，生产环境不会走到它：它取代了此前的 `build_tool_service` 装饰器链——那条链不可达，因为网关总是覆盖它。真正持有处理器的注册表是 `ToolHandlerRegistry`（`src/tools/registry.rs`）；`McpClient` 与 `ExtensionManager` 向它注册，因此动态工具注册扩展的是同一个注册表。
 
 ---
+
+## 限定作用域的执行管线
+
+> **历史。** 本页早期版本描述过一个五层装饰器栈（`ExecAuditLayer` → `PermissionLayer` → `ContextRuleLayer` → `TimeoutLayer` → `CoreDispatch`），位于 `src/tools/` 下的 `middleware/` 目录，由同级 `facade.rs` 中的 `build_tool_service()` 构建。该栈已不在源码树中；它的职责由下面描述的单个 `ScopedToolService` 承担。
+
+`ScopedToolService` 按关注点拆分（`src/tools/scoped/`）：
+
+| 文件 | 职责 |
+|------|------|
+| `src/tools/scoped/builder.rs` | `new` 与全部 `with_*` 设置方法及小型辅助函数 |
+| `src/tools/scoped/gate_chain.rs` | 有序规则链，决定并**命名**是什么拦住了调用（`GateRule`） |
+| `src/tools/scoped/dispatch.rs` | 执行管线：确认门、`BeforeToolCall` hook、超时、重试、第 2 层结果预算、`AfterToolCall` hook、错误脱敏 |
+| `src/tools/scoped/artifact_harvest.rs` | 把工具输出中的 `_media` 落入工件存储 |
+| `src/tools/scoped/ledger.rs` | 在该咽喉点向签名操作账本记录的内容 |
+| `src/tools/scoped/traits.rs` | 公共扩展点（`ToolDefinitionRewriter`、`CapabilityConstraintContextSource`） |
+
+该服务是注册表之上的只读适配器：不会修改底层注册表，`list()` / `describe()` 是已注册能力描述符的投影。
+
+### 处理器注册表
+
+`ToolHandlerRegistry`（`src/tools/registry.rs`）是 Tool 能力在运行期的唯一事实来源：每个条目把一个 `ToolHandler` 与其 `ToolCapabilityDescriptor` 配成一对，二者在一次原子 `ArcSwap` 交换中一起写入，订阅者永远不会看到半注册的工具。每次 register / replace / unregister 都会推进全注册表单调递增的 `revision`；该 revision 记录在条目描述符上，并随变更事件与 `RegistrationHandle` 返回，因此过期句柄永远无法移除更新的条目。面向模型的 `ToolDefinition` 是描述符的投影，而不是第二个事实来源。
 
 ## AlephTool Trait
 
@@ -502,36 +488,24 @@ MCP 工具在启动时通过 `list_tools` RPC 调用发现，包装在 `McpHandl
 
 ## 工具过滤
 
-`PermissionLayer` 通过 `SmartFilter` trait 表面控制 LLM 看到哪些工具以及哪些需要用户确认：
+模型能看到哪些工具、哪些工具要停下来等人确认，由 `ScopedToolService`（`src/tools/scoped/`）内部决定，而不是由可替换的过滤器 trait 决定。决策有三个输入：
 
 ```rust
-pub trait SmartFilter: Send + Sync {
-    /// 将工具调用分类为允许 / 确认 / 拒绝。
-    fn classify(&self, name: &str, input: &Value) -> Classification;
-}
+pub enum PermissionAction { Allow, Deny, Ask }   // src/extension/types/agents.rs
 
-pub enum Classification {
-    Allow,
-    Confirm { reason: String },
-    Deny { reason: String },
+pub struct ToolPermissionsConfig {               // src/config/types/policies/tool_permissions.rs
+    pub default: PermissionAction,                // 默认 Allow
+    pub overrides: HashMap<String, PermissionAction>,  // 精确工具名或 glob，例如 "*_delete" = "ask"
 }
 ```
 
-生产实现（`src/tools/middleware/permission/resolver.rs` 中的 `LayeredPermissionResolver`）查询合并的全局 + 每个代理 `ToolPermissionsConfig`。过滤器和审批器可以通过 `PermissionLayer::set_smart_filter()` 和 `set_approver()` 在运行时交换。
+`effective_permission`（`src/config/types/policies/exec_tier.rs`）是唯一的组合点：先看 tier 的 `Deny` 裁决（`Plan` 档），再看显式的 `overrides` 条目，最后用 `restrictive_min` 把 `default` 与 tier 裁决合并。`ScopedToolService::permission_for`（循环的强制执行咽喉点）以及在循环之前提出同一问题的每个网关入口都调用它，因此没有哪个入口会长出自己的优先级。
 
-### 遗留 ToolFilter（仍支持）
+### 门规则链（`GateRule`）
 
-```rust
-pub struct ToolFilter {
-    pub allowed: Option<HashSet<String>>,  // 白名单（如果设置）
-    pub blocked: HashSet<String>,           // 始终排除
-    pub require_confirmation: HashSet<String>,
-}
-```
+当一次调用必须停下时，`src/tools/scoped/gate_chain.rs` 会命名**是哪条规则**拦住了它（`GateRule::id()` 是日志、签名账本和测试使用的稳定标记）。`ScopedToolService::confirmation_rule` 返回第一条命中的规则，顺序保证理由不会误导读者「改什么才能改变结果」：`PolicyDeny`（拒绝）→ `SideQuestion` → `ToolDeclared`（工具自带的确认下限，如 MCP 服务器的 `destructiveHint`）→ `GateRemoval` / `DestructiveArguments` → `PolicyAsk` → `TierRaised`。`OperatorRequired`、`PlanMode`、`HookRequested` 在该函数之外判定（调用者角色、规划档、`BeforeToolCall` hook 回答 `Ask`），但与其余规则同属一个枚举，以便轨迹能给它们命名。
 
-`allowed` 列表中支持 glob 模式（如 `memory_*` 匹配所有记忆工具）。
-
-工具过滤与安全系统交互：即使工具通过过滤器，`PolicyEngine` 也会检查 `IdentityContext` 以确保会话的角色允许工具调用。访客会话只能调用其 `GuestScope.allowed_tools` 中列出的工具。
+工具过滤与安全体系相互作用：即便工具通过了门规则链，仍会检查会话身份——访客会话只能调用其 `GuestScope.allowed_tools`（`shared/protocol/src/auth.rs`，精确名称，不支持通配符）中列出的工具。
 
 ---
 
@@ -589,7 +563,7 @@ impl ToolService for CoreDispatch {
 
 `src/tools/concurrency.rs` 资源声明三态（`Shared` / `Exclusive{Global}` / `Exclusive{Paths}`）—— Act 阶段按声明分桶并行。
 
-### `tools.defer_mcp_tools` / `enable_tool_search`
+### `defer_mcp_tools`（`[tools]` 配置键） / `enable_tool_search`
 
 26.7.7+ 渐进式工具披露——非核心工具 schema 折叠为 name + description；`tool_search` 元工具按需加载。
 

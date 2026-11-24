@@ -1,9 +1,9 @@
 ---
 title: "ClawHub"
-description: "Historical reference: ClawHub survives in the Hub catalog as a `via: \"clawhub\"` provenance label; the `src/clawhub/` module has been removed."
+description: "Historical reference: ClawHub survives in the Hub catalog as a `via: \"clawhub\"` provenance label; the standalone ClawHub client module has been removed."
 ---
 
-> **Removed — historical reference.** The `src/clawhub/` module no longer exists in the source tree. ClawHub's dedicated Settings tab has been removed; its discovery role is subsumed into the [Extensions Store](/docs/en/concepts/extensions-store), which browses Skills, Plugins, and MCP servers under one **Extension** umbrella by functional category.
+> **Removed — historical reference.** The standalone ClawHub client module (a top-level `clawhub` module in the source tree) no longer exists in the source tree. ClawHub's dedicated Settings tab has been removed; its discovery role is subsumed into the [Extensions Store](/docs/en/concepts/extensions-store), which browses Skills, Plugins, and MCP servers under one **Extension** umbrella by functional category.
 
 ClawHub is still reachable through the **Hub catalog's long-tail provenance label**: `src/hub/types.rs::ExtensionProvenance::via = "clawhub"` (see the `via: "clawhub"` wire shape in `src/hub/catalog_client.rs::CatalogEntry.via` tests). The Store Agent reads a URL / repo for installs that no curated source covers. The structure below is retained as historical reference.
 

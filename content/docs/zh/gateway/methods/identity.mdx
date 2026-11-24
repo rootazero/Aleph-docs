@@ -14,7 +14,7 @@ description: "身份和灵魂管理 RPC 方法"
 | [`identity.clear`](#identityclear) | 移除身份文件（恢复默认 persona） |
 | [`identity.list`](#identitylist) | 列出全部身份文件的存在 / 大小状态 |
 
-> 历史文档中提到的 `identity.sign` / `identity.verify` / `identity.rotate` 不是 RPC；签名 / 验证链由 `src/gateway/security/crypto.rs` 提供，但仅供网关内部委托链使用，**未对外暴露**为 JSON-RPC 方法。
+> 签名、验证与密钥轮换不是本命名空间的 RPC；内部委托链的密码学实现见 `src/gateway/security/crypto.rs`。
 
 ## 身份文件清单
 

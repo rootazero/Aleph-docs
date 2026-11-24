@@ -48,9 +48,9 @@ description: "两层数据模型（L0 原始 / L1 笔记）、四个存储 trait
 | **语义**（事实与规则） | 蒸馏出的 `preference` / `learning` / `skill` / `reference` 笔记 | 严重度为底线的置信度衰减 |
 | **原始**（审计 / 回溯基） | 每次蒸馏背后的 `raw_memories` 行 | 仅保留期扫描 |
 
-检索到的项在组装出的记忆上下文里被打上所在层的标记（markdown 头 + XML `layer="…"` 属性），让模型感知结构。带有 `permanent: true`（或 `permanent` / `pinned` 标签）的笔记，以及 `memory.memory_decay.protected_types` 中的类别，免于衰减 / 归档——「永久核心知识不受影响」的承诺。
+检索到的项在组装出的记忆上下文里被打上所在层的标记（markdown 头 + XML `layer="…"` 属性），让模型感知结构。带有 `permanent: true`（或 `permanent` / `pinned` 标签）的笔记，以及 `[memory.memory_decay]` 表里的 `protected_types` 键中的类别，免于衰减 / 归档——「永久核心知识不受影响」的承诺。
 
-召回时的「热度上浮 + 时间衰减」默认开启（`memory.retrieval_scoring`）：频繁召回的笔记会浮上来（`reinforcement`，源于 `recall_signals` 计数），陈旧的会淡化（`recency`）；两者都只读现有数据，无额外模型调用。
+召回时的「热度上浮 + 时间衰减」默认开启（`[memory.retrieval_scoring]` 配置）：频繁召回的笔记会浮上来（`reinforcement`，源于 `recall_signals` 计数），陈旧的会淡化（`recency`）；两者都只读现有数据，无额外模型调用。
 
 **嵌入**通过 `EmbeddingProvider` trait（OpenAI / SiliconFlow / Ollama 经 OpenAI 兼容的 `RemoteEmbeddingProvider`）实现可插拔；「数据保留在本地」这一要求今天通过把它指向本地 **Ollama** 来满足。**没有**故意添加一个打包在二进制内的 ONNX 后端——它会把一个沉重的单一用途原生依赖拖进核心（R3），去满足一个本地 Ollama 路径已经达成的隐私目标。如果权衡变化，它仍是同一 trait 背后一个干净的未来补充。
 
@@ -366,14 +366,14 @@ pub struct ReflectionResult {
 | `src/memory/notes/` | `KnowledgeNote`、`NoteStore`、`NoteIndexer` |
 | `src/memory/store/` | `RawMemoryStore`、`DreamStore`、`CompressionStore` trait + `SqliteMemoryBackend` |
 | `src/memory/store/sqlite/vec.rs` | sqlite-vec 集成 |
-| `src/memory/retrieval/` | 通用检索接口 |
-| `src/memory/scoring_pipeline/` | 评分阶段 |
+| `src/memory/rerank/` | 重排序提供方（Cohere、Jina、Pinecone、SiliconFlow、vLLM、Voyage） |
+| `src/memory/note_retrieval/scoring.rs` | 时效 / 强化加权与 MMR 重排（`recency_multiplier`、`apply_reinforcement`、`mmr_reorder`） |
 | `src/memory/dreaming/mod.rs` | `DreamDaemon`、`StrategySelector`、`MutationGate` |
 | `src/memory/dreaming/evolution/` | **SkillOpt 演化门**（gate / budget / evidence / score） |
 | `src/memory/dreaming/stages/` | 所有 `DreamStage` 实现 |
 | `src/memory/events/` | `MemoryEvent`、事件溯源 |
 | `src/memory/transcript_indexer/` | 记录分块与索引 |
-| `src/memory/namespace/` | `MemoryNamespace`、隔离级别 |
+| `src/memory/namespace.rs` | `NamespaceScope`（仅 `Owner` 一个变体——只是列标签，不是隔离边界；隔离位于 `src/memory/project_scope.rs`） |
 | `src/memory/scratchpad/` | 会话内工作记忆缓冲区 |
 
 ---

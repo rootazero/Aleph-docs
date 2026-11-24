@@ -3,9 +3,9 @@ title: "arena.*"
 description: "评估和基准测试 RPC 方法"
 ---
 
-`arena.*` 命名空间在当前 `aleph-server` 运行时**未被注册**。源码中既没有 `arena` 处理模块,也没有 `registry.register("arena.*", ...)` 的调用,更不存在 `src/arena/` 模块——任何 `arena.*` 方法在运行时会返回 `Method not found`(错误码 `-32601`)。
+`arena.*` 命名空间在当前 `aleph-server` 运行时**未被注册**。源码中既没有 `arena` 处理模块,也没有 `registry.register("arena.*", ...)` 的调用,更不存在 `arena` 模块——任何 `arena.*` 方法在运行时会返回 `Method not found`(错误码 `-32601`)。
 
-26.7.x 的 CHANGELOG 没有关于该命名空间的条目,最初的评估竞技场设计(`src/arena/`、竞技场基准任务、排行榜)在当前构建中已不存在。
+26.7.x 的 CHANGELOG 没有关于该命名空间的条目,最初的评估竞技场设计(竞技场基准任务、排行榜)在当前构建中已不存在。
 
 ## 方法
 

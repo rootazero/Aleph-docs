@@ -19,7 +19,7 @@ Every contributor, every PR reviewer, and every automated check must treat these
 
 ### Rule
 
-The core defines abstract traits (capability contracts) for platform-specific operations. Physical implementations live in native bridges (the Tauri-Rust layer), which communicate with the core over IPC.
+The core defines abstract traits (capability contracts) for platform-specific operations. Physical implementations live in the native host layer (`desktop/`), which communicates with the core over IPC: `desktop/shared` provides the capability traits and `desktop/{macos,linux,windows}` provide the per-platform implementations. `src/builtin_tools/desktop/` is tool orchestration over that capability layer, not a platform implementation.
 
 ### Principle
 
@@ -49,7 +49,7 @@ Sandbox restricted-token / job-object / AppContainer / integrity-level / SID·AC
 
 ### Rule
 
-Complex settings pages, forms, lists, dashboards, and any UI carrying business logic must be implemented in the Leptos (WASM) Panel. The native shell (Tauri, Swift, Kotlin, etc.) provides only: the window container, native menu items, native animations, and system-level integration (notifications, file dialogs).
+Complex settings pages, forms, lists, dashboards, and any UI carrying business logic must be implemented in the Leptos (WASM) Panel. The native shell (the NSH native desktop host in Rust + system-native APIs, Swift, Kotlin, etc.) provides only: the window container, native menu items, native animations, and system-level integration (notifications, file dialogs).
 
 ### Principle
 

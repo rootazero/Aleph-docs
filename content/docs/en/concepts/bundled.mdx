@@ -8,9 +8,9 @@ The `bundled` module embeds official skills, plugins, and templates into the Ale
 ## Design Philosophy
 
 1. **Self-contained distribution** — official content ships inside the binary; no network at runtime, works behind firewalls and offline.
-2. **Version-aware updates** — only re-extract when `manifest.bundled_version < BUNDLED_VERSION`; a repeat start is zero-cost.
+2. **Version-aware updates** — only re-extract when `bundled_version < BUNDLED_VERSION`; a repeat start is zero-cost.
 3. **User-content protection** — `SkillOrigin::User / Local / Github` entries are skipped during extraction; the binary never overwrites them.
-4. **Idempotent** — partial failure does not advance `manifest.bundled_version`; the next start retries automatically.
+4. **Idempotent** — partial failure does not advance `bundled_version`; the next start retries automatically.
 5. **Network-free by design** — the `bundled.sync` RPC (CLI / tool / Hub button) only reconciles the embedded content with `~/.aleph/bundled/` on disk.
 
 ---
@@ -51,12 +51,12 @@ pub const OFFICIAL_PLUGINS_REPO: &str = "https://github.com/rootazero/Aleph-plug
 ## Extraction Pipeline (`src/bundled/extractor.rs`)
 
 1. **Read manifest** — `~/.aleph/bundled/manifest.json`; create a blank one if it does not exist.
-2. **First-run bootstrap** — when the manifest is empty, call `sync_official_now(SyncKind::All)` to pull the latest `main` from the official repos; **`skills` succeeding while `plugins` fails is treated as partial success**, and `manifest.bundled_version` aligns with the embedded version on the parts that landed.
-3. **Version compare** — if `manifest.bundled_version == BUNDLED_VERSION`, skip re-extraction (saves time); otherwise step 4.
+2. **First-run bootstrap** — when the manifest is empty, call `sync_official_now(SyncKind::All)` to pull the latest `main` from the official repos; **`skills` succeeding while `plugins` fails is treated as partial success**, and `bundled_version` aligns with the embedded version on the parts that landed.
+3. **Version compare** — if `bundled_version == BUNDLED_VERSION`, skip re-extraction (saves time); otherwise step 4.
 4. **Atomic directory swap** —
    - **Skills**: each `include_dir!` subdirectory writes to `~/.aleph/bundled/skills/<name>/`; `SkillOrigin::User / Local / Github` entries are skipped (**only `Official` is overwritten**).
    - **Plugins**: `swap_dir_into_place` (`temp → remove-if-exists → rename`) atomically replaces `~/.aleph/bundled/plugins/cache/aleph-official/`. `ENOTEMPTY` on Unix and `AlreadyExists` on Windows are both eaten.
-5. **Update manifest** — on full success, write `manifest.bundled_version = BUNDLED_VERSION`; on partial failure, **do not write** (next start retries automatically).
+5. **Update manifest** — on full success, write `bundled_version = BUNDLED_VERSION`; on partial failure, **do not write** (next start retries automatically).
 
 `sync_official_with_urls` is a URL-injectable variant (takes `skills_url` / `plugins_url`) so tests can mount local git repos and avoid the network entirely.
 

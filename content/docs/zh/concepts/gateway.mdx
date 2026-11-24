@@ -54,10 +54,10 @@ impl WebSocketHandler {
 
 **方法：**
 - `session.create` —— 创建新会话
-- `session.send` —— 发送消息
-- `session.history` —— 获取对话历史
-- `session.clear` —— 清除会话上下文
-- `tool.call` —— 直接调用工具
+- `chat.send` —— 发送消息（封装 `agent.run`）
+- `chat.history` —— 获取对话历史（会话列表与历史另有 `sessions.list` / `sessions.history`）
+- `chat.clear` —— 清除会话的对话历史（整体重置用 `sessions.reset`）
+- `tools.invoke` —— 直接调用工具
 
 ### SessionManager
 
@@ -183,14 +183,14 @@ pub struct RateLimiter {
 
 - `src/gateway/` —— 模块根
 - `src/gateway/handlers/` —— WebSocket 和 HTTP 处理程序
-- `src/gateway/session/` —— 会话管理
+- `src/gateway/session_manager/` —— 会话管理
 - `src/gateway/execution_engine/` —— 代理执行循环
 - `src/gateway/interfaces/` —— 平台适配器（Discord、Telegram、CLI、TUI）
-- `src/gateway/routing/` —— 消息路由
+- `src/gateway/router.rs` —— 消息路由
 
 ## 另请参阅
 
-- [会话管理](./session-service) —— 会话生命周期
+- [会话管理](../architecture/session-service) —— 会话生命周期
 - [事件系统](./event-system) —— 事件分发
 - [思考器](./thinker) —— 提示词构造
 
@@ -212,7 +212,7 @@ pub struct RateLimiter {
 
 ### 死信与重投递
 
-26.7.17+：`channel.dead_letters` 收集未送达消息；`channel.redrive_dead_letters` 重投递。
+26.7.17+：投递队列会把永久投递失败的出站消息保存为死信，并可重新投递。死信的查看与重投递**不是 Gateway RPC 方法**，而是内建工具 `channel_outbox`（`status` / `dead_letters` / `redrive` 三个 op；`redrive` 需 `confirm_redrive: true` 才会真正重投，省略时只返回预览）。曾有的 `channels.dead_letters` / `channels.redrive_dead_letters` RPC 因没有任何客户端调用已移除；`channels.list` 仍会给出永久未送达推送的数量。
 
 ### 自签名 TLS + TOFU
 

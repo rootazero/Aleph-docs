@@ -41,7 +41,7 @@ description: "工程骨架：1 核心、2 面孔、3 肢体、4 神经"
               │                       │                       │
      ┌────────┴──────────┐  ┌────────┴────────┐  ┌──────────┴─────────┐
      │  原生 (肌肉)       │  │   MCP (工具)    │  │  技能 (专业知识)    │
-     │  桌面桥接          │  │  Playwright,    │  │  PPT 专家,         │
+     │  桌面能力层        │  │  Playwright,    │  │  PPT 专家,         │
      │  Shell, OCR       │  │  Google Maps    │  │  代码审查          │
      └────────────────────┘  └─────────────────┘  └────────────────────┘
               │                       │                       │
@@ -55,7 +55,7 @@ Rust 核心是 Aleph 的灵魂。它只负责三件事，别无其他：
 
 | 职责 | 说明 |
 |------|------|
-| **推理** | 决定下一步做什么。核心编排[工具链](./harness)（观察-思考-行动-反馈），调用 LLM 提供商，并运行[提示系统](./prompt-system)以进行目标导向的执行。 |
+| **推理** | 决定下一步做什么。核心编排[工具链](./harness)（观察-思考-行动-反馈），调用 LLM 提供商，并运行[提示系统](../concepts/prompt-system)以进行目标导向的执行。 |
 | **状态管理** | 维护对话上下文、任务图、[会话密钥](./routing)和[记忆系统](./memory)。 |
 | **路由** | 根据任务需求将工作分派到正确的执行系统 —— 原生工具、MCP 服务器或技能插件。 |
 
@@ -64,15 +64,16 @@ Rust 核心是 Aleph 的灵魂。它只负责三件事，别无其他：
 核心从不渲染 UI，从不调用平台特定 API（AppKit、Vision、CoreGraphics），也从不会为 niche 功能捆绑重型第三方库。这些是架构红线（R1、R3），保持核心轻量且可移植。
 
 ```rust
-// 核心将能力契约定义为 trait。
-// 物理实现存在于桌面桥接中。
-//
-// 示例：核心可以请求截图，但实际的
-// CGWindowListCreateImage 调用发生在 Tauri 中。
-pub trait DesktopCapability: Send + Sync {
-    async fn screenshot(&self, region: Option<ScreenRegion>) -> Result<Vec<u8>>;
+// 核心只依赖能力契约（trait）；物理实现在 desktop/{macos,linux,windows}，
+// 由 src/executor/builtin_registry/builder/constructor/mod.rs 按目标 OS 构造，
+// 以 Arc<dyn aleph_desktop::DesktopPlatform> 注入桌面工具。
+// 示例（desktop/shared/src/traits/screen.rs）：
+#[async_trait]
+pub trait ScreenCapability: Send + Sync {
+    async fn screenshot(&self, region: Option<ScreenRegion>) -> Result<Screenshot>;
     async fn click(&self, x: f64, y: f64, button: MouseButton) -> Result<()>;
     async fn type_text(&self, text: &str) -> Result<()>;
+    // ……
 }
 ```
 
@@ -82,16 +83,23 @@ Aleph 向世界呈现两张面孔。两者都是纯 I/O 层 —— 它们将用�
 
 ### 面孔 1：统一面板（Leptos/WASM）
 
-单个 Leptos 代码库编译为 WASM，作为所有平台的 UI：
+单个 Leptos 代码库（`interfaces/webchat`）编译为 WASM，作为所有平台的 UI。面板资源经 `rust_embed` 静态嵌入 `aleph-server`（`src/gateway/control_plane/assets.rs`），运行时不从磁盘读取。
 
 | 平台 | 宿主 | 说明 |
 |------|------|------|
 | Web | 浏览器 | 由 Aleph 服务器提供 |
-| macOS | Tauri 壳 | 菜单栏优先，Halo 浮动窗口 |
-| Windows | Tauri 壳 | 系统集成托盘 |
-| Linux | Tauri 壳 | 标准桌面窗口 |
+| macOS / Windows / Linux | 桌面宿主 `desktop/nsh-shell`（NSH） | 窗口容器 + WebView，加载同一个 Panel |
 
-原生壳（Tauri）仅提供窗口容器、系统托盘和原生动画。所有复杂 UI —— 设置页面、对话视图、调试面板 —— 都在 WASM 层（红线 R2）。
+桌面宿主是**薄宿主**：只做窗口容器和原生集成（托盘、召唤热键、`aleph://` URL 方案、通知、设备凭据存取），所有复杂 UI —— 设置页面、对话视图、调试面板 —— 都在 WASM 层（红线 R2）。NSH 托管的是同一个 Panel，不是第二套业务 UI（`docs/reference/DESKTOP_SHELL.md`）。宿主**连接**已存在的 Gateway，不启动、不停止、不重配服务（`desktop/nsh-shell/src/main.rs` 的帮助文本）；唯一例外是默认关闭的 `embedded-core` feature，启用后仅在 `127.0.0.1:18790` 拒绝连接时启动同级 `aleph-server` 二进制（`desktop/host/src/local_server.rs`）。NSH 尚无发布流水线，各平台验收进度见 `docs/reference/DESKTOP_SHELL.md`。
+
+桌面侧各目录的分工如下（能力层的细节在下文「肢体 1」）：
+
+| 层 | 目录 | 运行时 | 职责 |
+|----|------|--------|------|
+| 面孔 1 · 桌面宿主 | `desktop/nsh-shell/` | Rust，crate `aleph-nsh-shell`，基于 nsh 0.6.0 | 窗口、托盘、热键、URL 方案、通知、凭据；连接 Gateway |
+| 面孔 1 · 本机准入 | `desktop/host/` | Rust，crate `aleph-desktop-host` | `embedded-core` 下探测并准入本机 Gateway |
+| 肢体 1 · 能力契约 | `desktop/shared/` | Rust，crate `aleph-desktop`（编译进 `aleph-server`） | `DesktopPlatform` 与 `*Capability` trait、Swift 助手客户端 |
+| 肢体 1 · 平台实现 | `desktop/{macos,linux,windows}/` | Rust，编译进 `aleph-server`；macOS 另有 Swift 助手 `desktop/macos/bridge/` | 各平台的屏幕、输入、AX、权限、媒体、PIM 实现 |
 
 ### 面孔 2：社交机器人网关
 
@@ -109,17 +117,18 @@ Aleph 向世界呈现两张面孔。两者都是纯 I/O 层 —— 它们将用�
 
 ### 肢体 1：原生能力（肌肉）
 
-通过[桌面桥接](./desktop-bridge)和 shell 执行进行直接系统控制：
+通过桌面能力层和 shell 执行进行直接系统控制。桌面能力层是**进程内库**，不是单独进程：trait 与共享类型在 `desktop/shared`，平台实现在 `desktop/{macos,linux,windows}`，随 `aleph-server` 一起编译运行（`Cargo.toml` 按目标 OS 引入对应 crate）。
 
 | 能力 | 实现 | 协议 |
 |------|------|------|
-| 截图 / OCR | 桌面桥接（Tauri） | UDS JSON-RPC |
-| 鼠标 / 键盘 | 桌面桥接（Tauri） | UDS JSON-RPC |
-| 窗口管理 | 桌面桥接（Tauri） | UDS JSON-RPC |
-| 画布覆盖 | 桌面桥接（Tauri） | UDS JSON-RPC |
-| Shell 命令 | 内置 Exec 系统 | 直接 |
+| 截图 / OCR | `ScreenCapability`；macOS 经 Swift 助手 `screen.*`，其余平台用 `NativeScreen` | 进程内调用（macOS 助手：stdio JSON-RPC 2.0） |
+| 鼠标 / 键盘 | `ScreenCapability`；macOS 定向输入经助手 `input.*` | 进程内调用（macOS 助手：stdio JSON-RPC 2.0） |
+| 窗口管理 | `ScreenCapability`（`window_list` / `focus_window` / `move_window`） | 进程内调用 |
+| 无障碍树（AX） | `AccessibilityCapability`；macOS 助手 `ax.*`、Windows UI Automation、Linux AT-SPI2 | 进程内调用（macOS 助手：stdio JSON-RPC 2.0） |
+| 个人信息（PIM） | `PimCapability`；macOS 经助手 `pim.*` | 进程内调用（macOS 助手：stdio JSON-RPC 2.0） |
+| Shell 命令 | 内置 Exec 系统（`src/exec/`） | 直接 |
 
-桌面桥接作为单独的 Tauri 进程运行。核心通过 Unix 域套接字使用 JSON-RPC 2.0 与其通信，保持大脑-肢体分离原则。
+只有 macOS 的部分能力委托给 Swift 助手 `aleph-bridge`（源码 `desktop/macos/bridge/`）：核心通过 `SwiftBridge` 客户端（`desktop/shared/src/bridge/client.rs`）在 stdio 上发送 JSON-RPC 2.0 请求，协议在 `shared/protocol/src/desktop_bridge/`。该通道由 `aleph-server` 持有，不经过桌面宿主。生命周期、超时与方法清单见[桌面桥接](./desktop-bridge)。
 
 ### 肢体 2：MCP（外部工具）
 
@@ -153,7 +162,7 @@ MCP 服务器作为单独进程运行。Aleph 的 `mcp/` 模块处理服务器�
 | 神经 | 通道 | 协议 | 用途 |
 |------|------|------|------|
 | **N1** | 核心 —— UI | WebSocket + JSON-RPC | 驱动统一面板。双向：UI 发送用户输入，核心流式传输响应和事件。 |
-| **N2** | 核心 —— 桌面桥接 | UDS + JSON-RPC 2.0 | 驱动桌面控制。每个连接一个请求-响应，通过 `~/.aleph/run/desktop-bridge.sock`。 |
+| **N2** | 核心 —— 桌面能力层 | 进程内 trait 调用；macOS 助手为 stdio 上的 JSON-RPC 2.0 | 驱动桌面控制。能力层与核心同进程，只有 macOS 助手是独立子进程，见[桌面桥接](./desktop-bridge)。 |
 | **N3** | 核心 —— 网关 | gRPC / NATS | 驱动社交机器人。高吞吐，支持多频道分发的扇出。 |
 | **N4** | 核心 —— MCP | JSON-RPC over stdio/SSE | 驱动外部工具。标准 MCP 传输，每个工具域一个服务器。 |
 
@@ -168,9 +177,10 @@ MCP 服务器作为单独进程运行。Aleph 的 `mcp/` 模块处理服务器�
 │  ────────────────   原因：UI 需要实时 token 流式传输、                │
 │                     事件驱动更新、低延迟                              │
 │                                                                      │
-│  N2 (UDS/IPC)       最适合：本地高频控制                             │
-│  ────────────────   原因：桌面桥接是共置的，                         │
-│                     UDS 避免 TCP 开销，亚毫秒级延迟                   │
+│  N2 (进程内)       最适合：本机能力调用                              │
+│  ────────────────   原因：桌面能力层与核心同进程，                   │
+│                     trait 调用无需序列化；只有 macOS                 │
+│                     助手经 stdio 交换 JSON-RPC                       │
 │                                                                      │
 │  N3 (gRPC/NATS)     最适合：结构化服务间通信                         │
 │  ────────────────   原因：网关可能运行在不同主机上，                  │
@@ -189,8 +199,8 @@ MCP 服务器作为单独进程运行。Aleph 的 `mcp/` 模块处理服务器�
 
 | 红线 | 规则 | 后果 |
 |------|------|------|
-| **R1** | 大脑-肢体分离 | `core/src` 从不导入平台 API。核心定义 trait；桌面桥接实现它们。 |
-| **R2** | UI 单一事实来源 | Tauri 壳没有业务逻辑 UI。所有复杂视图都在 Leptos/WASM 中。 |
+| **R1** | 大脑-肢体分离 | `src` 从不直接调用平台 API。核心定义 trait；桌面能力层（`desktop/{macos,linux,windows}`）实现它们。 |
+| **R2** | UI 单一事实来源 | 原生桌面宿主（`desktop/nsh-shell`）没有业务逻辑 UI。所有复杂视图都在 Leptos/WASM 中。 |
 | **R3** | 核心极简主义 | 不为 niche 功能引入重型第三方 crate。优先使用技能或 MCP。 |
 | **R4** | 仅 I/O 接口 | 面孔从不持久化数据、检索记忆或计划任务。 |
 | **R5** | 菜单栏优先 | macOS 默认菜单栏模式，带 Halo 覆盖层。仅在需要时使用完整窗口。 |
@@ -215,9 +225,9 @@ MCP 服务器作为单独进程运行。Aleph 的 `mcp/` 模块处理服务器�
    │  → LLM 决定："截图，然后 OCR"
    │
    ▼
-4. 核心分派到桌面桥接（肢体 1，神经 N2）
-   │  → UDS JSON-RPC: desktop.screenshot → base64 图像
-   │  → UDS JSON-RPC: desktop.ocr → 提取的文本
+4. 核心分派到桌面能力层（肢体 1，神经 N2）
+   │  → ScreenCapability::screenshot → 截图
+   │  → ScreenCapability::ocr → 提取的文本
    │
    ▼
 5. 核心继续使用 OCR 结果进行推理
@@ -239,6 +249,7 @@ MCP 服务器作为单独进程运行。Aleph 的 `mcp/` 模块处理服务器�
 
 ```
 aleph/
+├── Cargo.toml / justfile / CHANGELOG.md / config.search.example.toml
 ├── src/                         # 1. 核心（大脑）
 │   ├── harness/                 #    推理：观察-思考-行动-反馈
 │   ├── thinker/                 #    推理：LLM 交互（含 graph_topology 层）
@@ -255,16 +266,19 @@ aleph/
 │   ├── mcp/                     #    4. 神经 N4（MCP 客户端）
 │   ├── tools/                   #    3. 肢体（工具定义）
 │   ├── builtin_tools/           #    3. 肢体 1（原生工具）
+│   ├── executor/                #    3. 肢体 1（组合根：按目标 OS 注入桌面平台实现）
 │   ├── extension/               #    3. 肢体 3（插件运行时）
 │   ├── loop_graph/              #    叠加层：治理拓扑（不属 1-2-3-4）
 │   ├── looping/ goal/ strategy/ #    长任务子系统（loop / goal / strategy）
 │   └── hub/                     #    Aleph Hub 单一源
 ├── desktop/
-│   ├── shell/                   #    3. 肢体 1（Tauri 桌面壳）
-│   │   ├── macos/               #       macOS 原生桥接 (Swift)
-│   │   ├── linux/ windows/      #       Linux / Windows 原生桥接
-│   │   └── shared/              #       DesktopCapability trait + IPC 协议
-│   └── shared/                  #    4. 神经 N2 共享桥接客户端
+│   ├── nsh-shell/               #    2. 面孔 1 宿主（aleph-nsh-shell，NSH 0.6.0）
+│   ├── host/                    #    aleph-desktop-host：本机 Gateway 准入（embedded-core）
+│   ├── shared/                  #    3. 肢体 1：DesktopPlatform + *Capability trait
+│   ├── macos/                   #    3. 肢体 1：macOS 平台实现
+│   │   └── bridge/              #       Swift 助手（aleph-bridge，stdio JSON-RPC）
+│   ├── linux/                   #    3. 肢体 1：Linux 平台实现
+│   └── windows/                 #    3. 肢体 1：Windows 平台实现
 ├── interfaces/
 │   ├── cli/                     #    2. 面孔 1（CLI 客户端）
 │   ├── tui/                     #    2. 面孔 1（TUI 客户端）
@@ -274,6 +288,8 @@ aleph/
 ├── shared/                      #    跨 crate 共享（protocol / logging / ui_logic / client）
 └── plugins/                     #    插件示例 + SDK
 ```
+
+仓库里仍保留的 `desktop/shell/` 是过渡期遗留的旧宿主，最终将删除，本站不再描述它。
 
 ## 设计理念
 
@@ -292,7 +308,7 @@ aleph/
 
 ### 1-2-3-4 仍然稳定
 
-1 核心（`alephcore`）、2 面孔（CLI / TUI / WebChat Panel + 桌面壳）、3 肢体（gateway、harness、工具链）、4 神经（事件总线、记忆、profile、状态机）。
+1 核心（`alephcore`）、2 面孔（CLI / TUI / WebChat Panel + 桌面宿主 NSH）、3 肢体（gateway、harness、工具链）、4 神经（事件总线、记忆、profile、状态机）。
 
 ### `loop_graph` 叠加在 1 之上
 

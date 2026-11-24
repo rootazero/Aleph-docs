@@ -3,7 +3,7 @@ title: "services.*"
 description: "Internal service management RPC methods"
 ---
 
-`services.*` controls the lifecycle of Aleph's internal services. The handlers are registered in `HandlerRegistry::new()` (`src/gateway/handlers/mod.rs:329-332`) and require no external dependencies to invoke.
+`services.*` controls the lifecycle of Aleph's internal services. The handlers are registered in `HandlerRegistry::new()` (`src/gateway/handlers/mod.rs`) and require no external dependencies to invoke.
 
 ## Methods
 
@@ -14,7 +14,7 @@ description: "Internal service management RPC methods"
 | [`services.stop`](#servicesstop) | Stop a service |
 | [`services.status`](#servicesstatus) | Read a single service's runtime state |
 
-> `services.restart` is not an RPC; to restart a service, call `stop` followed by `start`.
+> There is no standalone restart RPC; call `services.stop` followed by `services.start`.
 
 ### services.list
 

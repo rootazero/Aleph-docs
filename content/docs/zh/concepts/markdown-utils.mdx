@@ -123,31 +123,20 @@ pub fn get_runtimes_dir() -> Result<PathBuf>;                    // ~/.aleph/run
 
 ---
 
-## PII 清理（`src/utils/pii.rs`）
+## PII 清理（`shared/logging/src/pii.rs`）
 
 ```rust
 #[must_use]
 pub fn scrub_pii(text: &str) -> String;
 ```
 
-`utils::pii` 比 `src/gateway/pii` 更激进：宁可误报也不漏报，专给日志/遥测这种「文本里出现的 token 不进 LLM API」的场景用。网关侧 PII 是给 LLM 输入前最后一道过滤，会更保守（双 false positive 会污染 prompt）。两者**不是同一个模块**，按调用点区分。
+`aleph_logging::scrub_pii`（在 `shared/logging/src/pii.rs`）比网关侧 PII 引擎（`src/pii/`）更激进：宁可误报也不漏报，专给日志/遥测这种「文本里出现的 token 不进 LLM API」的场景用。网关侧引擎（`crate::pii::PiiEngine`，`src/pii/engine.rs`）是给 LLM 输入前最后一道过滤，精调优先——误报会损害 LLM 理解。两者**不是同一个模块**，按调用点区分。
 
 ---
 
-## 配置字段反序列化（`src/utils/one_or_many.rs`）
+## 历史：配置字段反序列化（`OneOrMany<T>`）
 
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany<T> {
-    One(T),
-    Many(Vec<T>),
-}
-```
-
-对 `toml` / `serde_json` 都不指定 tag：单值直接解 `T`，数组解 `Vec<T>`。意图是允许「`voice = "deepgram"`」与「`voice = ["deepgram", "elevenlabs"]`」在同一字段合法。
-
-`Default` 实现是 `Many(vec![])`（`is_empty() = true`），让「省略」与「空数组」行为一致。
+早期 `OneOrMany<T>` 助手（`#[serde(untagged)]` 枚举），让「`voice = "deepgram"`」与「`voice = ["deepgram", "elevenlabs"]`」两种写法都能反序列化到同一字段。该类型已从代码仓移除：配置字段现改用具体结构体——`voice` 键映射到 `src/config/types/voice_local.rs` 的 `VoiceSection` / `VoiceLocalConfig`（由 `src/config/structs.rs` 的 `#[serde(rename = "voice")]` 接入）。现在已无通用单值/数组二义反序列化助手。
 
 ---
 
@@ -231,12 +220,10 @@ pub fn is_path_within(base: &Path, target: &Path) -> bool;
 - `src/markdown/fences.rs` — `FenceSpan` + `FenceSplit` + 4 个解析函数
 
 **Utils：**
-- `src/utils/mod.rs` — 模块入口，re-export `OneOrMany`
+- `src/utils/mod.rs` — 模块入口
 - `src/utils/text_format.rs` — `format_timestamp` / `truncate_text` / `escape_markdown`
 - `src/utils/json_extract.rs` — `extract_json_robust` + 4 策略 + `find_matching_brace`
 - `src/utils/paths.rs` — `get_config_dir` / `get_data_dir` / `get_memory_db_path` / `get_note_memory_dir` / `get_agent_config_dir` / `get_skills_dir` / `get_runtimes_dir` / `expand_tilde` / `equivalent` / `get_all_skills_dirs` / `migrate_legacy_db_files`
-- `src/utils/pii.rs` — `scrub_pii`
-- `src/utils/one_or_many.rs` — `OneOrMany<T>` + `OneOrManyIter`
 - `src/utils/sqlite_open.rs` — `open_sqlite_safe` / `open_sqlite_readonly`
 - `src/utils/atomic_io.rs` — `write_atomic` + `with_file_lock`（fs2 exclusive lock）
 - `src/utils/atomic_write.rs` — `atomic_write_file`（async 版，含权限保留）
@@ -245,6 +232,10 @@ pub fn is_path_within(base: &Path, target: &Path) -> bool;
 - `src/utils/no_window.rs` — `no_window`（Windows CREATE_NO_WINDOW / Unix setsid）
 - `src/utils/path_within.rs` — `is_path_within`（白名单、纯字面量）
 - `src/utils/vault_io.rs` — `VaultIo::new` / `read` / `write`（atomic + locked）
+
+**PII：**
+- `shared/logging/src/pii.rs` — `scrub_pii`（日志/遥测，容忍误报）
+- `src/pii/engine.rs` — `PiiEngine` + `FilterResult` + `PiiMatch` + `PiiSeverity`（网关 LLM 输入前过滤）
 
 ---
 
@@ -282,6 +273,6 @@ pub fn is_path_within(base: &Path, target: &Path) -> bool;
 - [技能系统](/docs/zh/concepts/skill-system) — `SKILL.md` 形式 + 工具调用
 - [记忆演化](/docs/zh/concepts/memory-evolution) — 笔记层 + 梦境
 - [内置工具](/docs/zh/concepts/builtin-tools) — 使用 Markdown 解析的 builtin 工具
-- [PII 保护](/docs/zh/concepts/pii-protection) — 网关级 PII 过滤（与 `utils::pii` 区别：保守度）
+- [PII 保护](/docs/zh/concepts/pii-protection) — 网关级 PII 引擎（与 `aleph_logging::scrub_pii` 区别：保守度）
 - [技能源仓库](https://github.com/rootazero/Aleph-skills) — Aleph 官方技能
 - [Aleph-skills 官方插件](https://github.com/rootazero/Aleph-plugins) — Aleph 官方插件

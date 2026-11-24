@@ -30,7 +30,7 @@ FlowOutcome → Gateway 渲染响应
 ```
 
 > Phase 7（2026-04-21）将 `SubagentTool` 迁移到
-> `Orchestrator → HarnessRunner → AgentHarness`。旧 `src/agent_loop/` 路径
+> `Orchestrator → HarnessRunner → AgentHarness`。旧 src/agent_loop/ 路径
 > 已删除；每个 agent run——顶层或子代理——都使用同一个 harness。
 
 ## 设计原则
@@ -124,7 +124,7 @@ pub enum TurnState { Continue, Done }
   每个 `AgentHarness` 在每个回合顶部都检查 `cancel.is_cancelled()`。
 - 子代理失败由 `AgentRuntime::run` 收集，以
   `Result<LoopRunResult, String>` 抛出——取消是一个 error string，不是
-  `LoopRunResult` 上的 boolean（`src/agents/runtime.rs:28-37`）。
+  `LoopRunResult` 上的 boolean（`src/agents/runtime.rs`）。
 
 ```
 Main Agent (claude-opus-4) — via AgentHarness (Gateway chat)
@@ -198,7 +198,7 @@ busy_input_mode = "interrupt"   # 默认是 "steer"
 ## 另请参阅
 
 - [代理组件](/docs/zh/concepts/agent-components) — 循环的模块地图
-- [编排器](./orchestrator) — AgentDef + FlowSpec 分派
+- [编排器](../architecture/orchestrator) — AgentDef + FlowSpec 分派
 - [子代理树 RPC](/docs/zh/gateway/methods/agents) — 实时子代理树
 - [工具基础设施](/docs/zh/concepts/tool-infrastructure) — 资源 claim
 - [Harness 架构](/docs/zh/architecture/harness) — 薄 harness 哲学

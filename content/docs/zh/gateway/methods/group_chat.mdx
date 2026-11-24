@@ -3,7 +3,7 @@ title: "group_chat.*"
 description: "群聊与多方对话 RPC 方法"
 ---
 
-`group_chat.*` 是低层多代理群聊**会话原语**,持久的 `teams.chat.*` 线程(以及 Panel 的三栏群聊窗口)构建于其上。六个方法在 `HandlerRegistry::new()` 中以 `service_unavailable` 占位符注册,然后在 `register_group_chat_handlers` 中替换为真实处理器——一旦 `GroupChatOrchestrator` + `GroupChatExecutor` 在服务器启动时存在(`src/bin/aleph-server/commands/start/builder/handlers/system.rs:95-150`)。
+`group_chat.*` 是低层多代理群聊**会话原语**,持久的 `teams.chat.*` 线程(以及 Panel 的三栏群聊窗口)构建于其上。六个方法在 `HandlerRegistry::new()` 中以 `service_unavailable` 占位符注册,然后在 `register_group_chat_handlers` 中替换为真实处理器——一旦 `GroupChatOrchestrator` + `GroupChatExecutor` 在服务器启动时存在(`src/bin/aleph-server/commands/start/builder/handlers/system.rs`)。
 
 占位符在注册表构造和 orchestrator 安装之间被调用——这段时间窗口内的调用返回 `INTERNAL_ERROR: group_chat.<method> requires GroupChatOrchestrator runtime - wire Gateway first`。正常操作下,orchestrator 在第一个 RPC 到达前就已安装。
 

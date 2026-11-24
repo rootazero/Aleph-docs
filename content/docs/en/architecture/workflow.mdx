@@ -57,7 +57,7 @@ pub struct WorkflowDef {
 
 pub enum WorkflowStepKind {
     #[default]
-    Agent,    // run step.agent on step.prompt (default; legacy templates without `kind` deserialize unchanged)
+    Agent,    // run the agent named by `agent` on `prompt` (default; legacy templates without `kind` deserialize unchanged)
     Clarify,  // pause the run, ask the user the prompt (optionally choices); runs no agent
 }
 
@@ -67,7 +67,7 @@ pub struct WorkflowStepDef {
     pub agent: String,                                 // becomes coord_task.owner; ignored for Clarify
     pub prompt: String,                                // {input} substituted; for Clarify this is the question
     #[serde(default)]
-    pub depends_on: Vec<String>,                       // becomes coord_task.blocked_by
+    pub depends_on: Vec<String>,                       // becomes the coord_task blocked_by field
     #[serde(default, skip_serializing_if = "WorkflowStepKind::is_agent")]
     pub kind: WorkflowStepKind,                        // Agent (default) | Clarify
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,7 +87,7 @@ A passing `validate()` guarantees `topo_order()` succeeds.
 
 ### Materialisation (`src/workflow/compile.rs`)
 
-The compiler maps each `WorkflowStepDef` to one `coord_task` owned by `step.agent`, with `step.depends_on` mapped to `coord_task.blocked_by`. Tasks are tagged `{"managed_by": "dispatcher"}` so the autonomous loop picks them up:
+The compiler maps each `WorkflowStepDef` to one `coord_task` owned by the agent named in its `agent` field, with `depends_on` mapped to the coord_task `blocked_by` field. Tasks are tagged `{"managed_by": "dispatcher"}` so the autonomous loop picks them up:
 
 ```rust
 pub async fn materialize(
@@ -242,7 +242,7 @@ User runs workflow(action='run', name='research-report', input='quantum computin
 ┌─────────────────────────────────────────────────────┐
 │ TeamDispatcher (src/teams/dispatcher/)              │
 │   • Pick up pending tasks                           │
-│   • For agent steps: route to step.agent            │
+│   • For agent steps: route to the step's agent      │
 │   • For clarify steps: CLARIFY_OWNER parks task     │
 │   • Build handoff context from upstream outputs     │
 │   • Execute with Tokio concurrency                  │

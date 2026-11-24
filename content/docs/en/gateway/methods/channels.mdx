@@ -5,7 +5,7 @@ description: "Communication channel management RPC methods"
 
 `channels.*` is the runtime surface over the `ChannelRegistry`. Methods are registered in two passes:
 
-- `register_channel_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/session.rs:202-303`) — the core lifecycle methods (`channels.list/status`, `channel.start/stop/pairing_data/send/create/delete/health`, `channels.dead_letters`, `channels.redrive_dead_letters`, `channels.set_agent`).
+- `register_channel_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/session.rs`) — the core lifecycle methods (`channels.list/status`, `channel.start/stop/pairing_data/send/create/delete/health`, `channels.set_agent`).
 - `start/mod.rs:2431-2466` — the channel-pairing methods (`channel.pairing.list/approve/reject/approved/revoke`).
 - The Discord Control-Plane panel methods (`discord.validate_token`, `discord.list_guilds`, `discord.list_channels`, `discord.audit_permissions`) are registered next to the other channel handlers.
 
@@ -107,25 +107,29 @@ Read the channel-health monitor for one channel (or every channel, summarised).
 
 **Response (all):** `{ "channels": [ ...ChannelHealthResponse... ], "summary": { "total", "healthy", "stale", "degraded" } }`.
 
-### channels.dead_letters
+### channel_outbox: dead_letters
 
-Detail-on-demand companion to the `dead_lettered` count in `channels.list`. Lists the outbound deliveries that exhausted their retry budget.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `limit` | number | no | Defaults to 50, capped at 500 |
-
-**Response:** `{ "dead_letters": [ ...{channel, to, text_preview (≤ 200 chars), attachments, attempts, last_error, created_at, died_at, age_secs}... ], "count" }`. `{ "dead_letters": [], "count": 0, "store": false }` when no durable delivery store is attached.
-
-### channels.redrive_dead_letters
-
-Recovery half of the dead-letter trail. Moves dead-lettered deliveries back into the live outbound queue for another delivery pass once the transport is healthy. Safe by construction — every dead letter was a duplicate-safe transient failure.
+This is the `channel_outbox` **builtin tool, not a Gateway RPC method**. Use `action: "dead_letters"` to inspect outbound messages retired after exhausting retries or for other safety reasons.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `channel` | string | no | Restrict the redrive to one transport |
+| `action` | string | yes | `dead_letters` |
+| `channel_id` | string | no | Restrict to a channel; omitted means all |
+| `limit` | number | no | Default 10, capped at 25 |
 
-**Response:** `{ "redriven": N }` on success. `{ "redriven": 0, "store": false }` when no durable store is attached.
+**Output:** `message`, `durable_queue`, and `dead_letters`. Entries contain `channel_id`, `conversation_id`, `preview` (at most 200 characters), `attempts`, `last_error`, `reason`, `redrivable`, and `age_secs`. With no durable queue configured, `durable_queue` is `false`.
+
+### channel_outbox: redrive
+
+Recovery action of the same **builtin tool, not a Gateway RPC method**. Use `action: "redrive"` to move safely replayable dead letters back into the outbound queue; not every dead letter is replayable.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | string | yes | `redrive` |
+| `channel_id` | string | no | Restrict to a channel |
+| `confirm_redrive` | boolean | no | Only `true` performs the redrive; omitted returns a preview |
+
+**Output:** `message`, `durable_queue`, and applicable fields such as `redriven`, `skipped_queue_full`, and `skipped_not_replay_safe`. Inspect the preview and confirm the target before replaying.
 
 ### channels.set_agent
 

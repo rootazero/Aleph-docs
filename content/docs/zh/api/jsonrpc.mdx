@@ -1,425 +1,90 @@
 ---
-title: "JSON-RPC API"
-description: "WebSocket JSON-RPC 2.0 接口的完整方法参考"
+title: "JSON-RPC 协议"
+description: "Gateway 消息信封、错误码、事件与反向工具调用"
 ---
 
-本页是 Aleph Gateway 公开的每个 JSON-RPC 方法的紧凑快速参考。有关详细的请求/响应示例，请点击链接查看各个方法页面。
+本页说明 Gateway 的 JSON-RPC 消息语义，不承担方法参数手册。
 
-## 传输
+## 消息形态
 
-所有方法都通过到 Gateway 服务器的 **WebSocket** 连接调用（默认 `ws://127.0.0.1:18790`）。协议是 JSON-RPC 2.0——每个请求都需要 `jsonrpc`、`method` 和 `id` 字段。通知（无 `id`）用于服务器到客户端的事件。
+Gateway 的 JSON-RPC 2.0 消息分为请求、响应与通知。共享定义为 `JsonRpcRequest`、`JsonRpcResponse`、`JsonRpcError`，见 `shared/protocol/src/jsonrpc.rs`。方法清单见[方法参考](../gateway/methods)。
+
+## 请求与响应
+
+`JsonRpcRequest.id` 是 `Option<Value>`，共享类型没有把它收窄为字符串：`new()` 生成字符串 ID，`with_id()` 接受 JSON 值。需要响应的请求携带 `id`；`notification()` 设为 `None`，序列化时省略字段，`is_notification()` 检查是否为 `None`。不要把显式 JSON `null` 当成客户端应使用的请求关联 ID。`params` 为可选的 `Option<Value>`，不局限于对象。见 `shared/protocol/src/jsonrpc.rs`。
+
+响应的 `id: Value` 关联请求；`success()` 与 `error()` 分别构造只有 `result` 或只有 `error` 的响应。错误对象有 `code`、`message` 与可选 `data`。这是构造器约定，不是类型层面的互斥枚举。见 `shared/protocol/src/jsonrpc.rs`。
+
+下面给出 `echo` 的请求与成功响应（`src/gateway/handlers/echo.rs`），随后单独展示错误信封格式：
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "agent.run",
-  "params": { "message": "Hello" }
-}
+{"jsonrpc":"2.0","id":"req-1","method":"echo","params":{"text":"hello"}}
 ```
-
-## 认证
-
-当 Gateway 配置中启用 `require_auth` 时，新 WebSocket 连接上的**第一条消息**必须是 `connect`。认证成功之前，所有后续请求都会被拒绝。
-
-| 方法 | 描述 | 参数 |
-|--------|-------------|------------|
-| `connect` | 认证 WebSocket 连接 | `token` (string), `client_id` (string, optional) |
-
-## 方法索引
-
-### Core
-
-| 方法 | 描述 |
-|--------|-------------|
-| `health` | 健康检查，返回 `{ status: "ok" }` |
-| `echo` | 回传参数 |
-| `version` | 服务器版本与 build |
-| `system.info` | 系统指标（CPU、内存、磁盘、uptime） |
-| `request.state` | 每请求运行时状态快照 |
-
-### `agent.*` / `agents.*` — Agent 执行
-
-[完整文档](/docs/zh/gateway/methods/agent)
-
-| 方法 | 描述 |
-|--------|-------------|
-| `agent.run` | 启动 Agent 运行（流式） |
-| `agent.status` | 运行状态（轮询） |
-| `agent.cancel` | 取消正在运行的 Agent |
-| `agent.list` / `agents.list` | 列出 Agent 配置 |
-| `agents.get` | 获取单个 Agent |
-| `agents.create` / `agents.update` / `agents.delete` | CRUD |
-| `agents.set_default` | 默认 Agent |
-| `agents.teams` | Agent 所属团队列表 |
-| `agents.tools_schema` | Agent 的工具 schema |
-| `agents.files.list` / `.get` / `.set` / `.delete` | Agent 文件 CRUD |
-| `agents.bindings` | 频道到 Agent 的绑定 |
-
-### `session.*` / `sessions.*` — 会话管理
-
-| 方法 | 描述 |
-|--------|-------------|
-| `session.usage` | 会话成本（daemon 用核心 pricing 计算） |
-| `session.compact` | 触发手动压缩 |
-| `session.truncate` | 截断会话 |
-| `sessions.list` | 列出带过滤的会话 |
-| `sessions.delete` | 删除会话 |
-
-### `chat.*` — 聊天控制
-
-| 方法 | 描述 |
-|--------|-------------|
-| `chat.send` | 发送聊天消息（在启动时通过 `agent_init` 接线） |
-| `chat.abort` | 中止当前聊天生成 |
-| `chat.history` | 获取聊天历史 |
-| `chat.clear` | 清除聊天历史 |
-| `chat.rewind` | 回退到更早的轮次 |
-| `chat.context_estimate` | 估算上下文窗口使用 |
-
-### `config.*` — 配置
-
-| 方法 | 描述 |
-|--------|-------------|
-| `config.schema` | 配置 JSON Schema |
-| `config.get` / `config.path` | 读取活动配置 / 子键 |
-| `config.reload` | 从磁盘重新加载 |
-| `config.validate` | 验证但不应用 |
-| `config.patch` | 修补活动配置 |
-
-### `exec.*` — 命令执行安全
-
-| 方法 | 描述 |
-|--------|-------------|
-| `exec.approval.request` | 请求命令审批 |
-| `exec.approval.resolve` | 解析待处理审批 |
-| `exec.approvals.get` / `exec.approvals.set` | 审批配置 CRUD |
-| `exec.approvals.pending` | 列出待处理审批 |
-
-### `events.*` — 事件订阅
-
-| 方法 | 描述 |
-|--------|-------------|
-| `events.subscribe` | 订阅事件主题 |
-| `events.unsubscribe` | 移除订阅 |
-| `events.list` | 列出活动订阅 |
-
-### `logs.*` — 日志
-
-| 方法 | 描述 |
-|--------|-------------|
-| `logs.getLevel` / `logs.setLevel` | 组件日志级别 |
-| `logs.getDirectory` | 日志目录 |
-| `logs.tail` | 流式传输最近的日志条目 |
-
-### `commands.*` / `tools.*` — 命令与工具
-
-| 方法 | 描述 |
-|--------|-------------|
-| `commands.list` | 列出已注册命令 |
-| `command.execute` | 执行命令 |
-| `tools.catalog` | 完整工具目录 |
-| `tools.effective` | 有效工具（按 progressive disclosure / mode 计算） |
-| `tools.invoke` | 调用工具 |
-| `tools.cancel_call` | 取消正在进行的调用 |
-| `tools.in_flight` | 列出正在进行的调用 |
-
-### `wizard.*` — 设置向导（Panel 驱动）
-
-`wizard.*` 在 `WizardSessionManager` 构造完成后，通过 `install_wizard_handlers`（`src/gateway/handlers/wizard.rs`）在启动时接线。CLI 没有对应子命令——Panel 在握手窗口中调用这些方法。
-
-| 方法 | 描述 |
-|--------|-------------|
-| `wizard.start` | 启动向导会话 |
-| `wizard.next` | 推进（不答题） |
-| `wizard.answer` | 回答并推进 |
-| `wizard.cancel` | 取消会话 |
-| `wizard.status` | 会话状态 |
-
-### `cron.*` / `heartbeat.*` — 计划作业
-
-`cron.*` 和 `heartbeat.*` 在启动时注册为 phase-1 占位；启动路径会在对应 service 起来时替换为真实 handler。
-
-| 方法 | 描述 |
-|--------|-------------|
-| `cron.list` / `cron.get` / `cron.create` / `cron.update` / `cron.delete` | 作业 CRUD |
-| `cron.run` / `cron.runs` | 触发 + 历史 |
-| `cron.status` / `cron.toggle` | 调度器控制 |
-| `heartbeat.list` / `.get` / `.create` / `.update` / `.delete` | Heartbeat CRUD |
-| `heartbeat.toggle` / `.wake` / `.runs` | Heartbeat 控制 |
-
-### `channel.*` / `channels.*` / `channel.pairing.*` — 频道
-
-[完整文档](/docs/zh/gateway/methods/channels)
-
-| 方法 | 描述 |
-|--------|-------------|
-| `channels.list` | 列出频道（已注册 + 已配置） |
-| `channels.status` | 频道状态 |
-| `channels.set_agent` | 将频道绑定到 Agent |
-| `channels.dead_letters` | 检查死信队列 |
-| `channels.redrive_dead_letters` | 重发死信消息 |
-| `channel.start` / `channel.stop` | 生命周期 |
-| `channel.create` / `channel.delete` | CRUD |
-| `channel.send` | 发送消息 |
-| `channel.pairing_data` | 配对载荷（QR / code） |
-| `channel.pairing.list` / `.approve` / `.reject` / `.approved` / `.revoke` | 配对流程 |
-| `discord.validate_token` / `discord.list_guilds` / `discord.list_channels` / `discord.audit_permissions` | Discord Panel 助手 |
-
-### `browser.*` — 浏览器自动化
-
-| 方法 | 描述 |
-|--------|-------------|
-| `browser.navigate` / `browser.click` / `browser.type` / `browser.screenshot` / `browser.evaluate` / `browser.snapshot` | 无头浏览器控制 |
-| `browser_config.*` | 浏览器配置（代理、允许的域、无头标志） |
-
-### `memory.*` — 记忆操作
-
-| 方法 | 描述 |
-|--------|-------------|
-| `memory.search` / `memory.compress` / `memory.reembed` / `memory.reembed.cancel` / `memory.retrieve_with_trace` | 记忆子系统 |
-| `memory_config.*` | 记忆配置 |
-
-### `mcp.*` / `mcp_config.*` — MCP
-
-| 方法 | 描述 |
-|--------|-------------|
-| `mcp.list` / `mcp.add` / `mcp.update` / `mcp.delete` / `mcp.status` / `mcp.logs` | MCP 服务器 CRUD |
-| `mcp.start` / `mcp.stop` / `mcp.restart` | MCP 生命周期 |
-| `mcp.tools` / `mcp.resources` / `mcp.prompts` | 能力聚合 |
-| `mcp_config.list` / `.get` / `.create` / `.update` / `.delete` | Settings 页 CRUD |
-
-### `plugin.*` / `plugins.*` / `extensions.*` — 扩展
-
-| 方法 | 描述 |
-|--------|-------------|
-| `plugins.list` / `plugins.install` / `plugins.installFromZip` / `plugins.uninstall` | 遗留命名空间 |
-| `plugin.list` / `plugin.install` / `plugin.installFromZip` / `plugin.uninstall` / `plugin.update` | 规范 CC 兼容命名空间 |
-| `plugin.enable` / `plugin.disable` / `plugin.load` / `plugin.unload` / `plugin.reload` | 插件生命周期 |
-| `plugin.callTool` / `plugin.executeCommand` | 调用 |
-| `plugin.marketplace.list` / `.add` / `.update` / `.remove` / `.install` | 市场 |
-| `extensions.catalog` / `extensions.installed` / `extensions.toggle` / `extensions.uninstall` / `extensions.disclosure` / `extensions.configure` / `extensions.install` | 扩展商店 |
-
-### `skills.*` / `markdown_skills.*` — 技能
-
-| 方法 | 描述 |
-|--------|-------------|
-| `skills.status` / `skills.update` / `skills.install_dep` / `skills.remove` / `skills.install` | 技能生命周期 |
-| `markdown_skills.load` / `.reload` / `.list` / `.unload` | Markdown 技能运行时 |
-
-### `bundled.sync` — Bundled Content
-
-| 方法 | 描述 |
-|--------|-------------|
-| `bundled.sync` | 把 bundled 内容同步到用户目录 |
-
-### `services.*` — 后台服务
-
-| 方法 | 描述 |
-|--------|-------------|
-| `services.start` / `services.stop` / `services.list` / `services.status` | 服务生命周期 |
-
-### `pty.*` — 嵌入式终端
-
-| 方法 | 描述 |
-|--------|-------------|
-| `pty.spawn` / `pty.input` / `pty.resize` / `pty.close` / `pty.list` | PTY 会话 CRUD |
-
-### `hooks.*` — 用户级 Hooks
-
-| 方法 | 描述 |
-|--------|-------------|
-| `hooks.list` / `hooks.registry` / `hooks.add` / `hooks.remove` / `hooks.reload` / `hooks.events` | `~/.aleph/hooks.json` 管理 |
-
-### `providers.*` / `embedding_providers.*` / `generation_providers.*` / `rerank_config.*` / `search_config.*`
-
-提供商配置（读 / 写 / 测试），以及 embedding、generation、rerank、search 提供商面板。
-
-### `runtimes.*` — 能力探测 / 分类账
-
-| 方法 | 描述 |
-|--------|-------------|
-| `runtimes.list` / `runtimes.refresh` / `runtimes.install` | 外部工具分类账 |
-
-### `models.*` — 模型发现
-
-| 方法 | 描述 |
-|--------|-------------|
-| `models.list` / `models.get` / `models.capabilities` | 模型元数据 |
-
-### `identity.*` — 身份
-
-| 方法 | 描述 |
-|--------|-------------|
-| `identity.get` / `identity.set` / `identity.clear` / `identity.list` | 身份（"灵魂"）管理 |
-
-### `workspace.*` / `projects.*` — 工作空间与项目
-
-| 方法 | 描述 |
-|--------|-------------|
-| `workspace.create` / `.list` / `.get` / `.update` / `.archive` | 工作空间 CRUD |
-| `projects.list` / `projects.add` / `projects.create_blank` / `projects.remove` / `projects.touch` / `projects.get` | 项目 CRUD |
-
-### `teams.*` / `teams.chat.*` — 团队与群聊
-
-| 方法 | 描述 |
-|--------|-------------|
-| `teams.list` / `teams.get` / `teams.disband` / `teams.delete` | 团队生命周期 |
-| `teams.list_tasks` / `teams.create_task` / `teams.update_task` | 任务 CRUD |
-| `teams.task.trace` / `teams.usage` | 任务内省 |
-| `teams.chat.send` / `teams.chat.cancel` / `teams.chat.thread` / `teams.chat.history` | 群聊运行控制 |
-
-### `group_chat.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `group_chat.start` / `group_chat.mention` / `group_chat.end` / `group_chat.list` / `group_chat.history` | 群聊编排 |
-
-### `subagent.tree`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `subagent.tree` | 子 Agent 层级快照 |
-
-### `graph.*` — 治理拓扑
-
-| 方法 | 描述 |
-|--------|-------------|
-| `graph.query` / `graph.node_detail` / `graph.search` | 图谱读 |
-| `graph.update_note` / `graph.rename_note` / `graph.delete_note` | 图谱写 |
-
-### `dreaming.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `dreaming.run_now` | 触发一次 dream run |
-
-### `trace.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `trace.list` / `trace.get` / `trace.by_runs` | Trace 回放 |
-
-### `daemon.*` / `gateway.*` — Daemon 与 Gateway 凭据
-
-| 方法 | 描述 |
-|--------|-------------|
-| `daemon.status` / `daemon.shutdown` / `daemon.logs` | Daemon 生命周期 |
-| `gateway.token.current` / `gateway.token.rotate` | Gateway token |
-| `gateway.ticket.create` | 配对 ticket |
-| `gateway.devices.list` / `gateway.devices.revoke` | 可信设备 |
-| `gateway.credentials` | 凭据包 |
-| `gateway.identity.get` | 身份快照 |
-| `gateway.metrics.lanes` / `gateway.metrics.run_concurrency` | 指标 |
-| `gateway.flow.reload` | 重新加载 gateway flow 配置 |
-| `oauth.*` / `gateway.ticket.*` | OAuth + ticket 面板 |
-
-### `cluster.*` / `flow_admin.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `cluster.*` | 集群注册 / 节点控制 |
-| `flow_admin.*` | flow admin |
-
-### `activity.*` / `insights.*` / `debug.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `activity.stats` | 活动计数器 |
-| `insights.tools` | 工具使用洞察 |
-| `debug.*` | debug 面板 |
-
-### `secret_approvals.*` / `secret_migration.*` / `secrets.*` / `security_config.*` / `fetch_config.*` / `general_config.*` / `generation_config.*` / `behavior_config.*` / `execution_config.*` / `acp_config.*` / `mcp_config.*`
-
-按区域划分的配置 CRUD。
-
-### `pairing.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `pairing.*` | Gateway 级配对管理 |
-
-### `flow_admin.*` / `fs.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `flow_admin.*` | flow admin |
-| `fs.*` | 文件系统助手 |
-
-### `voice.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `voice.*` | 语音流式控制 |
-
-### `route_config.*` / `routing_rules.*` / `pairing.*`
-
-| 方法 | 描述 |
-|--------|-------------|
-| `route_config.*` | 路由绑定 CRUD |
-| `routing_rules.*` | 路由规则 CRUD |
-
-## 错误代码
-
-标准 JSON-RPC 2.0 错误代码加上 Aleph 扩展：
-
-| 代码 | 常量 | 描述 |
-|------|----------|-------------|
-| `-32700` | `PARSE_ERROR` | 无效的 JSON |
-| `-32600` | `INVALID_REQUEST` | 格式错误的 JSON-RPC 请求 |
-| `-32601` | `METHOD_NOT_FOUND` | 方法不存在 |
-| `-32602` | `INVALID_PARAMS` | 无效的方法参数 |
-| `-32603` | `INTERNAL_ERROR` | 内部服务器错误 |
-| `-32000` | `AUTH_REQUIRED` | 需要认证（先发送 `connect`） |
-| `-32001` | `AUTH_FAILED` | 认证凭据被拒绝 |
-| `-32002` | `PERMISSION_DENIED` | 权限不足 |
-| `-32003` | `RATE_LIMITED` | 请求过多 |
-| `-32004` | `RESOURCE_NOT_FOUND` | 请求的资源未找到 |
-| `-32005` | `TIMEOUT_ERROR` | 操作超时 |
-| `-32006` | `TOOL_ERROR` | 工具执行失败 |
-
-错误响应格式：
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32601,
-    "message": "Method not found: agent.nonexistent"
-  }
-}
+{"jsonrpc":"2.0","id":"req-1","result":{"echo":{"text":"hello"}}}
 ```
 
-## 事件主题
+```json
+{"jsonrpc":"2.0","id":"req-1","error":{"code":-32602,"message":"Invalid params: missing field"}}
+```
 
-事件作为 JSON-RPC 通知（无 `id` 字段）交付给订阅的客户端。通过 `events.subscribe` 订阅。
+## 错误码
 
-| 主题模式 | 描述 |
-|---------------|-------------|
-| `stream.start` | Agent 响应流式传输开始 |
-| `stream.chunk` | Agent 的文本块 |
-| `stream.tool_start` | 工具调用开始 |
-| `stream.tool_end` | 工具执行完成 |
-| `stream.thinking` | 推理步骤（CoT） |
-| `stream.end` | 流式传输完成 |
-| `agent.started` | Agent 运行开始 |
-| `agent.completed` | Agent 运行完成 |
-| `agent.error` | Agent 运行失败 |
-| `agent.cancelled` | Agent 运行取消 |
-| `session.created` | 新会话创建 |
-| `session.deleted` | 会话删除 |
-| `session.compacted` | 会话压缩 |
-| `config.changed` | 配置修改 |
-| `config.reloaded` | 从文件重新加载配置 |
-| `cron.triggered` | Cron 作业触发 |
-| `cron.completed` | Cron 作业完成 |
-| `cron.failed` | Cron 作业失败 |
-| `exec.approval_requested` | 命令需要审批 |
-| `exec.approval_resolved` | 审批决策已做出 |
+下表逐项对应 `shared/protocol/src/jsonrpc.rs` 的常量及其定义语义；不是每个传输入口都保证发出全部错误码。
 
-## 另请参阅
+| 码 | 常量 | 含义 | 何时出现 |
+|---|---|---|---|
+| -32700 | `PARSE_ERROR` | 解析错误 | 收到的内容不是有效 JSON |
+| -32600 | `INVALID_REQUEST` | 无效请求 | JSON 不是有效请求对象 |
+| -32601 | `METHOD_NOT_FOUND` | 方法不存在或不可用 | 分发器无法找到可用方法 |
+| -32602 | `INVALID_PARAMS` | 参数无效 | 方法参数校验失败 |
+| -32603 | `INTERNAL_ERROR` | 内部错误 | 发生内部 JSON-RPC 错误 |
+| -32000 | `AUTH_REQUIRED` | 需要认证或角色授权 | 需要认证；也用于 operator 方法拒绝 |
+| -32002 | `RATE_LIMITED` | 请求限流 | 超过速率限制 |
+| -32003 | `AGENT_ERROR` | Agent 执行错误 | Agent 执行失败 |
+| -32004 | `TOOL_ERROR` | 工具执行错误 | 工具执行失败 |
+| -32008 | `PERMISSION_DENIED` | 权限不足 | 操作不被许可 |
+| -32009 | `RESOURCE_NOT_FOUND` | 资源不存在 | 找不到目标资源 |
+| -32010 | `TIMEOUT_ERROR` | 操作超时 | 操作未在时限内完成 |
+| -32031 | `REVISION_CONFLICT` | 画布版本冲突 | canvas.apply 的 base_revision 已过期 |
 
-- [Rust API](/docs/zh/api/rust) — 库使用的核心 crate 参考
-- [Gateway 概览](/docs/zh/gateway/overview) — 架构和连接详情
-- [协议](/docs/zh/gateway/protocol) — 传输格式和认证流程
+## operator 拒绝消息
+
+`ADMIN_REQUIRED_MESSAGE` 的原文如下，定义于 `shared/protocol/src/jsonrpc.rs`。运行期 `src/gateway/method_admin.rs` 的 `method_requires_admin` 判定需要 operator 的方法；已认证 member 被拒绝时使用 `AUTH_REQUIRED`（-32000），而非 `PERMISSION_DENIED`。门控调用位于 `src/gateway/server/connection/dispatch.rs`。
+
+```text
+Not authorized: this method requires operator privileges
+```
+
+## 事件通知
+
+`TOPIC_EVENT_METHOD = "event"` 是主题事件信封的 `method`，不是主题名。通知没有 `id`；`params` 携带 `topic` 与 `data`，见 `shared/protocol/src/jsonrpc.rs`。它与逐帧使用独立方法名的流式事件不同。主题目录见[网关事件](../gateway/methods/events)。
+
+事件可见性受 `src/gateway/event_visibility.rs` 的所有者与作用域检查约束；订阅主题不代表可读取其他用户的事件。
+
+```json
+{"jsonrpc":"2.0","method":"event","params":{"topic":"agent.run.complete","data":{}}}
+```
+
+这里只展示信封；`data` 的具体结构由事件定义决定，见 `src/gateway/events/frame.rs`。
+
+## 工具调用专用信封
+
+反向 RPC 的共享载荷定义在 `shared/protocol/src/jsonrpc.rs`：服务端请求客户端执行工具，客户端回传结果。这些是 JSON-RPC 内承载的业务载荷，不替代外层 `id`。
+
+| 类型 | 字段与约束 |
+|---|---|
+| `ToolCallParams` | `call_id: String`, `tool_name: String`, `params: Value`, `context: ToolCallContext`（省略时默认） |
+| `ToolCallContext` | 均可选：`run_id: String`, `session_key: String`, `timeout_ms: u64` |
+| `ToolCallResult` | `call_id: String`, `success: bool`; 可选：`result: Value`, `error: String`, `duration_ms: u64` |
+
+结果的 `call_id` 必须匹配调用。`ToolCallResult::success()` / `error()` 分别填充结果或错误字符串；`with_duration()` 添加耗时，见 `shared/protocol/src/jsonrpc.rs`。
+
+## 与 Protocol v1 的关系
+
+JSON-RPC 定义消息语义；帧、握手与传输见 [Protocol v1](../gateway/protocol-v1)。相应代码是 `shared/protocol/src/framing.rs`、`shared/protocol/src/system_hello.rs` 与 `src/gateway/server/connection/`。
+
+## 历史：方法索引从本页迁出
+
+本页曾承担全量方法索引，现迁至[方法参考](../gateway/methods)，随 `src/gateway/method_census.rs` 的 `RPC_METHOD_CENSUS` 更新。

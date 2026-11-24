@@ -9,7 +9,7 @@ This guide covers everything you need to compile Aleph from source, from install
 
 ### Rust Toolchain
 
-Aleph requires **Rust 1.95 or later** (edition 2021). The MSRV is raised by `sysinfo 0.39`, and `rust-toolchain.toml` pins the build to `1.96.0`. Install via [rustup](https://rustup.rs/):
+Aleph requires **Rust 1.99 or later** (edition 2021, `Cargo.toml`). `rust-toolchain.toml` pins the toolchain to `1.99.1`. Install with [rustup](https://rustup.rs/):
 
 ```bash
 # Install Rust (if not already installed)
@@ -19,7 +19,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup show
 
 # Verify the version
-rustc --version   # must be >= 1.95
+rustc --version   # must be >= 1.99
 cargo --version
 ```
 
@@ -32,23 +32,23 @@ cargo install wasm-bindgen-cli
 
 ### System Dependencies
 
-Aleph bundles most of its dependencies via Cargo, but a few system-level libraries are needed:
+See `Cargo.toml` for the core crate's `rusqlite` and `reqwest` features, and `justfile` and `interfaces/webchat/package.json` for the Panel CSS build.
 
 | Dependency | Purpose | Notes |
 |------------|---------|-------|
 | **SQLite** | Session storage, memory DB | Bundled via `rusqlite` `bundled` feature — no system install needed |
-| **OpenSSL** | TLS for HTTP clients | macOS: provided by the system. Linux: `libssl-dev` (Debian) or `openssl-devel` (Fedora) |
+| **OpenSSL** | TLS for HTTP clients | The Linux CI build installs `libssl-dev` (`.github/workflows/aleph-core-ci.yml`). On Fedora, use `openssl-devel`. |
 | **pkg-config** | Locating system libraries | Linux only: `apt install pkg-config` or `dnf install pkgconf` |
 | **C compiler** | Native dependency compilation | Xcode Command Line Tools (macOS) or `build-essential` (Linux) |
-| **Node.js + npm** | Control Plane CSS build (optional) | Only required when building with the `control-plane` feature |
+| **Node.js + npm** | Panel CSS build | `just wasm` runs `npm run build:css` |
 
-On **macOS**, the Xcode Command Line Tools provide everything:
+On **macOS**, install the Xcode Command Line Tools for the native compiler. For the CI package list, see `.github/workflows/aleph-core-ci.yml`:
 
 ```bash
 xcode-select --install
 ```
 
-On **Debian/Ubuntu**:
+On **Debian/Ubuntu**, install the base toolchain packages below. Check `.github/workflows/aleph-core-ci.yml` for additional native libraries used by the workspace:
 
 ```bash
 sudo apt update
@@ -57,16 +57,16 @@ sudo apt install build-essential pkg-config libssl-dev
 
 ### Environment Variables
 
-The server requires an API key at runtime (not at build time):
+If your runtime configuration needs an Anthropic API key, set the environment variable below. The build does not need it (`src/gateway/provider_factory.rs`):
 
 ```bash
-# Set in your shell profile or ~/.aleph/config.toml
+# Set in your shell
 export ANTHROPIC_API_KEY="your-api-key"
 ```
 
 ## Workspace Structure
 
-Aleph uses a **Cargo workspace** with members organized by role:
+This excerpt shows the workspace layout defined in `Cargo.toml`, along with the root `justfile`:
 
 ```
 Aleph/
@@ -74,9 +74,11 @@ Aleph/
 ├── src/                        # alephcore — main library + server binary
 │   ├── lib.rs                  # Library crate entrypoint
 │   └── bin/aleph-server/       # Server binary
+├── justfile                    # Build and check recipes
 ├── desktop/
-│   ├── shared/                 # DesktopCapability trait + IPC protocol
-│   ├── shell/                  # Tauri desktop shell
+│   ├── nsh-shell/              # NSH desktop host
+│   ├── host/                   # Host helper library
+│   ├── shared/                 # Desktop capability traits
 │   ├── macos/                  # macOS native implementation
 │   ├── linux/                  # Linux native implementation
 │   └── windows/                # Windows native implementation
@@ -91,53 +93,18 @@ Aleph/
     └── webchat/                # Web-based chat interface (WASM)
 ```
 
-The workspace root `Cargo.toml` defines shared dependency versions so all members stay in sync:
+NSH is the target desktop host (`desktop/nsh-shell/Cargo.toml`, nsh `0.6.0`). During the transition, current desktop releases still build the legacy Tauri shell (`desktop/shell/`): CI uses `.github/workflows/aleph-app-release.yml`, and local packaging uses `just shell-build` in `justfile`. The legacy shell will be removed; NSH does not yet have a release pipeline of its own (`justfile`, `.github/workflows/`). See the [desktop host overview](../desktop-hosts/overview).
 
-```toml
-[workspace]
-resolver = "2"
-members = [
-    "desktop/shared",
-    "desktop/macos",
-    "desktop/linux",
-    "desktop/windows",
-    "desktop/shell",
-    "shared/logging",
-    "shared/protocol",
-    "shared/ui_logic",
-    "shared/client",
-    "interfaces/cli",
-    "interfaces/tui",
-    "interfaces/webchat",
-]
-
-[workspace.package]
-version = "26.7.21"   # CalVer; keep in sync with the VERSION file
-edition = "2021"
-license = "MIT"
-rust-version = "1.95"
-```
+See `VERSION` for the workspace version and `Cargo.toml` for shared dependencies, the full member list, and release profiles.
 
 ## Feature Flags
 
-Aleph compiles **all production features by default**. Only test and experimental features are gated (kept in sync with `Cargo.toml`):
-
-```toml
-[features]
-default = []
-loom = ["dep:loom"]               # Concurrency testing with Loom
-test-helpers = []                  # Integration test utilities
-control-plane = []                 # Experimental: Control Plane UI (Leptos/WASM dashboard)
-disabled-tests = []                # Disabled test modules (awaiting rewrite)
-plugin-wasm = []                   # Placeholder for the in-flight WASM plugin runtime; keeps `tests/wasm_capability_test.rs`'s `cfg(feature = "plugin-wasm")` gate
-```
-
-**No feature flags are required for production builds.** All channels, tools, and integrations are compiled and enabled/disabled at runtime via `config.toml` configuration.
+The core crate has an empty default feature list (`Cargo.toml`). For example, `loom` enables concurrency testing and `test-helpers` enables test utilities; neither is needed for a standard server build. Embedding Panel assets does not require the `control-plane` feature (`build.rs`, `src/gateway/control_plane/assets.rs`).
 
 ### Building
 
 ```bash
-# Default build (all production features)
+# Default build
 cargo run -p alephcore --bin aleph-server
 
 # Release build
@@ -171,7 +138,7 @@ cargo build -p alephcore --bin aleph-server --release
 ls -lh target/release/aleph-server
 ```
 
-The workspace release profile strips debug symbols:
+The server uses the standard release profile in `Cargo.toml`:
 
 ```toml
 [profile.release]
@@ -186,9 +153,6 @@ strip = true
 
 # Check help
 ./target/release/aleph-server --help
-
-# Verify embedded UI assets (if built with control-plane)
-strings target/release/aleph-server | grep "index.html"
 ```
 
 ## Building the WebChat Panel UI
@@ -210,7 +174,15 @@ This will:
 3. Generate JavaScript bindings with `wasm-bindgen`
 4. Create the runtime `index.html`
 
-The Gateway serves the WASM assets directly from `interfaces/webchat/dist/`.
+Next, rebuild the server and replace the running service with the new binary. Updating `interfaces/webchat/dist/` alone does not update a running release build: `rust_embed` embeds assets in `aleph-server` at compile time, and the release binary does not read the on-disk `dist/` at runtime (`src/gateway/control_plane/assets.rs`, `build.rs`).
+
+```bash
+just wasm
+just check-dist
+cargo build --release -p alephcore --bin aleph-server
+```
+
+`just check-dist` calls `scripts/check_panel_dist.mjs` to check that the JavaScript and WASM artifacts match (`justfile`).
 
 ## Using Just (Recommended)
 
@@ -302,7 +274,7 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli
 ```
 
-Note: The server builds successfully without the UI. If the `dist/` directory exists, `build.rs` skips the UI build step. The `control-plane` feature is optional.
+For a usable embedded Panel, generate the complete asset set with `just wasm` before compiling the server. A successful server compile does not prove that Panel artifacts were generated (`justfile`, `build.rs`).
 
 ### Port Already in Use
 
@@ -312,11 +284,10 @@ If the server fails to start because port 18790 is occupied:
 # Find the process using the port
 lsof -i :18790
 
-# Kill it
-kill -9 <PID>
+# If this is a process you intend to stop, use its normal shutdown procedure
 
 # Or start on a different port
-cargo run --bin aleph-server -- --port 8080
+cargo run -p alephcore --bin aleph-server -- start --port 8080
 ```
 
 ### Slow Builds
@@ -337,11 +308,11 @@ Consider using `cargo check` instead of `cargo build` when you only need to veri
 
 ---
 
-## 26.7.x Addendum
+## History: 26.7.x Addendum
 
 ### Rust Toolchain 1.95+
 
-26.7.x: `rust-version` in `Cargo.toml` has been bumped to **1.95**. Use `rustup install 1.95` or `rust-toolchain.toml` in development.
+26.7.x: `rust-version` in `Cargo.toml` has been bumped to **1.95**. See Prerequisites for the current requirement.
 
 ### Harness 12 Files + Line-Count Ratchet
 
@@ -349,7 +320,7 @@ Consider using `cargo check` instead of `cargo build` when you only need to veri
 
 - Top-level 8 + `agent/` 4 = **12 files** (tests under `tests/` do not count toward the ratchet)
 - Line count gated by `src/harness/tests/budget.rs` ratchet, bound to the `CEILING` constant
-- Current `CEILING` = **5,055** (`src/harness/tests/budget.rs:335`, 2026-07-26 revision); treat any line count reproduced here as a stale copy
+- At the time, `CEILING` = **5,055** (during 26.7.x); the current value is **5,535** (`src/harness/tests/budget.rs:795`); treat any line count reproduced here as a stale copy
 - The 3 questions before adding code: scaffolding vs cognition? Will a model upgrade still need it? How many real consumers does it have?
 
 ### YAGNI Withdrawal

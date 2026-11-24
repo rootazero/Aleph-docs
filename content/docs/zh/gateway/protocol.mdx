@@ -1,223 +1,119 @@
 ---
-title: "协议"
-description: "WebSocket JSON-RPC 2.0 协议"
+title: "旧 WebSocket 入口（/ws）"
+description: "Gateway 的历史兼容入口：WebSocket 上的 JSON-RPC 2.0、connect 握手、升级门与登录墙。新客户端请使用 Protocol v1。"
 ---
 
-Aleph 网关使用基于 WebSocket 的 JSON-RPC 2.0 进行所有通信。所有 RPC、事件、连接握手都运行在同一个 WebSocket 连接上。
+import { Callout } from "fumadocs-ui/components/callout";
+
+<Callout type="warn">
+`/ws` 是历史兼容入口，不是新客户端的接入面。新客户端与 NSH 桌面宿主应使用 [Protocol v1](./protocol-v1)：长度前缀帧 + `system.hello` 握手 + Desktop IPC / Web v1 入口。Panel 经 WebView 运行在 NSH 宿主内，由宿主负责连接。本页只描述 `/ws` 现状，便于维护旧客户端与排查。
+</Callout>
+
+`/ws` 用 WebSocket Text 消息承载 JSON-RPC 2.0：所有 RPC、事件和连接握手共用同一条连接，消息边界由 WebSocket 自己提供，没有长度前缀。收到 Binary 消息只记录警告并忽略（`src/gateway/server/connection/mod.rs`）。
 
 ## 端点
 
-```
+```text
 ws://127.0.0.1:18790/ws          # 默认绑定，loopback
 wss://<host>:<port>/ws           # 启用原生 TLS 后
 ```
 
-- 默认绑定 `127.0.0.1:18790`（`src/gateway/config.rs` 的 `GatewayServerConfig::default`），单台机器零配置，loopback 客户端直接是 `operator`。
-- 非 loopback 绑定须配 [TLS 三层](protocol#tls-三层) 才能启动。
-- 浏览器跨源 / DNS-rebinding 由 `src/gateway/origin_policy.rs` 拦在 `/ws` 升级处。
+- 默认绑定 `127.0.0.1:18790`（`src/gateway/config.rs`）；loopback 客户端直接是 `operator`。
+- 路由 `/ws` 挂在 `src/gateway/server/mod.rs`，升级处理器是 `src/gateway/server/connection/upgrade.rs` 的 `ws_upgrade_handler`。
+- 非 loopback 绑定必须启用 TLS、受信代理或 `allow_insecure_remote` 之一，否则 `check_network_exposure`（`src/gateway/server/mod.rs`）让进程拒绝启动。
 
 ## 会话初始化（`connect` 握手）
 
-WebSocket 建连后的**第一帧**必须是 `connect`（参见 `src/gateway/server/handler.rs` 的「Session-init invariant」分支；任何非 `connect` 的首帧会收到 `AUTH_REQUIRED` 后断连）：
+连接建立后的**第一帧**必须是 `connect`；任何其他首帧都收到 `AUTH_REQUIRED`（`First request must be 'connect'`）并断开（`src/gateway/server/connection/mod.rs`）。
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "method": "connect",
-  "params": {
-    "token": "aleph-<uuid>"
-  }
+  "params": {}
 }
 ```
 
-远程连接可通过三种凭据中的任意一种完成 `connect`（优先级见 `src/gateway/handlers/connect.rs::resolve_connect_auth`），缺失或不合法即落到 [登录墙](#会话与限流)：
+loopback 连接可以省略凭据。远程连接的凭据解析顺序在 `src/gateway/handlers/connect.rs` 的 `resolve_connect_auth`，可用的字段是 `device_token`、`bootstrap_ticket`（搭配 `device_id`）和旧版共享 `token`；三种凭据的区别、有效期与撤销见[身份认证](./auth)。
 
-```json
-// 1) loopback：可省略整个 params —— 始终 operator
-// 2) 已配对的设备：长期设备令牌
-{
-  "method": "connect",
-  "params": { "device_token": "aleph-dt-<uuid>", "device_id": "panel-1" }
-}
-
-// 3) 首次配对：用一次性引导票换取新设备令牌（响应里回带 device_token）
-{
-  "method": "connect",
-  "params": { "bootstrap_ticket": "aleph-bt-<uuid>", "device_id": "panel-1" }
-}
-
-// 4) 旧版共享网关令牌（仅向前兼容）
-{
-  "method": "connect",
-  "params": { "token": "aleph-<uuid>" }
-}
-```
-
-握手成功后服务端在 `handle_connect` 返回 session baseline 字段，并由 `server::handler` 叠加授权 verdict：
+握手成功后的结果由 `handle_connect` 给出基线字段，连接层再叠加授权结论：
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "role": "operator",                      // operator / guest
+    "role": "operator",
     "state_version": 17,
     "keepalive": { "ping_interval_secs": 30, "idle_timeout_secs": 90 },
-    "authorized": true,                      // 是否过了 token 登录墙
-    "needs_token": false                     // 未授权时为 true；配合登录墙使用
+    "authorized": true,
+    "needs_token": false
   }
 }
 ```
 
-- `bootstrap_ticket` 命中时，结果还会回带 `device_token`：客户端须持久化使用，每次重连都用它。
-- 远程 `connect` 被拒绝会写入安全审计日志（`AuditEventType::AuthFailure`），由 `Auth`-scope 限速（默认 ≤10/60s/IP）保护。
-- 完整三种凭据对比、TTL、撤销路径见 [认证 / 连接](/docs/zh/gateway/auth)。
+`state_version` 与 `keepalive` 的数值为示例。`system.hello` 在 `/ws` 上只是 `connect` 之后的版本探测方法，它不准入连接，也不设置身份，见 [Protocol v1](./protocol-v1#握手-systemhello)。
 
-## TLS 三层
+## 升级门：TLS、来源与连接上限
 
-远程连接由启动门 + 每连接门两段硬性拒明文；上游是受信代理时由 `trusted_proxy` 补回真实客户端 IP。
+HTTP 升级为 WebSocket 之前，`ws_upgrade_handler` 依次检查：
 
-| 层 | 配置 | 行为 |
-|-----|------|------|
-| **启动门（`check_network_exposure`）** | `src/gateway/server/mod.rs` | 非 loopback 且 `tls` / `trusted_proxy` / `allow_insecure_remote` 都未启用 → 进程拒绝启动。|
-| **每连接门（`refuse_insecure_remote`）** | `src/gateway/server/handler.rs::ws_upgrade_handler` | 非 loopback 且 leg 未加密 → WS 升级返回 `426 Upgrade Required`。|
-| **受信代理（`trusted_proxy`）** | `[gateway] trusted_proxy.{enabled, trusted_ips}` （默认 `enabled=false`，`trusted_ips=["127.0.0.1","::1"]`） | 仅当连接 peer ∈ `trusted_ips` 时，从 `X-Forwarded-For` 取最后一段视为真实客户端，从 `X-Forwarded-Proto: https` 视 leg 为加密；其它 peer 的转发头一律忽略（防伪造）。|
+| 检查 | 失败响应 | 代码 |
+|------|---------|------|
+| 非 loopback 且连接未加密（`refuse_insecure_remote`） | `426`，`TLS required for remote connections` | `src/gateway/server/connection/upgrade.rs` |
+| 来源策略（防跨源与 DNS rebinding） | `403`，`origin not allowed` | `src/gateway/origin_policy.rs` |
+| 全局连接数达到 `max_connections` | `503`，`Connection limit reached` | `src/gateway/server/connection/upgrade.rs` |
+| 单 IP 连接数达到 `max_connections_per_ip` | `503`，`Per-IP connection limit reached` | `src/gateway/server/connection/upgrade.rs` |
 
-`trusted_proxy` 仅负责"恢复 XFF 头"——它**永远不会**让 XFF 把 loopback 判定翻转：是 loopback 还是 loopback，不取决于头。完整 schema 与三种 TLS 推荐组合（自签 / 受信代理 / 自带证书）见 [认证 / 远程连接加密](/docs/zh/gateway/auth#远程连接加密)。
+- `max_connections` 默认 100，`max_connections_per_ip` 默认 64，二者在 `src/gateway/config.rs`；loopback 不受单 IP 上限限制，设为 `0` 关闭该上限。
+- 前置受信代理时，真实客户端地址与是否加密由 `src/gateway/trusted_proxy.rs` 的 `resolve_client` 解析；`trusted_ips` 只接受单个 IP，不支持 CIDR（无法解析的条目会被丢弃并告警）。只有对端在 `trusted_ips` 内，转发头才被采信。
+- 通过升级门的连接按来源归类：本机为 Desktop，其他为 Bot。
 
-## 会话与限流
+TLS 的三种组合（自签、受信代理、自带证书）与审计见[身份认证](./auth)，不在此重复。
 
-`/ws` 升级后服务端立即建立 `ConnectionState`：
+## 登录墙与洪泛保护
 
-- **`first_message`**：第一帧必须是 `connect`；非 `connect` 直接 `AUTH_REQUIRED` 断连。
-- **登录墙**：未授权远程连接只能用 `connect`（重发）；碰其它方法立刻 `AUTH_REQUIRED`，并由 `UnauthorizedFloodGuard`（`src/gateway/server/flood_guard.rs`）按 `Auth` scope 计数——达到阈值断连并写入 `AuditEventType::RateLimited` 审计记录。
-- **每连接门**：通过了授权的连接是 `operator`，角色与 loopback 单层一致；`guest` 只在授权失败后短暂出现于登录墙交互里，不进入业务命名空间。
-- **每 IP 连接上限**：`[gateway] max_connections_per_ip`（默认 64，`0` 关闭），loopback 豁免，依据 `trusted_proxy` 解析后的 `client_ip` 计算，不被 XFF 欺骗到原始 peer。
-- **速率限流**：`src/gateway/rate_limiter.rs`，按真实客户端 IP × 方法 scope 计算，`x.x.x.x` 形式作 `rl_identity`（loopback 豁免）。
+未授权的远程连接只能调用 `connect`：
+
+- 其他方法立即得到 `AUTH_REQUIRED`，判定函数是 `src/gateway/server/connection/auth.rs` 的 `wall_admits`。
+- `src/gateway/server/flood_guard.rs` 按连接统计登录墙拒绝次数，达到 `MAX_UNAUTHORIZED_STRIKES`（10）后关闭连接，防止过期客户端无限重试。
+- 请求本身还受 `src/gateway/rate_limiter.rs` 的按 IP 与方法范围限流。
 
 ## 消息类型
 
-### 请求（客户端 → 网关）
+消息形态与 [JSON-RPC](../api/jsonrpc) 一致，`/ws` 上没有额外的信封。
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "method": "namespace.action",
-  "params": { ... }
-}
+{ "jsonrpc": "2.0", "id": "req-1", "method": "health" }
 ```
-
-- `method` 遵循 `<namespace>.<action>` 命名空间约定（见下文"方法命名空间"）。
-- `id` 可为字符串、数字或 `null`（`null` = 通知，不期望响应）。
-
-### 响应（网关 → 客户端）
-
-成功：
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "result": { ... }
-}
+{ "jsonrpc": "2.0", "id": "req-1", "result": { "status": "healthy", "timestamp": "2026-11-24T00:00:00Z" } }
 ```
-
-错误：
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": "unique-id",
-  "error": {
-    "code": -32603,
-    "message": "Internal error",
-    "data": { ... }
-  }
-}
+{ "jsonrpc": "2.0", "method": "event", "params": { "topic": "session.lifecycle.changed", "data": {} } }
 ```
 
-`error.data` 仅携带结构化字段（如 `idempotency_key` 提示、`receipt_id` 用户可读回执），不再外泄原始错误链。
+- 响应的 `timestamp` 为示例值，字段定义见 `src/gateway/handlers/health.rs`。
+- 事件是不带 `id` 的通知，`method` 恒为 `"event"`，订阅用 `events.subscribe`，参数键是 `topics`（`src/gateway/handlers/events.rs`）。事件目录与错误码全集见[事件方法](./methods/events)与 [JSON-RPC](../api/jsonrpc)。
+- 完整 RPC 目录见[方法参考](./methods)。只有 `/ws` 提供完整方法面；Desktop IPC 与 Web v1 目前只放行 `health` 与 `sessions.list`。
 
-### 事件（网关 → 客户端）
+## 历史：协议从无版本演进到 v1
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "event",
-  "params": {
-    "topic": "stream.token",
-    "data": { ... }
-  }
-}
-```
-
-流式方法的生命周期由三类事件串联（`src/gateway/server/handler.rs` 的 broadcast forwarder）：
-
-```json
-{ "method": "event", "params": { "topic": "stream.start",  "data": { "run_id": "..." } } }
-{ "method": "event", "params": { "topic": "stream.token",  "data": { "text": "..." } } }
-{ "method": "event", "params": { "topic": "stream.end",    "data": { "run_id": "..." } } }
-```
-
-## 方法命名空间
-
-完整 RPC 由 `src/gateway/handlers/mod.rs` 的 `registry.register(...)` 注册；常见命名空间：
-
-| 前缀 | 例子 | 说明 |
-|--------|-------|----------|
-| `chat.*` | `chat.send`, `chat.abort`, `chat.history`, `chat.clear` | 聊天面板高层 API，`chat.send` 包裹 `agent.run` |
-| `session.*` | `session.create`, `session.usage`, `session.compact`, `session.truncate` | 会话元数据 / 压缩 / 检查点 |
-| `agents.*` | `agents.list`, `agents.bindings`, `agents.teams` | 代理生命周期、绑定、团队 |
-| `config.*` | `config.get`, `config.patch`, `config.schema`, `config.apply` | 热重载配置 CRUD |
-| `exec.*` | `exec.approvals.*` | 执行审批（操作级，参考 [安全 / 审批](/docs/zh/security/pairing)） |
-| `cron.*` | `cron.list`, `cron.create`, `cron.run`, `cron.toggle` | 定时任务 |
-| `wizard.*` | `wizard.start`, `wizard.next`, `wizard.answer`, `wizard.cancel` | 配置向导 |
-| `cluster.*` | `cluster.admit_node`, `cluster.deregister`, `environments.list` | 集群节点准入 / 注销 |
-| `gateway.*` | `gateway.ticket.create`, `gateway.token.current`, `gateway.token.rotate`, `gateway.devices.list`, `gateway.devices.revoke`, `gateway.credentials`, `gateway.metrics.lanes` | 网关注入面 — 票据、共享令牌、配对设备、会话-面快照 |
-| `secrets.*` | `secrets.list`, `secrets.set`, `secrets.delete` | 共享令牌同时作为 vault 主密钥的 CRUD |
-| `channel.*` | `channel.list`, `channel.send` | 渠道聚合 |
-| `pairing.*` | `pairing.list`, `pairing.approve`, `pairing.reject` | 渠道侧未知发送者审批，**与设备配对无关** |
-| `tools.invoke` | （单方法） | 直调工具，绕过 LLM 循环（仅供 E2E / 调试） |
-| `events.*` | `events.subscribe`, `events.unsubscribe`, `events.list` | 事件订阅 |
-
-完整方法目录（数百条 `gateway.*` / 业务命名空间）见 [方法参考](/docs/zh/gateway/methods)。
-
-## 事件订阅
-
-通过 `events.subscribe` / `events.unsubscribe` 订阅通配主题：
-
-```json
-{ "method": "events.subscribe",   "params": { "patterns": ["stream.*", "presence.*"] } }
-{ "method": "events.unsubscribe", "params": { "patterns": ["stream.*"] } }
-```
-
-`events.list` 返回当前连接的活跃订阅；广播通道 `Lagged` 会让该连接的事件订阅者自动恢复而不是被永久踢出。
-
-## 错误代码
-
-`error.code` 取自 `src/gateway/protocol.rs`，另加少量 [aleph-protocol 文档化的常量](https://docs.rs/aleph-protocol)：
-
-| 代码 | 常量 | 说明 |
+| 形态 | 特点 | 代码 |
 |------|------|------|
-| `-32700` | `PARSE_ERROR` | 解析错误 |
-| `-32600` | `INVALID_REQUEST` | 无效请求 |
-| `-32601` | `METHOD_NOT_FOUND` | 方法未找到 |
-| `-32602` | `INVALID_PARAMS` | 无效参数 |
-| `-32603` | `INTERNAL_ERROR` | 内部错误 |
-| `-32604` | `RESOURCE_NOT_FOUND` | 资源未找到 |
-| `-32605` | `TIMEOUT_ERROR` | 超时（also `-32002` 是其别名） |
-| `-32000` | `AUTH_REQUIRED` | 需要 `connect`（也用作"首帧非 connect"的拒绝码） |
-| `-32001` | `AUTH_FAILED` | 凭据无效 |
-| `-32002` | `PERMISSION_DENIED` | 权限不足 |
-| `-32003` | `TOOL_ERROR` | 工具执行错误 |
-| `-32004` | `RATE_LIMITED` | 速率限流（`data.retry_after_ms` / `lockout_remaining_ms`） |
-| `-32030` | `IDEMPOTENCY_KEY_REQUIRED` | 配置开启时未携带 `idempotency_key` 的写类 RPC |
-| `-32099` | `SERVICE_UNAVAILABLE` | 注册但该构建未挂接 |
+| `/ws` + `connect` | 握手结果只有 `role`、`state_version`、`keepalive` 等会话字段，没有协议版本，也不协商限额；消息边界依赖 WebSocket | `src/gateway/handlers/connect.rs` |
+| `/ws` 上的 `system.hello` 探针 | 在 `connect` 之后做版本探测；handler 注释称之为 legacy 探针，响应里的 `limits` 只是提示值，不强制 | `src/gateway/handlers/system_hello.rs` |
+| Protocol v1：Desktop IPC 与 Web v1 | 有界长度前缀帧，`system.hello` 必须是首帧，限额由传输强制；入口目前只读 | `src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs` |
 
-## 详见
+`/ws` 仍保留完整 RPC 面与 `connect` 认证，旧客户端不需要改动；它没有被移除，但不再是新增能力的落点。v1 尚未实现的部分（事件重放、快照、二进制通道、背压策略）见 [Protocol v1 的「规划中」一节](./protocol-v1#规划中尚未落地的部分)。
 
-- [认证 / 连接](/docs/zh/gateway/auth) — 凭据三档、token 类型、撤销、SSRF / TLS / 审计
-- [方法参考](/docs/zh/gateway/methods) — 完整 RPC 目录
-- [架构 / 网关](/docs/zh/architecture/gateway) — 内部结构
+## 另请参阅
+
+- [Protocol v1](./protocol-v1) — 当前的帧格式、握手与传输矩阵
+- [身份认证](./auth) — 凭据、TLS、受信代理与审计
+- [方法参考](./methods) — 完整 RPC 目录
+- [JSON-RPC](../api/jsonrpc) — 消息形态与错误码
+- [网关架构](../architecture/gateway) — 内部结构

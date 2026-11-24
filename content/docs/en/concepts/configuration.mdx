@@ -28,9 +28,9 @@ port = 18790
 allow_insecure_remote = false
 ```
 
-`[providers.<name>]` tables define providers; `general.default_provider` and `general.fallback_providers` reference their names. Use the current model catalog and Panel configuration for model IDs.
+`[providers.<name>]` tables define providers; the `default_provider` and `fallback_providers` keys in the `[general]` table reference their names. Use the current model catalog and Panel configuration for model IDs.
 
-`[policies]` contains global `mode` and `exec_tier`. `[sandbox.command_policy]` is an independent security hard floor that `exec_tier` cannot lower. Do not put session mode, execution tier, or the nonexistent `agents.defaults.thinking` field under `[agents.defaults]`; that table contains only defaults supported by agent definitions, such as model, workspace, and skills.
+`[policies]` contains global `mode` and `exec_tier`. `[sandbox.command_policy]` is an independent security hard floor that `exec_tier` cannot lower. Do not put session mode, execution tier, or the nonexistent `thinking` key under `[agents.defaults]`; that table contains only defaults supported by agent definitions, such as model, workspace, and skills.
 
 ## Gateway host, TLS, and trusted proxy
 

@@ -52,7 +52,7 @@ Tool definitions contain a name, description, input schema, source, and metadata
 - `Exclusive { scope: Nodes(...) }`: cluster nodes, conflicting only when target nodes overlap;
 - `Exclusive { scope: Sessions(...) }`: local agent sessions, allowing disjoint sessions to run together but conservatively conflicting with other scope kinds.
 
-`call_concurrency_claim` computes the actual claim from the tool name and this call's input, so the same `file_ops` tool can produce different claims for reads, bounded writes, and unknown operations. Path comparison is component-wise: `src/a` and `src/ab` do not conflict, while `src/a` and `src/a/b.rs` do; an unextractable footprint degrades to `Global`.
+`call_concurrency_claim` computes the actual claim from the tool name and this call's input, so the same `file_ops` tool can produce different claims for reads, bounded writes, and unknown operations. Path comparison is component-wise: `foo/a` and `foo/ab` do not conflict, while `foo/a` and `foo/a/b.rs` do; an unextractable footprint degrades to `Global`.
 
 `partition_parallel_groups` walks left to right and creates contiguous, order-preserving ranges. If the next call conflicts with any member of the current group, a new group starts; groups complete serially, while calls inside a group run concurrently. Multiple reads can therefore run first, a following `bash` can run alone, and disjoint file or node mutations can remain parallel. This is not a coarse split into one parallel bucket and one serial bucket.
 

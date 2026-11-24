@@ -41,7 +41,7 @@ iMessage 适配器位于 `src/gateway/interfaces/imessage/`：
 |--------|----------------|
 | `mod.rs` | `IMessageChannel`、能力默认值、factory 接线 |
 | `config.rs` | `IMessageConfig`、`DmPolicy`、`GroupPolicy` |
-| `db.rs` | `MessagesDb`——围绕 `chat.db` 的只读 SQLite 包装 |
+| `db.rs` | `MessagesDb`——围绕 Messages 数据库（默认 `~/Library/Messages/chat.db`）的只读 SQLite 包装 |
 | `sender.rs` | AppleScript 驱动的出站发送 |
 | `target.rs` | 目标标准化（`normalize_phone`、`parse_target`、`IMessageTarget`、`Service`） |
 | `reaction.rs` | Tapback code ↔ emoji 映射（两条传输的单一来源） |
@@ -248,7 +248,7 @@ allow_from = ["+15551234567"]
 
 轮询循环在后台 Tokio 任务中运行：
 
-1. **打开数据库** — `chat.db` 以 `SQLITE_OPEN_READ_ONLY` 只读模式打开
+1. **打开数据库** — Messages 数据库以 `SQLITE_OPEN_READ_ONLY` 只读模式打开
 2. **记录最后 ROWID** — 启动时，当前最大消息 ROWID 被记录为基线
 3. **轮询循环** — 每 `poll_interval_ms` 毫秒：
    - 查询 `ROWID > last_seen` 且 `is_from_me = 0` 的消息
@@ -317,10 +317,10 @@ Tapback code 的单一来源（`src/gateway/interfaces/imessage/reaction.rs`）�
 
 | 字段 | 来源 |
 |-------|--------|
-| `id` | 附件 GUID |
-| `mime_type` | 来自 `attachment.mime_type`（local）或 BlueBubbles `TransferName` |
-| `filename` | 来自 `attachment.filename` 或 `transfer_name` |
-| `size` | 来自 `attachment.total_bytes` |
+| `id` | 附件 GUID（local：`AttachmentInfo` 的 `guid` 字段；BlueBubbles：服务器给出的附件 GUID） |
+| `mime_type` | local：`AttachmentInfo` 的 `mime_type` 字段；BlueBubbles：服务器返回的 MIME 类型 |
+| `filename` | local：`AttachmentInfo` 的 `transfer_name` 字段，回退到 `filename` 字段的 basename；BlueBubbles：不填 |
+| `size` | local：`AttachmentInfo` 的 `total_bytes` 字段；BlueBubbles：不填 |
 
 ### 发送附件
 
@@ -337,7 +337,7 @@ Local 传输要求本地文件路径（通过 AppleScript `send POSIX file`）�
 
 ## 数据库架构（Local 传输）
 
-Aleph 从 `chat.db` 中的三个主要表读取：
+Aleph 从 Messages 数据库中的三个主要表读取：
 
 ### `message` 表
 
