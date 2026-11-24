@@ -38,8 +38,8 @@ PanelShell            interfaces/webchat/src/panel/shell.rs
 ```
 
 - `PanelShell` 的签名是 `pub fn PanelShell(projection: PanelProjection, initial_tab: Option<PanelTabKey>) -> impl IntoView`（`interfaces/webchat/src/panel/shell.rs`）。它自己建 `PanelLoader::new(projection.registry())`，再 `provide_context(host.clone())` 把宿主状态放进 Leptos 上下文——插件模块侧的 SDK 正是靠这个上下文拿到自己的标签页描述符。
-- `PanelProjection` 只持有一个 `registry: TabRegistry`（`interfaces/webchat/src/panel/projection.rs`），不做加载、不碰 DOM。
-- `TabRegistry` 的文件头注释写得很直白：「Pure tab membership and enabled mount projections; no loading or UI effects.」（`interfaces/webchat/src/panel/registry.rs`）
+- `PanelProjection` 只持有一个 `registry: TabRegistry`（`shared/ui_logic/src/panel/projection.rs`），不做加载、不碰 DOM。
+- `TabRegistry` 的文件头注释写得很直白：「Pure tab membership and enabled mount projections; no loading or UI effects.」（`shared/ui_logic/src/panel/registry.rs`）
 - `PanelShell` 渲染时把导航按钮交给 `registry.rows()`，把插件挂载点放进 `data-panel-sidebar-root` 和 `data-panel-content-root` 两个 div，把失败状态交给 `PanelLoadStatus` 并提供一个重试按钮（`interfaces/webchat/src/panel/shell.rs`）。
 
 数据流是单向的：
@@ -59,9 +59,9 @@ PanelShell            interfaces/webchat/src/panel/shell.rs
 - `builtins(label)` 构造只有内置条目的投影；`from_snapshot` / `replace_snapshot` 从能力快照构造。
 - `replace_snapshot` 拒绝修订号不大于当前值的快照，返回 `PanelProjectionError::StaleSnapshot`——旧快照不能覆盖新快照。
 - `select_route` 把当前路由投影成 `PanelRoute`：`Legacy`（常规 Panel）、`Modular(PanelTabKey)`（某个插件标签页）、`Unavailable`（没有可挂载的目标）。
-- `PanelProjectionError` 覆盖了描述符、来源、信任、权限、完整性、入口路径、版本、修订号等各类拒绝原因，并有 `reason_code()` 给出稳定原因码（`interfaces/webchat/src/panel/projection.rs`）。
+- `PanelProjectionError` 覆盖了描述符、来源、信任、权限、完整性、入口路径、版本、修订号等各类拒绝原因，并有 `reason_code()` 给出稳定原因码（`shared/ui_logic/src/panel/projection.rs`）。
 
-注册表侧的三个投影方法（`interfaces/webchat/src/panel/registry.rs`）：
+注册表侧的三个投影方法（`shared/ui_logic/src/panel/registry.rs`）：
 
 | 方法 | 含义 |
 |---|---|
@@ -83,7 +83,7 @@ pub trait PanelUiCapabilitySource {
 }
 ```
 
-（`interfaces/webchat/src/panel/source.rs`；该文件头注释为「Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.」）
+（`shared/ui_logic/src/panel/source.rs`；该文件头注释为「Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.」）
 
 协议层同时定义了快照的组成：
 
@@ -97,11 +97,11 @@ pub trait PanelUiCapabilitySource {
 | `PanelTabStatus` | 标签页状态：`Enabled`、`Disabled`、`Incompatible`、`Failed` |
 | `PANEL_UI_API_MAJOR` | 插件 UI 的主版本号，当前为 `1` |
 
-快照本身没有写入路径：来源实现只负责产出，投影层只负责读取与校验（`interfaces/webchat/src/panel/source.rs`、`interfaces/webchat/src/panel/projection.rs`）。取值来源有两个具体实现：`BuiltInTerminalSource`（内置终端标签页）和 `FixturePanelUiCapabilitySource`（测试夹具）。内置终端的标签页 id 在 `panel-tab-spike` 构建下是 `terminal-pilot`，否则是 `terminal`；社区夹具快照 `community_fixture_snapshot()` 只在 `panel-tab-spike` 下存在。
+快照本身没有写入路径：来源实现只负责产出，投影层只负责读取与校验（`shared/ui_logic/src/panel/source.rs`、`shared/ui_logic/src/panel/projection.rs`）。取值来源有两个具体实现：`BuiltInTerminalSource`（内置终端标签页）和 `FixturePanelUiCapabilitySource`（测试夹具）。内置终端的标签页 id 在 `panel-tab-spike` 构建下是 `terminal-pilot`，否则是 `terminal`；社区夹具快照 `community_fixture_snapshot()` 只在 `panel-tab-spike` 下存在。
 
 ### 连接作用域的发现
 
-快照不是一次性拉取的，而是绑定在连接上、按 epoch 与请求代次做栅栏。状态机在 `interfaces/webchat/src/panel/discovery.rs`（文件头注释：「Connection-scoped discovery state for the canonical Panel capability snapshot.」）：
+快照不是一次性拉取的，而是绑定在连接上、按 epoch 与请求代次做栅栏。状态机在 `shared/ui_logic/src/panel/discovery.rs`（文件头注释：「Connection-scoped discovery state for the canonical Panel capability snapshot.」）：
 
 - `PanelDiscoveryStatus`：`Disconnected`、`Loading`、`Ready`、`Error{message}`。
 - `SnapshotUpdate`：`Accepted`、`StaleEpoch`、`StaleRequest`、`StaleRevision`——三种「过期」分别是连接 epoch 变了、请求代次被超越、快照修订号不新。
@@ -124,14 +124,14 @@ pub trait PanelUiCapabilitySource {
 - 资源完整性必须可校验：`valid_asset_integrity` 要求 `sha256-` 前缀加 32 字节的 base64 摘要。
 - 权限必须在白名单内：`supported_community_permission` 只放行有限的权限名（例如 `pty.list`、`pty.spawn`、`pty.attach`、`pty.input`、`pty.resize`、`pty.close`、`config.get`、`sessions.list`，以及带具体 topic 的 `events.subscribe`），不接受通配。
 
-注册层（`interfaces/webchat/src/panel/registry.rs`）：
+注册层（`shared/ui_logic/src/panel/registry.rs`）：
 
 - `validate_descriptor` 要求 `plugin_id`、`tab_id`、`label`、`entry` 都不为空，且 `plugin_id`、`tab_id` 不含 `:`（qualified 键用冒号分隔）；`api_major` 必须等于 `PANEL_UI_API_MAJOR`。
 - 失败返回 `RegistryError`：`BuiltInShadowed`、`DuplicateKey`、`InvalidEntry`。
 
 ### 内置命名空间
 
-内置命名空间常量是 `BUILTIN_NAMESPACE = "aleph"`（`interfaces/webchat/src/panel/registry.rs`）：
+内置命名空间常量是 `BUILTIN_NAMESPACE = "aleph"`（`shared/ui_logic/src/panel/registry.rs`）：
 
 - `insert_builtin` 是宿主初始化内置条目的唯一入口，只接受 `aleph` 命名空间。
 - `insert_or_replace` 用于插件条目；如果插件试图占用 `aleph` 命名空间，返回 `RegistryError::BuiltInShadowed` 而不是覆盖内置条目。

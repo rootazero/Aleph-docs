@@ -38,8 +38,8 @@ PanelShell            interfaces/webchat/src/panel/shell.rs
 ```
 
 - `PanelShell` has the signature `pub fn PanelShell(projection: PanelProjection, initial_tab: Option<PanelTabKey>) -> impl IntoView` (`interfaces/webchat/src/panel/shell.rs`). It builds `PanelLoader::new(projection.registry())` itself, then calls `provide_context(host.clone())` to put the host state into the Leptos context — the SDK on the plugin-module side obtains its own tab descriptor through exactly that context.
-- `PanelProjection` holds nothing but a `registry: TabRegistry` (`interfaces/webchat/src/panel/projection.rs`); it performs no loading and touches no DOM.
-- The header comment of `TabRegistry` says it plainly: "Pure tab membership and enabled mount projections; no loading or UI effects." (`interfaces/webchat/src/panel/registry.rs`)
+- `PanelProjection` holds nothing but a `registry: TabRegistry` (`shared/ui_logic/src/panel/projection.rs`); it performs no loading and touches no DOM.
+- The header comment of `TabRegistry` says it plainly: "Pure tab membership and enabled mount projections; no loading or UI effects." (`shared/ui_logic/src/panel/registry.rs`)
 - While rendering, `PanelShell` takes its navigation buttons from `registry.rows()`, hands the plugin mount points to the `data-panel-sidebar-root` and `data-panel-content-root` divs, takes the failure state from `PanelLoadStatus`, and renders a retry button (`interfaces/webchat/src/panel/shell.rs`).
 
 Data flows in one direction:
@@ -59,9 +59,9 @@ The job of `PanelProjection` is to turn "protocol-level declarations" into "tabs
 - `builtins(label)` builds a projection with builtin entries only; `from_snapshot` and `replace_snapshot` build one from a capability snapshot.
 - `replace_snapshot` rejects a snapshot whose revision is not greater than the current one, returning `PanelProjectionError::StaleSnapshot` — an old snapshot must not overwrite a newer one.
 - `select_route` projects the current route into a `PanelRoute`: `Legacy` (the regular Panel), `Modular(PanelTabKey)` (some plugin tab), or `Unavailable` (no mountable target).
-- `PanelProjectionError` covers the rejection reasons for descriptors, origin, trust, permissions, integrity, entry paths, versions and revisions, and offers `reason_code()` for a stable reason code (`interfaces/webchat/src/panel/projection.rs`).
+- `PanelProjectionError` covers the rejection reasons for descriptors, origin, trust, permissions, integrity, entry paths, versions and revisions, and offers `reason_code()` for a stable reason code (`shared/ui_logic/src/panel/projection.rs`).
 
-The three projection methods on the registry side (`interfaces/webchat/src/panel/registry.rs`):
+The three projection methods on the registry side (`shared/ui_logic/src/panel/registry.rs`):
 
 | Method | Meaning |
 |---|---|
@@ -83,7 +83,7 @@ pub trait PanelUiCapabilitySource {
 }
 ```
 
-(`interfaces/webchat/src/panel/source.rs`; the header comment reads "Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.")
+(`shared/ui_logic/src/panel/source.rs`; the header comment reads "Immutable Panel UI capability snapshots; no plugin lifecycle or asset loading.")
 
 The protocol layer also defines the composition of a snapshot:
 
@@ -97,11 +97,11 @@ The protocol layer also defines the composition of a snapshot:
 | `PanelTabStatus` | Tab status: `Enabled`, `Disabled`, `Incompatible`, `Failed` |
 | `PANEL_UI_API_MAJOR` | Major version of the plugin UI API, currently `1` |
 
-Snapshots have no write path: a source implementation only produces them, and the projection layer only reads and validates them (`interfaces/webchat/src/panel/source.rs`, `interfaces/webchat/src/panel/projection.rs`). Two concrete sources exist: `BuiltInTerminalSource` (the builtin terminal tab) and `FixturePanelUiCapabilitySource` (a test fixture). The builtin terminal's tab id is `terminal-pilot` in a `panel-tab-spike` build and `terminal` otherwise; the community fixture snapshot `community_fixture_snapshot()` exists only under `panel-tab-spike`.
+Snapshots have no write path: a source implementation only produces them, and the projection layer only reads and validates them (`shared/ui_logic/src/panel/source.rs`, `shared/ui_logic/src/panel/projection.rs`). Two concrete sources exist: `BuiltInTerminalSource` (the builtin terminal tab) and `FixturePanelUiCapabilitySource` (a test fixture). The builtin terminal's tab id is `terminal-pilot` in a `panel-tab-spike` build and `terminal` otherwise; the community fixture snapshot `community_fixture_snapshot()` exists only under `panel-tab-spike`.
 
 ### Connection-scoped discovery
 
-Snapshots are not fetched once. They are bound to the connection and fenced by epoch and request generation. The state machine lives in `interfaces/webchat/src/panel/discovery.rs` (header comment: "Connection-scoped discovery state for the canonical Panel capability snapshot."):
+Snapshots are not fetched once. They are bound to the connection and fenced by epoch and request generation. The state machine lives in `shared/ui_logic/src/panel/discovery.rs` (header comment: "Connection-scoped discovery state for the canonical Panel capability snapshot."):
 
 - `PanelDiscoveryStatus`: `Disconnected`, `Loading`, `Ready`, `Error{message}`.
 - `SnapshotUpdate`: `Accepted`, `StaleEpoch`, `StaleRequest`, `StaleRevision` — the three kinds of "stale" being a changed connection epoch, a superseded request generation, and a snapshot revision that is not newer.
@@ -124,14 +124,14 @@ Protocol layer (`shared/protocol/src/panel.rs`):
 - Asset integrity must be verifiable: `valid_asset_integrity` requires a `sha256-` prefix followed by a 32-byte base64 digest.
 - Permissions must be on the allowlist: `supported_community_permission` only admits a limited set of permission names (for example `pty.list`, `pty.spawn`, `pty.attach`, `pty.input`, `pty.resize`, `pty.close`, `config.get`, `sessions.list`, plus `events.subscribe` with a concrete topic); wildcards are not accepted.
 
-Registry layer (`interfaces/webchat/src/panel/registry.rs`):
+Registry layer (`shared/ui_logic/src/panel/registry.rs`):
 
 - `validate_descriptor` requires `plugin_id`, `tab_id`, `label` and `entry` to be non-empty, and requires `plugin_id` and `tab_id` to contain no `:` (the qualified key uses a colon separator); `api_major` must equal `PANEL_UI_API_MAJOR`.
 - Failures return a `RegistryError`: `BuiltInShadowed`, `DuplicateKey`, `InvalidEntry`.
 
 ### The builtin namespace
 
-The builtin namespace constant is `BUILTIN_NAMESPACE = "aleph"` (`interfaces/webchat/src/panel/registry.rs`):
+The builtin namespace constant is `BUILTIN_NAMESPACE = "aleph"` (`shared/ui_logic/src/panel/registry.rs`):
 
 - `insert_builtin` is the only entry point for the host to initialise builtin entries, and it accepts only the `aleph` namespace.
 - `insert_or_replace` is used for plugin entries; if a plugin tries to take the `aleph` namespace, it gets `RegistryError::BuiltInShadowed` instead of overwriting the builtin entry.

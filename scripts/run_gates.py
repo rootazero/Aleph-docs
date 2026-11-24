@@ -4,6 +4,9 @@
 Gates:
   G1 anchor   — every source path the docs cite exists in the Aleph repo
   G1b method  — every dotted method/topic the docs cite exists in the code
+  G1c symbol  — every backticked code symbol the docs cite exists in the code,
+                every `aleph-*` crate name is real, every `just <target>` recipe
+                exists
   G2 facts    — no stale assertions, required semantics present
   G3 structure— navigation covers every page, no dead internal links
   G4 bilingual— zh and en have the same page set and heading skeleton
@@ -57,6 +60,7 @@ def main() -> int:
     checks = [
         ("G1 锚点门", [sys.executable, str(SCRIPTS / "anchor_check.py"), *common, *update]),
         ("G1b 方法册", [sys.executable, str(SCRIPTS / "method_audit.py"), *common, *update]),
+        ("G1c 符号门", [sys.executable, str(SCRIPTS / "symbol_check.py"), *common, *update]),
         ("G2 事实门", [sys.executable, str(SCRIPTS / "freshness_audit.py"), "--check", "facts", "--docs", args.docs, *update]),
         ("G3 结构门", [sys.executable, str(SCRIPTS / "freshness_audit.py"), "--check", "structure", "--docs", args.docs, *update]),
         ("G4 双语门", [sys.executable, str(SCRIPTS / "freshness_audit.py"), "--check", "bilingual", "--docs", args.docs, *update]),
@@ -64,7 +68,7 @@ def main() -> int:
     if args.build:
         checks.append(("G5 构建门", ["bash", "-lc", "pnpm exec next build && pnpm exec tsc --noEmit && pnpm exec eslint"]))
 
-    print("== Aleph 文档门 ==")
+    print("== Aleph 文档六道门 ==")
     failed = 0
     for label, cmd in checks:
         name, state, code = summarize(label, cmd)
