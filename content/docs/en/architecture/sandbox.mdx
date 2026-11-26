@@ -322,6 +322,30 @@ The resulting `Arc<dyn Sandbox>` is threaded through tool registration into ever
 
 ---
 
+## Planned: shell capability rework
+
+> **Status: planned** — the blueprint is `docs/superpowers/specs/2026-11-26-shell-capability-rework-design.md`;
+> the implementation and its evidence live in the unmerged branch
+> `shell-capability-rework` (`854505aa6`), with the receipt at
+> `docs/superpowers/runs/2026-11-26-shell-capability-rework-verification.md`.
+> None of those paths are on `main`; everything else on this page describes
+> the current state of `main`.
+
+The plan has two stages. Stage one repairs the existing path: a supervised
+job lifecycle — the state reflects what the process actually did, output can be
+resumed by cursor, inherited pipes are drained after the command ends, and
+child processes are reaped (a new `src/sandbox/shell_lifecycle.rs` plus changes
+to the drivers and workspace layer under `src/sandbox/`). Stage two is where
+controlled stdin / EOF arrives, and only drivers that have been proven may
+advertise it.
+
+The evidence boundary is worth stating plainly: the receipt covers measured
+Linux behaviour only — macOS and Windows are unverified; a design review is not
+an implementation approval; no independent final review has been started. None
+of these branches has been merged into `main`.
+
+---
+
 ## Related Pages
 
 - [Tool Architecture](./tools) — How exec-class tools consume the sandbox

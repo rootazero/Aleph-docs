@@ -66,6 +66,29 @@ trait，使用静态分发以获得最大性能，并由 executor 的 builtin �
 
 ---
 
+## 规划中：受控 stdin / EOF
+
+> **状态：规划中** — 通用 stdin 续写方案是 **no-go**，证据见
+> `docs/superpowers/runs/2026-11-26-shell-capability-stdin-verification.md`，
+> 这个结论不被撤回。替代方案「受控实时 JSONL」目前只是设计稿
+> （`docs/superpowers/specs/2026-11-26-shell-capability-jsonl-design.md`，待批准），
+> 代码在未合并的分支 `shell-capability-stdin`（`523bfe4d0`）上。
+
+现状：`bash` 不接受交互式 stdin，`process_action` 只有 `poll`、`wait`、`kill`、
+`list` 四个动作，没有写入或关闭输入的入口。
+
+规划中的受控 JSONL 形态：显式 `stdin_profile: "jsonl_inspect"` 启动一个受监督的
+`bash` 作业，必须同时给 `background: true` 或 `yield_ms`，不接受调用方自选程序、
+参数、环境或启动 stdin；`process_action: "write_stdin"` 每次只接受一条 JSON 记录
+（序列化后连换行不超过 4096 字节，整条输入流不超过 16 KiB，超限拒绝而不是截断），
+`close_stdin` 关闭写端；读侧用 `process_action: "read"` 按游标取结果。首发只启动
+受信任的宿主 jq，输出只有根类型与容器长度，不回显值。每次写入都要一次新的
+人工批准，不接受长期授权。
+
+这些都还没有实现；`main` 上的行为就是上面「后台作业」一节写的那样。
+
+---
+
 ## 文件操作
 
 | 工具 | 描述 |

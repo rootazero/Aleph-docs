@@ -81,6 +81,37 @@ Notes:
 
 ---
 
+## Planned: controlled stdin / EOF
+
+> **Status: planned** — the generic stdin continuation design is a **no-go**;
+> the evidence is in
+> `docs/superpowers/runs/2026-11-26-shell-capability-stdin-verification.md`
+> and that finding is not withdrawn. The replacement — controlled live JSONL —
+> is a design draft only
+> (`docs/superpowers/specs/2026-11-26-shell-capability-jsonl-design.md`,
+> pending approval), on the unmerged branch `shell-capability-stdin`
+> (`523bfe4d0`).
+
+Today: `bash` does not take interactive stdin, and `process_action` has exactly
+four actions — `poll`, `wait`, `kill` and `list`. There is no way to write to a
+job's input or to close it.
+
+The planned controlled JSONL shape: an explicit `stdin_profile: "jsonl_inspect"`
+starts a supervised `bash` job and must be paired with `background: true` or
+`yield_ms`; the caller cannot pick the program, arguments, environment or an
+initial stdin payload. `process_action: "write_stdin"` accepts exactly one JSON
+record per call (at most 4096 bytes including the newline once serialized, at
+most 16 KiB for the whole stream — excess is rejected, never truncated), and
+`close_stdin` closes the write side; the read side takes results by cursor
+through `process_action: "read"`. The first release starts only a trusted
+system jq, and the output carries the root kind and a container length, never
+the value. Every write needs a fresh human approval — no standing grant.
+
+None of this is implemented yet; on `main` the behaviour is what the "Background
+jobs" section above describes.
+
+---
+
 ## File operations
 
 | Tool | Description |

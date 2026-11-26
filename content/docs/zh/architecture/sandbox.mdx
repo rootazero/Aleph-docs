@@ -318,6 +318,23 @@ pub fn build_sandbox(
 
 ---
 
+## 规划中：shell 能力重构
+
+> **状态：规划中** — 蓝图为 `docs/superpowers/specs/2026-11-26-shell-capability-rework-design.md`；
+> 实现与证据在未合并的分支 `shell-capability-rework`（`854505aa6`），
+> 回执 `docs/superpowers/runs/2026-11-26-shell-capability-rework-verification.md`。
+> 这些路径不在 `main` 上，本节其余描述的仍是 `main` 的现状。
+
+规划分两阶段。第一阶段先修现有链路：受监督的作业生命周期 —— 状态如实反映
+进程事实、输出可以按游标续读、命令结束后的继承管道被排空、子进程被回收
+（新增 `src/sandbox/shell_lifecycle.rs`，并改动 `src/sandbox/` 下的驱动与工作空间层）。
+第二阶段才接受控 stdin / EOF，而且只有经过实证的驱动才声明支持。
+
+证据边界照实说：回执里只有 Linux 的实测结果，macOS 与 Windows 未验证；
+设计评审不等于实现批准，独立终审没有启动。这些分支也没有合并进 `main`。
+
+---
+
 ## 相关页面
 
 - [工具架构](./tools) —— exec 类工具如何使用沙箱
