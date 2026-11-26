@@ -24,7 +24,7 @@ pub trait CapabilityBackend: Send + Sync {
 }
 ```
 
-In the same file, `TOOL_NAMESPACE` is the namespace of Tool capabilities (`aleph/tools`), and `LegacyCapabilityHandler` is the callable boundary for non-Tool capabilities (a trait): `invoke(input: Value) -> Result<Value, LegacyCapabilityDispatchError>`, whose error type has exactly three variants — `InvalidInput`, `Execution`, `NotFound` — each carrying a message.
+In the same file, `TOOL_NAMESPACE` is the namespace of Tool capabilities (`aleph/tools`), `CapabilityBackend` is the storage/query contract every capability registry implements (`lookup` resolves one capability by id, `enumerate` lists a scope), and `ToolBackendAdapter` adapts the tool registry into a capability backend. The callable boundary for non-Tool capabilities used to be `LegacyCapabilityHandler`; that trait and its `LegacyCapabilityDispatchError` were removed by the 2026-11-25 capability convergence. Special capabilities are now held by `CapabilityHandlerRegistry` in `src/capability/special.rs`.
 
 Where a backend **comes from** is recorded as four-way evidence in `BackendSourceEvidence` in `src/capability/facade.rs`: `Tool` (canonical entry lease + provider generation), `Provider` (provider id + generation), `MemoryResource` (`Weak<MemoryRuntime>`), `Special` (captured special entry + generation). The backend adapters that actually exist today are:
 
@@ -93,9 +93,9 @@ This axis **does not exist** today. `GrantScope` and `AuthorizationResult` in `c
 
 `crates/aleph-slot-api/src/approval.rs` defines shared operation approval types, not a plugin trust policy or plugin grant ledger. `GrantScope::Session` lasts for the remainder of a conversation in this process; `Always` survives restarts until revoked. `AuthorizationResult` has `Authorized`, `Denied`, and `NotAuthenticated` outcomes for authorization checks on approval actions. Sandbox execution approval uses its own `GrantStore` (`src/sandbox/exec_approval/grants.rs`), not the cross-session registry below.
 
-### Cross-session capability delegation (unmounted)
+## History: cross-session capability delegation (unmounted)
 
-`src/capability/grant.rs` implements `GrantRegistry`: one session delegates a capability to another, and the grantee’s transitive reference cannot exceed the grantor’s authority. Delegation chains have length checks and cycle detection, revocation cascades downstream, and grants support migration across session epochs. These are module semantics, not production behavior: the header records the 2026-11-20 severed-wire audit’s **NOT MOUNTED IN PRODUCTION** finding and states that there is no production consumer. `scripts/capability_wiring_audit.py` pins this unmounted surface so new unwired entry points cannot grow silently. It is not interchangeable with load trust, planned plugin grants, or operation approval.
+The 2026-11-25 capability convergence removed `src/capability/grant.rs`. It used to implement `GrantRegistry`: one session delegates a capability to another, and the grantee’s transitive reference cannot exceed the grantor’s authority. Delegation chains have length checks and cycle detection, revocation cascades downstream, and grants support migration across session epochs. These were module semantics, not production behavior: the header recorded the 2026-11-20 severed-wire audit’s **NOT MOUNTED IN PRODUCTION** finding and stated that there was no production consumer. `scripts/capability_wiring_audit.py` still pins those entry points as unmounted, but the module is no longer in the source tree. There is no cross-session capability delegation today; sandbox execution approval uses its own `GrantStore` (`src/sandbox/exec_approval/grants.rs`), and it is not interchangeable with load trust, planned plugin grants, or operation approval. To recover the old implementation, read git history: `git log --diff-filter=D -- src/capability/grant.rs`.
 
 ## Plugin runtimes and their constraints
 

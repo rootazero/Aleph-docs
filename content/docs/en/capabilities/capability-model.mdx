@@ -5,11 +5,11 @@ description: "Reference for runtime capability descriptors, ownership, visibilit
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-This page answers one question: what makes up a runtime "capability" in Aleph, how it is authorized and revoked, and how a consumer avoids ending up with a stale handler. The code lives in `src/capability/` (39 files) and the contract crate `crates/aleph-slot-api/`.
+This page answers one question: what makes up a runtime "capability" in Aleph, how it is authorized and revoked, and how a consumer avoids ending up with a stale handler. The code lives in `src/capability/` (33 files) and the contract crate `crates/aleph-slot-api/`.
 
 <Callout type="warn" title="Read this first">
-  Several modules in `src/capability/` are **written and tested but not mounted on a production path** (see "Mount status" below).
-  This page distinguishes production paths from defined but unmounted contracts and from plans in the blueprints.
+  The 2026-11-25 **capability convergence** removed several modules from `src/capability/` that were "written and tested but not mounted on a production path": the old ambient / audit / grant modules, plus the capability's own lifecycle and activation state machines. A capability's "alive or dead" state is now carried by the provider lifecycle (see "Provider lifecycle and generations").
+  This page describes the state after the convergence and distinguishes production paths from defined but unmounted contracts and from plans in the blueprints.
 </Callout>
 
 ## What a capability is
@@ -64,7 +64,7 @@ pub enum CapabilityKind { Tool, Ambient, Terminal, Ui, Skill, Agent, Task, Resou
 
 (The source puts one variant per line; it is folded here for layout.) `CapabilityKind::UI` is a compatibility spelling of `Ui`.
 
-Tool and special-capability backends provide executable adapters, but the enum alone does not tell you whether a backend is mounted (`src/capability/descriptor.rs`). Ambient, for example, defines a handler that the source marks as unregistered in production (`src/capability/ambient.rs`).
+Tool and special-capability backends provide executable adapters, but the enum alone does not tell you whether a backend is mounted (`src/capability/descriptor.rs`). `Ambient` is still in the enum, but the module it used to live in, `src/capability/ambient.rs`, was removed by the 2026-11-25 capability convergence: that module declared itself unmounted, and exposing process identity and environment variables is a security decision, so there is no replacement today.
 
 `CapabilityFacet` is a behavior axis orthogonal to kind, with 5 variants: `Callable`, `EventSource`, `Subscription`, `ProviderLifecycle`, `ExternalEffect`. One provider can expose both an event source and callable operations without pretending the whole provider is a `Tool`.
 
@@ -144,28 +144,66 @@ pub enum OwnershipChange {
 
 (Multi-line in the source; condensed here.) It is emitted under `OwnershipTree`'s own mutex, in the same critical section that mutates state, and is the **only** observer-visible side effect of the tree's mutation methods. Observers subscribe through `OwnershipTree::subscribe_changes`; the stream does **not** route through any global bus, session event store, or approval authority. Subscribing is pure observation: it changes no state, does not advance the nonce, and registers no binding. A receiver that falls behind gets a lagged count and should reconcile against a fresh snapshot.
 
-### Lifecycle state machine and leases
+### Provider lifecycle and generations
 
-`LifecycleState` (`src/capability/lifecycle.rs`) has five states: created but not yet attached to an owner (`Created`), attached and eligible for activation (`Attached`), invocable and subscribable (`Active`), detaching (`Detaching`), and revoked (`Revoked`). `is_invocable` is true only in `Active`. The valid transitions include revocation before activation:
+A capability’s "alive or dead" state is carried by the **provider lifecycle**. `ProviderLifecycle` in `src/capability/provider.rs` is a pure state machine, and `ProviderTransport` has only two variants, `InProcess` and `Bridge`, naming the runtime boundary of a provider implementation.
+
+| State | Meaning |
+|---|---|
+| `Discovered` | Discovered, but no admitted declaration yet |
+| `Cold` | Declaration admitted; no runtime effects and no executable lease |
+| `Disabled` | Explicitly disabled |
+| `Starting` | Starting up |
+| `Ready` | Ready to be called |
+| `Stopping` | Stopping; no new calls are admitted |
+| `Stopped` | Stopped |
+| `Failed` | Startup or runtime failure |
+
+`ProviderLifecycle::transition` accepts only the transitions below and returns `ProviderLifecycleError::InvalidTransition { provider_id, from, to }` for anything else:
 
 ```text
-Created → Attached → Active → Detaching → Revoked
-Created  ───────────────────────────────→ Revoked
-Attached ───────────────────────────────→ Revoked
-Active   ───────────────────────────────→ Revoked
+Discovered → Cold | Disabled | Starting
+Disabled   → Cold | Starting
+Cold       → Disabled | Starting
+Starting   → Ready | Failed | Stopping
+Ready      → Stopping | Failed
+Stopping   → Stopped | Failed
+Stopped    → Starting | Disabled
+Failed     → Starting | Stopped | Disabled
 ```
 
-A lifecycle `Lease` starts at `issued_at`. With a TTL, `is_expired` becomes true when elapsed time reaches the TTL; without one, time does not expire the lease. `time_remaining` returns `None` if there is no TTL or elapsed time exceeds it. `renew` resets the issue time and TTL but keeps the `OwnerGeneration` (`src/capability/lifecycle.rs`). This lease is distinct from the facade’s `BackendLease` (`src/capability/facade.rs`).
+**Every entry into `Starting` increments the generation**, and an exhausted generation returns `ProviderLifecycleError::GenerationExhausted`. That is the mechanism behind "a restart invalidates old leases": leases from an older generation are invalid while the provider restarts, and they stay invalid after the replacement reaches `Ready`.
 
-`CapabilityLifecycle::transition_to` rejects transitions not shown above with `LifecycleError::InvalidTransition { from, to }`. Calling `revoke` again on a revoked capability returns the same error. `validate_activation` requires `Attached`, while `validate_lease` requires `Active`; both check the TTL and current owner generation. `renew_lease` accepts only `Active` and otherwise returns `NotInvocable` with the current state (`src/capability/lifecycle.rs`).
+Every accepted transition produces one `ProviderTransition { provider_id, transport, from, to, generation }`, broadcast as a `broadcast::Receiver<ProviderTransition>` through `ProviderHandle::subscribe_changes`.
 
-### Activation gate
+`ProviderHandle` is the thread-safe control handle (an `Arc<Mutex<ProviderLifecycle>>` plus a `broadcast::Sender` inside): `snapshot` returns `(ProviderState, u64)`; `acquire_call(expected_generation)` returns `ProviderCallError { provider_id, state, expected_generation, actual_generation }` when the generation does not match or the state is not `Ready`; `with_ready_commit`, `with_call_admission`, and `with_admitted_completion` are crate-internal staged-commit primitives (`src/capability/provider.rs`).
 
-For `CapabilityActivationController`, `Attached → Active` is the only transition guarded by constraints. Attaching is still registration, and runtime constraints do not block revocation. Activation checks the lease against the current owner generation; before an active capability is used, `validate_runtime` rechecks the lease and current constraints (`src/capability/activation.rs`).
+<Callout type="warn" title="The old capability lifecycle state machine was removed">
+  The 2026-11-25 capability convergence removed `src/capability/lifecycle.rs` (`LifecycleState`, the lifecycle `Lease`, `transition_to`) and `src/capability/activation.rs` (`CapabilityActivationController`). Runtime policy used those two files for exactly two things — comparing generations and noticing revocation — and both now live in the constraint attachment described below and in the provider lifecycle. To recover the old implementation, read the git history: `git log --diff-filter=D -- src/capability/lifecycle.rs`.
+</Callout>
 
-Production dispatch calls `admit_runtime` (`src/tools/scoped/dispatch.rs`). For constrained bindings, shared policy checks the current rules, activates the controller if it is still `Attached`, and revalidates the lifecycle. Production policy keeps constraint evaluation in the policy layer and gives the controller a lifecycle lease without a TTL (`src/capability/policy_runtime.rs`). Scoped tools also support optional compatibility controllers keyed by tool name and held as `Arc<dyn CapabilityActivation>` (`src/tools/scoped/mod.rs`, `src/tools/scoped/builder.rs`). Dispatch checks any registered controller, but the shared policy, not this map, manages production rules (`src/tools/scoped/dispatch.rs`, `src/capability/policy_runtime.rs`).
+### Runtime admission: the constraint attachment
 
-The two `ActivationError` types are distinct. The type in `src/capability/activation.rs` reports lifecycle, constraint, or hook errors. The one in `src/capability/provider_registry.rs` is for provider activation and has the variants `Rejected`, `Failed`, `Unknown`, and `NotVisible`.
+The production path has no "activation gate" step; constraint checking lands directly on **admission**. `PolicyEngine::admit_runtime` in `src/capability/policy_runtime.rs` checks in this order:
+
+1. Does the id have a rule in the runtime rule table? If not, the call is admitted immediately and no attachment is consumed.
+2. Does an attachment exist and match the id? Otherwise `PolicyDenial::AttachmentUnavailable { id }`.
+3. Does the attachment’s recorded binding match the lease (id, revision, generation, owner, visibility)? Otherwise `AttachmentUnavailable`.
+4. Is the fact-source snapshot readable? Otherwise `PolicyDenial::ConstraintDenied { reason: "facts_unavailable" }`.
+5. Is the fact source’s key unchanged? Otherwise `AttachmentUnavailable`.
+6. Recheck the lease captured at admission time (`validate_captured_lease`).
+7. Is the attachment still in the attachment table (compared with `Arc::ptr_eq`)? Otherwise `AttachmentUnavailable`.
+8. Evaluate the constraints: `ResourceUse::Allocate` runs the full evaluation, while `Existing` and `Release` run the non-allocating evaluation. A failure is `PolicyDenial::ConstraintDenied { reason: "runtime_constraints" }`.
+
+Revocation is **not** a second flag: it is "removed from the attachment table". `admit` is reachable only for a state that is still listed, and listing and removal share one lock, so a removed state never admits again (`src/capability/policy_runtime.rs`).
+
+A successful admission returns a `RunningCapabilityCall` guard. It must be held until the real operation finishes — asynchronous cancellation included — before the resource counter is released (`src/capability/policy_runtime.rs`).
+
+When a dependency is unavailable, tool dispatch turns `ResolveError::DependencyUnavailable` into a model-visible `ToolError::Execution` during resolution, with text like "`memory.runtime` is currently unavailable (state Stopped); retry later or ask the user to enable it". The tool itself stays in the tool list, so the model can see why the call failed and retry (`src/tools/scoped/dispatch.rs`).
+
+<Callout type="warn" title="The compatibility activation entry point was removed">
+  The scoped-tool layer used to accept an optional compatibility controller per tool name, held as `Arc<dyn CapabilityActivation>`, and production deliberately never installed one. The 2026-11-25 capability convergence removed that entry point together with `src/capability/activation.rs` (`src/tools/scoped/builder.rs`, `src/tools/scoped/dispatch.rs`). The `ActivationError` of the same name in `src/capability/provider_registry.rs` belongs to provider activation and has the variants `Rejected`, `Failed`, `Unknown`, and `NotVisible`; it has nothing to do with the capability lifecycle.
+</Callout>
 
 ## Visibility
 
@@ -305,6 +343,9 @@ There is one rule, and it cannot be broken: **a consumer must treat a lease as i
 | `Revoked` | The binding has been revoked |
 | `StaleOwner` | The lease's ownership binding or `owner_generation` differs from the current record (validate only) |
 | `StaleProvider` | The provider instance was stopped or replaced after the lease was minted |
+| `DependencyUnavailable { target, state }` | A dependency's provider is visible but not ready (`Cold` / `Starting` / `Stopping` / `Stopped` / `Failed` / `Disabled`). The capability stays listed, and the call is refused with the dependency's current state |
+
+An unavailable dependency (`DependencyUnavailable`) travels on to tool dispatch, where it becomes model-visible `ToolError::Execution` text (see "Runtime admission: the constraint attachment"). The event label given in `src/capability/zahir_facade.rs` is `dependency_unavailable`.
 
 `StaleOwner` is never a resolve-time error: a freshly minted lease carries the generation read at resolve time, so it cannot be stale at construction.
 
@@ -325,13 +366,13 @@ The stream in `src/capability/events.rs` records bounded, instance-scoped observ
 
 A record commits to memory first, broadcasts next, and then runs the optional persistence hook. Persistence failures are reported after commit, so retrying produces duplicate observations. Hooks run outside the buffer lock and can finish out of order; sinks that need to reconstruct the order must sort by record sequence (`src/capability/events.rs`).
 
-`CapabilityEventType` serializes in `snake_case`. Its variants are `Created`, `Attached`, `Activated`, `Detaching`, `Invoked`, `Revoked`, `ConstraintViolation`, `PolicyViolation`, and `ExecutionFailed`. The enum describes what the stream can represent, not which variants have production emitters (`src/capability/events.rs`).
+`CapabilityEventType` serializes in `snake_case`. Its variants are `Created`, `Activated`, `Invoked`, `Revoked`, `ConstraintViolation`, `PolicyViolation`, and `ExecutionFailed`. The enum describes what the stream can represent, not which variants have production emitters (`src/capability/events.rs`).
 
 ### Trusted audiences and production wiring
 
 `EventAudience` distinguishes `OperatorOnly` from `Principal(PrincipalEventAudience)`. The latter records a `user_id`, and optional `session_key`, `workspace`, and `source_incarnation` fields. Trusted producers capture the audience at their boundary; clients cannot establish that authority through deserialization (`src/capability/event_audience.rs`). The gateway checks visibility for the connection before forwarding each record (`src/gateway/capability_events.rs`, `src/gateway/server/connection/mod.rs`).
 
-Server startup builds and mounts the stream (`src/bin/aleph-server/commands/start/capability_init.rs`, `src/bin/aleph-server/commands/start/mod.rs`). Source evidence and observations come through the PTY manager’s `SourceObservationReceipt` (`src/gateway/pty/manager.rs`), the tool registry (`src/tools/registry.rs`), and dispatch’s `InvocationObservation` (`src/tools/scoped/dispatch.rs`). This is not a reader for `src/capability/audit.rs`, whose header records the 2026-11-20 severed-wire audit finding that it had no production readers.
+Server startup builds and mounts the stream (`src/bin/aleph-server/commands/start/capability_init.rs`, `src/bin/aleph-server/commands/start/mod.rs`). Source evidence and observations come through the PTY manager’s `SourceObservationReceipt` (`src/gateway/pty/manager.rs`), the tool registry (`src/tools/registry.rs`), and dispatch’s `InvocationObservation` (`src/tools/scoped/dispatch.rs`). The capability-side collector in `src/capability/audit.rs` had no production readers and was removed by the 2026-11-25 capability convergence; production auditing goes through `SecurityAuditLog`, and the live path is `src/gateway/capability_events.rs`.
 
 ## Zahir
 
@@ -360,14 +401,14 @@ The test-only census derives its inventory from installations in the file that d
 
 ## Mount status
 
-This table distinguishes production wiring, test-only logic, and retained contracts that are not mounted. Dated entries cite findings from the 2026-11-20 severed-wire audit (`review-results/sev-wire-2026-11-20/`).
+This table distinguishes production wiring, test-only logic, and retained contracts that are not mounted. Dated entries cite findings from the 2026-11-20 severed-wire audit (`review-results/sev-wire-2026-11-20/`); rows marked "removed" are modules the 2026-11-25 capability convergence took out of the source tree, whose earlier implementation is in git.
 
 | Module | Status | Basis |
 |---|---|---|
 | `src/capability/zahir_facade.rs` | Mounted: Tool / provider / special / memory resolution | `src/capability/projection_host.rs`, `src/bin/aleph-server/commands/start/mod.rs` |
 | `src/capability/production_init.rs` | Mounted: startup constraints | `src/bin/aleph-server/commands/start/capability_init.rs` |
-| `src/capability/lifecycle.rs` | Wired for constrained bindings in runtime policy | `src/capability/activation.rs`, `src/capability/policy_runtime.rs` |
-| `src/capability/activation.rs` | Shared policy uses the controller; the scoped-tool layer has optional trait-based checks | `src/capability/policy_runtime.rs`, `src/tools/scoped/builder.rs`, `src/tools/scoped/dispatch.rs` |
+| `src/capability/provider.rs` | Mounted: provider lifecycle and generations | `src/capability/provider_registry.rs`, `src/capability/zahir_facade.rs` |
+| `src/capability/provider_registry.rs` | Mounted: provider registration and activation | `src/capability/provider_backend.rs`, `src/capability/zahir_facade.rs` |
 | `src/capability/policy_runtime.rs` | Mounted: live admission | `src/tools/scoped/dispatch.rs`, `src/gateway/capability_ui.rs` |
 | `src/capability/events.rs` | Mounted: capability observations | `src/bin/aleph-server/commands/start/capability_init.rs`, `src/gateway/capability_events.rs` |
 | `src/capability/event_audience.rs` | Wired: trusted audiences and connection filtering | `src/gateway/pty/manager.rs`, `src/gateway/capability_events.rs` |
@@ -376,9 +417,11 @@ This table distinguishes production wiring, test-only logic, and retained contra
 | `src/capability/census.rs` | Test-only: derived handle inventory | `src/capability/mod.rs`, `src/capability/census.rs` |
 | `src/capability/ui.rs`, `src/capability/ui_surface.rs` | Mounted: `aleph/ui` | `src/gateway/capability_ui.rs` and both module headers |
 | `PolicyEngine::resolve` | The 2026-11-20 audit recorded it as unmounted | Header of `src/capability/policy.rs` |
-| `src/capability/ambient.rs` | The 2026-11-20 audit recorded no production registration; intentionally deferred | Header: exposing process identity, user identity, and environment variables is a security decision |
-| `src/capability/audit.rs` | The 2026-11-20 audit recorded no production reader | Header; the live path is `src/gateway/capability_events.rs` |
-| `src/capability/grant.rs` | The 2026-11-20 audit recorded `GrantRegistry` as unmounted | Header; `scripts/capability_wiring_audit.py` checks wiring, and sandbox approval uses `GrantStore` in `src/sandbox/exec_approval/grants.rs` |
+| `src/capability/ambient.rs` | Removed by the 2026-11-25 convergence | Declared itself unmounted; exposing process identity, user identity, and environment variables is a security decision, so removal leaves no implementation |
+| `src/capability/audit.rs` | Removed by the 2026-11-25 convergence | No production reader; production auditing is `SecurityAuditLog`, and the live path is `src/gateway/capability_events.rs` |
+| `src/capability/grant.rs` | Removed by the 2026-11-25 convergence | `GrantRegistry` was unmounted; sandbox approval uses `GrantStore` in `src/sandbox/exec_approval/grants.rs` |
+| `src/capability/lifecycle.rs` | Removed by the 2026-11-25 convergence | The old capability lifecycle state machine; its duties are now the provider lifecycle and the constraint attachment |
+| `src/capability/activation.rs` | Removed by the 2026-11-25 convergence | The old activation controller and the scoped-tool compatibility entry point; its duty is now `PolicyAttachment` |
 | `src/capability/effect_claim.rs` | Reducer not wired | Header: no production `EffectClaim*` construction point |
 
 ### The capability UI surface
@@ -392,6 +435,19 @@ The old model is "a plugin declares which capabilities it has": the `CapabilityD
 ## History: the removed legacy UI handler
 
 The 2026-11-20 severed-wire audit removed the legacy UI handler in `src/capability/ui.rs` that was never registered in production, along with the in-memory display / input stub: no production path ever registered that synchronous handler, so the whole "legacy UI handler" arm was a severed wire (`review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`, CUI-02). `src/capability/ui.rs` now keeps only the typed UI capability contract (the namespace, the schema, and the descriptor the gateway publishes).
+
+## History: modules removed by the capability convergence
+
+The 2026-11-25 capability convergence (designed in `docs/superpowers/specs/2026-11-25-zahir-capability-convergence-design.md` in the Aleph repository) removed several modules because they duplicated production authority or were never mounted:
+
+- `src/capability/ambient.rs`: the ambient handler that declared itself unmounted.
+- `src/capability/audit.rs`: the capability-side audit collector had no production reader; production auditing goes through `SecurityAuditLog`.
+- `src/capability/grant.rs`: the capability-side `GrantRegistry` was unmounted; sandbox approval uses `GrantStore` in `src/sandbox/exec_approval/grants.rs`.
+- `src/capability/lifecycle.rs` and `src/capability/activation.rs`: the capability's own lifecycle state machine and activation controller. Runtime policy used them for exactly two things — comparing generations and noticing revocation — and both now live in the constraint attachment and the provider lifecycle.
+- The compatibility entry point in `src/tools/scoped/` that accepted an `Arc<dyn CapabilityActivation>` per tool name, which production deliberately never installed.
+- The legacy handler registry and the `Legacy*` types in `src/capability/backend.rs`; `ToolBackendAdapter` is what stayed.
+
+To recover the old implementation, use git: `git log --diff-filter=D -- src/capability/lifecycle.rs`.
 
 ## Planned
 

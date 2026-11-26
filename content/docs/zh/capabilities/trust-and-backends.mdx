@@ -24,7 +24,7 @@ pub trait CapabilityBackend: Send + Sync {
 }
 ```
 
-同文件里 `TOOL_NAMESPACE` 是 Tool 能力的命名空间（`aleph/tools`），`LegacyCapabilityHandler` 是非 Tool 能力的可调用边界（一个 trait）：`invoke(input: Value) -> Result<Value, LegacyCapabilityDispatchError>`，错误只有 `InvalidInput` / `Execution` / `NotFound` 三种，每种带一条消息。
+同文件里 `TOOL_NAMESPACE` 是 Tool 能力的命名空间（`aleph/tools`），`CapabilityBackend` 是所有能力注册表实现的存储 / 查询契约（`lookup` 按 id 查一条，`enumerate` 列一个作用域），`ToolBackendAdapter` 把工具注册表适配成能力后端。非 Tool 能力的可调用边界曾由 `LegacyCapabilityHandler` 承担，该 trait 与它的 `LegacyCapabilityDispatchError` 已在 2026-11-25 的能力收敛中删除；special 能力现在由 `src/capability/special.rs` 的 `CapabilityHandlerRegistry` 持有。
 
 后端**从哪里来**，在 `src/capability/facade.rs` 的 `BackendSourceEvidence` 里有四元证据：`Tool`（canonical entry 租约 + provider generation）、`Provider`（provider id + generation）、`MemoryResource`（`Weak<MemoryRuntime>`）、`Special`（捕获到的 special 条目 + generation）。今天真正落地的后端适配器是：
 
@@ -93,9 +93,9 @@ pub struct OwnerTrustPolicy {
 
 `crates/aleph-slot-api/src/approval.rs` 定义的是操作审批共享类型，不是插件信任策略或插件授权账本。`GrantScope` 的 `Session` 表示当前进程中会话的剩余时间，`Always` 表示跨重启、直到撤销；`AuthorizationResult` 的 `Authorized` / `Denied` / `NotAuthenticated` 表示审批动作的授权检查结果。沙箱执行审批使用自己的 `GrantStore`（`src/sandbox/exec_approval/grants.rs`），不是下述跨会话注册表。
 
-### 跨会话能力委托（未挂载）
+## 历史：跨会话能力委托（未挂载）
 
-`src/capability/grant.rs` 已实现 `GrantRegistry`：一个会话向另一个会话委托能力，受托方的传递性引用不能超过授权方权限；委派链校验长度并检测环，撤销级联到下游，且支持跨会话纪元的迁移。这些是模块语义，不是线上行为：文件头记录 2026-11-20 severed-wire 审计的 **NOT MOUNTED IN PRODUCTION** 结论，并指出没有生产消费者。`scripts/capability_wiring_audit.py` 钉住此未挂载表面，防止新增入口悄悄漏接。它与加载信任、蓝图的插件授权、操作审批都不能互换。
+2026-11-25 的能力收敛删除了 `src/capability/grant.rs`。它曾实现 `GrantRegistry`：一个会话向另一个会话委托能力，受托方的传递性引用不能超过授权方权限；委派链校验长度并检测环，撤销级联到下游，且支持跨会话纪元的迁移。这些是模块语义，不是线上行为：文件头记录 2026-11-20 severed-wire 审计的 **NOT MOUNTED IN PRODUCTION** 结论，并指出没有生产消费者。`scripts/capability_wiring_audit.py` 仍把那些入口钉为「未挂载」，但模块已不在代码树里。今天代码树里没有跨会话能力委托；沙箱执行审批走自己的 `GrantStore`（`src/sandbox/exec_approval/grants.rs`），与加载信任、蓝图的插件授权、操作审批都不能互换。要找回旧实现，看 git 历史：`git log --diff-filter=D -- src/capability/grant.rs`。
 
 ## 插件运行时与约束
 

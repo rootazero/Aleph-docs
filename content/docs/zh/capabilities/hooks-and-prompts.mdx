@@ -60,7 +60,7 @@ Core 内部的 `VersionedRegistry<T, E, L>` 通过 `snapshot` 返回不可变的
 |---|---|---|
 | 事件 | 实例内有界记录，先提交到内存，再发实时通知并可选持久化。不是授权来源或回放日志。 | `src/capability/events.rs` |
 | 受众 | `EventAudience` 和 `TrustedEventScope` 为观察限制受众与请求范围，不是另一套访问控制列表。 | `src/capability/event_audience.rs` |
-| 审计投影 | 审计是共享事件缓冲区上的只读投影，未挂入生产查询路径；实时桥接不读取该投影。 | `src/capability/audit.rs`、`src/gateway/capability_events.rs` |
+| 审计投影 | 能力侧曾有一个共享事件缓冲区上的只读审计投影，它未挂入生产查询路径，已在 2026-11-25 的能力收敛中删除。生产审计是 `src/security/audit.rs` 的 `SecurityAuditLog`；实时桥接是 `src/gateway/capability_events.rs`。 | `src/security/audit.rs`、`src/gateway/capability_events.rs` |
 
 这些观察接口不能作为 Hook@1 已接入调度的证据（`src/capability/events.rs`、`crates/aleph-slot-api/src/slot.rs`）。
 

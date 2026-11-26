@@ -60,7 +60,7 @@ Core's internal `VersionedRegistry<T, E, L>` returns one immutable generation th
 |---|---|---|
 | Events | Bounded, instance-scoped records commit to memory before live notification and optional persistence. They are not authority or a replay log. | `src/capability/events.rs` |
 | Audience | `EventAudience` and `TrustedEventScope` bound the audience and request scope for observations. They are not a separate access control list. | `src/capability/event_audience.rs` |
-| Audit projection | Audit is a read-only projection over the shared event buffer and is not mounted in the production query path. The live bridge does not read it. | `src/capability/audit.rs`, `src/gateway/capability_events.rs` |
+| Audit projection | The capability side used to have a read-only audit projection over the shared event buffer. It was never mounted in the production query path and was removed by the 2026-11-25 capability convergence. Production auditing is `SecurityAuditLog` in `src/security/audit.rs`; the live bridge is `src/gateway/capability_events.rs`. | `src/security/audit.rs`, `src/gateway/capability_events.rs` |
 
 These observation interfaces are not evidence that Hook@1 is wired into dispatch (`src/capability/events.rs`, `crates/aleph-slot-api/src/slot.rs`).
 

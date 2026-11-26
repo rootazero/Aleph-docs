@@ -5,11 +5,11 @@ description: "运行时能力描述符、所有权、可见性、策略与后端
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-本页解决一个问题：Aleph 运行时里的一个「能力」（capability）由什么构成，它怎么被授权、怎么被撤销，以及消费方怎样避免拿到陈旧的 handler。代码位于 `src/capability/`（39 个文件）与契约 crate `crates/aleph-slot-api/`。
+本页解决一个问题：Aleph 运行时里的一个「能力」（capability）由什么构成，它怎么被授权、怎么被撤销，以及消费方怎样避免拿到陈旧的 handler。代码位于 `src/capability/`（33 个文件）与契约 crate `crates/aleph-slot-api/`。
 
 <Callout type="warn" title="先读这一条">
-  `src/capability/` 里有若干模块**写好了、测过了，但没有挂到生产路径上**（见下文「挂载状态」）。
-  本页区分生产调用路径、已定义但未挂载的契约，以及蓝图里的规划。
+  2026-11-25 的**能力收敛**删掉了 `src/capability/` 里几组「写好了、测过了，但没有挂到生产路径上」的模块：旧的 ambient / audit / grant 模块，以及能力自身的生命周期与激活状态机。能力的「活 / 死」现在由 provider 生命周期承载（见「Provider 生命周期与代」）。
+  本页描述收敛后的现状，并区分生产调用路径、已定义但未挂载的契约，以及蓝图里的规划。
 </Callout>
 
 ## 能力是什么
@@ -64,7 +64,7 @@ pub enum CapabilityKind { Tool, Ambient, Terminal, Ui, Skill, Agent, Task, Resou
 
 （源码里每个变体独占一行，这里为排版压成一行。）`CapabilityKind::UI` 是 `Ui` 的兼容拼写。
 
-Tool 与 special 能力后端有可执行适配器；kind 枚举本身不保证对应后端已挂载（`src/capability/descriptor.rs`）。例如，Ambient 定义了 handler，但源码标明没有生产注册（`src/capability/ambient.rs`）。
+Tool 与 special 能力后端有可执行适配器；kind 枚举本身不保证对应后端已挂载（`src/capability/descriptor.rs`）。`Ambient` 仍留在枚举里，但它原来对应的 `src/capability/ambient.rs` 已在 2026-11-25 的能力收敛中删除——那个模块自述「未挂载」，暴露进程身份与环境变量属于安全面决策，今天没有替代实现。
 
 `CapabilityFacet` 是与 kind 正交的行为轴，有 5 个变体：`Callable`、`EventSource`、`Subscription`、`ProviderLifecycle`、`ExternalEffect`。一个 provider 可以同时暴露事件源和可调用操作，而不必假装整个 provider 是 `Tool`。
 
@@ -144,28 +144,66 @@ pub enum OwnershipChange {
 
 （源码为多行写法，这里压缩。）它在 `OwnershipTree` 自己的互斥锁内、与状态变更同一个临界区里发出，是树的变更方法**唯一**对观察者可见的副作用面。订阅用 `OwnershipTree::subscribe_changes`，它**不经过**全局事件总线、会话事件存储或审批权威。订阅是纯观察：不改状态、不推进 nonce、不注册绑定；接收方落后时会得到滞后计数，应据此从新快照重新对账。
 
-### 生命周期状态机与租约
+### Provider 生命周期与代
 
-`LifecycleState`（`src/capability/lifecycle.rs`）定义五态：已创建、尚未挂接 owner（`Created`）；已挂接、可激活（`Attached`）；可调用、可订阅（`Active`）；正在脱离（`Detaching`）；已撤销（`Revoked`）。只有 `Active` 的 `is_invocable` 为真。合法迁移包括激活前直接撤销：
+能力的「活 / 死」由 **provider 生命周期**承载。`src/capability/provider.rs` 里的 `ProviderLifecycle` 是纯状态机；`ProviderTransport` 只有 `InProcess` 与 `Bridge` 两个变体，表示 provider 实现的运行时边界。
+
+| 状态 | 含义 |
+|---|---|
+| `Discovered` | 已被发现，尚未准入声明 |
+| `Cold` | 已准入声明，没有运行期副作用，也没有可执行租约 |
+| `Disabled` | 被显式禁用 |
+| `Starting` | 正在启动 |
+| `Ready` | 就绪，可以被调用 |
+| `Stopping` | 正在停止，不再准入新调用 |
+| `Stopped` | 已停止 |
+| `Failed` | 启动或运行失败 |
+
+`ProviderLifecycle::transition` 只接受下列迁移，其余返回 `ProviderLifecycleError::InvalidTransition { provider_id, from, to }`：
 
 ```text
-Created → Attached → Active → Detaching → Revoked
-Created  ───────────────────────────────→ Revoked
-Attached ───────────────────────────────→ Revoked
-Active   ───────────────────────────────→ Revoked
+Discovered → Cold | Disabled | Starting
+Disabled   → Cold | Starting
+Cold       → Disabled | Starting
+Starting   → Ready | Failed | Stopping
+Ready      → Stopping | Failed
+Stopping   → Stopped | Failed
+Stopped    → Starting | Disabled
+Failed     → Starting | Stopped | Disabled
 ```
 
-生命周期 `Lease` 从 `issued_at` 起计时。有 TTL 时，经过时间达到 TTL 即 `is_expired`；没有 TTL 则不会因时间到期。`time_remaining` 在未设 TTL 或经过时间超过 TTL 时返回 `None`；`renew` 重置签发时间和 TTL，保留 `OwnerGeneration`（`src/capability/lifecycle.rs`）。生命周期租约与门面签发的 `BackendLease` 不同（`src/capability/facade.rs`）。
+**每次进入 `Starting` 都把代（generation）加一**，代用尽时返回 `ProviderLifecycleError::GenerationExhausted`。这正是「重启会让旧租约失效」的机制：旧代租约在重启期间无效，替换实例达到 `Ready` 之后依然无效。
 
-`CapabilityLifecycle::transition_to` 拒绝图外迁移，返回 `LifecycleError::InvalidTransition { from, to }`；对已撤销能力再次 `revoke` 也返回此错误。`validate_activation` 要求处于 `Attached`，`validate_lease` 要求处于 `Active`；两者都检查 TTL 和当前 owner 代。`renew_lease` 只允许在 `Active` 下续期，否则返回带当前状态的 `NotInvocable`（`src/capability/lifecycle.rs`）。
+每次成功迁移产生一条 `ProviderTransition { provider_id, transport, from, to, generation }`，通过 `ProviderHandle::subscribe_changes` 以 `broadcast::Receiver<ProviderTransition>` 广播。
 
-### 激活闸
+`ProviderHandle` 是线程安全控制柄（内部是 `Arc<Mutex<ProviderLifecycle>>` 加 `broadcast::Sender`）：`snapshot` 返回 `(ProviderState, u64)`；`acquire_call(expected_generation)` 在代不符或状态不是 `Ready` 时返回 `ProviderCallError { provider_id, state, expected_generation, actual_generation }`；`with_ready_commit`、`with_call_admission`、`with_admitted_completion` 是 crate 内的分段提交原语（`src/capability/provider.rs`）。
 
-`CapabilityActivationController` 只在 `Attached → Active` 这一迁移上执行约束检查：attach 仍是注册动作，撤销不受运行期约束阻挡。激活时按当前 owner 代校验租约；使用已激活能力前，`validate_runtime` 重新检查租约和当前约束（`src/capability/activation.rs`）。
+<Callout type="warn" title="旧的能力生命周期状态机已删除">
+  2026-11-25 的能力收敛删除了 `src/capability/lifecycle.rs`（`LifecycleState`、生命周期 `Lease`、`transition_to`）与 `src/capability/activation.rs`（`CapabilityActivationController`）。这两个文件当时只被运行期策略用来做「代数比对 + 已撤销」两项检查，这两项现在由下节的约束附件与 provider 生命周期承担。要找回旧实现，看 git 历史：`git log --diff-filter=D -- src/capability/lifecycle.rs`。
+</Callout>
 
-生产分发调用 `admit_runtime`（`src/tools/scoped/dispatch.rs`）；对有约束的绑定，共享策略先检查当前规则，再将尚处于 `Attached` 的控制器激活，并复核生命周期。生产策略将约束判定留在策略层，给控制器的生命周期租约不设 TTL（`src/capability/policy_runtime.rs`）。Scoped tools 还支持按工具名登记可选的兼容控制器，类型为 `Arc<dyn CapabilityActivation>`（`src/tools/scoped/mod.rs`、`src/tools/scoped/builder.rs`）。分发会校验已登记的控制器，但生产规则由共享策略管理，不通过这张 map 安装（`src/tools/scoped/dispatch.rs`、`src/capability/policy_runtime.rs`）。
+### 运行期准入：约束附件
 
-两个 `ActivationError` 不同：`src/capability/activation.rs` 的类型报告生命周期、约束或钩子错误；`src/capability/provider_registry.rs` 的同名类型属于 provider 激活，变体是 `Rejected`、`Failed`、`Unknown`、`NotVisible`。
+生产路径没有「激活闸」这一步；约束检查直接落在**准入**上。`src/capability/policy_runtime.rs` 的 `PolicyEngine::admit_runtime` 按顺序检查：
+
+1. 该 id 在运行期规则表里有约束吗？没有就直接放行，不占附件。
+2. 附件存在且 id 匹配，否则 `PolicyDenial::AttachmentUnavailable { id }`。
+3. 附件记录的绑定与租约一致（id、revision、generation、owner、visibility），否则 `AttachmentUnavailable`。
+4. 事实来源快照可读，否则 `PolicyDenial::ConstraintDenied { reason: "facts_unavailable" }`。
+5. 事实来源的 key 没有被换掉，否则 `AttachmentUnavailable`。
+6. 复核捕获时的租约（`validate_captured_lease`）。
+7. 附件仍在附件表里（用 `Arc::ptr_eq` 比较同一实例），否则 `AttachmentUnavailable`。
+8. 评估约束：`ResourceUse::Allocate` 走完整评估，`Existing` 与 `Release` 走非分配评估；失败为 `PolicyDenial::ConstraintDenied { reason: "runtime_constraints" }`。
+
+撤销（revocation）**不是**另一个标志位，而是「从附件表里移除」：`admit` 只对仍在表里的状态可达，而列表与移除共用一把锁，所以被移除的状态不会再被准入（`src/capability/policy_runtime.rs`）。
+
+准入成功返回 `RunningCapabilityCall` 守卫。它必须被持有到真实操作结束（含异步取消）才释放资源计数（`src/capability/policy_runtime.rs`）。
+
+依赖不可用时，工具分发在解析阶段把 `ResolveError::DependencyUnavailable` 转成模型可见的 `ToolError::Execution`，文本形如「`memory.runtime` 当前不可用（状态 Stopped），稍后重试或请用户启用」；工具本身仍留在工具列表里，模型能看到失败原因并稍后重试（`src/tools/scoped/dispatch.rs`）。
+
+<Callout type="warn" title="兼容激活入口已删除">
+  scoped tool 层曾提供按工具名登记 `Arc<dyn CapabilityActivation>` 的兼容入口，生产刻意不安装它。2026-11-25 的能力收敛删除了该入口与 `src/capability/activation.rs`（`src/tools/scoped/builder.rs`、`src/tools/scoped/dispatch.rs`）。`src/capability/provider_registry.rs` 里同名的 `ActivationError` 属于 provider 激活，变体是 `Rejected`、`Failed`、`Unknown`、`NotVisible`，与能力生命周期无关。
+</Callout>
 
 ## 可见性
 
@@ -305,6 +343,9 @@ pub struct BackendLease {
 | `Revoked` | 绑定已撤销 |
 | `StaleOwner` | 租约的所有权绑定或 `owner_generation` 与当前记录不一致（仅 validate） |
 | `StaleProvider` | 租约签发后 provider 实例被停止或替换 |
+| `DependencyUnavailable { target, state }` | 依赖的 provider 可见但未就绪（`Cold` / `Starting` / `Stopping` / `Stopped` / `Failed` / `Disabled`）。能力仍列在清单里，调用被拒并带上依赖当前的状态 |
+
+依赖不可用（`DependencyUnavailable`）会一路传到工具分发，转成模型可见的 `ToolError::Execution` 文本（见「运行期准入：约束附件」一节）；`src/capability/zahir_facade.rs` 给它的事件标签是 `dependency_unavailable`。
 
 `StaleOwner` 不会出现在 resolve 阶段：刚签发的租约带的就是当时读到的代，构造时不可能陈旧。
 
@@ -325,13 +366,13 @@ pub struct BackendLease {
 
 记录先提交到内存，再广播，最后运行可选的持久化钩子。持久化失败是在提交后报告的，重发会产生重复观测。钩子在缓冲区锁外运行，可能乱序结束；需要重建顺序的落盘方应按记录的序号排序（`src/capability/events.rs`）。
 
-`CapabilityEventType` 按 `snake_case` 序列化，变体为 `Created`、`Attached`、`Activated`、`Detaching`、`Invoked`、`Revoked`、`ConstraintViolation`、`PolicyViolation`、`ExecutionFailed`。枚举声明可表达的观测，不代表每个变体都有生产者（`src/capability/events.rs`）。
+`CapabilityEventType` 按 `snake_case` 序列化，变体为 `Created`、`Activated`、`Invoked`、`Revoked`、`ConstraintViolation`、`PolicyViolation`、`ExecutionFailed`。枚举声明可表达的观测，不代表每个变体都有生产者（`src/capability/events.rs`）。
 
 ### 受信任的受众与生产接线
 
 `EventAudience` 区分 `OperatorOnly` 与 `Principal(PrincipalEventAudience)`。后者记录 `user_id`、以及可选的 `session_key`、`workspace` 与来源实例标识 `source_incarnation`。受众只在受信任的生产者边界捕获，客户端不能通过反序列化声明这个权威（`src/capability/event_audience.rs`）。网关针对连接逐条复核可见性后才转发（`src/gateway/capability_events.rs`、`src/gateway/server/connection/mod.rs`）。
 
-服务启动时构建并挂载事件流（`src/bin/aleph-server/commands/start/capability_init.rs`、`src/bin/aleph-server/commands/start/mod.rs`）。来源证据与观测接线见 PTY 管理器的 `SourceObservationReceipt`（`src/gateway/pty/manager.rs`）、工具注册表（`src/tools/registry.rs`）与分发侧的 `InvocationObservation`（`src/tools/scoped/dispatch.rs`）。这不是 `src/capability/audit.rs` 的读取路径；该模块头注释记录了 2026-11-20 severed-wire 审计指出的无生产读取方问题。
+服务启动时构建并挂载事件流（`src/bin/aleph-server/commands/start/capability_init.rs`、`src/bin/aleph-server/commands/start/mod.rs`）。来源证据与观测接线见 PTY 管理器的 `SourceObservationReceipt`（`src/gateway/pty/manager.rs`）、工具注册表（`src/tools/registry.rs`）与分发侧的 `InvocationObservation`（`src/tools/scoped/dispatch.rs`）。能力侧原来的 `src/capability/audit.rs` 收集器没有生产读取方，已在 2026-11-25 的能力收敛中删除；生产审计走 `SecurityAuditLog`，活路径是 `src/gateway/capability_events.rs`。
 
 ## Zahir
 
@@ -360,14 +401,14 @@ pub struct BackendLease {
 
 ## 挂载状态
 
-下表区分生产接线、测试专用逻辑与保留的未挂载契约。标明审计日期的行引用 2026-11-20 severed-wire 审计记录（`review-results/sev-wire-2026-11-20/`）。
+下表区分生产接线、测试专用逻辑与保留的未挂载契约。标明审计日期的行引用 2026-11-20 severed-wire 审计记录（`review-results/sev-wire-2026-11-20/`）；标「已删除」的行是 2026-11-25 能力收敛从源码树移出的模块，历史实现见 git。
 
 | 模块 | 状态 | 依据 |
 |---|---|---|
 | `src/capability/zahir_facade.rs` | 已挂载：Tool / provider / special / memory 解析 | `src/capability/projection_host.rs`、`src/bin/aleph-server/commands/start/mod.rs` |
 | `src/capability/production_init.rs` | 已挂载：启动期约束 | `src/bin/aleph-server/commands/start/capability_init.rs` |
-| `src/capability/lifecycle.rs` | 已接入运行期策略的约束绑定 | `src/capability/activation.rs`、`src/capability/policy_runtime.rs` |
-| `src/capability/activation.rs` | 共享策略使用激活控制器；scoped tool 层另有可选 trait 校验 | `src/capability/policy_runtime.rs`、`src/tools/scoped/builder.rs`、`src/tools/scoped/dispatch.rs` |
+| `src/capability/provider.rs` | 已挂载：provider 生命周期与代 | `src/capability/provider_registry.rs`、`src/capability/zahir_facade.rs` |
+| `src/capability/provider_registry.rs` | 已挂载：provider 注册与激活 | `src/capability/provider_backend.rs`、`src/capability/zahir_facade.rs` |
 | `src/capability/policy_runtime.rs` | 已挂载：实时准入 | `src/tools/scoped/dispatch.rs`、`src/gateway/capability_ui.rs` |
 | `src/capability/events.rs` | 已挂载：能力观测 | `src/bin/aleph-server/commands/start/capability_init.rs`、`src/gateway/capability_events.rs` |
 | `src/capability/event_audience.rs` | 已接线：受信任的受众及连接过滤 | `src/gateway/pty/manager.rs`、`src/gateway/capability_events.rs` |
@@ -376,9 +417,11 @@ pub struct BackendLease {
 | `src/capability/census.rs` | 仅测试：推导句柄清单 | `src/capability/mod.rs`、`src/capability/census.rs` |
 | `src/capability/ui.rs`、`src/capability/ui_surface.rs` | 已挂载：`aleph/ui` | `src/gateway/capability_ui.rs`，参见两个模块的头注释 |
 | `PolicyEngine::resolve` | 2026-11-20 审计记录未挂载 | `src/capability/policy.rs` 头注释 |
-| `src/capability/ambient.rs` | 2026-11-20 审计记录未生产注册；有意延期 | 头注释：暴露进程 / 用户身份与环境变量是安全面决策 |
-| `src/capability/audit.rs` | 2026-11-20 审计记录无生产读取方 | 头注释；活路径是 `src/gateway/capability_events.rs` |
-| `src/capability/grant.rs` | 2026-11-20 审计记录 `GrantRegistry` 未挂载 | 头注释；`scripts/capability_wiring_audit.py` 检查接线，沙箱审批走 `src/sandbox/exec_approval/grants.rs` 的 `GrantStore` |
+| `src/capability/ambient.rs` | 2026-11-25 收敛已删除 | 自述未挂载；暴露进程 / 用户身份与环境变量是安全面决策，删除即无实现 |
+| `src/capability/audit.rs` | 2026-11-25 收敛已删除 | 无生产读取方；生产审计是 `SecurityAuditLog`，活路径是 `src/gateway/capability_events.rs` |
+| `src/capability/grant.rs` | 2026-11-25 收敛已删除 | `GrantRegistry` 未挂载；沙箱审批走 `src/sandbox/exec_approval/grants.rs` 的 `GrantStore` |
+| `src/capability/lifecycle.rs` | 2026-11-25 收敛已删除 | 旧能力生命周期状态机；职责由 provider 生命周期与约束附件承担 |
+| `src/capability/activation.rs` | 2026-11-25 收敛已删除 | 旧激活控制器与 scoped tool 兼容入口；职责由 `PolicyAttachment` 承担 |
 | `src/capability/effect_claim.rs` | reducer 未接线 | 头注释：无生产 `EffectClaim*` 构造点 |
 
 ### 能力 UI 表面
@@ -392,6 +435,19 @@ pub struct BackendLease {
 ## 历史：已删除的 legacy UI 处理器
 
 2026-11-20 的 severed-wire 审计删除了 `src/capability/ui.rs` 里从未在生产注册过的 legacy UI handler，以及内存里的 display / input 桩：没有任何生产路径注册过那个同步 handler，整条「legacy UI handler」分支是一根断线（`review-results/sev-wire-2026-11-20/cap-ui-REPORT.md`，CUI-02）。`src/capability/ui.rs` 现在只保留类型化的 UI 能力契约（命名空间、schema 与网关发布的描述符）。
+
+## 历史：能力收敛删除的模块
+
+2026-11-25 的能力收敛（设计见 Aleph 仓 `docs/superpowers/specs/2026-11-25-zahir-capability-convergence-design.md`）删除了几组模块，理由是它们与生产权威重复或从未挂载：
+
+- `src/capability/ambient.rs`：自述未挂载的 ambient handler。
+- `src/capability/audit.rs`：能力侧审计收集器没有生产读取方；生产审计走 `SecurityAuditLog`。
+- `src/capability/grant.rs`：能力侧 `GrantRegistry` 未挂载；沙箱审批用 `src/sandbox/exec_approval/grants.rs` 的 `GrantStore`。
+- `src/capability/lifecycle.rs` 与 `src/capability/activation.rs`：能力自身的生命周期状态机与激活控制器。它们当时只被运行期策略用来做「代数比对 + 已撤销」两项检查，这两项现在由约束附件与 provider 生命周期承担。
+- `src/tools/scoped/` 里按工具名登记 `Arc<dyn CapabilityActivation>` 的兼容入口，生产刻意不安装。
+- `src/capability/backend.rs` 里的 legacy handler 注册表与 `Legacy*` 类型，保留的是 `ToolBackendAdapter`。
+
+需要找回旧实现时用 git：`git log --diff-filter=D -- src/capability/lifecycle.rs`。
 
 ## 规划中
 
