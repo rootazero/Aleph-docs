@@ -7,7 +7,7 @@ description: "Aleph 概念的标准化术语和翻译"
 
 本页为 Aleph 概念建立规范名称，以确保文档、代码和 UI 之间的一致性。
 
-> **面板顶层模式**（top-level modes）：桌面面板共有七个，按导航顺序排列——Chat (`/chat`)、Dashboard (`/dashboard`)、Memory (`/memory`)、Agents (`/agents`)、Teams (`/teams`)、Extensions (`/extensions`)、Settings (`/settings`)。Settings 将 MCP / Plugins / Skills 归入 **Advanced（高级）** 组；ClawHub 设置标签页已移除。
+> **面板顶层模式**（top-level modes）：桌面面板顶部切换器共有八项，按导航顺序排列——Chat (`/chat`)、Dashboard (`/dashboard`)、Memory (`/memory`)、Agents (`/agents`)、Teams (`/teams`)、Projects (`/projects`)、Terminal (`/terminal`)、Settings (`/settings`)。Extensions (`/extensions`) 也是面板模式，但**不在**顶部切换器里——它的入口在 Chat 侧栏的高级功能区。Settings 把 MCP / Plugins / Skills / ACP 归入 **Extensions（扩展）** 组，把 Browser / Policies / Security / Execution / Workspaces 归入 **Advanced（高级）** 组；ClawHub 设置标签页已移除。
 
 ## 核心概念
 
@@ -64,6 +64,10 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Batch Export** | 批量导出 | 一次性导出多张卡片为可交付物 |
 | **Dream Insights** | 梦境洞察 | 只读面板（Settings > Memory），由 `dreaming.list_insights` 支撑——近期每日综合笔记 + dream-run 历史 |
 | **Corrections** | 纠正记录 | 只读面板（Settings > Memory），由 `memory.list_corrections` 支撑——呈现纠正 → 蒸馏的生命周期 |
+| **Memory Graph** | 记忆图 | `shared/protocol/src/memory_graph.rs`——记忆图的只读查询契约（`graph.query` / `graph.search` / `graph.node_detail`）；节点身份就是笔记路径 |
+| **Memory Nebula** | 记忆星云 | `shared/ui_logic/src/nebula/`——两份 Panel 渲染器共用的纯图索引与力导向布局（`NebulaIndex`），只读 |
+| **Session Continuity** | 会话连续性 | `src/memory/session_resume/`——跨会话恢复对话上下文（`SnapshotWriter` / `SnapshotReader`），按 agent 分区存放 |
+| **Context Fold** | 上下文折叠 | `src/context/compact/folds.rs`——折叠记录是唯一真值源（`FoldRecord`）；回本判定（`FoldVerdict` / `Payback`）在 `src/context/compact/fold_ledger.rs` 里按需惰性计算 |
 | **Raw Memory (L0)** | 原始记忆 | 压缩前的短暂会话数据 |
 | **Note (L1)** | 笔记 | 持久的 markdown 知识文件 |
 | **Wikilink** | 维基链接 | Obsidian 兼容的 `[[note-name]]` 交叉引用 |
@@ -84,8 +88,8 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Extension Tool** | 扩展工具 | 插件提供的工具（WASM / Node.js） |
 | **Skill** | 技能 | 添加工具的学习或安装能力 |
 | **Skill System** | 技能系统 | 技能发现、注册和生命周期的框架 |
-| **Dispatcher** | 调度器 | 工具注册表、风险评估和语义检索 |
-| **Hydration** | hydrated tools | 基于查询上下文的语义工具检索 |
+| **Tool Registry** | 工具注册表 | `ToolHandlerRegistry`（`src/tools/registry.rs`）——描述符驱动的工具真值源；模型可见的工具定义只是它的投影，不是第二套来源 |
+| **tool_search** | 工具检索 | 延迟暴露层的排序发现元工具（`src/tools/tool_search.rs`）——按名称与描述自包含地做 BM25 排序，不依赖记忆 FTS 索引 |
 | **Parallel Group** | 并行组 | Act 阶段按资源声明分桶后并行执行的一组工具调用；组内并发、组间串行 |
 | **Resource Claim** | 资源声明 | 工具对文件系统/网络/进程的并发冲突声明 |
 | **Memo / Cross-batch Dedup** | 备忘 / 跨批次去重 | 在一个批次或跨批次内对相同 `(name, args)` 的二次调用复用首次结果 |
@@ -97,7 +101,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | English | 中文 | 定义 |
 |---------|---------|------------|
 | **Extension** | 扩展 | 面向用户的 Skill + Plugin + MCP 服务器统称——每个 Extension 恰好属于一种**类型**。参见[扩展商店](/docs/zh/concepts/extensions-store) |
-| **Extensions Store** | 扩展商店 | 顶层面板模式 (`/extensions`)，按功能类别浏览/安装扩展，附带信任层级与安装前披露 |
+| **Extensions Store** | 扩展商店 | 面板模式 (`/extensions`)——不在顶部切换器里，入口在 Chat 侧栏的高级功能区；按功能类别浏览/安装扩展，附带信任层级与安装前披露 |
 | **ExtensionKind** | 扩展类型 | 面向商店的类型枚举 `{Skill, Plugin, Mcp}`——与插件宿主运行时的 `PluginKind {Wasm, Mcp, Static}` 不同 |
 | **Aleph Hub** | Aleph Hub | 单一扩展目录源 `aleph-hub`（`hub.heyaleph.com/catalog.json`）；启动时由 `hub::primer` 投影进 `~/.aleph/hub_catalog.db` |
 | **Hub 工具** | Hub 工具 | 注册在主内置工具注册表中的 `hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify`；安装受信任与用户同意关卡约束 |
@@ -106,6 +110,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Source** | 源 | 目录提供方（插件市场、Official MCP Registry、Docker MCP Catalog），在 SQLite 中缓存以供离线浏览 |
 | **Plugin.install (unified)** | 插件统一入口 | `plugin.install` 不再猜测来源；按源（市场 / 压缩包 / 路径）分类统一处理 |
 | **Plugin Marketplace** | 插件市场 | 列入 `plugin.marketplace.list` / `plugin.marketplace.add` 的可索引目录 |
+| **Reload Preflight** | 重载预检 | `src/extension/lifecycle.rs`——插件重载前先编译新版本（`preflight_reload`）；编译不过就拒绝（`ReloadRefused`），不动正在运行的版本 |
 
 ## 桌面宿主与 Panel
 
@@ -114,7 +119,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **NSH** | NSH | Aleph 桌面端的目标形态：原生桌面宿主 crate `aleph-nsh-shell`（`desktop/nsh-shell/`），基于 nsh 0.6.0（`nsh-core` / `nsh-base` / `nsh-engine` 锁定 `=0.6.0`） |
 | **Desktop Host** | 桌面宿主 | 薄原生壳：只提供窗口容器、托盘、全局热键、通知、凭据存取、登录项状态读取等系统级集成；**不持有任何聊天或会话投影**（`desktop/nsh-shell/src/shell_host.rs`） |
 | **Panel** | 面板 | 业务界面的唯一真值源：Rust + Leptos/WASM，代码在 `interfaces/webchat/`；NSH 托管的就是这一个 Panel，不是第二套业务 UI |
-| **Panel Runtime** | 面板运行时 | Panel 内部的模块化运行时（`interfaces/webchat/src/panel/`）：`TabRegistry` / `PanelProjection` / `PanelLoader` / `PanelSdk`；`panel-modular` 是 opt-in feature |
+| **Panel Runtime** | 面板运行时 | Panel 内部的模块化运行时：`TabRegistry`（`shared/ui_logic/src/panel/registry.rs`）、`PanelProjection`（`shared/ui_logic/src/panel/projection.rs`）、`PanelLoader`（`interfaces/webchat/src/panel/loader.rs`）、`PanelSdk`（`interfaces/webchat/src/panel/sdk.rs`）；`panel-modular` 是 opt-in feature |
 | **Legacy Shell** | 旧桌面壳 | 过渡期遗留的 Tauri v2 应用（`desktop/shell/`）：自带 daemon supervisor、托盘、自动更新、深链、热键、菜单、通知。**最终会删除** |
 | **embedded-core** | 内嵌核心 | NSH 的编译期可选特性（默认关）：本地目标且端口确实空闲时，允许启动同目录随包的 `aleph-server`；端口已被占用时只做兼容性检查，不接管已有服务 |
 | **aleph:// deep link** | aleph:// 深链 | NSH 注册的 URL scheme；当前只识别精确的 `aleph://open`（打开 Chat），其余 `aleph://` URL 被忽略 |
@@ -134,14 +139,21 @@ description: "Aleph 概念的标准化术语和翻译"
 | **PolicyDenial** | 策略拒绝 | 策略引擎拒绝一次能力调用的结果（`src/capability/policy_runtime.rs`） |
 | **Zahir** | Zahir | 能力解析与分发的唯一活动宿主：`ZahirFacade`（`src/capability/zahir_facade.rs`）组合工具后端适配器（可调用工具的唯一真值源）与 `OwnershipTree`（归属 / 撤销 / 释放的唯一真值源），不持有第二套描述符或处理器表 |
 | **Slot API** | 插槽 API | `crates/aleph-slot-api/`：插槽契约的唯一权威（错误、文本、工具、搜索 / 嵌入、频道、审批、取消、webhook、AI provider）。**无 I/O、无平台、无 LLM**，依赖方向单向：`alephcore → aleph-slot-api` |
+| **Capability Census** | 能力普查 | `src/capability/census.rs`——能力成员资格是**派生**出来的：一个句柄属于某个能力，当且仅当安装它的那份代码自己安装该能力；这份名单从不是手写的 |
+| **VersionedRegistry** | 版本化注册表 | `src/capability/versioned_registry.rs`——核心专用的不可变版本化状态发布原语，带重入保护（`ReentrancyGuard`） |
+| **ProjectionHost** | 投影宿主 | `src/capability/projection_host.rs`——持续观察能力状态投影的宿主（`HostSnapshot` / `ProjectionEvent`）；它不是第三个权威源 |
+| **EffectClaim** | 效果声明 | `src/capability/effect_claim.rs`——对「效果已发生」类事件历史的纯对账（`EffectClaimState`）；尚未接入运行时事件构造 |
+| **EventAudience** | 事件受众 | `src/capability/event_audience.rs`——可信的事件观察受众（`TrustedEventScope`），不是另一套 ACL |
+| **DiagnosticControl** | 诊断控制 | `src/capability/diagnostic_control.rs`——投影宿主的诊断面：同一时刻最多一个 hold（`DiagnosticStatus`），超时自动释放 |
 
 ## 安全
 
 | English | 中文 | 定义 |
 |---------|---------|------------|
 | **Sandbox** | 沙箱 | 带有能力强制执行的每会话执行隔离 |
+| **Owned Worktree** | 自有工作树 | `src/sandbox/worktree.rs`——子代理在自己的 git worktree 中执行（`WorktreeHandle`），由挂载的 OS 驱动强制 |
 | **Capability（扩展期）** | 能力（扩展期） | 旧扩展模型里的权限声明（文件系统、网络、进程）；现已被 `src/capability/` 的能力模型取代，见[能力模型](/docs/zh/capabilities/capability-model) |
-| **Capability Ledger** | 能力账本 | 每次安装时从磁盘重建的可见能力清单（用于安装前披露） |
+| **Capability Ledger** | 能力账本 | `src/runtimes/ledger.rs`——运行时能力的状态账本：只跟踪每个能力的状态（Missing / Bootstrapping / Ready / Stale），从不下载或安装任何东西 |
 | **Approval Gate** | 审批门 | 提升权限的人机回环审批 |
 | **fail-closed** | 失败关闭 | 不可读或损坏的策略不静默放行：`ConfigApprovalPolicy` 回退到 Ask；缺失策略文件则使用内置的分类默认值（`src/approval/config.rs`） |
 | **IdentityContext** | 身份上下文 | 流经执行的不可变身份快照 |
@@ -178,6 +190,8 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Error Receipt** | 错误回执 | 网关返回给客户端的**单一来源**用户可读错误；原始错误链不外泄 |
 | **Dead Letter** | 死信 | channel.* 未能成功下发的消息，可在 Panel 内重投递 |
 | **Webhook Backpressure** | Webhook 反压 | webhook 接收端在拥塞时返回 503 而不是默默丢弃 |
+| **Chat Transcript** | 聊天转录 | `shared/protocol/src/chat_transcript.rs`——`chat.transcript_details` 的受限呈现契约（工具卡片、引用、上下文计量） |
+| **Bounded Scrollback** | 有界回溯 | `chat.history` / `pty.history` 按投影顺序返回有界历史；PTY 一侧经 `src/gateway/pty/screen/history.rs` 的能力边界分页 |
 
 ## AI/LLM
 
@@ -198,13 +212,13 @@ description: "Aleph 概念的标准化术语和翻译"
 |---------|---------|------------|
 | **A2A** | A2A | Agent-to-Agent 协议，用于 Agent 间通信 |
 | **ACP** | ACP | Agent Client Protocol，用于 Agent 发现和委托 |
-| **ClawHub** | ClawHub | 遗留注册表——不再是一级扩展源；设置标签页已移除，并入扩展商店（仅作长尾，由商店智能体读取） |
+| **ClawHub** | ClawHub | 已删除：代码里不再有 ClawHub 注册表路径，设置标签页与目录入口都已移除；目录浏览由扩展商店承担 |
 | **Team** | 团队 | 队长 + 成员的群组；首条消息时队长先规划（"团队战略协调"），并将该规划焊入每个成员的提示词 |
 | **Team Strata** | 团队战略协调 | 由队长先行的战略规划，协调团队成员 |
 | **Coord Task** | 协调任务 | 成员被分配的任务，状态为 `Pending → InProgress → WaitingReview → Completed`，由队长通过 `task_review` 审核 |
 | **Group Chat** | 群聊 | 三栏团队群聊窗口（花名册 · 归属气泡消息流 · 工作区），由持久的每团队线程 (`teams.chat.*`) 驱动 |
-| **WorldModel** | 世界模型 | 用于主动行为的环境状态跟踪 |
-| **Proactive Dispatcher** | 主动调度器 | 基于世界状态调度主动任务的守护进程 |
+| **WorldModel** | 世界模型 | 已删除：守护进程式的世界模型子系统已移除；治理拓扑改由 `src/loop_graph/` 提供 |
+| **Proactive Dispatcher** | 主动调度器 | 已删除：独立的主动调度守护进程已移除；后台定时任务由 `src/tasks/cron/` 与 `src/tasks/heartbeat/` 提供 |
 | **Desktop Bridge** | 桌面桥 | 用于桌面自动化的 UDS JSON-RPC 协议 |
 | **Deliverable** | 交付物 | 由 `artifact_publish` 工具产出的工作产物——落地为 `ArtifactOrigin::Deliverable`，Panel "Deliverables" 面板可钉住并打开 |
 | **Artifact Store** | 工件存储 | `src/artifacts/`——交付物的统一存储后端（`MAX_ARTIFACT_BYTES = 50 MB` + `MAX_ARTIFACTS_PER_SESSION = 200`） |
@@ -283,6 +297,19 @@ description: "Aleph 概念的标准化术语和翻译"
 | `AgentLedger` | Operation Ledger |
 | `Verification` | Verifier / Turn-verify context |
 | `Guardrail` | Guardrail (Block / Sanitize / Pass) |
+| `ToolHandlerRegistry` | Tool Registry |
+| `tool_search` | Tool Search |
+| `VersionedRegistry` | Versioned Registry |
+| `ProjectionHost` | Projection Host |
+| `DiagnosticControl` | Diagnostic Control |
+| `EventAudience` | Event Audience |
+| `EffectClaimState` | Effect Claim |
+| `NebulaIndex` | Memory Nebula |
+| `WorktreeHandle` | Owned Worktree |
+| `TabRegistry` | Panel Registry |
+| `PanelProjection` | Panel Projection |
+| `PanelLoader` | Panel Loader |
+| `PanelSdk` | Panel SDK |
 
 ## 已弃用术语（请勿使用）
 
@@ -300,6 +327,10 @@ description: "Aleph 概念的标准化术语和翻译"
 | SubagentTool | （保留为子代理生成工具，`src/agents/subagent_tool/`） | 流程侧没有独立的流程运行工具：流程编排改为声明式 `FlowSpec`（`src/orchestrator/flow_spec.rs`）经 `FlowRegistry`（`src/orchestrator/flow_registry.rs`）解析派发；唯一的工作流工具是 `WorkflowTool`（`src/builtin_tools/workflow_tool.rs`） |
 | LoopToolRegistry | ToolService | 统一工具外观 |
 | ClawHub 设置标签页 | 扩展商店 | ClawHub 降级为长尾；设置标签页已移除 |
+| Dispatcher（工具链模块） | `src/orchestrator/dispatch.rs` | 历史上的工具链 Dispatcher 模块（`ToolRegistry` / `RiskEvaluator` / `ToolIndex` / `HydrationResult`）已删除；今天的分发器是编排器级 flow 分发 |
+| Hydration | `tool_search` | 语义工具检索改为延迟暴露层的排序发现元工具 |
+| Capability Ledger（安装前披露） | `src/hub/trust.rs` | 安装前披露由 `src/hub/trust.rs` 的 `DisclosurePayload` 承担，不是磁盘重建的能力清单 |
+| Capability 生命周期状态机 | 能力解析结果 + 投影宿主 | 生命周期、激活、审计、授予与环境模块已删除；能力归属改由 `src/capability/ownership.rs` 与 `src/capability/projection_host.rs` 承担 |
 | `teams.run` | `teams.chat.send` / 协调任务 | 该方法从不存在——团队使用聊天线程 + 任务 |
 | `coordination: sequential\|parallel\|hierarchical` | 团队战略协调（队长先行规划） | 协调模式纯属虚构 |
 | DiminishingReturnsDetector | （已移除） | harness ratchet 收紧至当前 `CEILING`（`src/harness/tests/budget.rs:795`）；该硬停违反 R10 |

@@ -1,19 +1,79 @@
 ---
 title: "Changelog"
-description: "Release history, milestones, and notable changes in Aleph (through 2026-11-24)"
+description: "Release history, milestones, and notable changes in Aleph (through 2026-11-26)"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # Changelog
 
-Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-11-24.
+Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-11-26.
 
-`VERSION` is still `26.9.1` after 2026-09-25 — the entries from 2026-09-26 to 2026-11-24 below record changes that are **merged on `main` but not yet released**.
+`VERSION` is still `26.9.1` after 2026-09-25 — the entries from 2026-09-26 to 2026-11-26 below record changes that are **merged on `main` but not yet released**.
 
 <Callout type="info">
   This page is a **documentation-focused** summary derived from Aleph's main repository `CHANGELOG.md` and git history — it surfaces **user-visible** changes (features, CLI/RPC, config, security) and omits pure-internal refactor details. For the full record, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
 </Callout>
+
+---
+
+## 2026-11-26 — Memory self-evolution closure
+
+The memory side turned "reflect → correct → distil" into a verifiable loop: missing dependencies surface before an attempt, feedback batches are validated before the cursor advances, and a successor note is published and verified before the old one is retired.
+
+### Added
+
+- **Dependency readiness first** (`7bd692733`) — a dream run reports missing dependencies to the model before it attempts anything; it fails closed and no longer overwrites the previous run's result.
+- **Feedback batch recovery and validation** (`41b38ac2b`) — persisted feedback batches are recovered and validated before the cursor advances.
+- **Successor published before retirement** (`66c82a1bd`) — the shared writer validates the successor's Markdown / SQLite / FTS state before retiring the original note.
+- **Calibration and gate records** (`25ab346ce`, `9bac9d613`) — the calibration report for the self-evolution contracts plus the final gate outcome.
+
+### Changed
+
+- **Upstream merged** (`7fb540b44`) and **reflector branch merged** (`fbf1cfe53`) — both landed on `main`.
+
+---
+
+## 2026-11-25 — Capability model convergence, protocol surface growth, and the terminal rework
+
+The capability layer drops the lifecycle state machine, the audit collector, the grant registry and the legacy handler table, and lets the resolution result plus the projection host carry the weight. In the same round the chat transcript, bounded history, the plugin reload preflight and owned worktrees land.
+
+### Added
+
+- **Plugin reload preflight** (`084453b9d`) — the new version is compiled before it replaces the running one; a compile failure refuses the reload instead of tearing the running version down.
+- **Authorized chat transcript details** (`ed7dba611`) — `chat.transcript_details` returns tool cards, citations and context metering read-only.
+- **Bounded history reads** (`b84632f85`, `9b83ab81e`) — bounded history comes back from the canonical PTY grid and in projection order.
+- **One folded transcript** (`6e0cba213`) — ordered chat events fold into a single session transcript.
+- **Unavailable dependencies are visible** (`ae9438dd5`) — an unavailable required dependency is reported to the model in a readable form instead of failing silently.
+- **Authorized chat tool presentations** (`5d10304ab`) — chat tool presentations are streamed once the grant is in place.
+- **PTY scrollback paging through the capability boundary** (`f660ebb83`) — terminal history is read page by page through the capability boundary instead of straight from the backend.
+- **Older history prepended to the shared transcript** (`bf2e0b03e`, `82ddc741d`) — the panel prepends older history to the front of the shared transcript.
+- **Rich Markdown and measured context** (`649f0504b`) — the panel renders rich Markdown assistant replies and shows the measured context usage.
+
+### Changed
+
+- **Owned worktrees** (`6b82702f6`) — sub-agents are forced into their own worktree through the mounted OS drivers.
+- **Raw corrections are sequenced** (`8c65a29d8`) — corrections are ordered by their owning index and carry a status cursor.
+- **Reflection attribution** (`86bcf95f3`) — reflection exposure is attributed to the source notes.
+- **Bounded fold recovery** (`13e03d7b2`) — fold recovery is bounded and persisted summaries are accounted for.
+
+### Fixed
+
+- **Terminal refusals no longer leak session existence** (`893a91085`).
+- **Transcript grants are fenced** (`9dd1b7d04`) — a missing diff is distinguished from no diff.
+- **Shape validated only after admission** (`f49405f70`).
+- **Top scroll anchor preserved** (`606122b67`) — and unavailable history is distinguished from empty history.
+- **Selected conversation preserved** (`630bd63ee`) — across matching mounts.
+- **Live chat reconciliation** (`18dd2d602`) — unconfirmed turns are no longer lost while reconciling.
+- **Capability resolution details stay internal** (`f9008ed5f`).
+- **obscura pinned and its gaps closed** (`c6f2d703d`) — the browser pins the obscura version and closes the gaps it opens.
+- **Page-started navigation routed by frame id** (`0cb486484`).
+
+### Removed
+
+- **Capability lifecycle / activation state machine** (`459c4fe96`).
+- **Unmounted audit collector and grant registry** (`8507aff30`).
+- **Legacy handler registry and unmounted ambient module** (`4cb16e5b6`).
 
 ---
 
@@ -28,11 +88,19 @@ The desktop shape and the wire protocol changed in the same round: the Panel spl
 - **The v1 method set** (`src/gateway/`) — three methods: `health` / `sessions.list` / `panel.capabilities.snapshot`, plus `panel_routes` and a CSP; the Gateway mounts the native TSX web v1 ingress on its TLS router.
 - **A per-user subject in `system.hello`** (`src/gateway/`) — the handshake response carries a per-user derived `subject`: HMAC-SHA256, domain separator `aleph.panel.subject.v1\0`, first 16 bytes as hex. It is **not** an identity credential; it only correlates several connections belonging to the same user.
 - **Desktop IPC** (`desktop/nsh-shell/`, `src/`) — opt-in read-only Unix IPC and tier-gated Windows named-pipe IPC; the client now uses bounded frames.
+- **Shared memory graph read contracts and a read-only Nebula surface** (`5e1707f89`, `cd3ef045d`) — the memory graph is read-only under one contract and a node's identity is its note path; the Nebula lands as a read-only v1 surface.
+- **Read-only Nebula rendering in the NSH Panel** (`e8cc2e7b1`) — the Nebula renders inside the shared NSH Panel instead of a second business UI.
+- **Panel preferences, theme tokens and command rules** (`e795fca40`) — panel preferences and theme tokens move into the shared UI logic layer.
+- **A command palette with rebindable shortcuts** (`c3712ff8d`) — a searchable command palette inside the Panel, with shortcuts that can be rebound.
+- **A fixed two-column shell with appearance settings** (`10ff3bc39`) — the panel shell is fixed to two columns and wired to the appearance settings.
 
 ### Changed
 
 - **Cold channel declaration** (`src/gateway/`) — declarative channel configuration no longer activates at startup; a declared or disabled channel is brought up only by an explicit start (`9976b7840`).
 - **Severed config, link, and adapter wires removed** (`3df8e0401`) — the disconnected configuration found by the audit is deleted instead of lingering in the config surface.
+- **The panel's text size applies on Desktop and Web** (`779cd18c5`).
+- **`live_events` push and `chat.*` on the v1 endpoints** (`e0972bd96`).
+- **A TSX Chat module with live streaming** (`1280a3647`).
 
 ---
 

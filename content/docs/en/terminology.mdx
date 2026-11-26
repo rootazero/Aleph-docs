@@ -7,7 +7,7 @@ description: "Standardized terminology and translations for Aleph concepts"
 
 This page establishes canonical names for Aleph concepts to ensure consistency across documentation, code, and UI.
 
-> **Panel top-level modes** (顶层模式): the desktop panel has seven, in nav order — Chat (`/chat`), Dashboard (`/dashboard`), Memory (`/memory`), Agents (`/agents`), Teams (`/teams`), Extensions (`/extensions`), Settings (`/settings`). Settings groups MCP / Plugins / Skills under an **Advanced** group; the ClawHub settings tab was removed.
+> **Panel top-level modes** (顶层模式): the desktop panel switcher has eight, in nav order — Chat (`/chat`), Dashboard (`/dashboard`), Memory (`/memory`), Agents (`/agents`), Teams (`/teams`), Projects (`/projects`), Terminal (`/terminal`), Settings (`/settings`). Extensions (`/extensions`) is a panel mode too, but it is **not** in the switcher — its launcher lives in the Chat sidebar's advanced-features zone. Settings groups MCP / Plugins / Skills / ACP under an **Extensions** group, and Browser / Policies / Security / Execution / Workspaces under an **Advanced** group; the ClawHub settings tab was removed.
 
 ## Core Concepts
 
@@ -64,6 +64,10 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Batch Export** | 批量导出 | Export multiple cards at once as a deliverable |
 | **Dream Insights** | 梦境洞察 | Read-only panel (Settings > Memory) backed by `dreaming.list_insights` — recent daily synthesis notes + dream-run history |
 | **Corrections** | 纠正记录 | Read-only panel (Settings > Memory) backed by `memory.list_corrections` — surfaces the correction → distillation lifecycle |
+| **Memory Graph** | 记忆图 | `shared/protocol/src/memory_graph.rs` — the read-only query contract over the memory graph (`graph.query` / `graph.search` / `graph.node_detail`); a node's identity is its note path |
+| **Memory Nebula** | 记忆星云 | `shared/ui_logic/src/nebula/` — the pure graph indexing and force-directed layout shared by both Panel renderers (`NebulaIndex`), read-only |
+| **Session Continuity** | 会话连续性 | `src/memory/session_resume/` — restores conversation context across sessions (`SnapshotWriter` / `SnapshotReader`), partitioned per agent |
+| **Context Fold** | 上下文折叠 | `src/context/compact/folds.rs` — the fold record is the single source of truth (`FoldRecord`); payback accounting (`FoldVerdict` / `Payback`) is computed lazily in `src/context/compact/fold_ledger.rs` |
 | **Raw Memory (L0)** | 原始记忆 | Ephemeral session data before compression |
 | **Note (L1)** | 笔记 | Persistent markdown knowledge files |
 | **Wikilink** | 维基链接 | Obsidian-compatible `[[note-name]]` cross-references |
@@ -84,8 +88,8 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Extension Tool** | 扩展工具 | Plugin-provided tool (WASM / Node.js) |
 | **Skill** | 技能 | A learned or installed capability that adds tools |
 | **Skill System** | 技能系统 | Framework for skill discovery, registration, and lifecycle |
-| **Dispatcher** | 调度器 | Tool registry, risk evaluation, and semantic retrieval |
-| **Hydration** | hydrated tools | Semantic tool retrieval based on query context |
+| **Tool Registry** | 工具注册表 | `ToolHandlerRegistry` (`src/tools/registry.rs`) — the descriptor-backed source of truth for tools; the tool definition the model sees is a projection of it, not a second source |
+| **tool_search** | 工具检索 | The ranked discovery meta-tool of the deferred exposure tier (`src/tools/tool_search.rs`) — self-contained BM25 over names and descriptions, with no coupling to the memory FTS index |
 | **Parallel Group** | 并行组 | A bucket of tool calls in the Act phase, partitioned by resource claim and dispatched concurrently; groups are serial, intra-group concurrent |
 | **Resource Claim** | 资源声明 | A tool's concurrency-conflict declaration over fs/network/process |
 | **Memo / Cross-batch Dedup** | 备忘 / 跨批次去重 | Reuse of the first result for a duplicate `(name, args)` within or across batches |
@@ -97,7 +101,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | English | Chinese | Definition |
 |---------|---------|------------|
 | **Extension** | 扩展 | User-facing umbrella for Skill + Plugin + MCP server — exactly one **kind** per Extension. See [Extensions Store](/docs/en/concepts/extensions-store) |
-| **Extensions Store** | 扩展商店 | Top-level panel mode (`/extensions`) for browsing/installing Extensions by functional category, with trust tiers and pre-install disclosure |
+| **Extensions Store** | 扩展商店 | Panel mode (`/extensions`) — not in the top switcher; its launcher lives in the Chat sidebar's advanced-features zone. Browses and installs Extensions by functional category, with trust tiers and pre-install disclosure |
 | **ExtensionKind** | 扩展类型 | Store-facing kind enum `{Skill, Plugin, Mcp}` — distinct from plugin-host runtime `PluginKind {Wasm, Mcp, Static}` |
 | **Aleph Hub** | Aleph Hub | Single extension catalog source `aleph-hub` (`hub.heyaleph.com/catalog.json`), cold-start projected by `hub::primer` into `~/.aleph/hub_catalog.db` |
 | **Hub tools** | Hub 工具 | `hub_catalog_sync` / `hub_fetch_docs` / `hub_resolve_spec` / `hub_install_run` / `hub_install_verify`, registered in the main built-in tool registry and constrained by trust and user-consent gates |
@@ -106,6 +110,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Source** | 源 | A catalog provider (plugin marketplaces, Official MCP Registry, Docker MCP Catalog) cached in SQLite for offline browse |
 | **Plugin.install (unified)** | 插件统一入口 | `plugin.install` no longer guesses source; classifies the source (marketplace / zip / path) and routes uniformly |
 | **Plugin Marketplace** | 插件市场 | Indexable directory exposed via `plugin.marketplace.list` / `plugin.marketplace.add` |
+| **Reload Preflight** | 重载预检 | `src/extension/lifecycle.rs` — a plugin reload compiles the new version first (`preflight_reload`); if that fails it refuses (`ReloadRefused`) instead of tearing down the running version |
 
 ## Desktop Hosts and the Panel
 
@@ -114,7 +119,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **NSH** | NSH | The target shape of the Aleph desktop end: the native desktop host crate `aleph-nsh-shell` (`desktop/nsh-shell/`), built on nsh 0.6.0 (`nsh-core` / `nsh-base` / `nsh-engine` all pinned to `=0.6.0`) |
 | **Desktop Host** | 桌面宿主 | A thin native shell: window container, tray, global hotkey, notifications, credential storage, login-item status — and **no chat or session projection of its own** (`desktop/nsh-shell/src/shell_host.rs`) |
 | **Panel** | 面板 | The single source of truth for the business UI: Rust + Leptos/WASM in `interfaces/webchat/`. NSH hosts this one Panel; it is not a second business UI |
-| **Panel Runtime** | 面板运行时 | The modular runtime inside the Panel (`interfaces/webchat/src/panel/`): `TabRegistry` / `PanelProjection` / `PanelLoader` / `PanelSdk`; `panel-modular` is an opt-in feature |
+| **Panel Runtime** | 面板运行时 | The modular runtime inside the Panel: `TabRegistry` (`shared/ui_logic/src/panel/registry.rs`), `PanelProjection` (`shared/ui_logic/src/panel/projection.rs`), `PanelLoader` (`interfaces/webchat/src/panel/loader.rs`), `PanelSdk` (`interfaces/webchat/src/panel/sdk.rs`); `panel-modular` is an opt-in feature |
 | **Legacy Shell** | 旧桌面壳 | The transition-era Tauri v2 app (`desktop/shell/`): its own daemon supervisor, tray, auto-update, deep links, hotkey, menus, notifications. **It will be removed** |
 | **embedded-core** | 内嵌核心 | An opt-in NSH compile-time feature (off by default): on a local target with the port genuinely free, it may start the bundled `aleph-server` next to the host; when the port is taken it only checks compatibility and never takes over an existing service |
 | **aleph:// deep link** | aleph:// 深链 | The URL scheme NSH registers; today only the exact `aleph://open` is recognised (opens Chat), every other `aleph://` URL is ignored |
@@ -134,14 +139,21 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **PolicyDenial** | 策略拒绝 | The result of the policy engine refusing a capability call (`src/capability/policy_runtime.rs`) |
 | **Zahir** | Zahir | The one live host for capability resolution and dispatch: `ZahirFacade` (`src/capability/zahir_facade.rs`) composes the tool backend adapter (the single source of truth for callable tools) with the `OwnershipTree` (the single source of truth for ownership / revocation / disposal), and keeps no second descriptor or handler map |
 | **Slot API** | 插槽 API | `crates/aleph-slot-api/`: the pure contract authority for the slot API (error, text, tool, search / embedding, channel, approval, cancellation, webhook, AI provider). **No I/O, no platform, no LLM**, with a one-way dependency: `alephcore → aleph-slot-api` |
+| **Capability Census** | 能力普查 | `src/capability/census.rs` — capability membership is **derived**: a handle belongs to a capability exactly when the code that installs it installs that capability; the list is never hand-written |
+| **VersionedRegistry** | 版本化注册表 | `src/capability/versioned_registry.rs` — the core-only immutable publication primitive for versioned state, with reentrancy protection (`ReentrancyGuard`) |
+| **ProjectionHost** | 投影宿主 | `src/capability/projection_host.rs` — the host that keeps observing the capability state projection (`HostSnapshot` / `ProjectionEvent`); it is not a third source of truth |
+| **EffectClaim** | 效果声明 | `src/capability/effect_claim.rs` — pure reconciliation over effect-claim event histories (`EffectClaimState`); not yet wired into runtime event construction |
+| **EventAudience** | 事件受众 | `src/capability/event_audience.rs` — the trusted audience that may observe events (`TrustedEventScope`); not another ACL store |
+| **DiagnosticControl** | 诊断控制 | `src/capability/diagnostic_control.rs` — the projection host's diagnostic plane: at most one hold at a time (`DiagnosticStatus`), auto-released on timeout |
 
 ## Security
 
 | English | Chinese | Definition |
 |---------|---------|------------|
 | **Sandbox** | 沙箱 | Per-session execution isolation with capability enforcement |
+| **Owned Worktree** | 自有工作树 | `src/sandbox/worktree.rs` — sub-agents execute inside their own git worktree (`WorktreeHandle`), enforced through the mounted OS drivers |
 | **Capability (extension era)** | 能力（扩展期） | The old extension model's permission declaration (filesystem, network, process); now superseded by the capability model in `src/capability/`, see [Capability Model](/docs/en/capabilities/capability-model) |
-| **Capability Ledger** | 能力账本 | Per-install visible capability list rebuilt from disk (used in pre-install disclosure) |
+| **Capability Ledger** | 能力账本 | `src/runtimes/ledger.rs` — the runtime capability state ledger: it tracks only the state of each capability (Missing / Bootstrapping / Ready / Stale) and never downloads or installs anything |
 | **Approval Gate** | 审批门 | Human-in-the-loop approval for elevated permissions |
 | **fail-closed** | 失败关闭 | An unreadable or malformed policy never silently allows execution: `ConfigApprovalPolicy` falls back to Ask; an absent policy file uses curated built-in defaults (`src/approval/config.rs`) |
 | **IdentityContext** | 身份上下文 | Immutable identity snapshot flowing through execution |
@@ -178,6 +190,8 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Error Receipt** | 错误回执 | Single-sourced user-readable error returned by the gateway; the raw error chain never leaks out |
 | **Dead Letter** | 死信 | Messages that failed to deliver via channel.*; re-drivable from the Panel |
 | **Webhook Backpressure** | Webhook 反压 | Webhook receiver returns 503 under congestion rather than silently dropping |
+| **Chat Transcript** | 聊天转录 | `shared/protocol/src/chat_transcript.rs` — the restricted presentation contract behind `chat.transcript_details` (tool cards, citations, context metering) |
+| **Bounded Scrollback** | 有界回溯 | `chat.history` / `pty.history` return bounded history in projection order; on the PTY side it pages through the capability boundary in `src/gateway/pty/screen/history.rs` |
 
 ## AI/LLM
 
@@ -198,13 +212,13 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 |---------|---------|------------|
 | **A2A** | A2A | Agent-to-Agent protocol for inter-agent communication |
 | **ACP** | ACP | Agent Client Protocol for agent discovery and delegation |
-| **ClawHub** | ClawHub | Legacy registry — no longer a first-class Extensions source; settings tab removed, subsumed into the Extensions Store (long-tail only, read via the Store Agent) |
+| **ClawHub** | ClawHub | Removed — the code no longer carries a ClawHub registry path; both its settings tab and its catalog entry are gone, and catalog browsing is the Extensions Store's job |
 | **Team** | 团队 | A leader + members group; on first message the leader plans first ("Team Strata") and the plan is welded into every member's prompt |
 | **Team Strata** | 团队战略协调 | Leader-first strategic planning that coordinates a team's members |
 | **Coord Task** | 协调任务 | A member's assigned task with status `Pending → InProgress → WaitingReview → Completed`, reviewed by the leader via `task_review` |
 | **Group Chat** | 群聊 | The three-panel team chat window (roster · attribution-bubble message flow · workspace), powered by the durable per-team thread (`teams.chat.*`) |
-| **WorldModel** | 世界模型 | Environmental state tracking for proactive behavior |
-| **Proactive Dispatcher** | 主动调度器 | Daemon that dispatches proactive tasks based on world state |
+| **WorldModel** | 世界模型 | Removed — the daemon-style world-model subsystem is gone; the governance topology now lives in `src/loop_graph/` |
+| **Proactive Dispatcher** | 主动调度器 | Removed — the standalone proactive-dispatch daemon is gone; background scheduled work is served by `src/tasks/cron/` and `src/tasks/heartbeat/` |
 | **Desktop Bridge** | 桌面桥 | UDS JSON-RPC protocol for desktop automation |
 | **Deliverable** | 交付物 | Work product produced by the `artifact_publish` tool — landed as `ArtifactOrigin::Deliverable`; Panel "Deliverables" pane pins and opens it |
 | **Artifact Store** | 工件存储 | `src/artifacts/` — unified backend for deliverables (`MAX_ARTIFACT_BYTES = 50 MB` + `MAX_ARTIFACTS_PER_SESSION = 200`) |
@@ -283,6 +297,19 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `AgentLedger` | Operation Ledger |
 | `Verification` | Verifier / Turn-verify context |
 | `Guardrail` | Guardrail (Block / Sanitize / Pass) |
+| `ToolHandlerRegistry` | Tool Registry |
+| `tool_search` | Tool Search |
+| `VersionedRegistry` | Versioned Registry |
+| `ProjectionHost` | Projection Host |
+| `DiagnosticControl` | Diagnostic Control |
+| `EventAudience` | Event Audience |
+| `EffectClaimState` | Effect Claim |
+| `NebulaIndex` | Memory Nebula |
+| `WorktreeHandle` | Owned Worktree |
+| `TabRegistry` | Panel Registry |
+| `PanelProjection` | Panel Projection |
+| `PanelLoader` | Panel Loader |
+| `PanelSdk` | Panel SDK |
 
 ## Deprecated Terms (Do Not Use)
 
@@ -300,6 +327,10 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | SubagentTool | (retained as the sub-agent spawn tool, `src/agents/subagent_tool/`) | The flow side has no separate flow-run tool: flow orchestration is declarative `FlowSpec` (`src/orchestrator/flow_spec.rs`) resolved and dispatched through `FlowRegistry` (`src/orchestrator/flow_registry.rs`); the only workflow tool is `WorkflowTool` (`src/builtin_tools/workflow_tool.rs`) |
 | LoopToolRegistry | ToolService | Unified tool façade |
 | ClawHub settings tab | Extensions Store | ClawHub demoted to long-tail; settings tab removed |
+| Dispatcher (tool-chain module) | `src/orchestrator/dispatch.rs` | The historical tool-chain Dispatcher module (`ToolRegistry` / `RiskEvaluator` / `ToolIndex` / `HydrationResult`) was removed during the phase 6/7 tool-chain migration; today's dispatcher is the orchestrator-level flow dispatch |
+| Hydration | `tool_search` | Semantic tool retrieval became the ranked discovery meta-tool of the deferred exposure tier |
+| Capability Ledger (pre-install disclosure) | `src/hub/trust.rs` | Pre-install disclosure is carried by `DisclosurePayload` in `src/hub/trust.rs`, not by a disk-rebuilt capability list |
+| Capability lifecycle state machine | Capability resolution result + projection host | The lifecycle, activation, audit, grant and ambient modules were removed; capability ownership now lives in `src/capability/ownership.rs` and `src/capability/projection_host.rs` |
 | `teams.run` | `teams.chat.send` / Coord Tasks | Not a method — teams use the chat thread + tasks |
 | `coordination: sequential\|parallel\|hierarchical` | Team Strata (leader-first planning) | Coordination modes were fictional |
 | DiminishingReturnsDetector | (removed) | Harness ratchet tightened to the current `CEILING` (`src/harness/tests/budget.rs:795`); the hard stop inside the loop violates R10 |
