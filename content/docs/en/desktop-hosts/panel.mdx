@@ -53,7 +53,7 @@ Packaging for the Web does not enable the static route. Set `panel_web_dir` unde
 
 ### Host functions
 
-`interfaces/panel/nsh.json` declares four host functions. `desktop/nsh-shell/src/panel_host.rs` implements them on desktop, and `interfaces/panel/web/host.js` implements them on the Web.
+`interfaces/panel/nsh.json` declares five host functions and asks for the `openUrl` permission (only the https and http schemes are allowed). `desktop/nsh-shell/src/panel_host.rs` implements them on desktop, and `interfaces/panel/web/host.js` implements them on the Web.
 
 | Function | Behavior on each host (see implementations above) |
 |---|---|
@@ -61,6 +61,16 @@ Packaging for the Web does not enable the static route. Set `panel_web_dir` unde
 | `aleph.pair` | Always returns an error on desktop, where the operating system authenticates Desktop IPC. The Web host submits a device token or a one-time ticket to `/v1/session`. |
 | `aleph.connect` | Opens a connection and can reconnect after a drop. |
 | `aleph.connection` | Reads the current connection state. The event of the same name carries `state`, `endpoint`, `subject`, and `pairing` when the state changes. |
+| `aleph.fontScale` | Sets the Panel's text size: a number is a multiple of the system font size, `null` means follow the system. The accepted range is 0.5 to 3; out of range it reports `font scale must be a number from 0.5 to 3`. |
+
+The desktop side hangs `aleph.fontScale` off `aleph/panel-surface` (the surface owns the `AppView`); the web side changes the root element's `font-size` (16px is 100%).
+
+Besides `aleph.connection`, the host also delivers an `aleph.event` event shaped as `{ topic, data }`:
+
+- The desktop side wraps the stream events the Gateway pushes into `stream.<type>` topics (`desktop/nsh-shell/src/panel_host.rs`).
+- The web side forwards notifications with a topic unchanged (`interfaces/panel/web/host.js`).
+- After dropped frames the desktop side first sends its own `connection.stale` event (the `data` carries the dropped count), telling the Panel to re-fetch instead of trusting its own view.
+- Live frames are never replayed: once the connection changes, events from the old connection are no longer delivered.
 
 ### Choosing a renderer
 
@@ -107,13 +117,14 @@ The host sends `probe` during a probe window of up to 15 seconds, waiting 350 ms
 | TSX (NSH desktop) | `aleph.rpc` uses a local Desktop IPC connection opened by `AlephClient::connect_local`, over a Unix socket on macOS (`desktop/nsh-shell/src/panel_host.rs`, `shared/client/src/connection.rs`). | The operating system authenticates the same user. The Unix socket's parent directory must be owned by that user with mode `0700` (`shared/client/src/local_ipc.rs`, `src/gateway/server/connection/local_ipc.rs`). |
 | TSX (Web) | Same-origin `wss://…/v1/ws` with the `aleph.protocol.v1` subprotocol. Binary messages contain a four-byte big-endian length followed by UTF-8 JSON; the first frame is `system.hello` (`interfaces/panel/web/host.js`, `shared/protocol/src/framing.rs`). | The native TLS router checks the origin. `POST /v1/session` issues a short-lived, host-only cookie that references an existing device credential (`src/gateway/server/connection/web_v1.rs`). |
 
-Desktop IPC and Web v1 share a read-only method list: `health`, `sessions.list`, and `panel.capabilities.snapshot`. Other RPCs do not reach Core through these two ingress paths (`src/gateway/server/connection/mod.rs`, `shared/protocol/src/panel.rs`).
+Desktop IPC and Web v1 share one method list, twelve methods in all: `health`, `sessions.list`, `panel.capabilities.snapshot`, `graph.query`, `graph.search`, `graph.node_detail`, `chat.history`, `chat.send`, `chat.abort`, `chat.transcript_details`, `trace.tool_output`, and `context.breakdown`. Other RPCs do not reach Core through these two ingress paths (`src/gateway/server/connection/mod.rs`, `shared/protocol/src/panel.rs`).
 
 ## Known limits
 
 - Desktop TSX reaches only local Desktop IPC. For example, a WebSocket target set with `--connect` reports `unavailable` rather than falling back to WebSocket. `ALEPH_SHELL_PANEL_IPC` is a socket path, but the endpoint portion of the layout storage key is always `desktop-ipc`, even if the socket path changes (`desktop/nsh-shell/src/panel_host.rs`, `interfaces/panel/shell/Shell.tsx`, `shared/ui_logic/src/panel/layout.rs`).
 - `tsx-panel` is off by default. The desktop release workflow still packages the transitional legacy Tauri shell and `aleph-server` with its Leptos assets; it has no NSH TSX release step (`desktop/nsh-shell/Cargo.toml`, `.github/workflows/aleph-app-release.yml`).
 - TSX does not yet cover every classic Panel tab. Tabs that require the classic renderer show an unavailable message (`interfaces/panel/shell/Shell.tsx`).
+- The TSX `aleph:memory-nebula` tab is declared by the Gateway and depends on `graph.query`, `graph.search`, and `graph.node_detail` all being mounted; when they are not, the tab does not exist (`src/gateway/handlers/panel_capabilities.rs`, `src/gateway/handlers/mod.rs`).
 
 > **Status: Planned** — The S4 consistent snapshot and durable observation replay are described in `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`. The TSX Panel currently fetches a capability snapshot (`interfaces/panel/shell/Shell.tsx`), which is not session or task recovery. The Gateway does not advertise snapshot or replay features in `system.hello` (`src/gateway/handlers/system_hello.rs`).
 

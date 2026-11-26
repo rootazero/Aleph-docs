@@ -143,6 +143,65 @@ pub trait PanelUiCapabilitySource {
 
 由此得到三条不变量：布局只存稳定 `PanelTabKey` 与纯数据；恢复只能重排当前快照已有的标签，不能让任何标签变成可挂载；快照不再提供的标签渲染为 `Unavailable` 占位，渲染器永不执行它（`LayoutSlot::Unavailable` 的注释：「Renderers show a placeholder and never execute it.」）。布局损坏只重置表现，不触碰会话或插件。
 
+## 共享模型层：转录、偏好与星云
+
+`shared/ui_logic/src/` 下除 `panel/` 之外还有三块与运行时无关的共享模型（见 `shared/ui_logic/src/lib.rs`）。它们同样被两套渲染器共用，但**不在 `panel` feature 之后**：TUI 构建也编进 `transcript`，Leptos 的默认构建也编进 `prefs`。
+
+| 模块 | 职责 | 谁在读 |
+|---|---|---|
+| `shared/ui_logic/src/transcript/` | 把会话事件折成行、组、摘要与差异；纯数据进纯数据出 | Leptos Panel、TSX Panel、TUI（ratatui） |
+| `shared/ui_logic/src/prefs/` | 个人偏好：外观轴、快捷键、命令面板排序 | Leptos Panel、TSX Panel |
+| `shared/ui_logic/src/nebula/` | 记忆星云的图索引与三维力导向布局 | Leptos Panel（WebGL2）、TSX Panel |
+
+### 转录呈现层：shared/ui_logic/src/transcript/
+
+`shared/ui_logic/src/transcript/mod.rs` 的模块注释划定了边界：
+
+> Transcript presentation logic shared by the Panel (Leptos) and the TUI (ratatui). Everything here is `data → data`: no rendering, no signals, no terminal.
+
+折叠、摘要与差异视图都在这一层，因此两套渲染器不可能对「一行该不该折叠」「摘要取哪一句」「差异高亮哪一段」给出不同答案。该模块在 `default-features = false` 下也能编译（TUI 构建用它），其中 `chat_panel.rs` 与 `mermaid.rs` 位于 `panel` feature 之后，只有 Panel 构建会编进。
+
+| 出口 | 作用 |
+|---|---|
+| `fold` / `FoldPolicy` / `Folded` | 按策略折叠工具输出；`DEFAULT_COLLAPSED_ROWS` 与 `FALLBACK_WIDTH` 是默认参数 |
+| `summarize` / `CallSummary` / `display_name` | 把一次工具调用压成一行摘要；`DISPLAY_NAMES` 与 `PREFERRED_ARG_KEYS` 决定取哪个参数 |
+| `group_entries` / `group_tool_rows` | 把相邻的工具行合并成组 |
+| `diff_rows` / `DiffView` / `word_spans` | 差异视图的行与词级高亮；`COLLAPSED_DIFF_ROWS` 与 `EXPANDED_DIFF_ROWS` 是两种展开深度 |
+| `enhance` / `find_path_refs` / `linkify_bare_urls` | Markdown 增强：路径引用与可点击链接 |
+| `step_headline` / `step_tally` / `ThinkingBlock` | 每一步的标题、计数与思考块 |
+| `reconcile` / `ContextRows` | 上下文用量视图；`PROVIDER_TOLERANCE` 是对账容差 |
+| `Transcript` / `Change` / `TranscriptEntry` | 事件归约器的状态与增量 |
+
+### 偏好层：shared/ui_logic/src/prefs/
+
+文件头写明这份数据的边界：
+
+> Preferences are per device and stored by the Panel host under `PREFS_STORAGE_KEY`. Unlike `panel::layout`, they are not scoped to a Gateway endpoint or subject.
+
+| 符号 | 作用 |
+|---|---|
+| `PREFS_STORAGE_KEY` | 存储键 `"aleph.panel.prefs.v1"` |
+| `PREFS_VERSION` | 当前版本 `1`；版本不认识时退回默认值并报 `UnknownVersion` |
+| `PanelPrefs` | 偏好的全部内容：版本、外观、快捷键绑定 |
+| `Binding::Key` / `Binding::Cleared` | 一条快捷键绑定；没有条目的命令用默认键 |
+| `restore` / `RestoredPrefs` | 读回偏好；文本损坏报 `PrefsRepair::Corrupt` |
+| `set_appearance` / `set_binding` | 改一个外观轴或一条绑定 |
+
+外观有五条轴（`shared/ui_logic/src/prefs/appearance.rs`）：`ThemeMode`（System / Light / Dark）、`Accent`（Mauve / Ocean / Forest / Sunset / Rose）、`FontScale`（Compact 0.9、Default 1.0、Cozy 1.1、Large 1.25、Largest 1.4）、`Roundness`、`Density`。`theme_tokens` 把它们变成 NSH `setTheme` 的载荷，同时带明暗两套配色，所以切换主题不需要第二次调用。
+
+Leptos 侧的 `interfaces/webchat/src/appearance.rs` 直接转出这五个枚举，自己只保留 Leptos 独有的部分——第六条轴 `Material`、本地化标签与 `localStorage` 读写。`Material` 因此不进 `shared/ui_logic/src/prefs/`，TSX Panel 也没有这一轴。
+
+命令面板的排序与按键解析在 `shared/ui_logic/src/prefs/commands.rs`：`score` 给「标签前缀 100、词首 70、标签包含 40、关键词前缀 35、关键词包含 20」，空查询返回 `u32::MAX`；`rank` 按分数排序，同分保持输入顺序；`resolve_bindings` 决定每条命令最终用哪个键，返回 `ResolvedKey`——`source` 取 `KeySource` 的 Default / User / Cleared，`problem` 取 `KeyProblem` 的 Invalid / Conflict，有问题的键不生效（冲突时 Conflict 带上先占用的命令 id）。
+
+### 星云布局层：shared/ui_logic/src/nebula/
+
+`shared/ui_logic/src/nebula/` 是记忆星云的共享模型，分两块：
+
+- `NebulaIndex::new` 把边拆成两样：`relations` 保留有向关系（每条 `Relation` 带 from、to 与原始行），`springs` 把一对端点合并成一根无向弹簧，同一对节点只留一根。
+- `ForceLayout` 是三维力导向布局：库仑斥力、虎克弹簧、向心力与社区重力叠加，`alpha` 从 1.0 退火到 `ALPHA_MIN`，所以模拟会冷却而不是永远震荡；`seed` 用节点 id 的哈希做种子，同样的图每次布局一致，`step` 推进一步，`converged` 判断是否收敛。
+
+Leptos 侧用 WebGL2 渲染器跑完整的三维沉降（`interfaces/webchat/src/platform/wide/views/memory/galaxy/gl/layout3d.rs`）；TSX 侧只在读窗口内工作——`NebulaModel::scene` 取 `graph.query` 的结果，跑 8 步后投影成二维点集与边（`interfaces/panel/src/lib.rs`）。
+
 ## 渲染器层
 
 ### Leptos 渲染器（interfaces/webchat/）
@@ -219,32 +278,54 @@ PanelShell            interfaces/webchat/src/panel/shell.rs
 | `move_tab(stored, key, forward)` | `PanelLayout::move_one` |
 | `set_hidden(stored, key, hidden)` | `PanelLayout::set_hidden` |
 | `select(stored, key)` | `PanelLayout::select` |
+| `prefs(stored)` | `prefs::restore`；返回外观、绑定、修复原因、主题载荷与文字大小系数 |
+| `set_appearance(stored, axis, value)` | `prefs::set_appearance`；轴或值不认识时返回 `None` |
+| `set_binding(stored, command, binding)` | `prefs::set_binding`；`null` 恢复默认，`"cleared"` 去掉键 |
+| `resolve_bindings(commands, stored, apple)` | `resolve_bindings`；返回每条命令的键、来源与问题 |
+| `rank_commands(query, items)` | `rank`；返回命中的条目 id，从最好到最差 |
+| `normalize_keystroke(text, apple)` | `nsh_core::keymap::Keystroke::parse_with`；`apple` 让 `mod` 表示 Command |
 
-TSX 侧自己渲染三个内置模块（`SHELL_MODULES`，组件在 `interfaces/panel/modules/`）：
+除了 `PanelModel`，`interfaces/panel/src/lib.rs` 还导出两个模块：
+
+| 模块 | 作用 |
+|---|---|
+| `ChatModel` | 一个已挂载 Chat 标签页自己的转录状态；包住 `shared_ui_logic::transcript::chat_panel::ChatState`，提供 `reset`、`begin_send`、`resolve_send`、`accept`、`interrupt`、`resume_composing`、`replace_history`、`prepend_history`、`apply_history_details`、`context_view`、`mermaid_view`、`diff_view` |
+| `NebulaModel` | `NebulaModel::scene` 把 `graph.query` 的结果变成非权威的场景数据（点集与边）；图形本身来自 Core，这里只做布局 |
+
+TSX 侧自己渲染四个内置模块（`SHELL_MODULES`，组件在 `interfaces/panel/modules/`）：
 
 | key | label | icon | order | 组件 |
 |---|---|---|---|---|
 | `aleph:overview` | Overview | `layout-dashboard` | -30 | `interfaces/panel/modules/Overview.tsx` |
 | `aleph:sessions` | Sessions | `messages-square` | -20 | `interfaces/panel/modules/Sessions.tsx` |
+| `aleph:chat` | Chat | `message-circle` | -15 | `interfaces/panel/modules/Chat.tsx` |
 | `aleph:capabilities` | Capabilities | `blocks` | -10 | `interfaces/panel/modules/Capabilities.tsx` |
 
-- 这三个模块以 `BuiltIn` 声明并入 Core 快照，与 Core 的内置条目走同一套投影校验；Core 已声明同名 key 时保留 Core 的描述符。
-- 快照缺失、格式错误或被投影拒绝时，只保留这三个模块并在 `projectionError` 中报告原因码，绝不挂载被拒快照的任何部分。
-- 每个 tab 带 `renderer` 字段：三个内置模块为 `tsx`，**其余 tab 为 `dom`，即 Leptos Panel 的 DOM 模块 ABI，在 TSX 侧显示为不可用**。
-- 挂载的模块拿到 `interfaces/panel/shell/sdk.ts` 的 `PanelSdk`（`invoke`、`subscribe`、`connection`、`navigate`、`dispose`），绑定一个 tab key 与一个连接代次；`dispose()` 或连接代次推进之后，旧调用的结果被丢弃而不是送达模块。这里的 `subscribe` 监听的是连接状态，不是 Leptos 侧的事件 topic。
-- 壳的其余部分在 `interfaces/panel/shell/`：`interfaces/panel/shell/Shell.tsx`、`interfaces/panel/shell/LayoutEditor.tsx`、`interfaces/panel/shell/PairingForm.tsx`、`interfaces/panel/shell/view.ts`。
+第五个标签页 `aleph:memory-nebula` 不在这张表里：它的声明由 Gateway 注入能力快照（`src/gateway/handlers/panel_capabilities.rs` 的 `with_memory_nebula`，label `Memory Nebula`、icon `network`、order 0、entry `shell/memory-nebula`），前提是 `graph.query`、`graph.search`、`graph.node_detail` 三个方法都已挂载（`src/gateway/handlers/mod.rs` 的 `memory_nebula_mounted`）。组件是 `interfaces/panel/modules/MemoryNebula.tsx`，它调 `graph.query` 读窗口、调 `graph.search` 搜索、调 `graph.node_detail` 看单个节点。
+
+- 这四个模块以 `BuiltIn` 声明并入 Core 快照，与 Core 的内置条目走同一套投影校验；Core 已声明同名 key 时保留 Core 的描述符。
+- 快照缺失、格式错误或被投影拒绝时，只保留这几个模块并在 `projectionError` 中报告原因码，绝不挂载被拒快照的任何部分。
+- 每个 tab 带 `renderer` 字段：这几个模块为 `tsx`，**其余 tab 为 `dom`，即 Leptos Panel 的 DOM 模块 ABI，在 TSX 侧显示为不可用**。
+- 挂载的模块拿到 `interfaces/panel/shell/sdk.ts` 的 `PanelSdk`，绑定一个 tab key 与一个连接代次；`dispose()` 或连接代次推进之后，旧调用的结果与旧事件都被丢弃而不是送达模块。`invoke` 调 RPC，`subscribe` 监听连接状态，`on` 按主题前缀收宿主转发来的实时帧（`stream.`、`connection.`），模块还可以把自己的命令注册进命令面板，`navigate` 可以带一份交给目标模块的意图，`active` 报告当前代次是否仍然有效。
+- 壳的其余部分在 `interfaces/panel/shell/`：`interfaces/panel/shell/Shell.tsx`、`interfaces/panel/shell/LayoutEditor.tsx`、`interfaces/panel/shell/PairingForm.tsx`、`interfaces/panel/shell/CommandPalette.tsx`、`interfaces/panel/shell/Settings.tsx`、`interfaces/panel/shell/Sidebar.tsx`、`interfaces/panel/shell/commands.ts`、`interfaces/panel/shell/prefs.ts`、`interfaces/panel/shell/view.ts`。
 
 ### TSX 宿主函数
 
-TSX 壳通过 `interfaces/panel/nsh.json` 的 `capabilities` 段里的 `host` 列表申请四个宿主函数。函数契约写在 `interfaces/panel/web/host.js` 的文件头：
+TSX 壳通过 `interfaces/panel/nsh.json` 的 `capabilities` 段里的 `host` 列表申请五个宿主函数，并申请 `openUrl` 权限（只允许 https 与 http 两种 scheme）。函数契约写在 `interfaces/panel/web/host.js` 的文件头：
 
 ```text
 "aleph.rpc"        { method, params } -> { result } | { error: { code, message } }
 "aleph.pair"       { bootstrap_ticket } | { device_token } -> { result: null } | { error }
 "aleph.connect"    null -> opens a new socket (after a drop)
 "aleph.connection" null -> the current connection state
+"aleph.fontScale"  number | null -> null
 事件 "aleph.connection"  { state, endpoint, subject, pairing }
+事件 "aleph.event"       { topic, data }
 ```
+
+`aleph.fontScale` 设置 Panel 的文字大小：数字是系统字号的倍数，`null` 表示跟随系统；桌面与 Web 的可接受范围都是 0.5 到 3，越界时回 `font scale must be a number from 0.5 to 3`。桌面由 `desktop/nsh-shell/src/panel_surface.rs` 实现（surface 拥有 `AppView`，所以这个函数挂在 surface 上而不是 `panel_host` 上），Web 由 `interfaces/panel/web/host.js` 实现（改根元素的 `font-size`，16px 是 100%）。
+
+`aleph.event` 是宿主转发来的实时帧，形状是 `{ topic, data }`。桌面把 Gateway 推来的流事件包成 `stream.<type>` 主题，Web 把带 topic 的通知原样转发；两端形状相同。桌面还会在丢掉帧之后先发一条自己的 `connection.stale` 事件（`data` 里是丢帧数），提醒 Panel 重新拉取而不是相信自己那份视图。实时帧不重放。
 
 同一份 TSX 源码有两个宿主适配器：
 
@@ -282,7 +363,7 @@ TSX 壳通过 `interfaces/panel/nsh.json` 的 `capabilities` 段里的 `host` �
 | `PanelUiCapabilitySnapshot` | `revision` + `declarations`；`new()` 按来源（内置在前）再按 qualified key 排序 |
 | `PanelProjectSelection` / `PanelUiContextSnapshot` | 项目选择（`project_id`、`generation`）及携带它的快照 |
 
-Gateway 侧，`src/gateway/server/connection/mod.rs` 的 `V1_METHODS` 是 v1 入口共用的方法集：`health`、`sessions.list` 与 `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`。快照 handler 在 `src/gateway/handlers/panel_capabilities.rs`。
+Gateway 侧，`src/gateway/server/connection/mod.rs` 的 `V1_METHODS` 是 v1 入口共用的方法集，共十二个：`health`、`sessions.list`、`panel.capabilities.snapshot`、`graph.query`、`graph.search`、`graph.node_detail`、`chat.history`、`chat.send`、`chat.abort`、`chat.transcript_details`、`trace.tool_output`、`context.breakdown`。快照 handler 在 `src/gateway/handlers/panel_capabilities.rs`。
 
 ### 描述符校验
 
@@ -344,7 +425,7 @@ Aleph 仓的 `justfile` 为两套渲染器各提供一组 recipe：
 
 > **状态：规划中** — 蓝图见 `docs/research/NSH_ADR-001~009.md` 的 ADR-003（插件 UI 采用 Hybrid 形态）与 ADR-009（动态 UI 包的分发、缓存与回滚）。当前社区插件标签页只能通过 Leptos 侧的 DOM 模块 ABI 加载（`interfaces/webchat/src/panel/loader.rs`），TSX 侧显示为不可用（`interfaces/panel/src/lib.rs`）；没有分发与回滚链路。
 
-> **状态：规划中** — 蓝图见 `docs/research/NSH_ADR-001~009.md` 的 ADR-005：Agent 生成的受限 TSX UI（Generated UI），在隔离容器与受限运行时中运行；S2 设计明确将 Generated UI 列为范围外。当前 TSX 渲染器只渲染自带的三个内置模块（`interfaces/panel/src/lib.rs` 的 `SHELL_MODULES`），不执行外部提供的 TSX。
+> **状态：规划中** — 蓝图见 `docs/research/NSH_ADR-001~009.md` 的 ADR-005：Agent 生成的受限 TSX UI（Generated UI），在隔离容器与受限运行时中运行；S2 设计明确将 Generated UI 列为范围外。当前 TSX 渲染器只渲染自带的内置模块（`interfaces/panel/src/lib.rs` 的 `SHELL_MODULES`），不执行外部提供的 TSX。
 
 ## 历史：单一 Leptos Panel 的描述
 

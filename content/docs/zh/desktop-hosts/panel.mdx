@@ -53,7 +53,7 @@ Web 打包不会自动启用静态路由。将 Gateway 配置 `[gateway]` 下的
 
 ### 宿主函数
 
-`interfaces/panel/nsh.json` 声明四个宿主函数。桌面由 `desktop/nsh-shell/src/panel_host.rs` 实现，Web 由 `interfaces/panel/web/host.js` 实现。
+`interfaces/panel/nsh.json` 声明五个宿主函数，并申请 `openUrl` 权限（只允许 https 与 http 两种 scheme）。桌面由 `desktop/nsh-shell/src/panel_host.rs` 实现，Web 由 `interfaces/panel/web/host.js` 实现。
 
 | 函数 | 两端的行为（见上述实现） |
 |---|---|
@@ -61,6 +61,16 @@ Web 打包不会自动启用静态路由。将 Gateway 配置 `[gateway]` 下的
 | `aleph.pair` | 桌面恒返回错误，由操作系统认证 Desktop IPC；Web 将设备令牌或一次性票据提交给 `/v1/session`。 |
 | `aleph.connect` | 发起连接；断线后可用它重新连接。 |
 | `aleph.connection` | 读取连接状态；同名事件在状态变化时携带 `state`、`endpoint`、`subject`、`pairing`。 |
+| `aleph.fontScale` | 设置 Panel 的文字大小：数字是系统字号的倍数，`null` 表示跟随系统；可接受范围 0.5 到 3，越界时返回 `font scale must be a number from 0.5 to 3`。 |
+
+桌面侧把 `aleph.fontScale` 挂在 `aleph/panel-surface` 上（surface 拥有 `AppView`），Web 侧改根元素的 `font-size`（16px 为 100%）。
+
+除 `aleph.connection` 外，宿主还会下发 `aleph.event` 事件，形状是 `{ topic, data }`：
+
+- 桌面把 Gateway 推来的流事件包成 `stream.<type>` 主题（`desktop/nsh-shell/src/panel_host.rs`）。
+- Web 把带 topic 的通知原样转发（`interfaces/panel/web/host.js`）。
+- 桌面在丢掉帧之后，先发一条自己的 `connection.stale` 事件（`data` 里是丢帧数），提醒 Panel 重新拉取而不是相信自己那份视图。
+- 实时帧不重放：换连接之后旧连接的事件不再投递。
 
 ### 选择渲染器
 
@@ -107,13 +117,14 @@ WebView 桥接使用带 `kind` 标签的 JSON。`shared/protocol/src/panel_shell
 | TSX（NSH 桌面） | `aleph.rpc` 走 `AlephClient::connect_local` 建立的本地 Desktop IPC 连接，macOS 用 Unix socket（`desktop/nsh-shell/src/panel_host.rs`、`shared/client/src/connection.rs`）。 | 同账号由操作系统认证；Unix socket 的父目录须由该用户持有、权限为 `0700`（`shared/client/src/local_ipc.rs`、`src/gateway/server/connection/local_ipc.rs`）。 |
 | TSX（Web） | 同源 `wss://…/v1/ws`，子协议 `aleph.protocol.v1`。二进制消息由 4 字节大端长度和 UTF-8 JSON 组成，首帧为 `system.hello`（`interfaces/panel/web/host.js`、`shared/protocol/src/framing.rs`）。 | 原生 TLS 路由校验来源，`POST /v1/session` 签发短期、仅限当前主机的 Cookie，引用现有的设备凭据（`src/gateway/server/connection/web_v1.rs`）。 |
 
-Desktop IPC 和 Web v1 共用只读方法列表：`health`、`sessions.list`、`panel.capabilities.snapshot`。其他 RPC 不会从这两个入口进入 Core（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`）。
+Desktop IPC 和 Web v1 共用同一份方法列表，共十二个：`health`、`sessions.list`、`panel.capabilities.snapshot`、`graph.query`、`graph.search`、`graph.node_detail`、`chat.history`、`chat.send`、`chat.abort`、`chat.transcript_details`、`trace.tool_output`、`context.breakdown`。其他 RPC 不会从这两个入口进入 Core（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`）。
 
 ## 已知限制
 
 - 桌面 TSX 只连本地 Desktop IPC；例如以 `--connect` 指定的 WebSocket 目标会返回 `unavailable`，不会回退到 WebSocket。`ALEPH_SHELL_PANEL_IPC` 是 socket 路径，但布局存储键的 endpoint 部分固定为 `desktop-ipc`，不随 socket 路径变化（`desktop/nsh-shell/src/panel_host.rs`、`interfaces/panel/shell/Shell.tsx`、`shared/ui_logic/src/panel/layout.rs`）。
 - `tsx-panel` 默认关闭；当前桌面发布流水线仍打包过渡期遗留的 Tauri 壳及带 Leptos 资源的 `aleph-server`，没有 NSH TSX 发布步骤（`desktop/nsh-shell/Cargo.toml`、`.github/workflows/aleph-app-release.yml`）。
 - TSX 尚未覆盖全部经典 Panel 标签页；需要经典渲染器的标签页会显示不可用提示（`interfaces/panel/shell/Shell.tsx`）。
+- TSX 侧的 `aleph:memory-nebula` 标签页由 Gateway 注入声明，依赖 `graph.query`、`graph.search`、`graph.node_detail` 三个方法都已挂载；未挂载时该标签页不存在（`src/gateway/handlers/panel_capabilities.rs`、`src/gateway/handlers/mod.rs`）。
 
 > **状态：规划中** — S4 的一致性快照与持久观察事件回放见 `docs/superpowers/specs/2026-11-22-nsh-panel-modular-refactor-design.md`。当前 TSX 获取的是能力快照（`interfaces/panel/shell/Shell.tsx`），这不等同于会话或任务状态的恢复；Gateway 的 `system.hello` 没有宣布快照或回放特性（`src/gateway/handlers/system_hello.rs`）。
 

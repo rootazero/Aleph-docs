@@ -143,6 +143,65 @@ The edit methods only touch plain data: `PanelLayout::move_one(key, forward)` sw
 
 This yields three invariants. A layout stores only stable `PanelTabKey` values and plain data. Restoring can only rearrange tabs the current snapshot already offers; it can never make a tab mountable. A tab the snapshot no longer offers renders as an `Unavailable` placeholder that renderers never execute (the comment on `LayoutSlot::Unavailable`: "Renderers show a placeholder and never execute it."). A damaged layout only resets presentation; it never touches sessions or plugins.
 
+## Shared model layer: transcript, prefs, and nebula
+
+Besides `panel/`, `shared/ui_logic/src/` holds three more runtime-neutral models (see `shared/ui_logic/src/lib.rs`). They are shared by both renderers as well, but they are **not** behind the `panel` feature: the TUI build compiles `transcript` too, and the default Leptos build compiles `prefs`.
+
+| Module | Responsibility | Who reads it |
+|---|---|---|
+| `shared/ui_logic/src/transcript/` | Folds session events into rows, groups, summaries, and diffs; data in, data out | Leptos Panel, TSX Panel, TUI (ratatui) |
+| `shared/ui_logic/src/prefs/` | Personal preferences: appearance axes, key bindings, command palette ordering | Leptos Panel, TSX Panel |
+| `shared/ui_logic/src/nebula/` | Graph index and 3D force-directed layout for the memory nebula | Leptos Panel (WebGL2), TSX Panel |
+
+### Transcript presentation: shared/ui_logic/src/transcript/
+
+The module comment in `shared/ui_logic/src/transcript/mod.rs` sets the boundary:
+
+> Transcript presentation logic shared by the Panel (Leptos) and the TUI (ratatui). Everything here is `data → data`: no rendering, no signals, no terminal.
+
+Folding, summarization, and diff views all live in this layer, so the two renderers cannot disagree about which row folds, which sentence a summary picks, or which span a diff highlights. The module compiles with `default-features = false` (the TUI build uses it); `chat_panel.rs` and `mermaid.rs` sit behind the `panel` feature, so only Panel builds include them.
+
+| Export | What it does |
+|---|---|
+| `fold` / `FoldPolicy` / `Folded` | Folds tool output by policy; `DEFAULT_COLLAPSED_ROWS` and `FALLBACK_WIDTH` are the defaults |
+| `summarize` / `CallSummary` / `display_name` | Compresses one tool call into a one-line summary; `DISPLAY_NAMES` and `PREFERRED_ARG_KEYS` pick the argument |
+| `group_entries` / `group_tool_rows` | Merges adjacent tool rows into groups |
+| `diff_rows` / `DiffView` / `word_spans` | Diff rows and word-level highlighting; `COLLAPSED_DIFF_ROWS` and `EXPANDED_DIFF_ROWS` are the two depths |
+| `enhance` / `find_path_refs` / `linkify_bare_urls` | Markdown enhancement: path references and clickable links |
+| `step_headline` / `step_tally` / `ThinkingBlock` | Per-step headline, tally, and thinking block |
+| `reconcile` / `ContextRows` | Context usage view; `PROVIDER_TOLERANCE` is the reconciliation tolerance |
+| `Transcript` / `Change` / `TranscriptEntry` | The event reducer's state and its deltas |
+
+### Preferences: shared/ui_logic/src/prefs/
+
+The file header states the scope of this data:
+
+> Preferences are per device and stored by the Panel host under `PREFS_STORAGE_KEY`. Unlike `panel::layout`, they are not scoped to a Gateway endpoint or subject.
+
+| Symbol | What it does |
+|---|---|
+| `PREFS_STORAGE_KEY` | The storage key `"aleph.panel.prefs.v1"` |
+| `PREFS_VERSION` | Current version `1`; an unknown version falls back to defaults and reports `UnknownVersion` |
+| `PanelPrefs` | Everything preferences carry: version, appearance, key bindings |
+| `Binding::Key` / `Binding::Cleared` | One key binding; a command with no entry uses its default key |
+| `restore` / `RestoredPrefs` | Reads preferences back; corrupt text reports `PrefsRepair::Corrupt` |
+| `set_appearance` / `set_binding` | Changes one appearance axis or one binding |
+
+Appearance has five axes (`shared/ui_logic/src/prefs/appearance.rs`): `ThemeMode` (System / Light / Dark), `Accent` (Mauve / Ocean / Forest / Sunset / Rose), `FontScale` (Compact 0.9, Default 1.0, Cozy 1.1, Large 1.25, Largest 1.4), `Roundness`, and `Density`. `theme_tokens` turns them into the payload of NSH `setTheme`, carrying both a light and a dark palette, so switching theme needs no second call.
+
+`interfaces/webchat/src/appearance.rs` on the Leptos side re-exports those five enums and keeps only what is Leptos-specific: a sixth axis, `Material`, plus the localized labels and the `localStorage` plumbing. `Material` therefore stays out of `shared/ui_logic/src/prefs/`, and the TSX Panel has no such axis.
+
+Command palette ordering and key resolution live in `shared/ui_logic/src/prefs/commands.rs`: `score` gives 100 for a label prefix, 70 for a word start, 40 for a label substring, 35 for a keyword prefix, and 20 for a keyword substring; an empty query returns `u32::MAX`. `rank` sorts by score and keeps the input order for ties. `resolve_bindings` decides which key each command ends up with and returns `ResolvedKey`: `source` is one of `KeySource`'s Default / User / Cleared, `problem` is one of `KeyProblem`'s Invalid / Conflict, and a problematic key does not take effect (on conflict, Conflict carries the id of the command that holds the key first).
+
+### Nebula layout: shared/ui_logic/src/nebula/
+
+`shared/ui_logic/src/nebula/` is the shared model of the memory nebula, in two parts:
+
+- `NebulaIndex::new` splits the edges two ways: `relations` keeps the directed relations (each `Relation` carries from, to, and the original row), while `springs` merges each pair of endpoints into one undirected spring, so a pair of nodes has a single spring.
+- `ForceLayout` is the 3D force-directed layout: Coulomb repulsion, Hooke springs, centripetal pull, and community gravity are summed, and `alpha` anneals from 1.0 down to `ALPHA_MIN`, so the simulation cools instead of oscillating forever. `seed` hashes node ids into a seed, so the same graph lays out identically every time; `step` advances one tick and `converged` reports whether the layout has settled.
+
+The Leptos side runs the full 3D settle with a WebGL2 renderer (`interfaces/webchat/src/platform/wide/views/memory/galaxy/gl/layout3d.rs`). The TSX side works only inside the read window: `NebulaModel::scene` takes the `graph.query` result, runs 8 steps, and projects it into a 2D point set and edge list (`interfaces/panel/src/lib.rs`).
+
 ## Renderer layer
 
 ### Leptos renderer (interfaces/webchat/)
@@ -219,32 +278,54 @@ The capability surface presents UI capabilities owned by Core. It is a separate 
 | `move_tab(stored, key, forward)` | `PanelLayout::move_one` |
 | `set_hidden(stored, key, hidden)` | `PanelLayout::set_hidden` |
 | `select(stored, key)` | `PanelLayout::select` |
+| `prefs(stored)` | `prefs::restore`; returns appearance, bindings, repair reason, theme payload, and the text scale factor |
+| `set_appearance(stored, axis, value)` | `prefs::set_appearance`; returns `None` for an unknown axis or value |
+| `set_binding(stored, command, binding)` | `prefs::set_binding`; `null` restores the default, `"cleared"` removes the key |
+| `resolve_bindings(commands, stored, apple)` | `resolve_bindings`; returns the key, source, and problem for each command |
+| `rank_commands(query, items)` | `rank`; returns the ids of the matching items, best first |
+| `normalize_keystroke(text, apple)` | `nsh_core::keymap::Keystroke::parse_with`; with `apple`, `mod` means Command |
 
-The TSX side renders three built-in modules itself (`SHELL_MODULES`, components in `interfaces/panel/modules/`):
+Besides `PanelModel`, `interfaces/panel/src/lib.rs` exports two more modules:
+
+| Module | What it does |
+|---|---|
+| `ChatModel` | The transcript state of one mounted Chat tab; wraps `shared_ui_logic::transcript::chat_panel::ChatState` and offers `reset`, `begin_send`, `resolve_send`, `accept`, `interrupt`, `resume_composing`, `replace_history`, `prepend_history`, `apply_history_details`, `context_view`, `mermaid_view`, `diff_view` |
+| `NebulaModel` | `NebulaModel::scene` turns the result of `graph.query` into non-authoritative scene data (points and edges); the graph itself comes from Core, only the layout happens here |
+
+The TSX side renders four built-in modules itself (`SHELL_MODULES`, components in `interfaces/panel/modules/`):
 
 | key | label | icon | order | Component |
 |---|---|---|---|---|
 | `aleph:overview` | Overview | `layout-dashboard` | -30 | `interfaces/panel/modules/Overview.tsx` |
 | `aleph:sessions` | Sessions | `messages-square` | -20 | `interfaces/panel/modules/Sessions.tsx` |
+| `aleph:chat` | Chat | `message-circle` | -15 | `interfaces/panel/modules/Chat.tsx` |
 | `aleph:capabilities` | Capabilities | `blocks` | -10 | `interfaces/panel/modules/Capabilities.tsx` |
 
+The fifth tab, `aleph:memory-nebula`, is not in that table: its declaration is injected into the capability snapshot by the Gateway (`with_memory_nebula` in `src/gateway/handlers/panel_capabilities.rs` — label `Memory Nebula`, icon `network`, order 0, entry `shell/memory-nebula`), and only when `graph.query`, `graph.search`, and `graph.node_detail` are all mounted (`memory_nebula_mounted` in `src/gateway/handlers/mod.rs`). The component is `interfaces/panel/modules/MemoryNebula.tsx`; it calls `graph.query` for the read window, `graph.search` to search, and `graph.node_detail` to inspect a single node.
+
 - These modules are merged into the Core snapshot as `BuiltIn` declarations, so they pass the same projection validation as Core's own built-ins. When Core already declares the same key, Core's descriptor wins.
-- If the snapshot is missing, malformed or rejected by the projection, only these three modules remain and `projectionError` carries the reason code. No part of a rejected snapshot is ever mounted.
-- Every tab carries a `renderer` field: `tsx` for the three built-ins, and **`dom` for every other tab, meaning the Leptos Panel's DOM module ABI; the TSX side shows those tabs as unavailable**.
-- A mounted module receives `PanelSdk` from `interfaces/panel/shell/sdk.ts` (`invoke`, `subscribe`, `connection`, `navigate`, `dispose`), bound to one tab key and one connection generation. After `dispose()`, or once the connection generation moves on, results of earlier calls are dropped instead of reaching the module. Here `subscribe` listens to connection state, not to event topics as on the Leptos side.
-- The rest of the shell lives in `interfaces/panel/shell/`: `interfaces/panel/shell/Shell.tsx`, `interfaces/panel/shell/LayoutEditor.tsx`, `interfaces/panel/shell/PairingForm.tsx`, `interfaces/panel/shell/view.ts`.
+- If the snapshot is missing, malformed or rejected by the projection, only these modules remain and `projectionError` carries the reason code. No part of a rejected snapshot is ever mounted.
+- Every tab carries a `renderer` field: `tsx` for these built-ins, and **`dom` for every other tab, meaning the Leptos Panel's DOM module ABI; the TSX side shows those tabs as unavailable**.
+- A mounted module receives `PanelSdk` from `interfaces/panel/shell/sdk.ts`, bound to one tab key and one connection generation. After `dispose()`, or once the connection generation moves on, both results of earlier calls and earlier events are dropped instead of reaching the module. `invoke` calls an RPC method, `subscribe` listens to connection state, `on` receives live frames forwarded by the host by topic prefix (`stream.`, `connection.`), a module can also register its own commands into the command palette, `navigate` can carry an intent for the target module, and `active` reports whether the current generation is still valid.
+- The rest of the shell lives in `interfaces/panel/shell/`: `interfaces/panel/shell/Shell.tsx`, `interfaces/panel/shell/LayoutEditor.tsx`, `interfaces/panel/shell/PairingForm.tsx`, `interfaces/panel/shell/CommandPalette.tsx`, `interfaces/panel/shell/Settings.tsx`, `interfaces/panel/shell/Sidebar.tsx`, `interfaces/panel/shell/commands.ts`, `interfaces/panel/shell/prefs.ts`, `interfaces/panel/shell/view.ts`.
 
 ### TSX host functions
 
-The TSX shell requests four host functions through the `host` list inside the `capabilities` section of `interfaces/panel/nsh.json`. Their contract is written in the header of `interfaces/panel/web/host.js`:
+The TSX shell requests five host functions through the `host` list inside the `capabilities` section of `interfaces/panel/nsh.json`, and asks for the `openUrl` permission (only the https and http schemes are allowed). Their contract is written in the header of `interfaces/panel/web/host.js`:
 
 ```text
 "aleph.rpc"        { method, params } -> { result } | { error: { code, message } }
 "aleph.pair"       { bootstrap_ticket } | { device_token } -> { result: null } | { error }
 "aleph.connect"    null -> opens a new socket (after a drop)
 "aleph.connection" null -> the current connection state
+"aleph.fontScale"  number | null -> null
 event "aleph.connection"  { state, endpoint, subject, pairing }
+event "aleph.event"       { topic, data }
 ```
+
+`aleph.fontScale` sets the Panel's text size: a number is a multiple of the system font size, and `null` means follow the system. The accepted range is 0.5 to 3 on both desktop and web; out of range it reports `font scale must be a number from 0.5 to 3`. The desktop implementation lives in `desktop/nsh-shell/src/panel_surface.rs` (the surface owns the `AppView`, so this function hangs off the surface rather than off `panel_host`), and the web implementation in `interfaces/panel/web/host.js` (it changes the root element's `font-size`, where 16px is 100%).
+
+`aleph.event` is a live frame forwarded by the host, shaped as `{ topic, data }`. The desktop side wraps the stream events the Gateway pushes into `stream.<type>` topics; the web side forwards notifications with a topic unchanged. Both sides use the same shape. On desktop, after dropped frames it first sends its own `connection.stale` event (the `data` carries the dropped count), telling the Panel to re-fetch instead of trusting its own view. Live frames are never replayed.
 
 The same TSX source has two host adapters:
 
@@ -282,7 +363,7 @@ Main types:
 | `PanelUiCapabilitySnapshot` | `revision` + `declarations`; `new()` sorts by origin (built-ins first), then by qualified key |
 | `PanelProjectSelection` / `PanelUiContextSnapshot` | The project selection (`project_id`, `generation`) and the snapshot that carries it |
 
-On the Gateway side, `V1_METHODS` in `src/gateway/server/connection/mod.rs` is the single method set shared by the v1 entry points: `health`, `sessions.list` and `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`. The snapshot handler is in `src/gateway/handlers/panel_capabilities.rs`.
+On the Gateway side, `V1_METHODS` in `src/gateway/server/connection/mod.rs` is the single method set shared by the v1 entry points, twelve methods in all: `health`, `sessions.list`, `panel.capabilities.snapshot`, `graph.query`, `graph.search`, `graph.node_detail`, `chat.history`, `chat.send`, `chat.abort`, `chat.transcript_details`, `trace.tool_output`, and `context.breakdown`. The snapshot handler is in `src/gateway/handlers/panel_capabilities.rs`.
 
 ### Descriptor validation
 
@@ -344,7 +425,7 @@ The items below are not implemented. Do not read them as current state.
 
 > **Status: planned** — Blueprint: ADR-003 (Hybrid plugin UI) and ADR-009 (distribution, caching and rollback of dynamic UI packages) in `docs/research/NSH_ADR-001~009.md`. Today community plugin tabs can only be loaded through the Leptos-side DOM module ABI (`interfaces/webchat/src/panel/loader.rs`) and show as unavailable on the TSX side (`interfaces/panel/src/lib.rs`); there is no distribution or rollback path.
 
-> **Status: planned** — Blueprint: ADR-005 in `docs/research/NSH_ADR-001~009.md`: restricted TSX UI generated by agents (Generated UI), running in an isolated container under a restricted runtime; the S2 design explicitly lists Generated UI as out of scope. Today the TSX renderer renders only its own three built-in modules (`SHELL_MODULES` in `interfaces/panel/src/lib.rs`) and executes no externally supplied TSX.
+> **Status: planned** — Blueprint: ADR-005 in `docs/research/NSH_ADR-001~009.md`: restricted TSX UI generated by agents (Generated UI), running in an isolated container under a restricted runtime; the S2 design explicitly lists Generated UI as out of scope. Today the TSX renderer renders only its own built-in modules (`SHELL_MODULES` in `interfaces/panel/src/lib.rs`) and executes no externally supplied TSX.
 
 ## History: the single Leptos Panel description
 

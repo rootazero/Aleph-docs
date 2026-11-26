@@ -16,7 +16,9 @@ Aleph 仓库自第二轮基线以来的变化不是「改了实现细节」，�
 | 面板新外壳 | `interfaces/panel/modules/{Chat,MemoryNebula,NebulaCanvas}.tsx`、`interfaces/panel/shell/{CommandPalette,Settings,Sidebar}.tsx` | `desktop-hosts/*` 停在第一轮写的 Leptos 侧与早期 TSX 宿主契约 |
 | 执行边界 | `src/sandbox/` 改为 owned worktree + 挂载型 OS 驱动；`src/context/compact/manual.rs` 接线；`src/extension/lifecycle.rs` 增加重载预检 | 沙箱页、上下文页、扩展页与现状不符 |
 
-第二轮结束时基线八段全 0，`scripts/baseline.json` 里没有一格存量债务。**本轮的新失效全部是新增的**，不棘轮进基线，直接修到 0。
+第二轮结束时基线八段全 0，`scripts/baseline.json` 里没有一格存量债务。本轮的新失效全部是新增的。
+
+**棘轮口径**：S1 先修能力面（把 `capabilities/*` 的 30 条锚点失效与相关符号失效修到 0）；剩下 125 条符号失效散在 74 个 zh/en 页对上（`development/design-patterns`、`architecture/*`、`philosophy/*` 等），不在任一单阶段的范围内，全部归到 S6。S4 结束时把这 125 条棘轮进 `scripts/baseline.json` 的 `symbol` 段作为**已知旧债**——这样中途阶段一旦引入新失效，G1c 仍会立即变红——S6 清零后再棘轮回 0。其余七段（anchor、bare_name、bilingual、facts、method_ghost、method_missing、structure）全程保持 0，不棘轮。
 
 门禁现状（`python3 scripts/run_gates.py --repo ../Aleph`）：
 
@@ -133,4 +135,5 @@ S8 终验 ◀── S7 术语·导航·changelog ◀── S6 全站符号校准
 | S0 | 完成 | G1b 加固后判定「已注册未文档化」2 条（`chat.transcript_details`、`pty.history`）；G1 30 条锚点失效、G1c 148 条符号失效待修。G1 失效在本阶段后由 S1 修到 0 | `c1b03b1`、`0009a62`、`822d7d3` |
 | S1 | 完成 | G1 锚点 0（新增 0）；G2 / G3 / G4 各 0；G5 `next build` / `tsc --noEmit` / `eslint` 退出码 0。G1b 剩 2 条（S3 范围）、G1c 剩 125 条（S6 范围），本阶段未新增 | `0af0854`（正文含 `822d7d3`） |
 | S2 | 完成 | G1 锚点 0（新增 0）；G2 / G3 / G4 各 0；G5 `next build` / `tsc --noEmit` / `eslint` 退出码 0。G1b 剩 2 条（S3 范围）、G1c 剩 125 条（均为既有存量，本阶段新增 0） | `10a1153` |
-| S3 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6340）；G1b census 396 方法、ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 剩 125 条（S6 范围），本阶段新增 0 | 待提交（`docs(phase-S3): …`） |
+| S3 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6340）；G1b census 396 方法、ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 剩 125 条（S6 范围），本阶段新增 0 | `69f142f` |
+| S4 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6402）；G1b ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 125 条在本阶段棘轮为基线旧债（S6 范围），本阶段新增 0 | 待提交（`docs(phase-S4): …`） |
