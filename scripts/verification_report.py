@@ -38,7 +38,9 @@ def first_int(pattern: str, text: str) -> int:
     return int(m.group(1)) if m else -1
 
 
-# 页面 → 本轮阶段。按 ROADMAP-2026-11-pass2.md 的阶段划分；不在表内的改动页归 S5。
+# 页面 → 本轮阶段。首选按提交信息 `docs(phase-SN)` 推导实际改写该页的阶段；
+# 推导不到时回落到下面这张静态表（沿用 ROADMAP-2026-11-pass2.md 的阶段划分）。
+PHASE_COMMIT_RE = re.compile(r"phase-(S\d+)")
 PHASE_BY_PATH: list[tuple[str, str]] = [
     ("desktop-hosts/panel-runtime.mdx", "S1"),
     ("desktop-hosts/panel.mdx", "S1"),
@@ -67,6 +69,22 @@ def phase_for(rel_path: str) -> str:
     return "S5"
 
 
+def phases_touching(rel_path: str, since: str) -> list[str]:
+    """本轮改写过该页的阶段（按 S0→S8 升序）。"""
+    proc = subprocess.run(
+        ["git", "log", "--format=%s", f"{since}..HEAD", "--", rel_path],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    phases: list[str] = []
+    for subject in reversed(proc.stdout.splitlines()):
+        match = PHASE_COMMIT_RE.search(subject)
+        if match and match.group(1) not in phases:
+            phases.append(match.group(1))
+    return phases
+
+
 def changed_pages(since: str) -> set[str]:
     proc = subprocess.run(
         ["git", "diff", "--name-only", f"{since}..HEAD"],
@@ -88,10 +106,12 @@ def page_table(docs: str, since: str) -> list[str]:
             phase = phase_for(f"{lang}/{page.relative_to(root / lang).as_posix()}")
             if rel in touched:
                 verdict = "本轮改写"
-                basis = f"{phase}：改写后符号 / 锚点 / 方法册零失效"
+                phases = phases_touching(rel, since)
+                label = "、".join(phases) if phases else phase
+                basis = f"{label}：改写后符号 / 锚点 / 方法册零失效"
             else:
-                verdict = "沿用首轮"
-                basis = "首轮已校准，本轮未改动，站内复查零失效"
+                verdict = "沿用前轮"
+                basis = "前轮已校准，本轮未改动，站内复查零失效"
             rows.append(f"| `{rel}` | {verdict} | {basis} | G1–G4 通过 |")
     return rows
 
@@ -117,6 +137,11 @@ def main() -> int:
     parser.add_argument("--since", default="", help="本轮起点 commit，用于生成逐页判定表")
     parser.add_argument("--title", default="Aleph 文档站终验报告（2026-11）")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--build",
+        action="store_true",
+        help="额外跑构建门（G5）并在门禁表里补一行",
+    )
     args = parser.parse_args()
 
     common = ["--repo", args.repo, "--docs", args.docs]
@@ -134,6 +159,17 @@ def main() -> int:
         args_for_script = common if script != "freshness_audit.py" else ["--docs", args.docs]
         code, out = run([sys.executable, str(SCRIPTS / script), *args_for_script, *extra])
         gates.append((label, "PASS" if code == 0 else "FAIL", code, out))
+
+    if args.build:
+        code, out = run([sys.executable, str(SCRIPTS / "run_gates.py"), *common, "--build"])
+        match = re.search(r"G5 构建门\s+(PASS|FAIL)\s+\(([\d.]+)s\)", out)
+        if match:
+            state = match.group(1)
+            seconds = match.group(2)
+            detail = f"`next build` / `tsc --noEmit` / `eslint` 退出码 0（{seconds}s）"
+            gates.append(("G5 构建门", state, code, detail))
+        else:
+            gates.append(("G5 构建门", "FAIL" if code else "PASS", code, out.strip().splitlines()[-1]))
 
     zh, en = count_pages(args.docs)
     anchor_out = gates[0][3]
