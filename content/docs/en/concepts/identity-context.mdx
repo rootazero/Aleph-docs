@@ -173,7 +173,7 @@ let identity = metadata.to_identity_context(session_key);
 use aleph_protocol::{GuestScope, IdentityContext, Role};
 
 let scope = GuestScope {
-    allowed_tools: vec!["translate".to_string()],
+    allowed_tools: vec!["code_exec".to_string()],
     expires_at: Some(
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + 3600
     ),
@@ -189,7 +189,7 @@ let metadata = SessionIdentityMeta::guest(
 
 let identity = metadata.to_identity_context(session_key);
 // identity.role == Role::Guest
-// identity.scope.allows_tool("translate")   == true
+// identity.scope.allows_tool("code_exec")   == true
 // identity.scope.allows_tool("bash")    == false
 ```
 

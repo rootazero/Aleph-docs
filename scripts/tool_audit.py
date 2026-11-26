@@ -85,17 +85,13 @@ CALL_SITE_RE = re.compile(r'''(?:tool_use|allows_tool|tool_call|invoke_tool)\(\s
 
 # 明确不是 Aleph 内置工具的名字，各自写明理由。
 # 门禁不能因为站点提到一个 Rust crate 或一个示例名就报幽灵。
-EXEMPT_NAMES = {
-    # `content/docs/*/development/testing.mdx` 的「工具 | 用途」表列的是
-    # dev-dependency crate，不是 Aleph 暴露给模型的工具。
-    "criterion": "Rust 基准测试 crate（dev-dependency）",
-    "cucumber": "Rust BDD 测试 crate（dev-dependency）",
-    "filetime": "Rust 文件时间戳 crate（dev-dependency）",
-    "serial_test": "Rust 串行测试 crate（dev-dependency）",
-    "tempfile": "Rust 临时目录 crate（dev-dependency）",
-    # `content/docs/*/concepts/identity-context.mdx` 的示例里用一个假想的
-    # 技能名演示 `allows_tool`，不是对内置工具目录的断言。
-    "translate": "文档示例里的假想技能名",
+EXEMPT_NAMES: dict[str, str] = {
+    # 第四轮校准后不再需要任何豁免：
+    # - dev-dependency crate 所在的表头已从「工具 | 用途」改成
+    #   「命令 / crate | 用途」，不再是工具声明表；
+    # - `concepts/identity-context.mdx` 的访客示例改用真实工具名
+    #   `code_exec`，不再用假想名。
+    # 新增豁免前先想清楚：能不能改文档本身来消除这条声明。
 }
 
 # --- helpers -----------------------------------------------------------------

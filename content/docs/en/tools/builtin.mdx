@@ -243,6 +243,24 @@ void and blocking for the 120 s timeout.
 | `hooks_manage` | Shell-hook consent. |
 | `vault_store` | Write to the encrypted vault (confirm-gated, operator-only). |
 
+### Diagnostic surfaces
+
+`doctor` is the ordinary diagnostics entry point.
+`capability_projection_diagnostics` is the capability runtime's diagnostic
+control surface, off by default: it is advertised only when the process
+starts with `ALEPH_CAPABILITY_DIAGNOSTICS=1`; while disabled it is neither
+advertised nor dispatched, and its hold / timer state is empty. Even when it
+is visible to the model, only an operator process that passes a three-part
+check can drive it (operator role, loopback transport, non-empty connection
+id) — `ALEPH_GATEWAY_TOOLS_ALLOW` cannot bypass that gate.
+
+Seven operations, discriminated by `operation`: `status` (read the real
+applied state and the queue / telemetry counters), `bump_runtime` (advance the
+runtime generation), `revoke_tool` (drop one tool from the live tree by
+`tool_name`), `dispose_runtime` (drop the whole runtime scope), `hold` (freeze
+one `plane` for `duration_ms`, 1 to 5000 ms), `release` (drop the active hold)
+and `close` (shut the host down).
+
 ---
 
 ## Generation
@@ -311,8 +329,9 @@ background processes is the `bash` tool's own `process_action` argument.
 
 A workspace record carries display metadata only — model, tools and system
 prompt live in the agent's profile, which `workspace_manage` cannot change.
-Edit a profile with `agent_update`; edit persona text through the agent-files
-tools.
+Edit a profile with `agent_update`; persona text is `SOUL.md`, written through
+the `identity.set` RPC or the agent-files configuration API (no builtin tool
+for it).
 
 ---
 

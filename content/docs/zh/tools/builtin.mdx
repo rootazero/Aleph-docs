@@ -217,6 +217,19 @@ cron 与 heartbeat 是 headless 生产者 —— 当 cron 的审批无法被路�
 | `hooks_manage` | shell-hook consent。 |
 | `vault_store` | 写入加密 vault（confirm-gated，operator-only）。 |
 
+### 诊断面
+
+`doctor` 是常规诊断入口。`capability_projection_diagnostics` 是能力运行时的
+诊断控制面，默认关闭：只有启动时带 `ALEPH_CAPABILITY_DIAGNOSTICS=1` 才会被投放，
+关闭时它既不广告也不派发，hold / 计时器状态为空。即使它出现在模型面前，
+也只有通过三项检查的 operator 进程能驱动它（operator 角色 + loopback 传输 +
+非空连接 id），`ALEPH_GATEWAY_TOOLS_ALLOW` 不能绕过。
+
+七个操作由 `operation` 区分：`status`（读真实生效状态与队列 / 遥测计数）、
+`bump_runtime`（推进运行时代次）、`revoke_tool`（按 `tool_name` 从活动工具树里摘掉一个）、
+`dispose_runtime`（丢弃整个运行时作用域）、`hold`（按 `plane` 与 `duration_ms`
+冻结一个平面，1 到 5000 毫秒）、`release`（解除当前 hold）、`close`（关闭宿主）。
+
 ---
 
 ## 生成
@@ -282,8 +295,8 @@ cron 与 heartbeat 是 headless 生产者 —— 当 cron 的审批无法被路�
 | `agent_unbind` | 解除当前频道的 active-agent 绑定；频道随后回落到默认 agent 或路由表。幂等。 |
 
 工作区记录只承载展示元数据 —— 模型、工具与系统提示写在 agent 档案里，
-`workspace_manage` 改不了。改档案走 `agent_update`，改 persona 文本走
-agent-files 工具。
+`workspace_manage` 改不了。改档案走 `agent_update`；persona 文本是 `SOUL.md`，
+走 `identity.set` RPC 或 agent-files 配置接口改写（没有对应的内置工具）。
 
 ---
 
