@@ -138,6 +138,14 @@ SandboxError::CapabilityDenied {
 
 两者都可以通过 `WorkspaceSandbox` 上的 `with_timeout` / `with_max_output_bytes` 覆盖。
 
+#### 后台作业
+
+`bash` 的后台模式（`background: true`）把命令交给脱离每次调用预算包装的后台任务，
+但仍然走同一条 `WorkspaceSandbox::execute` 管道 —— 沙箱配置文件、能力检查与审批门
+在后台任务里照旧生效。区别只有三处：不套 180 秒的前台上限；未显式给定时墙钟超时
+从 60 秒换成 3600 秒；作业记在 `src/builtin_tools/process_registry.rs` 的进程登记簿里，
+按会话隔离。详见[内置工具](../tools/builtin)。
+
 ### 6. 审计
 
 发出一个 `tracing::info!(target: "capability_ledger", ...)` 记录，携带：

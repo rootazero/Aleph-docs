@@ -37,6 +37,50 @@ a 1 MiB output budget.
 
 ---
 
+## Background jobs
+
+`bash` with `background: true` hands the command to a background task and
+returns a `process_id` immediately — the way to run builds, installs and long
+test suites that outlive the 180 s foreground ceiling. Management uses the
+same tool's `process_action`; when `process_action` is set, `cmd` is ignored:
+
+| `process_action` | Behaviour |
+|------------------|-----------|
+| `poll` | Check the status. While running it returns an 8 KB `partial_stdout` / `partial_stderr` tail; once finished it returns the full `{exit_code, stdout, stderr}`. |
+| `wait` | Block until the job ends and return its full output; the wait window defaults to 60 s, can be extended with `timeout`, and caps at 170 s. If the window expires while the job still runs, it returns the `running` status. |
+| `kill` | Terminate the background process. |
+| `list` | Enumerate this session's background processes. |
+
+Notes:
+
+- **Only the foreground ceiling is bypassed.** The task runs through
+  `call_unclamped`, so the 180 s per-call budget does not apply, but it still
+  takes the same sandbox path — capability checks, workspace ownership and
+  approvals behave exactly as they do in the foreground
+  (`src/builtin_tools/bash_exec.rs:469`).
+- **One hour by default.** Without an explicit `timeout` a background job gets
+  3600 s; the explicit ceiling is 4 hours (`BACKGROUND_MAX_TIMEOUT_SECS`) and
+  larger values are clamped.
+- **Scoped per session.** A background process belongs to the session that
+  started it — other sessions can neither see nor kill it. Each session may
+  have at most 8 running jobs, 32 run globally, the registry holds 64 entries,
+  and the command preview is truncated to 120 characters
+  (`src/builtin_tools/process_registry.rs:64`).
+- **Cannot outlive an owned worktree.** When the workspace is an owned
+  worktree, background mode is refused with
+  `bash: background commands cannot outlive an owned worktree; run in the foreground`.
+- **Output passes a content gate first.** The raw bytes of the live tail only
+  reach `poll` / `wait` after the content gate in
+  `src/builtin_tools/partial_output.rs`; the live buffer itself lives in
+  `src/sandbox/live_tail.rs`.
+- **Registry in memory, journal on disk.** `ProcessRegistry` is a pure in-memory
+  structure; after a daemon restart the records survive through the
+  cross-process journal in `src/builtin_tools/process_journal.rs`.
+- **The child sees its identity.** The shell sees `ALEPH_SESSION_ID` and
+  `ALEPH_TOOL_NAME=bash`.
+
+---
+
 ## File operations
 
 | Tool | Description |

@@ -33,6 +33,39 @@ trait，使用静态分发以获得最大性能，并由 executor 的 builtin �
 
 ---
 
+## 后台作业
+
+`bash` 的 `background: true` 把命令交给后台任务，立即返回 `process_id`，
+用来跑超出前台上限（180 秒）的编译、安装、长测试。管理动作走同一个工具的
+`process_action`；带 `process_action` 时 `cmd` 被忽略：
+
+| `process_action` | 行为 |
+|------------------|------|
+| `poll` | 查状态。运行中返回 8 KB 的 `partial_stdout` / `partial_stderr` 尾；已结束返回完整的 `{exit_code, stdout, stderr}`。 |
+| `wait` | 阻塞到结束并返回完整输出；等待窗口默认 60 秒，可用 `timeout` 延长，最长 170 秒。窗口用完仍在跑则返回 `running` 状态。 |
+| `kill` | 终止该后台进程。 |
+| `list` | 列出本会话的后台进程。 |
+
+要点：
+
+- **只绕开前台上限**。后台任务走 `call_unclamped`，不套 180 秒的每次调用预算，
+  但仍走同一条沙箱执行路径 —— 能力检查、工作空间归属与审批照旧生效
+  （`src/builtin_tools/bash_exec.rs:469`）。
+- **默认一小时**。未显式给 `timeout` 时后台作业用 3600 秒；显式上限是 4 小时
+  （`BACKGROUND_MAX_TIMEOUT_SECS`），超过会被钳制。
+- **按会话隔离**。后台进程属于发起它的会话，看不到也杀不掉别的会话的作业；
+  每会话最多 8 个运行中、全局最多 32 个，登记簿最多 64 条，命令预览截到 120 字符
+  （`src/builtin_tools/process_registry.rs:64`）。
+- **不能活过 owned worktree**。工作空间是 owned worktree 时后台模式被拒绝，
+  报错是 `bash: background commands cannot outlive an owned worktree; run in the foreground`。
+- **输出先过内容门**。实时尾随的原始字节先经 `src/builtin_tools/partial_output.rs`
+  的内容门过滤才允许被 `poll` / `wait` 读到；实时缓冲在 `src/sandbox/live_tail.rs`。
+- **登记簿在内存，流水在磁盘**。`ProcessRegistry` 是纯内存结构，守护进程重启后
+  靠 `src/builtin_tools/process_journal.rs` 的跨进程流水保留记录。
+- **子进程可见身份**。shell 里能看到 `ALEPH_SESSION_ID` 与 `ALEPH_TOOL_NAME=bash`。
+
+---
+
 ## 文件操作
 
 | 工具 | 描述 |

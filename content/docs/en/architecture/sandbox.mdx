@@ -138,6 +138,18 @@ Two guards back this up:
 
 Both are overrideable on the `WorkspaceSandbox` via `with_timeout` / `with_max_output_bytes`.
 
+#### Background jobs
+
+`bash`'s background mode (`background: true`) hands the command to a task that
+escapes the per-call budget wrapper, but it still travels the same
+`WorkspaceSandbox::execute` pipeline — the sandbox profile, capability checks
+and the approval gate behave exactly as they do in the foreground. Three
+things differ: the 180 s foreground ceiling does not apply, the wall-clock
+timeout defaults to 3600 s instead of 60 s when none is given, and the job is
+recorded in the process registry in
+`src/builtin_tools/process_registry.rs`, scoped per session. See
+[Builtin Tools](../tools/builtin) for the full model.
+
 ### 6. Audit
 
 Emit a `tracing::info!(target: "capability_ledger", ...)` record carrying:
