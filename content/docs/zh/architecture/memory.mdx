@@ -270,6 +270,8 @@ pub struct AssemblyBudget {
 
 `MemoryReflector::reflect` 接收查询和 `ReflectOpts`，返回包含回答文本和引用条目 `NoteRef` 的 `Synthesis`。内置工具 `memory_reflect` 对外提供这一读取能力。见 `src/memory/reflector/fs_reflector.rs` 和 `src/memory/reflector/types.rs`。
 
+反射时写入的召回信号按**笔记的真实归属方**分组，而不是按发起请求的 agent。每条进入召回的笔记都带 `NoteProvenance`（`src/memory/assembler/envelope.rs`），其中 `owner` 是笔记在磁盘上的分区；`record_reflect_signals`（`src/memory/reflector/recall_signals.rs`）把同一 owner 的曝光合并成一个 `SignalBatch`，逐 owner 独立写盘，某个 owner 写失败只记警告、不影响其它 owner 的行。信号的依据是**呈现给模型的笔记**（曝光），不是模型最终引用了哪几条——引用选择是模型行为，不能当作归属证据。
+
 ---
 
 ## 事件溯源
@@ -286,7 +288,9 @@ pub struct AssemblyBudget {
 
 ## 纠正通道、目的地阶梯与确认契约
 
-**纠正通道（显式纠错链）。** 当用户纠正模型时，`flag_user_correction` 工具把一条 `RawMemorySource::Correction` 行写到 `aleph://correction/{id}`（带严重度标签、可选 `suggested_rule`），并立即从关键路径触发一次 compress→link drain——模型自身的「用户纠正了我」判断取代了旧的关键词 `SignalDetector`（R7）。`FeedbackDistill` dream 阶段之后通过 `aleph://correction/` 路径前缀读取纠正（自有 `feedback_distill` 水位线记在 `compression_metadata` 上；在 **Consolidate** 与 **Synthesize** 两条策略上都跑），并让 LLM 按信号挑选 `New` / `Strengthen` / `Supersede` / `Skip`——High/Critical 严重度跳过批量 quorum。输出是 `feedback/` 笔记，两种方式浮现：正常的相关性检索，加上始终开启的 `FeedbackFloorLoader`——后者把最多 6 条 High/Critical 规则无条件提升进信封的 `Feedback` 槽（与 `UserProfile` 一样预先填充，永远不会被重排丢弃）。
+**纠正通道（显式纠错链）。** 当用户纠正模型时，`flag_user_correction` 工具把一条 `RawMemorySource::Correction` 行写到 `aleph://correction/{id}`（带严重度标签、可选 `suggested_rule`），并立即从关键路径触发一次 compress→link drain——模型自身的「用户纠正了我」判断取代了旧的关键词 `SignalDetector`（R7）。
+
+`FeedbackDistill` dream 阶段按**追加序**消费这些纠正，而不是按秒级时间戳水位（自有 `feedback_distill` 游标记在 `compression_metadata` 的语料批次键上；在 **Consolidate** 与 **Synthesize** 两条策略上都跑）。存储层给每条纠正分配单调递增的追加序；每个语料在首次消费时冻结一条**迁移栅栏**（激活序 + 旧水位），消费者只读追加序大于已提交游标（`committed_seq`）的行，游标与待处理批次一起用比较并交换持久化。开批条件是页内待处理数达到 `feedback_distill_min_candidates`（默认 3）或页内出现 High/Critical 严重度（单条即可开批），批次上限 `feedback_distill_max_per_cycle`（默认 3，硬上限 128）。LLM 必须对页内**每一条**纠正给出恰好一个动作（新建 / 强化 / 替换 / 跳过），少一条、多一条或重复一条整批被拒并阻塞本轮；替换动作还要过召回证据门，落地路径是「先发布后继笔记、再退役原文」，发布失败不会丢掉原文。输出是 `feedback/` 笔记，两种方式浮现：正常的相关性检索，加上始终开启的 `FeedbackFloorLoader`——后者跨分区合并后把最多 6 条 High/Critical 规则无条件提升进信封的 `Feedback` 槽（与 `UserProfile` 一样预先填充，永远不会被重排丢弃）。
 
 **精选热区（`remember`）。** `remember` 工具是 per-agent `MEMORY.md` 热区的唯一写入者：`add` / `replace` / `remove`，外加一个原子的 `batch` 动作——几个操作要么全部应用要么全部不应用，字符预算仅在**最终**状态下校验，批内的重复 `add` 幂等跳过。
 

@@ -122,6 +122,18 @@ Run:
   run stages → emit DreamReport → update manifest + best_health
 ```
 
+**Dependency readiness (fail-closed)**: both the scheduler tick and a manual trigger ask `DreamDaemon::dependencies` (`src/memory/dreaming/mod.rs`) first. When the AI provider or the embedder is missing, `DreamMissingDependencies` (`shared/protocol/src/dreaming.rs`) names which one is absent:
+
+```text
+Scheduled tick: missing dependency → log reason = "missing_dependencies" → skip the cycle,
+                 leave the run status untouched (the previous run record stands)
+Manual trigger: missing dependency → fail before the run slot is taken,
+                 error text "dream cycle unavailable: missing AI provider"
+                 ("missing embedder" for the embedder, "missing AI provider and embedder" for both)
+```
+
+The failure is not silently downgraded: without a provider the daemon will not fake a cycle with a template — that only writes a report that looks like a result but carries nothing. The `missing_dependencies` field on the status exposes the gap to whoever queries it.
+
 #### Evolution Gate (`src/memory/dreaming/evolution/`)
 
 A port of SkillOpt's "textual learning rate" (arXiv 2605.23904): **`EditBudget`** defaults to `32 edits / 256 KiB` per cycle, shared across `NoteConsolidate` (merge), `NoteDecay` (archival), and `distill::Supersede` — the three **destructive** stages. **Additive paths** (new notes / links / strengthen) **do not** go through the budget; growth is never starved by an over-eager destructive stage.
@@ -181,13 +193,65 @@ A port of SkillOpt's "textual learning rate" (arXiv 2605.23904): **`EditBudget`*
 | `GraphRecomputeStage` | 4-signal community-aware recompute + Leiden refinement, writes `notes_graph_cache` + `notes_graph_insights` |
 | `CoRecallEdgesStage` | Materializes behavioral co-recall edges |
 | `SkillDistillStage` | Skill-note → `feedback/notes/` skill |
-| `FeedbackDistillStage` | User corrections (`aleph://correction/`) → `feedback/notes/` skill; High/Critical bypass quorum, bundled + scheduled both run |
+| `FeedbackDistillStage` | User corrections (`aleph://correction/`) → `feedback/notes/` notes; consumed in batches against an append-sequence cursor (see "Feedback Self-Evolution Loop" below) |
 | `WorkflowProposalStage` | Behavioral co-recall mining → `MetaSkill` draft (no LLM, automatic aggregation) |
 | `CorpusNarrativeStage` | LLM writes the daily memory narrative |
 | `DailyDigestStage` | LLM writes the daily insight |
 | `SkillLifecycleStage` | Skill-note Active→Stale (rule-based, default 30 d) |
 
 > `DailyInsight` is keyed by date (`YYYY-MM-DD`); same-day re-runs upsert. The D7 fetch_daily_insight falls back today → yesterday.
+
+---
+
+## Feedback Self-Evolution Loop (2026-11-25 convergence)
+
+"User corrects → the correction lands in memory → the agent does not repeat the mistake" is a loop. The 2026-11-25 convergence fixed the three places in that loop where a **false success** was possible: misattribution (recall signals were recorded under the requesting agent rather than the note's real owner), lossy batching (corrections were read by second-granularity timestamps, so several corrections queued within the same second were read as one), and lost text on replace (the original was retired before the successor was published, so a failed publish destroyed both copies).
+
+### Ownership: the note's owner, not the requesting agent
+
+Every note that enters retrieval carries a `NoteProvenance` (`src/memory/assembler/envelope.rs`): `owner` is the partition the note lives in on disk, `path` is the relative path inside that partition. `owner` has nothing to do with who issued the request — the same memory can be recalled by several agents.
+
+`record_reflect_signals` (`src/memory/reflector/recall_signals.rs`) groups by owner: exposures of the same owner collapse into one `SignalBatch`, and each owner is written independently. A write failure for one owner logs a warning and leaves the other owners' rows alone.
+
+The input is the **notes shown to the model** (the exposure), not which of them the model finally cited. Citation choice is model behaviour; it is not evidence of where a note belongs.
+
+### Correction stream: an append sequence and a frozen migration fence
+
+A user correction is written by the `flag_user_correction` tool as one correction record whose path is the `aleph://correction/` prefix plus the correction id. The store assigns every correction a monotonically increasing **append sequence**, allocated by a database trigger on append and released on delete.
+
+The first time a corpus is consumed, one "insert or ignore" freezes the **migration fence**: the highest append sequence at activation time (the activation sequence) plus the legacy timestamp watermark. Re-activating never moves the fence.
+
+The consumer only reads rows whose append sequence is greater than the committed cursor (`committed_seq`). The cursor and the pending batch are persisted together under a corpus-scoped batch key; the write is a compare-and-set so two consumers cannot advance it at once.
+
+The migration boundary is explicit: rows written before activation whose timestamp is not later than the legacy watermark count as consumed under the old watermark and are **not replayed by the old watermark**; rows appended after activation are consumed strictly by append sequence. An empty legacy watermark means there is nothing of that kind to replay.
+
+The Markdown backend implements the same two tables with the same semantics (`src/memory/store/markdown/raw_memory.rs`), so both backends behave identically.
+
+### Batches: quorum, urgent pass-through, and strict coverage
+
+A cycle reads one page of pending corrections:
+
+- Page size = `feedback_lookback` capped at 512 (`DreamingConfig::feedback_page_limit`).
+- A batch opens only when the page holds at least `feedback_distill_min_candidates` pending corrections (default 3); a correction of "high" or "critical" severity lets a **single row open a batch** (urgent pass-through).
+- Once open, the batch is truncated to `feedback_distill_max_per_cycle` (default 3), with a hard ceiling of 128 (`batch_limit`).
+- The LLM must return **exactly one** action per correction on the page (`validate_exact_coverage`). One action too many, one too few, or a duplicated correction is an illegal reply: the whole batch is rejected and the cycle is blocked.
+- Actions first pass format, semantic, and safety validation — the action set is the four variants of `DistillAction` (create, strengthen, replace, skip) — and then the candidate-path check: a target path that was not among the candidates shown to the model yields `FilteredNonCandidate`; a replace action must also pass the recall-evidence gate, otherwise `FilteredEvidence`; an exhausted budget yields `FilteredBudget`. The full outcome enum is `DistillOutcome`.
+
+A skip is a legitimate explicit "do not act", not a missing answer.
+
+The whole batch decision is persisted as pending state before any mutation, and every action is tracked on its own. A mid-batch failure can be **resumed**: settled actions are not rolled back, unsettled actions continue from the persisted state. `committed_seq` only advances to the last append sequence of the page once the entire batch is settled. A repeatedly failing action therefore cannot wedge a page forever — it is either explicitly settled (`Skipped` / `Filtered*` / `Unchanged`) or the batch stays pending and the next cycle resumes it.
+
+### Publish first, retire second
+
+Replacing a note starts by preparing a `PreparedDistillEffect` (`src/memory/notes/indexer/distill_effect.rs`): the target markdown, the destination path, the hash of the original (`expected_before`), and the optional retirement and reindex plan. Preparation and execution are separate — `prepare_distill_effect_locked` computes the plan, `verify_distill_effect_locked` runs it in a fixed order:
+
+1. Re-check the original's hash on disk and in the index (a mismatch means a conflict — stop);
+2. Publish the archive copy;
+3. Write the successor note atomically (if the destination path already exists, use create semantics rather than overwriting someone else's content);
+4. Write the index and re-check the content hash;
+5. **Only when the first four steps succeeded** retire the original: drop the index row first, then delete the file.
+
+Flipping that order loses a note every time. The old order (retire the original, then publish the new text) destroys both copies when the publish fails; the current order guarantees that when any step fails the successor note is already independently recallable, and the original is either still there or already superseded — never a hole where neither exists. A failure in the retirement step does not roll back the successor either — the successor is already recallable, and a retry can finish that last leg.
 
 ---
 

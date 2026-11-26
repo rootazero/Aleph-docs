@@ -66,11 +66,13 @@ Aleph 仓库自第二轮基线以来的变化不是「改了实现细节」，�
 | **G4** | 双语门 | zh/en 页面集合一致；同名页 `##` 标题骨架一致 | `python3 scripts/freshness_audit.py --check bilingual --docs content/docs` |
 | **G5** | 构建门 | `next build` / `tsc --noEmit` / `eslint` 退出码全 0 | `pnpm exec next build && pnpm exec tsc --noEmit && pnpm exec eslint` |
 
-### 本轮的工具加固（G1b 常量方法名）
+### 本轮的工具加固（G1b 常量方法名 / G1·G1c 行级免检）
 
 第二轮的 `method_audit.py` 只认 census 里的**字面量**方法名。协议 crate 把方法名收进常量后，census 里写成 `aleph_protocol::chat_transcript::CHAT_TRANSCRIPT_DETAILS_METHOD`，字面量正则匹配不到——这类方法在门眼里凭空消失，`chat.transcript_details` 因此直到本轮才发现没被文档覆盖。
 
 本轮把 census 的常量条目解析进方法集（`scripts/method_audit.py`：`CENSUS_CONST_RE` + `protocol_constants()`），修完基线保持 0，新出现的未文档化方法立即让 G1b 变红。
+
+第二轮的 `anchor_check.py` 与 `symbol_check.py` 只按**小节**豁免历史 / 规划中段落，行级引用一律判失效。文档却必须能记录「这个模块已经不在代码树里」——挂载状态表必须列出已删除的模块，历史说明必须点名旧文件。本轮把两门的免检规则抽到共享模块 `scripts/gate_exempt.py`，并加了一条**行级**免检：同一行显式声明「该引用已被删除 / 已下线」时该行免检（中文用「已删除 / 已移除 / 已下线 / 不再存在」这类完成态，英文用 removed / deleted 的过去式）。新增失效仍会立刻让门变红。
 
 ## 五、阶段路线（逐级解锁）
 
@@ -128,4 +130,6 @@ S8 终验 ◀── S7 术语·导航·changelog ◀── S6 全站符号校准
 
 | 阶段 | 状态 | 六门结果 | 提交 |
 |---|---|---|---|
-| S0 | 进行中 | G1b 加固后判定「已注册未文档化」2 条（`chat.transcript_details`、`pty.history`）；G1 30 条锚点失效、G1c 148 条符号失效待修 | 待提交 |
+| S0 | 完成 | G1b 加固后判定「已注册未文档化」2 条（`chat.transcript_details`、`pty.history`）；G1 30 条锚点失效、G1c 148 条符号失效待修。G1 失效在本阶段后由 S1 修到 0 | `c1b03b1`、`0009a62`、`822d7d3` |
+| S1 | 完成 | G1 锚点 0（新增 0）；G2 / G3 / G4 各 0；G5 `next build` / `tsc --noEmit` / `eslint` 退出码 0。G1b 剩 2 条（S3 范围）、G1c 剩 125 条（S6 范围），本阶段未新增 | `0af0854`（正文含 `822d7d3`） |
+| S2 | 完成 | G1 锚点 0（新增 0）；G2 / G3 / G4 各 0；G5 `next build` / `tsc --noEmit` / `eslint` 退出码 0。G1b 剩 2 条（S3 范围）、G1c 剩 125 条（均为既有存量，本阶段新增 0） | 待提交（`docs(phase-S2): …`） |

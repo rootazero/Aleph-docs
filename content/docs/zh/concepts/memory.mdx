@@ -122,6 +122,16 @@ pub struct KnowledgeNote {
   run stages → emit DreamReport → update manifest + best_health
 ```
 
+**依赖就绪（fail-closed）**：调度 tick 与手动触发都先问 `DreamDaemon::dependencies`（`src/memory/dreaming/mod.rs`），缺 AI provider 或 embedder 时按 `DreamMissingDependencies`（`shared/protocol/src/dreaming.rs`）报出缺哪一项：
+
+```text
+定时 tick:  缺依赖 → 记 reason = "missing_dependencies" → 本轮跳过，不写运行状态（上次运行记录保持不变）
+手动触发:  缺依赖 → 在占用运行位之前失败，错误文本 "dream cycle unavailable: missing AI provider"
+             （缺 embedder 时是 "missing embedder"，两者都缺时是 "missing AI provider and embedder"）
+```
+
+失败不静默降级：没有 provider 就不会拿模板假装跑完一轮——那样只会写进一份看着像结果的空报告。状态里的 `missing_dependencies` 字段把缺失项暴露给查询方。
+
 #### Evolution gate（`src/memory/dreaming/evolution/`）
 
 SkillOpt 移植（arXiv 2605.23904）的「textual learning rate」：**`EditBudget`** 默认 `32 edits / 256 KiB`/cycle，跨 `NoteConsolidate`（merge）、`NoteDecay`（archive）、`distill::Supersede` 三种**破坏性**阶段共享。**Additive 路径**（新笔记 / 链接 / 强化）**不**走 budget，永远不被早一步预算透支饿死。
@@ -181,13 +191,65 @@ SkillOpt 移植（arXiv 2605.23904）的「textual learning rate」：**`EditBud
 | `GraphRecomputeStage` | 4-signal 社区感知重算 + Leiden refinement，写 `notes_graph_cache` + `notes_graph_insights` |
 | `CoRecallEdgesStage` | 物化行为共召回边（同一 query 多次召回的笔记对之间加 typed edge） |
 | `SkillDistillStage` | 课程笔记 → `feedback/notes/` 技能 |
-| `FeedbackDistillStage` | 用户纠正 (`aleph://correction/`) → `feedback/notes/` 技能；高 / 严重 bypass quorum，bundled + scheduled 都跑 |
+| `FeedbackDistillStage` | 用户纠正（`aleph://correction/`）→ `feedback/notes/` 笔记；按追加序游标分批消费（见下文「反馈自进化闭环」） |
 | `WorkflowProposalStage` | 行为共召回挖掘 → `MetaSkill` 草稿（无 LLM，自动聚合） |
 | `CorpusNarrativeStage` | LLM 写当日记忆叙事 |
 | `DailyDigestStage` | LLM 写当日每日洞察 |
 | `SkillLifecycleStage` | 课程笔记 Active→Stale（rule-based，30 d 默认） |
 
 > `DailyInsight` 写盘 key 是日期 `(YYYY-MM-DD)`，同日重跑 upsert；D7 fetch_daily_insight 按「今天→昨天」回退。
+
+---
+
+## 反馈自进化闭环（2026-11-25 收敛）
+
+「用户纠正 → 写进记忆 → 下次不再犯」是一条闭环。2026-11-25 的收敛把这条链上三处会产生**假成功**的地方修掉了：归属记错（把召回信号记在发起请求的 agent 名下，而不是笔记的真实归属方）、扩批漏读（按秒级时间戳取纠正，同一秒里积压的多条只读到一条）、替换丢文（先退役原文再发布新文，发布失败时两份都没了）。
+
+### 归属：笔记的 owner，不是请求方的 agent
+
+每条进入召回的笔记都带 `NoteProvenance`（`src/memory/assembler/envelope.rs`），其中 `owner` 是笔记在磁盘上的分区，`path` 是分区内的相对路径。`owner` 与「是谁发起了这次请求」无关——同一份记忆可以被多个 agent 召回。
+
+`record_reflect_signals`（`src/memory/reflector/recall_signals.rs`）按 owner 分组：同一 owner 的曝光合并成一个 `SignalBatch`，逐 owner 独立写盘；某个 owner 写失败只记一条警告，不影响其它 owner 的行。
+
+统计的依据是**呈现给模型的笔记**（曝光），不是模型最终引用了哪几条。引用选择是模型行为，不能当作笔记归属的证据。
+
+### 纠正流：追加序 + 冻结的迁移栅栏
+
+用户纠正由 `flag_user_correction` 工具写成一条纠正记录，路径是 `aleph://correction/` 前缀加纠正 id。存储层给每条纠正分配一个单调递增的**追加序**，追加时由数据库触发器分配，删除时回收。
+
+每个语料在**首次消费**时用一次「插入或忽略」冻结**迁移栅栏**：记下激活时刻的最大追加序（激活序）和旧的时间戳水位（旧水位）。重复激活不移动栅栏。
+
+消费者只读追加序大于已提交游标（`committed_seq`）的行。游标与待处理批次一起持久化，键是语料维度的批次键；写入用比较并交换（compare-and-set），避免两个消费者同时推进。
+
+迁移边界是明确的：激活之前写入、且时间戳不晚于旧水位的旧行按旧水位视为已消费，**不按旧水位回放**；激活之后追加的行一律按追加序消费。旧水位为空时没有这类回放。
+
+Markdown 后端用同样的两张表实现同一套语义（`src/memory/store/markdown/raw_memory.rs`），两个后端行为一致。
+
+### 批次：quorum、紧急直通与严格覆盖
+
+一轮取一页待处理纠正：
+
+- 页大小 = `feedback_lookback` 与 512 取小（`DreamingConfig::feedback_page_limit`）。
+- 页内待处理数 ≥ `feedback_distill_min_candidates`（默认 3）才开批；页内出现「高」或「严重」级别的纠正时**单条即可开批**（紧急直通）。
+- 开批后截到 `feedback_distill_max_per_cycle`（默认 3），硬上限 128（`batch_limit`）。
+- LLM 必须对页内**每一条**纠正给出**恰好一个**动作（`validate_exact_coverage`）：多一条、少一条、重复一条都是非法回复，整批被拒并阻塞本轮。
+- 动作先过格式 / 语义 / 安全校验，动作集合是 `DistillAction` 的新建 / 强化 / 替换 / 跳过四种；再过候选路径校验：目标路径不在本批呈现给模型的候选里 → 结果记 `FilteredNonCandidate`；替换动作还要过召回证据门 → `FilteredEvidence`；预算不足 → `FilteredBudget`。完整结果枚举见 `DistillOutcome`。
+
+「跳过」是合法的显式「不处理」，不是漏答。
+
+整批决策在动手之前先落盘成待处理状态，每个动作单独记状态。中途失败可以**续跑**：已结算的动作不回滚，未结算的动作从持久化状态继续；只有整批结算完，`committed_seq` 才推进到本页最后一条追加序。因此一个反复失败的动作不会让整页纠正永远卡住——它要么被明确结算（`Skipped` / `Filtered*` / `Unchanged`），要么整批挂在待处理里等下一轮续跑。
+
+### 先发布后退役
+
+替换一条笔记时，先准备一份 `PreparedDistillEffect`（`src/memory/notes/indexer/distill_effect.rs`）：目标 markdown、目标路径、原文哈希（`expected_before`）、可选的退役与重建索引计划。准备与执行分成两步——`prepare_distill_effect_locked` 先算出计划，`verify_distill_effect_locked` 按固定顺序执行：
+
+1. 复核磁盘上与索引里的原文哈希（不一致 = 冲突，停手）；
+2. 发布归档副本；
+3. 原子写入后继笔记（目标路径已存在时用「创建」语义，不覆盖别人的内容）；
+4. 写索引并复核内容哈希；
+5. **只有前四步都成功**，才退役原文：先删索引行，再删文件。
+
+顺序反过来就少一条命。旧顺序（先退役原文，再发布新文）在发布失败时会同时丢掉两份内容；现在的顺序保证任一步失败时，后继笔记已经是可独立召回的，旧原文要么还在、要么已被替代，不会出现「两边都没有」的空洞。退役这一步失败也不回滚后继——后继已可召回，重试可以补完退役那一腿。
 
 ---
 

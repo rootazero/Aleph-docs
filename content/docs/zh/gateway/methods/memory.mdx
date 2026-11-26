@@ -70,19 +70,13 @@ description: "记忆流水线 RPC 方法"
 
 **响应:** `{ "facts": [ ...FactEntry... ], "total" }`。每个 `FactEntry` 包含 `id`(路径)、`agent_id`、`content`(文件名)、`fact_type`(类别)、`created_at`、`updated_at`、`category`、`path`、`tags`、`link_count`。
 
-### memory.appList
-
-列出有相关记忆的窗口。基于笔记的模型没有按窗口分组,因此此接口始终为空列表——为与旧客户端兼容而保留。
-
-**请求:** 无参数。
-
-**响应:** `{ "windows": [] }`。
-
 ### memory.list_corrections
 
 列出用户纠正(`aleph://correction/...` 原始行)及其蒸馏状态。只读——蒸馏仍由 LLM 驱动。
 
-`distilled` 标志从 `FeedbackDistill` 水位线读取,**不**从 `is_processed` 读取。`is_processed` 属于 `CompressionService` 排出器,在纠正落地后几秒内被设置;使用它会在梦境阶段真正消费之前就把每行渲染为"已蒸馏"。
+`distilled` 标志从**反馈消费者的游标**读取:已提交游标(`committed_seq`)之前的纠正算已蒸馏,之后的算待处理。语料尚未激活时,状态回落到旧的 `FeedbackDistill` 时间戳水位。`is_processed` **不**参与判定——它属于 `CompressionService` 排出器,在纠正落地后几秒内就被设置;用它会让每行在梦境阶段真正消费之前就显示成"已蒸馏"。
+
+分区可见性在读水位**之前**判定:不可见的分区返回空纠正列表,对该分区的梦境状态也一无所知。跨分区的纠正按创建时间倒序合并后再统一截断。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -176,6 +170,18 @@ Panel 的"Memory"标签和 LLM 通过**内建聊天工具**访问平行面——
 | `remember` | 将事实固定到精选热记忆 |
 | `forget` | 从记忆中移除事实 |
 | `memory_runtime_status` | 记忆系统健康 + 统计（`MemoryStatus`） |
+
+## 历史：已删除的记忆方法
+
+### memory.appList
+
+列出有相关记忆的窗口。基于笔记的模型没有按窗口分组,因此此接口始终为空列表——为与旧客户端兼容而保留。
+
+**请求:** 无参数。
+
+**响应:** `{ "windows": [] }`。
+
+---
 
 ## 另请参阅
 

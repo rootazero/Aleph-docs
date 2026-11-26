@@ -42,6 +42,8 @@ Exposed via the `memory_reflect` builtin tool.
 
 **Key insight:** Retrieval gives candidates; synthesis produces answers.
 
+**Ownership and signals (2026-11-25 convergence).** The recall signals written during reflection are grouped by the note's real owner: every note carries a `NoteProvenance` (`src/memory/assembler/envelope.rs`) whose `owner` is the on-disk partition rather than the requesting agent, and `record_reflect_signals` (`src/memory/reflector/recall_signals.rs`) writes each owner independently, so one owner's failure leaves the other owners' rows alone. The signal is driven by the exposure — the notes shown to the model — not by which of them the model finally cited, because citation choice is model behaviour rather than evidence of ownership.
+
 ---
 
 ## Spec 3: Context Fencing + Memory Modes
@@ -180,6 +182,24 @@ Writes stay LLM/tool-driven; these surfaces only observe. Both live under **Sett
 | 2026-04 | Memory Sovereignty Cleanup (deleted ValueEstimator, MemoryTier, etc.) |
 | 2026-06 | Memory Hub Unification (graph + table) |
 | 2026-06 | Governance Surfacing (Dream Insights + Corrections) |
+| 2026-11 | Feedback Self-Evolution Closure (ownership fix, correction append-sequence cursor, publish-before-retire) |
+
+---
+
+## 2026-11: Feedback Self-Evolution Closure
+
+**Status:** Shipped  
+**Focus:** Turning "the user corrects → the correction lands in memory → the mistake does not repeat" into a verifiable loop.
+
+Three fixes landed together:
+
+- **Ownership fix** — recall signals are written per the note's real owner (its on-disk partition), not under the agent that issued the request.
+- **The correction stream moved to an append sequence** — the store assigns each correction a monotonically increasing sequence, each corpus freezes a migration fence (activation sequence plus legacy watermark) on first consumption, and the consumer works in batches against a committed cursor instead of a second-granularity timestamp watermark.
+- **Publish before retire** — replacing a note publishes the successor and re-checks the index hash first, and retires the original last; a failed publish no longer destroys the original.
+
+The accompanying strictness rules: every correction on a page must get exactly one action (one too few, one too many, or a duplicate rejects the whole batch), a replace action must pass the recall-evidence gate, and the batch decision is persisted before any mutation so a failure can be resumed.
+
+**Key insight:** The value of the loop is not "there is feedback" but "the feedback is always consumed, and a failed consumption never pretends to have succeeded".
 
 ---
 

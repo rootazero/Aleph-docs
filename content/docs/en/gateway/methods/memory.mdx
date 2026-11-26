@@ -70,19 +70,13 @@ List compiled knowledge notes (Layer 2). Paginated, scoped to one agent.
 
 **Response:** `{ "facts": [ ...FactEntry... ], "total" }`. Each `FactEntry` carries `id` (path), `agent_id`, `content` (filename), `fact_type` (category), `created_at`, `updated_at`, `category`, `path`, `tags`, `link_count`.
 
-### memory.appList
-
-List windows that have associated memories. The notes-based model has no per-window grouping, so this is always an empty list — kept for backward compatibility with older clients.
-
-**Request:** no params.
-
-**Response:** `{ "windows": [] }`.
-
 ### memory.list_corrections
 
 List user corrections (`aleph://correction/...` raw rows) and their distillation status. Read-only — distillation stays LLM-driven.
 
-The `distilled` flag is read from the `FeedbackDistill` watermark, **not** from `is_processed`. `is_processed` belongs to the `CompressionService` drain and is set within seconds of the correction landing; using it would render every row "distilled" before the dream stage actually consumed it.
+The `distilled` flag is read from the **feedback consumer's cursor**: corrections at or before the committed cursor (`committed_seq`) count as distilled, the ones after it count as pending. For a corpus that has not been activated yet, the status falls back to the legacy `FeedbackDistill` timestamp watermark. `is_processed` plays no part — it belongs to the `CompressionService` drain and is set within seconds of the correction landing, so using it would render every row "distilled" before the dream stage actually consumed it.
+
+Partition visibility is decided **before** the watermark read: an invisible partition returns an empty correction list and learns nothing about that partition's dream state either. Corrections from several partitions are merged newest-first and then capped once.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -176,6 +170,18 @@ The Panel's "Memory" tab and the LLM reach a parallel surface through **builtin 
 | `remember` | Pin a fact to curated hot memory |
 | `forget` | Remove a fact from memory |
 | `memory_runtime_status` | Health + statistics for the memory system (`MemoryStatus`) |
+
+## History: removed memory methods
+
+### memory.appList
+
+List windows that have associated memories. The notes-based model has no per-window grouping, so this is always an empty list — kept for backward compatibility with older clients.
+
+**Request:** no params.
+
+**Response:** `{ "windows": [] }`.
+
+---
 
 ## See Also
 
