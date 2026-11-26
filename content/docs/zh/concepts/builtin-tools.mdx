@@ -3,9 +3,24 @@ title: "内置工具"
 description: "Aleph 内置工具的权威注册表、按请求执行面、工具发现和运行时能力边界。"
 ---
 
-Aleph 的内置工具分为两层：`src/executor/builtin_registry/definitions.rs:63` 的 `BUILTIN_TOOL_DEFINITIONS` 是面向代理的权威名称与描述清单；`src/builtin_tools/` 和 `src/executor/builtin_registry/` 提供实际实现与分发。某项工具是否出现在当前请求中，还会受到依赖、健康状态、代理/频道权限和会话模式影响，因此“注册表中存在”不等于“每个会话都可见”。
+Aleph 的内置工具有四个登记面。`src/executor/builtin_registry/definitions.rs:85` 的
+`BUILTIN_TOOL_DEFINITIONS` 是面向代理的权威名称与描述清单；`src/builtin_tools/` 与
+`src/executor/builtin_registry/` 提供实际实现与分发。某项工具是否出现在当前请求中，
+还会受到依赖、健康状态、代理/频道权限和会话模式影响，因此“注册表中存在”不等于
+“每个会话都可见”。
 
 ## 权威工具注册表
+
+| 登记面 | 位置 | 覆盖的名字 |
+| --- | --- | --- |
+| 目录 | `BUILTIN_TOOL_DEFINITIONS`（`definitions.rs:85`） | 无条件登记的 178 项，是模型看到的清单。 |
+| 仅注册表 | `REGISTRY_ONLY_DESCRIPTIONS`（`definitions.rs:1308`） | 依赖或健康状态满足时才注册（如 `scratchpad`、`permission`、`media`、`system`、`voice_mode_set`、`local_voice`、`audio_generate`、`video_generate`、`speech_generate`）。 |
+| 目录外 | `TOOLS_OUTSIDE_DEFINITIONS`（`src/executor/mod.rs:30`） | `subagent`、`tool_search` —— 不在目录里，模型仍可调用。 |
+| 按请求注入 | `src/tools/scoped/mod.rs` | 例如 `get_tool_schema`，逐请求追加到工具列表。 |
+
+另有六个 MCP 桥接工具（`mcp_read_resource`、`mcp_list_resources`、
+`mcp_list_resource_templates`、`mcp_get_prompt`、`mcp_list_prompts`、`mcp_login`）
+由 `src/mcp/tool_bridge.rs` 按能力门注册：既不在目录里，也不走 `reg(` 点。
 
 注册表当前覆盖以下工具族；名称以源码清单为准：
 
@@ -19,9 +34,16 @@ Aleph 的内置工具分为两层：`src/executor/builtin_registry/definitions.r
 | 自管理与运行时 | `self_manage`、`self_config`、`config_audit`、`doctor`、`hooks_manage`、`select_model`、`list_models`、`vault_store`、`gateway_route`、`agent_identity`、`agent_create`、`agent_list`、`agent_delete`、`agent_switch`、`agent_info` |
 | 集群、频道与媒体 | `node_list`、`node_invoke`、`node_invoke_many`、`node_file`、`node_manage`、`channel_pairing`、`media_understand`、`audio_transcribe`、`document_extract`、`media_send`、`artifact_publish`、`ask_user`、`google_meet` |
 | 自动化、团队与任务 | `cron_manage`、`heartbeat_list`、`heartbeat_create`、`heartbeat_update`、`heartbeat_delete`、`heartbeat_toggle`、`heartbeat_report`、`team_create`、`team_delegate`、`team_status`、`team_disband`、`team_set_protocol`、`team_member_add`、`team_member_remove`、`team_digest`、`team_from_template`、`team_snapshot`、`team_usage`、`team_workflow_canvas`、`message_send`、`inbox_read`、`plan_submit`、`plan_resolve`、`task_create`、`task_update`、`task_list`、`task_wait`、`task_comment`、`task_submit`、`task_read_artifact`、`task_review`、`workflow`、`workflow_step_review` |
-| 扩展与代理互操作 | `clawhub`、`hub_catalog_sync`、`hub_resolve_spec`、`hub_install_run`、`hub_install_verify`、`hub_fetch_docs`、`acp_delegate`、`acp_switch`、`a2a_delegate`、`a2a_agents`、`moa` |
+| 扩展与代理互操作 | `hub_catalog_sync`、`hub_catalog_search`、`hub_resolve_spec`、`hub_install_run`、`hub_install_verify`、`hub_fetch_docs`、`acp_delegate`、`acp_switch`、`a2a_delegate`、`a2a_agents` |
+| 工作区、项目与代理档案 | `workspace_manage`、`project_manage`、`agent_update`、`agent_unbind` |
+| 运行时与外部依赖 | `runtime_manage`、`memory_runtime_start`、`memory_runtime_stop` |
+| 插件、目录与用量 | `context_plugin`、`tool_usage` |
+| 通话生命周期 | `initiate_call`、`answer_call`、`hangup`、`cancel_output`、`call_status` |
+| 团队生命周期与协作 | `lifecycle_idle`、`lifecycle_request_shutdown`、`lifecycle_resolve_shutdown`、`session_read`、`session_collaborate`、`team_acp_member` |
+| 会话折叠与浏览器 companion | `session_decompress`、`browser_companion` |
+| 诊断 | `doctor`、`capability_projection_diagnostics` |
 
-部分工具需要在启动时注入内存、频道、集群、团队、媒体、生成或扩展依赖；缺少依赖时，分发器会返回明确错误，而不是凭空创建一个可用实例。`scratchpad` 与 `voice_mode_set` 是运行时追加的 LLM 工具，不属于这张静态清单；`audio_generate`、`video_generate`、`speech_generate` 等也不是这张清单中的静态名称。
+部分工具需要在启动时注入内存、频道、集群、团队、媒体、生成或扩展依赖；缺少依赖时，分发器会返回明确错误，而不是凭空创建一个可用实例。`scratchpad`、`voice_mode_set`、`local_voice`、`audio_generate`、`video_generate`、`speech_generate` 不在静态目录里，而是由注册表按依赖条件登记（见上表“仅注册表”一行）。
 
 ## 工具实现与执行
 

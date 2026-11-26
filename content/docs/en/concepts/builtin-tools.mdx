@@ -3,9 +3,18 @@ title: "Builtin Tools"
 description: "Aleph's authoritative built-in tool registry, request-scoped execution surface, discovery, and runtime capability boundaries."
 ---
 
-Aleph's built-in tools have two layers: `BUILTIN_TOOL_DEFINITIONS` at `src/executor/builtin_registry/definitions.rs:63` is the authoritative agent-facing list of names and descriptions; `src/builtin_tools/` and `src/executor/builtin_registry/` provide implementations and dispatch. Whether a tool appears in a request is additionally affected by dependencies, health, agent/channel permissions, and session mode, so registry membership does not mean universal visibility.
+Aleph's built-in tools live on four registration surfaces. `BUILTIN_TOOL_DEFINITIONS` at `src/executor/builtin_registry/definitions.rs:85` is the authoritative agent-facing list of names and descriptions; `src/builtin_tools/` and `src/executor/builtin_registry/` provide implementations and dispatch. Whether a tool appears in a request is additionally affected by dependencies, health, agent/channel permissions, and session mode, so registry membership does not mean universal visibility.
 
 ## Authoritative Registry
+
+| Surface | Location | Names it covers |
+| --- | --- | --- |
+| Catalogue | `BUILTIN_TOOL_DEFINITIONS` (`definitions.rs:85`) | The 178 unconditionally registered entries — the list the model sees. |
+| Registry-only | `REGISTRY_ONLY_DESCRIPTIONS` (`definitions.rs:1308`) | Registered only when a dependency or health check passes (e.g. `scratchpad`, `permission`, `media`, `system`, `voice_mode_set`, `local_voice`, `audio_generate`, `video_generate`, `speech_generate`). |
+| Outside the catalogue | `TOOLS_OUTSIDE_DEFINITIONS` (`src/executor/mod.rs:30`) | `subagent` and `tool_search` — not in the catalogue, still callable by the model. |
+| Per-request injection | `src/tools/scoped/mod.rs` | e.g. `get_tool_schema`, appended to the tool list per request. |
+
+Six MCP-bridge tools (`mcp_read_resource`, `mcp_list_resources`, `mcp_list_resource_templates`, `mcp_get_prompt`, `mcp_list_prompts`, `mcp_login`) are registered by capability gate in `src/mcp/tool_bridge.rs`: in no catalogue, and at no `reg(` site.
 
 The registry currently covers these tool families; the source list is authoritative:
 
@@ -19,9 +28,16 @@ The registry currently covers these tool families; the source list is authoritat
 | Self-management and runtime | `self_manage`, `self_config`, `config_audit`, `doctor`, `hooks_manage`, `select_model`, `list_models`, `vault_store`, `gateway_route`, `agent_identity`, `agent_create`, `agent_list`, `agent_delete`, `agent_switch`, `agent_info` |
 | Cluster, channels, and media | `node_list`, `node_invoke`, `node_invoke_many`, `node_file`, `node_manage`, `channel_pairing`, `media_understand`, `audio_transcribe`, `document_extract`, `media_send`, `artifact_publish`, `ask_user`, `google_meet` |
 | Automation, teams, and tasks | `cron_manage`, `heartbeat_list`, `heartbeat_create`, `heartbeat_update`, `heartbeat_delete`, `heartbeat_toggle`, `heartbeat_report`, `team_create`, `team_delegate`, `team_status`, `team_disband`, `team_set_protocol`, `team_member_add`, `team_member_remove`, `team_digest`, `team_from_template`, `team_snapshot`, `team_usage`, `team_workflow_canvas`, `message_send`, `inbox_read`, `plan_submit`, `plan_resolve`, `task_create`, `task_update`, `task_list`, `task_wait`, `task_comment`, `task_submit`, `task_read_artifact`, `task_review`, `workflow`, `workflow_step_review` |
-| Extensions and agent interoperability | `clawhub`, `hub_catalog_sync`, `hub_resolve_spec`, `hub_install_run`, `hub_install_verify`, `hub_fetch_docs`, `acp_delegate`, `acp_switch`, `a2a_delegate`, `a2a_agents`, `moa` |
+| Extensions and agent interoperability | `hub_catalog_sync`, `hub_catalog_search`, `hub_resolve_spec`, `hub_install_run`, `hub_install_verify`, `hub_fetch_docs`, `acp_delegate`, `acp_switch`, `a2a_delegate`, `a2a_agents` |
+| Workspaces, projects and agent records | `workspace_manage`, `project_manage`, `agent_update`, `agent_unbind` |
+| Runtimes and external dependencies | `runtime_manage`, `memory_runtime_start`, `memory_runtime_stop` |
+| Plugins, catalog and usage | `context_plugin`, `tool_usage` |
+| Call lifecycle | `initiate_call`, `answer_call`, `hangup`, `cancel_output`, `call_status` |
+| Team lifecycle and collaboration | `lifecycle_idle`, `lifecycle_request_shutdown`, `lifecycle_resolve_shutdown`, `session_read`, `session_collaborate`, `team_acp_member` |
+| Fold restoration and browser companion | `session_decompress`, `browser_companion` |
+| Diagnostics | `doctor`, `capability_projection_diagnostics` |
 
-Some tools require startup-injected memory, channel, cluster, team, media, generation, or extension dependencies. If a dependency is absent, the dispatcher returns an explicit error rather than fabricating a working instance. `scratchpad` and `voice_mode_set` are runtime-added LLM tools, not entries in this static list; `audio_generate`, `video_generate`, and `speech_generate` are also not static names in this list.
+Some tools require startup-injected memory, channel, cluster, team, media, generation, or extension dependencies. If a dependency is absent, the dispatcher returns an explicit error rather than fabricating a working instance. `scratchpad`, `voice_mode_set`, `local_voice`, `audio_generate`, `video_generate` and `speech_generate` are not in the static catalogue — the registry registers them conditionally on their dependency (see the "Registry-only" row above).
 
 ## Implementations and Execution
 

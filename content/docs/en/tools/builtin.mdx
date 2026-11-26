@@ -30,9 +30,10 @@ its name.
 | `code_exec` | Multi-language code snippet (`shell` / `python` / `javascript`). |
 
 Both dispatch subprocesses through `Arc<dyn Sandbox>`. Naked `Command::new`
-is **not** allowed in `src/builtin_tools/`. They take `code` / `command`
-with optional `working_dir` and `timeout`; output is bounded by the
-sandbox wall-clock (default 60 s) and a 1 MiB output budget.
+is **not** allowed in `src/builtin_tools/`. `code_exec` takes `language` and
+`code`, `bash` takes `cmd`; both accept optional `working_dir` and `timeout`
+(seconds), and output is bounded by the sandbox wall-clock (default 60 s) and
+a 1 MiB output budget.
 
 ---
 
@@ -192,7 +193,7 @@ void and blocking for the 120 s timeout.
 | `permission` | Query / request tool permissions. |
 | `select_model` | Switch the model for the current session. |
 | `self_config` / `self_manage` | Restricted self-configuration (default-denied on chat-tier channels by the channel tool gate). |
-| `config_audit` / `config_guide` / `read_config_guide` | Config helpers. |
+| `config_audit` / `read_config_guide` | Config audit and config guide. |
 | `agent_identity` | Read + verify each agent's signed ledger (operator-gated). |
 | `doctor` | Diagnostics. |
 | `hooks_manage` | Shell-hook consent. |
@@ -239,7 +240,7 @@ stdio helper — the Rust core stays sandbox-friendly.
 | `channel_directory` | Read-only listing of channels and members (idempotent; intentionally separated from `channel_message` so it can't be tier-tightened away). |
 | `media_send` | Send media (image, file, audio). |
 | `note_manage` / `note_graph_query` / `note_orient` / `note_schema` | Notes graph. |
-| `scratchpad` / `scratchpad_registry` | Shared scratchpad (used by teams). |
+| `scratchpad` | Shared scratchpad (used by teams). |
 | `pim` | Personal information management (contacts / calendar / reminders). |
 | `artifact_publish` | Publish an artifact. |
 | `workflow` | Workflow tool. |
@@ -247,9 +248,97 @@ stdio helper — the Rust core stays sandbox-friendly.
 | `local_voice` / `voice_mode_set` | Local voice. |
 | `google_meet` | Google Meet bridge. |
 | `flag_user_correction` | User-correction injection (namespaced to the active agent). |
-| `process_registry` | Track spawned processes. |
-| `command_canonicalize` / `command_ledger` | Command canonicalization + ledger (dedupe / audit). |
-| `crawl4ai` | Crawl via the crawl4ai backend. |
+
+`process_registry`, `command_canonicalize`, `command_ledger` and `crawl4ai`
+are not registered tool names — they are implementation modules under
+`src/builtin_tools/` (same-named `.rs` files). The management surface for
+background processes is the `bash` tool's own `process_action` argument.
+
+---
+
+## Workspaces, projects and agent records
+
+| Tool | Description |
+|------|-------------|
+| `workspace_manage` | Workspace records — list / get / create / update / archive / unarchive. A workspace id IS an agent id (1:1) and names that agent's memory and notes partition. |
+| `project_manage` | Project rooms: roster, their own memory and group chat (list / get / create / rename / archive / member_add / member_remove / member_list / bind_workspace). |
+| `agent_update` | Patch an agent's name, description, model or `allowed_users`. Only supplied keys change; explicit `null` clears one. |
+| `agent_unbind` | Clear the active-agent binding for the current channel; the channel then resolves via the default agent or the route table. Idempotent. |
+
+A workspace record carries display metadata only — model, tools and system
+prompt live in the agent's profile, which `workspace_manage` cannot change.
+Edit a profile with `agent_update`; edit persona text through the agent-files
+tools.
+
+---
+
+## Runtimes and external dependencies
+
+| Tool | Description |
+|------|-------------|
+| `runtime_manage` | List or install the external runtimes Aleph shells out to (fnm, node, uv, cargo, git, playwright-cli, obscura, chromium). |
+| `memory_runtime_start` | Start the memory runtime. |
+| `memory_runtime_stop` | Stop the memory runtime. |
+
+`runtime_manage` installs are **background jobs**: they return a job id at
+once, and you poll with `bash{process_action:"wait", process_id:<id>}` — a
+download is minutes, not one call.
+
+---
+
+## Context plugins, extension catalog and usage
+
+| Tool | Description |
+|------|-------------|
+| `context_plugin` | Grant or revoke a mounted context plugin for the current session. Requires operator confirmation of these exact arguments. |
+| `hub_catalog_search` | Search or browse the Aleph Hub catalog of installable extensions (MCP servers, skills, plugins). Reads the local cache — works offline. |
+| `tool_usage` | Invocation records for installed MCP servers, plugins and skills — call counts, last-used dates, and what has gone unused. Read-only. |
+
+`context_plugin` grants expire (default one hour) and do not permit network
+access, project writes or other sessions; reload/unload revokes the old
+mount, so you must grant again. `hub_catalog_search` is where you get the
+`entry_id` that `hub_resolve_spec` and `hub_install_run` require; run
+`hub_catalog_sync` first if results look stale. A `—` count in `tool_usage`
+means that entry has no tool-call channel to measure (e.g. a hooks-only
+plugin) and is NOT evidence it is unused.
+
+---
+
+## Call lifecycle
+
+| Tool | Description |
+|------|-------------|
+| `initiate_call` | Request a single approved call to your own server-configured binding. No arbitrary recipient, no retries. |
+| `answer_call` | Answer an authenticated ringing call owned by your binding, after single-use operator approval. |
+| `hangup` | Stop an owned call or pending operation and await owned coordinator completion. No new approval. |
+| `cancel_output` | Cancel exactly the current output epoch of an owned call. Acceptance is not confirmed playback clearing. |
+| `call_status` | Get structural status for an owned call, or at most 256 owned records. Never returns phone numbers or conversation text. |
+
+These five need a telecom lifecycle service and the current turn's
+capability; without the service, calls return
+`UNAVAILABLE: telecom lifecycle service not configured`.
+
+---
+
+## Team lifecycle and collaborative sessions
+
+| Tool | Description |
+|------|-------------|
+| `lifecycle_idle` | Report that this worker is idle and awaiting more work; the leader can then assign a new task or approve shutdown. No-op when called by the team leader. |
+| `lifecycle_request_shutdown` | Request the team leader's permission to terminate this worker. Do not exit until the leader approves. |
+| `lifecycle_resolve_shutdown` | Approve or reject a shutdown request (`decision` is `approve` or `reject`). |
+| `session_read` | Read a collaborative session's transcript, status and outcome. |
+| `session_collaborate` | Start a collaborative session between team members for real-time multi-turn discussion. |
+| `team_acp_member` | Manage external coding CLI sessions (Claude Code, Codex, Gemini CLI, …) as team members (add / remove / list). |
+
+---
+
+## Fold restoration and browser companion
+
+| Tool | Description |
+|------|-------------|
+| `session_decompress` | Verbatim-restore a folded (compacted) span of THIS session. Pass `fold_id`, or omit it to restore the most recent fold. |
+| `browser_companion` | Run a sandboxed companion service (e.g. a dev server) and show its page in the browser viewer. |
 
 ---
 
@@ -270,15 +359,36 @@ HTTP 400.
 
 ## Registration summary
 
-Built-in tools are not registered through a builder — they are assembled
-by `src/executor/builtin_registry/` at startup. The registry:
+Built-in tools are assembled by `BuiltinToolRegistry::with_config()`
+(`src/executor/builtin_registry/builder/constructor/mod.rs`). The
+authoritative list of names and descriptions is
+`src/executor/builtin_registry/definitions.rs:85`
+(`BUILTIN_TOOL_DEFINITIONS`); `create_tool_boxed()` (same file, `:907`) builds
+an instance by name and returns `None` when a dependency is missing — the tool
+is unavailable for that turn rather than conjured into existence.
+
+The registry, while assembling:
 
 - injects a shared `Arc<dyn Sandbox>` into every exec-class tool
-  (`bash_exec`, `code_exec`);
+  (`bash`, `code_exec`, `code_check`);
 - injects `Arc<ProfileManager>` into every browser tool;
 - injects `Arc<McpManagerHandle>` into every MCP-bridge tool;
 - injects channel context / `ApprovalRequester` into the tools that need
   them.
+
+Tool names live on four registration surfaces; the catalogue covers only the
+first:
+
+| Surface | Location | Meaning |
+|---------|----------|---------|
+| Catalogue | `BUILTIN_TOOL_DEFINITIONS` (`definitions.rs:85`) | Unconditionally registered; the authoritative list shown to agents. |
+| Registry-only | `REGISTRY_ONLY_DESCRIPTIONS` (`definitions.rs:1308`) | Registered only when a dependency or health check passes (e.g. `scratchpad`, `permission`, `media`, `system`). |
+| Outside the catalogue | `TOOLS_OUTSIDE_DEFINITIONS` (`src/executor/mod.rs:30`) | `subagent` and `tool_search` — not in the catalogue, still callable by the model. |
+| Per-request injection | `src/tools/scoped/mod.rs` | e.g. `get_tool_schema`, appended to the tool list per request. |
+
+Six MCP-bridge tools (`mcp_read_resource` and friends) are registered by
+capability gate in `src/mcp/tool_bridge.rs`: in no catalogue and at no `reg(`
+site.
 
 Every `requires_confirmation` tool is listed once in
 `CONFIRMATION_REQUIRED_TOOLS` (vault_store, agent_delete, team_disband, …)

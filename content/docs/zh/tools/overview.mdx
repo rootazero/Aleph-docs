@@ -146,7 +146,7 @@ pub struct SearchArgs {
 
 | 来源 | 分发 | 示例 |
 |------|------|------|
-| **内置**（`src/builtin_tools/`） | 静态（`AlephTool`） | `bash_exec`、`code_exec`、`file_ops`、`web_fetch`、`search`、`memory_*`、`browser_*` |
+| **内置**（`src/builtin_tools/`） | 静态（`AlephTool`） | `bash`、`code_exec`、`file_ops`、`web_fetch`、`search`、`memory_*`、`browser_*` |
 | **MCP**（外部进程） | 动态（`LoopTool` via `McpHandler`） | `<server>__<tool>`，capability-gated `mcp_read_resource` / `mcp_list_resources` / `mcp_list_resource_templates` / `mcp_get_prompt` / `mcp_list_prompts` / `mcp_login` |
 | **Per-action 浏览器**（`src/builtin_tools/browser_tools/`） | 静态 | `browser_open`、`browser_click`、`browser_navigate`、`browser_snapshot`、`browser_screenshot`、`browser_evaluate`、`browser_fill_form` … |
 

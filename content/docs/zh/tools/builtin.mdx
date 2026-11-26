@@ -27,9 +27,9 @@ trait，使用静态分发以获得最大性能，并由 executor 的 builtin �
 | `code_exec` | 多语言代码片段（`shell` / `python` / `javascript`）。 |
 
 两个工具都通过 `Arc<dyn Sandbox>` 执行子进程 —— `src/builtin_tools/` 内
-**不允许**裸 `Command::new`。`code_exec` 与 `bash_exec` 接收 `code` /
-`command`，可选 `working_dir` 与 `timeout`；输出受沙箱超时（默认 60 秒）
-与 1 MiB 输出预算约束。
+**不允许**裸 `Command::new`。`code_exec` 接收 `language` 与 `code`，`bash`
+接收 `cmd`；两者都可带 `working_dir` 与 `timeout`（秒），输出受沙箱超时
+（默认 60 秒）与 1 MiB 输出预算约束。
 
 ---
 
@@ -178,12 +178,11 @@ cron 与 heartbeat 是 headless 生产者 —— 当 cron 的审批无法被路�
 | `permission` | 查询/请求 tool 权限。 |
 | `select_model` | 切换当前会话的模型。 |
 | `self_config` / `self_manage` | 受限的自我配置（在 chat-tier 通道上默认被 channel tool gate 拒绝）。 |
-| `config_audit` / `config_guide` / `read_config_guide` | 配置辅助。 |
+| `config_audit` / `read_config_guide` | 配置审计与配置指南。 |
 | `agent_identity` | 读取 + 校验每 agent 的签名账本（operator-gated）。 |
 | `doctor` | 诊断。 |
 | `hooks_manage` | shell-hook consent。 |
 | `vault_store` | 写入加密 vault（confirm-gated，operator-only）。 |
-| `permission_tool` | 同 `permission`。 |
 
 ---
 
@@ -225,7 +224,7 @@ cron 与 heartbeat 是 headless 生产者 —— 当 cron 的审批无法被路�
 | `channel_directory` | 只读列出通道与成员（强制 `idempotent`，与 `channel_message` 分开避免 tier 收紧）。 |
 | `media_send` | 发送媒体（图像、文件、音频）。 |
 | `note_manage` / `note_graph_query` / `note_orient` / `note_schema` | 笔记图谱。 |
-| `scratchpad` / `scratchpad_registry` | 共享 scratchpad（用于团队）。 |
+| `scratchpad` | 共享 scratchpad（用于团队）。 |
 | `pim` | 个人信息管理（联系人 / 日历 / 提醒事项）。 |
 | `artifact_publish` | 发布制品。 |
 | `workflow` | 工作流。 |
@@ -233,9 +232,92 @@ cron 与 heartbeat 是 headless 生产者 —— 当 cron 的审批无法被路�
 | `local_voice` / `voice_mode_set` | 本地语音。 |
 | `google_meet` | Google Meet 桥接。 |
 | `flag_user_correction` | 用户改正注入（correction namespaced 到当前 agent）。 |
-| `process_registry` | 跟踪 spawned 进程。 |
-| `command_canonicalize` / `command_ledger` | 命令规范化与账本（去重 / 审计）。 |
-| `crawl4ai` | 通过 crawl4ai 后端抓取。 |
+
+`process_registry`、`command_canonicalize`、`command_ledger` 与 `crawl4ai`
+不是注册工具名，而是 `src/builtin_tools/` 下的实现模块（同名 `.rs` 文件）。
+后台进程的管理面是 `bash` 工具自己的 `process_action` 参数。
+
+---
+
+## 工作区、项目与代理档案
+
+| 工具 | 描述 |
+|------|------|
+| `workspace_manage` | 工作区记录的 list / get / create / update / archive / unarchive。workspace id 就是 agent id（1:1），并决定该 agent 的记忆与笔记分区。 |
+| `project_manage` | 项目房间管理：成员名单、独立记忆与群聊（list / get / create / rename / archive / member_add / member_remove / member_list / bind_workspace）。 |
+| `agent_update` | 修改 agent 的名称、描述、模型或 `allowed_users`；只改传入的键，显式 `null` 清除某项。 |
+| `agent_unbind` | 解除当前频道的 active-agent 绑定；频道随后回落到默认 agent 或路由表。幂等。 |
+
+工作区记录只承载展示元数据 —— 模型、工具与系统提示写在 agent 档案里，
+`workspace_manage` 改不了。改档案走 `agent_update`，改 persona 文本走
+agent-files 工具。
+
+---
+
+## 运行时与外部依赖
+
+| 工具 | 描述 |
+|------|------|
+| `runtime_manage` | 列出或安装 Aleph 会调用的外部运行时（fnm、node、uv、cargo、git、playwright-cli、obscura、chromium）。 |
+| `memory_runtime_start` | 启动记忆运行时。 |
+| `memory_runtime_stop` | 停止记忆运行时。 |
+
+`runtime_manage` 的安装是**后台作业**：立即返回 job id，再用
+`bash{process_action:"wait", process_id:<id>}` 轮询 —— 一次下载是分钟级，
+不是一次调用。
+
+---
+
+## 上下文插件、扩展目录与用量
+
+| 工具 | 描述 |
+|------|------|
+| `context_plugin` | 为当前会话授予或撤销一个已挂载的上下文插件。需要 operator 对这组参数逐字确认。 |
+| `hub_catalog_search` | 搜索或浏览 Aleph Hub 的可安装扩展目录（MCP server、技能、插件）。读本地缓存，可离线工作。 |
+| `tool_usage` | 已安装 MCP server、插件与技能的工具调用次数、最后使用时间，以及哪些一直没被用过。只读。 |
+
+`context_plugin` 的授权默认 1 小时过期，且不带来网络权限、项目写权限或跨会话
+访问；reload / unload 会撤销旧挂载，之后需要重新授权。`hub_catalog_search`
+给出的是 `hub_resolve_spec` 与 `hub_install_run` 需要的 `entry_id`；结果陈旧时
+先跑 `hub_catalog_sync`。`tool_usage` 里显示 `—` 表示该条目没有可测量的调用
+通道（例如只有 hook 的插件），**不是**「没人用」的证据。
+
+---
+
+## 通话生命周期
+
+| 工具 | 描述 |
+|------|------|
+| `initiate_call` | 向你自己服务端配置的绑定发起一次经批准的通话。不能指定任意收件人，也不重试。 |
+| `answer_call` | 在一次性 operator 批准后，接听你绑定上正在响铃的通话。 |
+| `hangup` | 停止你拥有的通话或待处理操作，并等它真正收尾。不需要新的批准。 |
+| `cancel_output` | 取消你拥有通话的当前输出 epoch。接受请求不等于确认播放已清空。 |
+| `call_status` | 取你拥有通话的结构化状态，或最多 256 条自有记录。永不返回电话号码与对话文本。 |
+
+这五个工具需要 telecom 生命周期服务与当前轮次的 capability；服务没配置时
+调用返回 `UNAVAILABLE: telecom lifecycle service not configured`。
+
+---
+
+## 团队生命周期与协作会话
+
+| 工具 | 描述 |
+|------|------|
+| `lifecycle_idle` | 报告这个 worker 空闲待命，向 team leader 发 `idle`；leader 才能派新任务或批准关闭。对 leader 调用是 no-op。 |
+| `lifecycle_request_shutdown` | 请求 team leader 批准终止本 worker。未获批准前不要退出。 |
+| `lifecycle_resolve_shutdown` | team leader 批准或拒绝 shutdown 请求（`decision` 取 `approve` 或 `reject`）。 |
+| `session_read` | 读协作会话的转录、状态与结果。 |
+| `session_collaborate` | 在 team 成员之间发起实时多轮协作会话。 |
+| `team_acp_member` | 把外部编码 CLI（Claude Code、Codex、Gemini CLI 等）作为 team 成员挂载（add / remove / list）。 |
+
+---
+
+## 会话折叠还原与浏览器 companion
+
+| 工具 | 描述 |
+|------|------|
+| `session_decompress` | 逐字还原本会话被折叠（compact）的一段。传 `fold_id`，或省略以还原最近一次折叠。 |
+| `browser_companion` | 起一个沙箱 companion 服务（例如 dev server），并在浏览器查看器里展示它的页面。 |
 
 ---
 
@@ -255,14 +337,31 @@ provider 都会被拒的 schema 会让整轮请求失败而不是污染整个 tu
 
 ## 注册摘要
 
-内置工具不通过 builder 注册；它们由
-`src/executor/builtin_registry/` 在启动时统一装配。注册表：
+内置工具的装配入口是 `BuiltinToolRegistry::with_config()`
+（`src/executor/builtin_registry/builder/constructor/mod.rs`）。名称与描述的
+权威清单是 `src/executor/builtin_registry/definitions.rs:85` 的
+`BUILTIN_TOOL_DEFINITIONS`；`create_tool_boxed()`（同文件 `:907`）按名称构造
+实例，缺少依赖时返回 `None` —— 该工具这一轮不可用，而不是凭空造一个。
 
-- 为每个 exec 类工具（`bash_exec` / `code_exec`）注入共享的
+注册表在装配时：
+
+- 为每个 exec 类工具（`bash` / `code_exec` / `code_check`）注入共享的
   `Arc<dyn Sandbox>`；
 - 为每个浏览器工具注入 `Arc<ProfileManager>`；
 - 为每个 MCP 桥接工具注入 `Arc<McpManagerHandle>`；
 - 为每个需要它们的工具注入通道上下文 / ApprovalRequester。
+
+工具名有四个登记面，目录只覆盖第一个：
+
+| 登记面 | 位置 | 含义 |
+| --- | --- | --- |
+| 目录 | `BUILTIN_TOOL_DEFINITIONS`（`definitions.rs:85`） | 无条件登记，是面向代理的权威清单。 |
+| 仅注册表 | `REGISTRY_ONLY_DESCRIPTIONS`（`definitions.rs:1308`） | 依赖或健康状态满足时才注册（如 `scratchpad`、`permission`、`media`、`system`）。 |
+| 目录外 | `TOOLS_OUTSIDE_DEFINITIONS`（`src/executor/mod.rs:30`） | `subagent`、`tool_search`，不进目录但模型可调用。 |
+| 按请求注入 | `src/tools/scoped/mod.rs` | 例如 `get_tool_schema`，逐请求追加到工具列表。 |
+
+另有六个 MCP 桥接工具（`mcp_read_resource` 等）由 `src/mcp/tool_bridge.rs`
+按能力门注册：既不在目录，也不走 `reg(` 点。
 
 每个 `requires_confirmation` 工具由 `CONFIRMATION_REQUIRED_TOOLS` 集合
 列出（vault_store、agent_delete、team_disband 等），共享一个
