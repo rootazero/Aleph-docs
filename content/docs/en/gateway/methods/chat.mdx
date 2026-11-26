@@ -5,7 +5,7 @@ description: "High-level RPC methods for chat clients: send, abort, history, cle
 
 `chat.*` are **high-level wrappers for chat-facing clients**, implemented in `src/gateway/handlers/chat.rs`. They are not a second execution engine — they reuse the execution adapter behind [`agent.*`](./agent) (`AgentRunManager`), narrowing the parameters and responses into shapes that fit chat.
 
-The full set lives in `RPC_METHOD_CENSUS` (`src/gateway/method_census.rs`); all six methods are `Class::Open`:
+The full set lives in `RPC_METHOD_CENSUS` (`src/gateway/method_census.rs`); all seven methods are `Class::Open`:
 
 | Method | Purpose |
 |---|---|
@@ -15,6 +15,7 @@ The full set lives in `RPC_METHOD_CENSUS` (`src/gateway/method_census.rs`); all 
 | `chat.clear` | Clear the chat history |
 | `chat.rewind` | Drop the conversation from a given event seq onward (server half of edit-and-resend) |
 | `chat.context_estimate` | Estimate the next prompt's context occupancy |
+| `chat.transcript_details` | Fetch the **presentation-layer** changes of tool calls by run id (for the V1 chat panel) |
 
 ## chat.send
 
@@ -88,6 +89,52 @@ Estimates the next prompt's context occupancy for a session, so the gauge can sh
 
 A denial reuses this method's own `null` rather than an error code that would exist only for denials.
 
+## chat.transcript_details
+
+Fetches the **presentation-layer** changes of a set of tool calls, addressed by run id. This is a restricted interface for the V1 chat panel: it is not a general trace-replay API. It replays the "what did the tool call do" layer only, never the model's raw text (`src/gateway/handlers/trace_replay/chat_details.rs`, `shared/protocol/src/chat_transcript.rs`).
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `session_key` | string | Yes | Canonical session key |
+| `run_ids` | string[] | Yes | The run ids to fetch |
+
+**Response:** `{ "runs": [ { "run_id": String, "tools": [ ... ], "limited": boolean } ], "limited": boolean }`.
+
+Each entry in `tools` is `{ "tool_call_id": String, "change": ... }`, where `change` is tagged by `kind` in three shapes:
+
+| `kind` | Payload | Meaning |
+|---|---|---|
+| `started` | `display_name`, `args_text` | The tool call started |
+| `working` | none | The tool is still running |
+| `finished` | `success`, `duration_ms`, optional `presentation`, `presentation_omitted` | The tool call ended |
+
+### Ownership and truncation
+
+The value of this interface lies in what it **refuses**, so the rules matter more than the fields:
+
+- **A run must belong to the session.** A history stamp alone cannot prove a trace belongs to this session (after a split or an older projector repair, least of all), so the server also compares the task record's `parent_session_id` with the canonical session key. A run that does not match is dropped and `limited` is set.
+- **A run id must be a safe address.** `safe_tool_address` requires it to be non-empty, at most 256 bytes, made only of alphanumerics plus `-`, `_`, `:` and `.`, and unchanged by secret masking. Ids that fail are dropped too.
+- **An invisible session is answered as "not found".** The reply is a not-found response rather than "forbidden" — a caller should not be able to tell "does not exist" from "not yours" by the error code.
+- **Everything is bounded.** At most 12 runs (`MAX_RUNS`), at most 80 tool facts per run (`MAX_DELTAS`), and at most 384 KiB for the whole response (`MAX_RESPONSE_BYTES`). Too many run ids, dropped runs and unreadable task records all set `limited`.
+- **Settled runs survive pressure first.** Finished runs (Completed/Failed/Interrupted) are kept ahead of the rest, and recent runs are favoured next; the reply itself still returns runs in request order, and each run keeps its trace order.
+- **Duplicate events cost the whole call.** When one `tool_call_id` has more than one start or more than one finish, that call is dropped as a whole (not just the unusable half) and `limited` is set.
+- **Empty runs are kept.** A run that was admitted but has no tool calls still appears in `runs`, so a client can tell "this run had no tools" from "this run was omitted".
+- **`presentation` is optional and gets squeezed out.** The presentation body (the diff) is attached only to finished calls, is read from the session store under a separate 96 KiB cap, and is dropped with `presentation_omitted` set when the byte budget runs out.
+
+### Errors
+
+| Case | Code | Message |
+|---|---|---|
+| Request `id` longer than 1024 bytes | `INVALID_PARAMS` | `Request id too large` |
+| Parameters do not parse | `INVALID_PARAMS` | `Invalid params` |
+| `session_key` is not a valid session key | `INVALID_PARAMS` | `Invalid session_key` |
+
+The request `id` is length-limited too, because it is caller-controlled and the budget on the result body alone cannot stop it.
+
+### The live counterpart
+
+The same presentation data is pushed on a connection under the `stream.chat_tool` topic (`CHAT_TOOL_TOPIC`), and only to v1 connections that negotiated `live_events`. This method is the addressed version of the same projection. See [Protocol v1](../protocol-v1).
+
 ## Visibility
 
-All six methods are `Treatment::KeyChecked` in `src/gateway/method_visibility.rs` — whether a call succeeds depends on the caller's visibility into the target session, not on the method being public. See [JSON-RPC error model](/docs/en/api/jsonrpc).
+All seven methods are `Treatment::KeyChecked` in `src/gateway/method_visibility.rs` — whether a call succeeds depends on the caller's visibility into the target session, not on the method being public. See [JSON-RPC error model](/docs/en/api/jsonrpc).

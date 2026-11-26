@@ -1,0 +1,141 @@
+---
+title: "pty.*"
+description: "内嵌终端的 RPC 方法：创建会话、写入输入、读取历史、挂载快照、调整尺寸、关闭与列出"
+---
+
+`pty.*` 是 Aleph **内嵌终端**（嵌入式 PTY）的 RPC 面。终端能力挂在 `aleph/terminal` 命名空间下，RPC 侧的每个方法都转成一次能力调用，落到同一个会话管理器上（`src/gateway/handlers/pty.rs`、`src/capability/tool_adapters.rs`）。Panel 与 `terminal` 工具走的是同一条通路：RPC 不是终端的第二套实现，而是它的一个调用面。
+
+七个方法全部是 `Class::Admin`，只有 operator 能调用（`src/gateway/method_census.rs`、`src/gateway/method_admin.rs`）。注册点在 `src/bin/aleph-server/commands/start/builder/handlers/system.rs` 的 `register_pty_handlers`。
+
+| 方法 | 分类 | 作用 |
+|---|---|---|
+| `pty.spawn` | Admin | 打开一个新的终端会话 |
+| `pty.input` | Admin | 向会话的标准输入写入字节 |
+| `pty.history` | Admin | 读取会话保留的滚动历史 |
+| `pty.attach` | Admin | 取会话当前屏幕的一次快照 |
+| `pty.resize` | Admin | 调整会话的终端尺寸 |
+| `pty.close` | Admin | 关闭会话 |
+| `pty.list` | Admin | 列出调用方可见的会话 |
+
+## 通用规则
+
+- **会话级开关**：整个命名空间由 `[policies.terminal] enabled` 控制，默认开启（`src/config/types/policies/terminal.rs` 的 `TerminalConfig`）。关闭后新的终端工作被拒，已经打开的会话仍然可以用 `pty.close` 收尾。拒绝时返回的原文是：
+
+  ```text
+  the embedded terminal is disabled: set `[policies.terminal] enabled = true` in config.toml to turn it on
+  ```
+- **不经过执行等级**：`pty.*` 绕过 `[sandbox.command_policy]` 与 exec 等级门控。这一层唯一的谓词就是上面那个会话级开关——交互式字节流上表达不了命令级策略，所以没有更细的粒度可给（`src/config/types/policies/terminal.rs`）。
+- **所有权**：除 `pty.spawn` 与 `pty.list` 外的方法都要求会话属于调用方，不属于你的会话按「找不到」处理，而不是按「无权限」处理（`require_owned_session`）。
+- **起始目录**：`pty.spawn` 的 `cwd` 只是一项请求。服务器把它规范化后与已登记的工作区根比较，落在根之外一律拒绝；空值回落到第一个登记的根，而不是守护进程自己的当前目录（`src/gateway/pty/jail.rs`）。约束只覆盖**起始**目录：进入终端后敲一次 `cd` 不受约束。
+- **并发上限**：`[policies.terminal] max_sessions`（默认 64）超出后按 FIFO 关闭最老的会话（`src/gateway/pty/manager.rs`）。`scrollback_lines`（默认 1000）是每个会话由服务端持有的滚动行数，只对之后新建的会话生效。
+
+## pty.spawn
+
+打开一个新的终端会话。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `command` | string | 否 | 要执行的命令；省略时使用登录 shell |
+| `args` | string[] | 否 | 命令参数 |
+| `cwd` | string | 否 | 起始目录，受工作区根约束 |
+| `env` | object | 否 | 追加的环境变量 |
+| `rows` | number | 否 | 初始行数 |
+| `cols` | number | 否 | 初始列数 |
+
+参数结构是 `PtySpawnParams`（`shared/protocol/src/capability.rs`）。
+
+**响应:** `{ "session_id": String, "shell": String, "seq": Number, "rows": Number, "cols": Number }`（`PtySpawnResponse`，`shared/protocol/src/pty.rs`）。`seq` 是屏幕帧序号，随响应一起返回，因此客户端拿到响应时就知道第一帧的起点，中间不存在窗口。
+
+## pty.input
+
+向会话的标准输入写入字节。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 目标会话 |
+| `data` | string | 是 | 要写入的内容 |
+| `base64` | boolean | 否 | 为真时 `data` 按 base64 解码后再写入（用于二进制粘贴）；否则按 UTF-8 原样写入 |
+
+**响应:** `{ "ok": true }`。
+
+## pty.history
+
+读取会话保留的滚动历史。请求结构是 `PtyHistoryRequest`，响应是 `PtyHistoryResponse`（`shared/protocol/src/pty.rs`）。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 目标会话 |
+| `before` | string | 否 | 游标，取上一页返回的 `older_before`；省略表示从最新一页开始 |
+| `limit` | number | 否 | 本页最多返回的行数，取值 1–64，默认 32（`default_history_limit`） |
+
+**响应:** `{ "rows": [ { "index": String, "runs": [ ... ] } ], "older_before": String | null, "evicted": boolean }`。
+
+- `index` 是该行在保留环里的绝对序号，字符串形式。下一页把上一页的 `older_before` 原样回填给 `before` 即可；`older_before` 为 `null` 表示已经到保留环的最旧一行。
+- `rows` 按序号从旧到新排列，`runs` 是该行的样式片段。
+- `evicted` 为真表示请求的游标已经落在保留环之外，中间的行被淘汰过——这时返回的页是残缺的，而不是完整历史。
+
+失败情形（`PtyHistoryError`，`shared/protocol/src/pty.rs`）：
+
+| 情形 | 消息 |
+|---|---|
+| `limit` 不在 1–64 | `PTY history limit must be between 1 and 64` |
+| `before` 不是合法游标 | `invalid PTY history cursor` |
+| 单行超出页字节预算（262 144 字节，`PTY_HISTORY_MAX_BYTES`） | `PTY history row exceeds page byte budget` |
+| 会话当前处于备用屏（全屏程序） | `PTY history is unavailable` |
+
+历史来自主屏已有的保留环，读取是有界且只读的：分页直接索引保留窗口，不扫描全部保留行（`src/gateway/pty/screen/history.rs`）。
+
+## pty.attach
+
+取会话当前屏幕的一次快照，一次调用完成，不拆成「拿屏幕」和「拿光标」两步。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 目标会话 |
+
+**响应:** `{ "seq": Number, "rows": Number, "cols": Number, "patch": ..., "scrollback_len": Number }`（`PtyAttachResponse`，`shared/protocol/src/pty.rs`），其中 `patch` 是屏幕增量（`PtyScreenPatch`）。
+
+## pty.resize
+
+调整会话的终端尺寸。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 目标会话 |
+| `rows` | number | 是 | 新的行数 |
+| `cols` | number | 是 | 新的列数 |
+
+**响应:** `{ "ok": true }`。
+
+有附着客户端时，尺寸以附着的视图为准，不允许后来的调用覆盖正在看的客户端；没有附着客户端时才真正调整会话尺寸（`src/capability/tool_adapters.rs`）。
+
+## pty.close
+
+关闭会话。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 目标会话 |
+
+**响应:** `{ "ok": true }`。
+
+关闭是这一层唯一在开关关闭后仍然允许的操作：它收尾已有会话，不开启新的终端工作。
+
+## pty.list
+
+列出调用方可见的会话。
+
+**响应:** `{ "sessions": [ { "session_id": String, "shell": String, "cwd": String, "created_at": Number, "closed": boolean } ] }`（`PtyListResponse` 与 `PtySessionInfo`，`shared/protocol/src/pty.rs`）。
+
+- `cwd` 是会话**创建时**的目录（继承服务端目录时为空串），不是 shell 之后的实时当前目录；实时目录随屏幕补丁一起下发。
+- `created_at` 是创建时的 Unix 秒级时间戳，与 Panel 运行时使用的毫秒时间戳不是同一个时钟，不能混用。
+
+## 事件
+
+终端会发布 `pty.screen`（屏幕帧）与 `pty.exit`（会话退出）两个主题（`PTY_SCREEN_TOPIC`、`PTY_EXIT_TOPIC`，`shared/protocol/src/pty.rs`）。主题投递同样受可见性与作用域约束，见[事件方法](./events)。
+
+## 另请参阅
+
+- [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
+- [事件方法](/docs/zh/gateway/methods/events)——主题事件与订阅
+- [IPC 协议](../../security/ipc)——各入口的信任边界

@@ -1,0 +1,142 @@
+---
+title: "pty.*"
+description: "RPC methods for the embedded terminal: spawn a session, write input, read history, attach a snapshot, resize, close, and list"
+---
+
+`pty.*` is the RPC face of Aleph's **embedded terminal** (the embedded PTY). The terminal capability lives under the `aleph/terminal` namespace, and every RPC method becomes one capability call against the same session manager (`src/gateway/handlers/pty.rs`, `src/capability/tool_adapters.rs`). The Panel and the `terminal` tool use the same path: the RPC is not a second implementation of the terminal, it is one of its call faces.
+
+All seven methods are `Class::Admin` — only an operator may call them (`src/gateway/method_census.rs`, `src/gateway/method_admin.rs`). They are registered in `register_pty_handlers` (`src/bin/aleph-server/commands/start/builder/handlers/system.rs`).
+
+| Method | Class | Purpose |
+|---|---|---|
+| `pty.spawn` | Admin | Open a new terminal session |
+| `pty.input` | Admin | Write bytes to the session's standard input |
+| `pty.history` | Admin | Read the scrollback the session retains |
+| `pty.attach` | Admin | Take one snapshot of the session's screen |
+| `pty.resize` | Admin | Change the session's terminal size |
+| `pty.close` | Admin | Close the session |
+| `pty.list` | Admin | List the sessions visible to the caller |
+
+## Common rules
+
+- **Session-grained switch**: the whole namespace is gated by `[policies.terminal] enabled`, which defaults to on (`TerminalConfig` in `src/config/types/policies/terminal.rs`). Once it is off, new terminal work is refused while already open sessions can still be finished with `pty.close`. The refusal reads:
+
+  ```text
+  the embedded terminal is disabled: set `[policies.terminal] enabled = true` in config.toml to turn it on
+  ```
+
+- **No execution tier**: `pty.*` bypasses `[sandbox.command_policy]` and the exec tier. The session-grained switch is the only predicate this layer has — a command-grained policy is not expressible over an interactive byte stream, so there is no finer grain to offer (`src/config/types/policies/terminal.rs`).
+- **Ownership**: every method except `pty.spawn` and `pty.list` requires the session to belong to the caller. A session that is not yours is answered as "not found", not as "forbidden" (`require_owned_session`).
+- **Starting directory**: `cwd` on `pty.spawn` is a request, not an authorization. The server canonicalises it and compares it with the registered workspace roots, refusing anything outside them; a blank value falls back to the first registered root, never to the daemon's own working directory (`src/gateway/pty/jail.rs`). The jail bounds the **starting** directory only: a `cd` typed inside the terminal is not constrained.
+- **Concurrency ceiling**: `[policies.terminal] max_sessions` (64 by default) closes the oldest session first when the ceiling is crossed (`src/gateway/pty/manager.rs`). `scrollback_lines` (1000 by default) is the number of scrollback lines the server retains per session, and it applies to sessions started afterwards.
+
+## pty.spawn
+
+Opens a new terminal session.
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `command` | string | No | Command to run; the login shell is used when omitted |
+| `args` | string[] | No | Command arguments |
+| `cwd` | string | No | Starting directory, bounded by the workspace roots |
+| `env` | object | No | Extra environment variables |
+| `rows` | number | No | Initial rows |
+| `cols` | number | No | Initial columns |
+
+The parameter struct is `PtySpawnParams` (`shared/protocol/src/capability.rs`).
+
+**Response:** `{ "session_id": String, "shell": String, "seq": Number, "rows": Number, "cols": Number }` (`PtySpawnResponse` in `shared/protocol/src/pty.rs`). `seq` is the screen frame sequence number and travels with the response, so a client knows where the first frame starts — there is no window between the spawn response and that frame.
+
+## pty.input
+
+Writes bytes to the session's standard input.
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `session_id` | string | Yes | Target session |
+| `data` | string | Yes | Bytes to send |
+| `base64` | boolean | No | When true, `data` is base64-decoded before writing (binary-safe paste); otherwise it is written as raw UTF-8 |
+
+**Response:** `{ "ok": true }`.
+
+## pty.history
+
+Reads the scrollback the session retains. The request is `PtyHistoryRequest` and the response is `PtyHistoryResponse` (`shared/protocol/src/pty.rs`).
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `session_id` | string | Yes | Target session |
+| `before` | string | No | Cursor — pass back the previous page's `older_before`; omitted means "start from the newest page" |
+| `limit` | number | No | Maximum rows in this page, 1–64, default 32 (`default_history_limit`) |
+
+**Response:** `{ "rows": [ { "index": String, "runs": [ ... ] } ], "older_before": String | null, "evicted": boolean }`.
+
+- `index` is the row's absolute position in the retention ring, as a string. To fetch the next page, feed the previous page's `older_before` back as `before`; `older_before` is `null` once the oldest retained row has been reached.
+- `rows` is ordered from older to newer, and `runs` holds that row's style runs.
+- `evicted` is true when the requested cursor pointed before the retention ring, so rows in between were evicted — the page you get back is then a fragment, not the full history.
+
+Failure cases (`PtyHistoryError` in `shared/protocol/src/pty.rs`):
+
+| Case | Message |
+|---|---|
+| `limit` outside 1–64 | `PTY history limit must be between 1 and 64` |
+| `before` is not a valid cursor | `invalid PTY history cursor` |
+| A single row exceeds the page byte budget (262 144 bytes, `PTY_HISTORY_MAX_BYTES`) | `PTY history row exceeds page byte budget` |
+| The session is on the alternate screen (a full-screen program) | `PTY history is unavailable` |
+
+The history comes from the primary screen's existing retention ring and the read is bounded and read-only: paging indexes the retention window directly instead of scanning every retained row (`src/gateway/pty/screen/history.rs`).
+
+## pty.attach
+
+Takes one snapshot of the session's screen. It is a single call, deliberately not split into "fetch the screen" and "fetch the cursor".
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `session_id` | string | Yes | Target session |
+
+**Response:** `{ "seq": Number, "rows": Number, "cols": Number, "patch": ..., "scrollback_len": Number }` (`PtyAttachResponse` in `shared/protocol/src/pty.rs`), where `patch` is the screen patch (`PtyScreenPatch`).
+
+## pty.resize
+
+Changes the session's terminal size.
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `session_id` | string | Yes | Target session |
+| `rows` | number | Yes | New row count |
+| `cols` | number | Yes | New column count |
+
+**Response:** `{ "ok": true }`.
+
+When a client is attached, the attached viewport wins and a later call cannot override the client that is looking at the session; without an attached client the session size is changed for real (`src/capability/tool_adapters.rs`).
+
+## pty.close
+
+Closes the session.
+
+| Parameter | Type | Required | Meaning |
+|---|---|---|---|
+| `session_id` | string | Yes | Target session |
+
+**Response:** `{ "ok": true }`.
+
+Closing is the one operation still allowed once the switch is off: it finishes an existing session instead of starting new terminal work.
+
+## pty.list
+
+Lists the sessions visible to the caller.
+
+**Response:** `{ "sessions": [ { "session_id": String, "shell": String, "cwd": String, "created_at": Number, "closed": boolean } ] }` (`PtyListResponse` and `PtySessionInfo` in `shared/protocol/src/pty.rs`).
+
+- `cwd` is the directory the session was **spawned** in (an empty string when it inherited the server's), not the shell's live working directory; the live one rides the screen patch.
+- `created_at` is a Unix timestamp in seconds taken at spawn time. The Panel's runtime timestamp is in milliseconds — the two clocks are not interchangeable.
+
+## Events
+
+The terminal publishes two topics: `pty.screen` (screen frames) and `pty.exit` (session exit) (`PTY_SCREEN_TOPIC` and `PTY_EXIT_TOPIC` in `shared/protocol/src/pty.rs`). Topic delivery is subject to the same visibility and scope rules as any other event; see [event methods](./events).
+
+## See also
+
+- [Method reference](/docs/en/gateway/methods) — every registered namespace
+- [Event methods](/docs/en/gateway/methods/events) — topic events and subscriptions
+- [IPC protocol](../../security/ipc) — trust boundaries per entry point

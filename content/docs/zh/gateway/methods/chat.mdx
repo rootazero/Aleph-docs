@@ -5,7 +5,7 @@ description: "面向聊天客户端的高层 RPC 方法：发送、中止、历�
 
 `chat.*` 是**面向聊天客户端的高层封装**，实现位于 `src/gateway/handlers/chat.rs`。它们不是另一套执行引擎——底层复用 [`agent.*`](./agent) 的执行适配器（`AgentRunManager`），只是把参数与响应收敛成聊天场景更简单的形状。
 
-方法全集见 `src/gateway/method_census.rs` 的 `RPC_METHOD_CENSUS`，六个方法全部为 `Class::Open`：
+方法全集见 `src/gateway/method_census.rs` 的 `RPC_METHOD_CENSUS`，七个方法全部为 `Class::Open`：
 
 | 方法 | 用途 |
 |---|---|
@@ -15,6 +15,7 @@ description: "面向聊天客户端的高层 RPC 方法：发送、中止、历�
 | `chat.clear` | 清空聊天历史 |
 | `chat.rewind` | 从指定事件序号起回退对话（编辑重发的服务端一半） |
 | `chat.context_estimate` | 估算会话下一次 prompt 的上下文占用 |
+| `chat.transcript_details` | 按 run id 取回工具调用的**呈现层**变更（V1 聊天面板用） |
 
 ## chat.send
 
@@ -88,6 +89,52 @@ description: "面向聊天客户端的高层 RPC 方法：发送、中止、历�
 
 拒绝时复用的是本方法自己的 `null` 形状，而不是另造一个只为拒绝存在的错误码。
 
+## chat.transcript_details
+
+按 run id 取回一组工具调用的**呈现层**变更。这是 V1 聊天面板专用的受限接口：它不是通用追踪回放 API，只回放「工具调用发生了什么」这一层信息，不回放模型的原始文本（`src/gateway/handlers/trace_replay/chat_details.rs`、`shared/protocol/src/chat_transcript.rs`）。
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_key` | string | 是 | 规范 session key |
+| `run_ids` | string[] | 是 | 要取回的 run id 列表 |
+
+**响应:** `{ "runs": [ { "run_id": String, "tools": [ ... ], "limited": boolean } ], "limited": boolean }`。
+
+`tools` 里每一项是 `{ "tool_call_id": String, "change": ... }`，`change` 按 `kind` 区分三种形态：
+
+| `kind` | 载荷 | 含义 |
+|---|---|---|
+| `started` | `display_name`、`args_text` | 工具调用开始 |
+| `working` | 无 | 工具仍在执行 |
+| `finished` | `success`、`duration_ms`、可选 `presentation`、`presentation_omitted` | 工具调用结束 |
+
+### 归属与裁剪
+
+这个接口的价值全在它**拒绝**什么上面，因此规则比字段本身更重要：
+
+- **run 必须属于该会话。** 只看历史戳记不足以证明追踪属于这个会话（分裂或旧投影修复之后尤其如此），因此服务端还要比对任务记录里的 `parent_session_id` 是否等于规范化的 session key；对不上的 run 直接丢弃并把 `limited` 置真。
+- **run id 必须是安全地址。** `safe_tool_address` 要求它非空、不超过 256 字节、只含字母数字与 `-`、`_`、`:`、`.`，并且在密钥掩码后保持原样。不合格的 id 同样被丢弃。
+- **越权会话按「找不到」处理。** 会话不可见时返回 not-found 响应，而不是「无权限」——调用方不该靠错误码区分「不存在」和「不归你」。
+- **一切都有上限。** 最多 12 个 run（`MAX_RUNS`），每个 run 最多 80 条工具事实（`MAX_DELTAS`），整条响应不超过 384 KiB（`MAX_RESPONSE_BYTES`）。run 数量超限、多余的 run、无法读取的任务记录，都会把 `limited` 置真。
+- **压力下先留已结算的 run。** 已结束（Completed/Failed/Interrupted）的 run 优先保留，其次偏向较新的 run；回复本身仍按请求顺序给出，每个 run 内部仍按追踪顺序给出。
+- **重复的事件整条丢弃。** 同一个 `tool_call_id` 出现多次开始或多次结束时，那次调用整体被丢弃（不是只丢坏的那一条），并置 `limited`。
+- **空的 run 会保留。** 一个被接纳但没有工具调用的 run 仍然出现在 `runs` 里，这样客户端能区分「这个 run 没有工具」和「这个 run 被略过了」。
+- **`presentation` 是可选的，且会被预算挤掉。** 呈现体（diff 正文）只在结束时附上，从会话存储读取时另有 96 KiB 的上限；字节预算不够时 `presentation` 被省掉并把 `presentation_omitted` 置真。
+
+### 错误
+
+| 情形 | 错误码 | 消息 |
+|---|---|---|
+| 请求 `id` 超过 1024 字节 | `INVALID_PARAMS` | `Request id too large` |
+| 参数无法解析 | `INVALID_PARAMS` | `Invalid params` |
+| `session_key` 不是合法会话键 | `INVALID_PARAMS` | `Invalid session_key` |
+
+请求 `id` 也要限长，是因为它由调用方控制，否则单靠结果体的预算挡不住它。
+
+### 实时对应物
+
+同一份呈现层数据在连接上以 `stream.chat_tool` 主题推送（`CHAT_TOOL_TOPIC`），只发给协商到 `live_events` 的 v1 连接；本方法是同一份投影的「按 run 寻址」版本。见 [Protocol v1](../protocol-v1)。
+
 ## 可见性
 
-六个方法在 `src/gateway/method_visibility.rs` 里都是 `Treatment::KeyChecked`——是否能调用取决于调用方对目标会话的可见性，而不是方法本身是否公开。相关说明见 [JSON-RPC 错误模型](/docs/zh/api/jsonrpc)。
+七个方法在 `src/gateway/method_visibility.rs` 里都是 `Treatment::KeyChecked`——是否能调用取决于调用方对目标会话的可见性，而不是方法本身是否公开。相关说明见 [JSON-RPC 错误模型](/docs/zh/api/jsonrpc)。

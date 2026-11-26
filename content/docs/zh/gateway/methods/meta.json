@@ -29,6 +29,7 @@
     "channels",
     "exec",
     "wizard",
-    "browser"
+    "browser",
+    "pty"
   ]
 }

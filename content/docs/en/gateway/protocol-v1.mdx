@@ -56,7 +56,7 @@ The cap is inclusive: a payload at the cap is valid, but one more byte returns `
 
 ### Request
 
-This example does not use the NSH host’s actual defaults. The four `client` fields (`name`, `version`, `platform`, `ui_runtime`) are required strings. `features` can be an empty array (`shared/protocol/src/system_hello.rs`).
+This example does not use the NSH host’s actual defaults. The four `client` fields (`name`, `version`, `platform`, `ui_runtime`) are required strings. `features` can be an empty array (`shared/protocol/src/system_hello.rs`). The two features requested here are exactly the ones both v1 endpoints implement; legacy `/ws` implements no optional feature, so those names are never granted there.
 
 ```json
 {
@@ -71,7 +71,7 @@ This example does not use the NSH host’s actual defaults. The four `client` fi
       "platform": "linux",
       "ui_runtime": "example"
     },
-    "features": ["event_replay", "snapshot", "binary_channel"]
+    "features": ["live_events", "chat_transcript"]
   }
 }
 ```
@@ -88,7 +88,7 @@ This is a successful Desktop IPC response. The server version, connection UUID, 
     "protocol": { "major": 1, "minor": 0 },
     "server": { "name": "aleph-server", "version": "26.9.1" },
     "connection_id": "ipc-3f0c1b52-8a0e-4d0a-9b1a-6a6d2f0a7e11",
-    "features": [],
+    "features": ["live_events", "chat_transcript"],
     "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 8 },
     "subject": "0123456789abcdef0123456789abcdef"
   }
@@ -114,8 +114,20 @@ Legacy `/ws` always omits `subject`. The v1 endpoints also omit it when the shar
 | `event_replay` | `EventReplay` |
 | `snapshot` | `Snapshot` |
 | `binary_channel` | `BinaryChannel` |
+| `live_events` | `LiveEvents` |
+| `chat_transcript` | `ChatTranscript` |
 
-The server calls `negotiate_features(&params.features, &[])` with an empty implementation list, so `features` is always `[]` in a successful response. Recognizing a feature name does not enable the feature (`src/gateway/handlers/system_hello.rs`).
+Unknown strings deserialize as `Unknown(String)`: they parse, but they do not take part in the negotiation (`shared/protocol/src/system_hello.rs`).
+
+All three endpoints call the same `negotiate_features(requested, implemented)`; only `implemented` differs:
+
+| Endpoint | `implemented` | Negotiation result |
+|----------|---------------|--------------------|
+| Legacy `/ws` | empty list | Always `[]` — the legacy endpoint pushes no events and has no optional features |
+| Desktop IPC | `V1_FEATURES` | The intersection of the request with `LiveEvents` and `ChatTranscript` |
+| Web v1 | `V1_FEATURES` | The same |
+
+`V1_FEATURES` is exactly `LiveEvents` and `ChatTranscript` (`src/gateway/server/connection/mod.rs`). There is one extra condition: `chat_transcript` presupposes `live_events`, and `negotiate_features` drops `ChatTranscript` when `live_events` was not granted (`shared/protocol/src/system_hello.rs`). Recognizing a feature name does not enable the feature; `event_replay`, `snapshot` and `binary_channel` are still implemented by no endpoint, so they never appear in a negotiation result (`src/gateway/handlers/system_hello.rs`).
 
 ## Server behavior
 
@@ -148,12 +160,25 @@ On legacy `/ws`, `system.hello` is an optional version probe after `connect`. It
 
 | Endpoint | Transport | Authentication | Methods | Source |
 |----------|-----------|----------------|---------|--------|
-| Desktop IPC (Unix) | Unix domain socket with length-prefixed frames | OS verifies that the peer is the same user; grants no network privileges | `system.hello` first, then `health`, `sessions.list`, `panel.capabilities.snapshot` | `src/gateway/server/connection/local_ipc.rs`, `shared/client/src/local_ipc.rs` |
+| Desktop IPC (Unix) | Unix domain socket with length-prefixed frames | OS verifies that the peer is the same user; grants no network privileges | `system.hello` first, then the 12 mounted methods listed below | `src/gateway/server/connection/local_ipc.rs`, `shared/client/src/local_ipc.rs` |
 | Desktop IPC (Windows, not exposed) | Local named-pipe code is in the tree | Account authentication is implemented but not enabled | None: both the client connection and the Gateway listener are gated | `shared/client/src/local_ipc/windows.rs`, `src/gateway/server/connection/local_ipc/windows.rs`, `shared/client/src/local_ipc.rs` |
-| Web v1 | WebSocket over native TLS; exactly one frame per Binary message | Same-origin check and session cookie; exchange a device token or bootstrap ticket for a session | `system.hello` first, then `health`, `sessions.list`, `panel.capabilities.snapshot` | `src/gateway/server/connection/web_v1.rs`, `src/gateway/server/mod.rs` |
+| Web v1 | WebSocket over native TLS; exactly one frame per Binary message | Same-origin check and session cookie; exchange a device token or bootstrap ticket for a session | `system.hello` first, then the 12 mounted methods listed below | `src/gateway/server/connection/web_v1.rs`, `src/gateway/server/mod.rs` |
 | Legacy `/ws` (compatibility) | WebSocket Text messages without a length prefix | Checks transport security and `Origin` (if present) at upgrade, then authenticates with `connect` | Full legacy RPC surface, subject to authorization; see [Method Reference](./methods) | `src/gateway/server/connection/upgrade.rs`, `src/gateway/server/connection/mod.rs` |
 
-The handshake handles `system.hello` separately; it is not part of the post-handshake method list. Both v1 endpoints use `V1_METHODS` and `v1_mounted()` to expose only the three read-only methods above. `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD` is defined as `panel.capabilities.snapshot`. The state-changing `panel.project.select` is not mounted on v1. Unmounted methods do not reach Core. The server returns `METHOD_NOT_FOUND` unless Web v1 hits its rate limit and closes the connection (`src/gateway/server/connection/mod.rs`, `shared/protocol/src/panel.rs`, `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
+The handshake handles `system.hello` separately; it is not part of the post-handshake method list. Both v1 endpoints share `V1_METHODS` and `v1_mounted()`, and they mount these 12 methods:
+
+| Method | Purpose |
+|--------|---------|
+| `health` | Health check |
+| `sessions.list` | Session list |
+| `panel.capabilities.snapshot` | Panel capability snapshot (`PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`) |
+| `graph.query` / `graph.search` / `graph.node_detail` | Memory-graph query, search and node detail |
+| `chat.history` / `chat.send` / `chat.abort` | The chat trio |
+| `chat.transcript_details` | Presentation-layer changes of tool calls |
+| `trace.tool_output` | Tool output |
+| `context.breakdown` | Context breakdown |
+
+These run through the same dispatch, ownership check and idempotency cache as on legacy `/ws`. The state-changing `panel.project.select` is not mounted on v1. Unmounted methods do not reach Core. The server returns `METHOD_NOT_FOUND` unless Web v1 hits its rate limit and closes the connection (`src/gateway/server/connection/mod.rs`, `shared/protocol/src/panel.rs`, `shared/protocol/src/memory_graph.rs`, `shared/protocol/src/chat_transcript.rs`, `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
 
 See [Authentication](./auth) for credentials and the [IPC Protocol](../security/ipc) for trust boundaries.
 
@@ -213,8 +238,27 @@ Topic events on legacy `/ws` are JSON-RPC notifications without an `id`. The `me
 ```
 
 - Example topics include `agent.run.complete`, `session.lifecycle.changed`, and `config.changed` (`src/gateway/events/frame.rs`).
-- `events.subscribe` takes `topics`: each entry is a string pattern or a `{topic, where}` filter object (`src/gateway/handlers/events.rs`). Only legacy `/ws` offers event subscriptions. The two v1 endpoints do not mount this method or deliver topic events (`src/gateway/server/connection/mod.rs`, `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
+- `events.subscribe` takes `topics`: each entry is a string pattern or a `{topic, where}` filter object (`src/gateway/handlers/events.rs`). Only legacy `/ws` mounts this method — the two v1 endpoints negotiate their event surface during the handshake and never subscribe.
 - Subscriptions do not bypass visibility checks. Delivery remains subject to owner, session, and role restrictions (`src/gateway/event_visibility.rs`, `src/gateway/event_scope.rs`). See [Event Methods](./methods/events).
+
+### The v1 event plane
+
+Both v1 endpoints start delivering events only after the handshake granted `live_events`. A pushed frame still passes two gates: first the shared admission decision `admit_event` (identity, scope, ownership, projection), then the v1 topic allowlist `V1_EVENT_TOPICS` (`src/gateway/server/connection/event_admission.rs`, `src/gateway/server/connection/mod.rs`).
+
+The allowlist holds six topics:
+
+| Topic | Meaning |
+|-------|---------|
+| `stream.run_accepted` | A run was accepted |
+| `stream.response_chunk` | A response chunk |
+| `stream.run_complete` | The run finished normally |
+| `stream.run_error` | The run failed |
+| `stream.chat_tool` | Presentation-layer changes of a tool call |
+| `connection.warning` | A connection-level warning (overflow, dropped frames) |
+
+`stream.chat_tool` is only produced when both `live_events` and `chat_transcript` were granted, and it carries the same presentation projection that the `chat.transcript_details` method returns (`src/gateway/handlers/chat_presentation.rs`). See [chat methods](./methods/chat) for the method side.
+
+A v1 connection subscribes to the event bus directly, so a dropped frame surfaces as `Lagged` on that connection instead of being swallowed by a buffer. When frames are lost the server first sends one `connection.warning` frame (`reason` is `events_overflow`) and then ends the connection, and the client has to resynchronize; a single frame that exceeds the limit only produces a warning and the connection keeps serving (`src/gateway/server/connection/forward.rs`, `src/gateway/server/connection/event_admission.rs`).
 
 ## Error model
 

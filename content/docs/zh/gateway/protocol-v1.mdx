@@ -56,7 +56,7 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 
 ### 请求
 
-以下是请求示例，不是 NSH 宿主的实际默认值。`client` 中的 `name`、`version`、`platform`、`ui_runtime` 均为必填字符串；`features` 可以是空数组（`shared/protocol/src/system_hello.rs`）。
+以下是请求示例，不是 NSH 宿主的实际默认值。`client` 中的 `name`、`version`、`platform`、`ui_runtime` 均为必填字符串；`features` 可以是空数组（`shared/protocol/src/system_hello.rs`）。示例里请求的两个特性正是两个 v1 入口实现的那两个；旧 `/ws` 不实现任何可选特性，因此在旧入口上这两个名字不会被授予。
 
 ```json
 {
@@ -88,7 +88,7 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
     "protocol": { "major": 1, "minor": 0 },
     "server": { "name": "aleph-server", "version": "26.9.1" },
     "connection_id": "ipc-3f0c1b52-8a0e-4d0a-9b1a-6a6d2f0a7e11",
-    "features": [],
+    "features": ["live_events", "chat_transcript"],
     "limits": { "max_message_bytes": 8388608, "max_inflight_requests": 8 },
     "subject": "0123456789abcdef0123456789abcdef"
   }
@@ -114,8 +114,20 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 | `event_replay` | `EventReplay` |
 | `snapshot` | `Snapshot` |
 | `binary_channel` | `BinaryChannel` |
+| `live_events` | `LiveEvents` |
+| `chat_transcript` | `ChatTranscript` |
 
-服务端调用 `negotiate_features(&params.features, &[])`，实现列表为空，因此成功响应的 `features` 恒为 `[]`。特性标识能解析，不代表该特性已经启用（`src/gateway/handlers/system_hello.rs`）。
+未知的字符串反序列化为 `Unknown(String)`：它能被解析，但不参加协商（`shared/protocol/src/system_hello.rs`）。
+
+三个入口调用同一个 `negotiate_features(requested, implemented)`，区别只在 `implemented`：
+
+| 入口 | `implemented` | 协商结果 |
+|------|---------------|----------|
+| 旧 `/ws` | 空列表 | 恒为 `[]`——旧入口不推事件，也没有可选特性 |
+| Desktop IPC | `V1_FEATURES` | 请求列表与 `LiveEvents`、`ChatTranscript` 的交集 |
+| Web v1 | `V1_FEATURES` | 同上 |
+
+`V1_FEATURES` 就是 `LiveEvents` 与 `ChatTranscript` 两项（`src/gateway/server/connection/mod.rs`）。还有一个附加条件：`chat_transcript` 以 `live_events` 为前提，`negotiate_features` 在没有授予 `live_events` 时会连带去掉 `ChatTranscript`（`shared/protocol/src/system_hello.rs`）。特性标识能解析，不代表该特性已经启用；`event_replay`、`snapshot`、`binary_channel` 至今没有任何入口实现，因此不会出现在协商结果里（`src/gateway/handlers/system_hello.rs`）。
 
 ## 服务端行为
 
@@ -148,12 +160,25 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 
 | 入口 | 传输 | 认证 | 能调用什么 | 代码 |
 |------|------|------|-----------|------|
-| Desktop IPC（Unix） | Unix domain socket，长度前缀帧 | 操作系统校验对端为同一用户，不授予网络权限 | 首帧 `system.hello`；之后 `health`、`sessions.list`、`panel.capabilities.snapshot` | `src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs` |
+| Desktop IPC（Unix） | Unix domain socket，长度前缀帧 | 操作系统校验对端为同一用户，不授予网络权限 | 首帧 `system.hello`；之后是挂载清单里的 12 个方法（见下） | `src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs` |
 | Desktop IPC（Windows，未开放） | 本地命名管道代码已入库 | 已实现账户认证，未启用 | 无：客户端连接和 Gateway 监听均受可用性开关限制 | `shared/client/src/local_ipc/windows.rs`、`src/gateway/server/connection/local_ipc/windows.rs`、`shared/client/src/local_ipc.rs` |
-| Web v1 | 原生 TLS 上的 WebSocket；每条 Binary 消息恰好一帧 | 同源校验与会话 cookie；以设备令牌或引导票换取会话 | 首帧 `system.hello`；之后 `health`、`sessions.list`、`panel.capabilities.snapshot` | `src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs` |
+| Web v1 | 原生 TLS 上的 WebSocket；每条 Binary 消息恰好一帧 | 同源校验与会话 cookie；以设备令牌或引导票换取会话 | 首帧 `system.hello`；之后是挂载清单里的 12 个方法（见下） | `src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs` |
 | 旧 `/ws`（兼容） | WebSocket Text 消息，无长度前缀 | 升级时检查传输安全与 `Origin`（若提供），再由 `connect` 认证 | 旧版完整 RPC 面，仍受授权限制，见[方法参考](./methods) | `src/gateway/server/connection/upgrade.rs`、`src/gateway/server/connection/mod.rs` |
 
-`system.hello` 在握手时单独处理，不属于握手后的挂载清单。两个 v1 入口共用 `V1_METHODS` 与 `v1_mounted()`，只挂载上述三个只读方法，其中 `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD` 定义为 `panel.capabilities.snapshot`。`panel.project.select` 会改变状态，未挂载在 v1 上；未挂载的方法不会进入 Core；服务端返回 `METHOD_NOT_FOUND`，Web v1 触发限流时则直接断开（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`、`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+`system.hello` 在握手时单独处理，不属于握手后的挂载清单。两个 v1 入口共用 `V1_METHODS` 与 `v1_mounted()`，挂载的是这 12 个方法：
+
+| 方法 | 说明 |
+|------|------|
+| `health` | 健康检查 |
+| `sessions.list` | 会话列表 |
+| `panel.capabilities.snapshot` | Panel 能力快照（`PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`） |
+| `graph.query` / `graph.search` / `graph.node_detail` | 记忆图谱的查询、搜索与节点详情 |
+| `chat.history` / `chat.send` / `chat.abort` | 聊天三件套 |
+| `chat.transcript_details` | 工具调用的呈现层变更 |
+| `trace.tool_output` | 工具输出 |
+| `context.breakdown` | 上下文构成 |
+
+这些方法与旧 `/ws` 走同一套分发、归属检查与幂等缓存。`panel.project.select` 会改变状态，未挂载在 v1 上；未挂载的方法不会进入 Core；服务端返回 `METHOD_NOT_FOUND`，Web v1 触发限流时则直接断开（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`、`shared/protocol/src/memory_graph.rs`、`shared/protocol/src/chat_transcript.rs`、`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
 认证细节见[身份认证](./auth)，信任边界见 [IPC 协议](../security/ipc)。
 
@@ -213,8 +238,27 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 ```
 
 - 主题包括 `agent.run.complete`、`session.lifecycle.changed` 和 `config.changed`（`src/gateway/events/frame.rs`）。
-- `events.subscribe` 接收 `topics`：每项为字符串模式或 `{topic, where}` 过滤对象（`src/gateway/handlers/events.rs`）。只有旧 `/ws` 提供事件订阅；两个 v1 入口没有挂载该方法，也不下发主题事件（`src/gateway/server/connection/mod.rs`、`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+- `events.subscribe` 接收 `topics`：每项为字符串模式或 `{topic, where}` 过滤对象（`src/gateway/handlers/events.rs`）。只有旧 `/ws` 挂载了这个方法——两个 v1 入口的事件面是握手协商出来的，不需要订阅。
 - 订阅并不绕过可见性检查；事件投递仍受所有者、会话和角色约束（`src/gateway/event_visibility.rs`、`src/gateway/event_scope.rs`）。详见[事件方法](./methods/events)。
+
+### v1 的事件面
+
+两个 v1 入口在握手时协商到 `live_events` 之后才开始下发事件。推送的帧还要再过两道闸：先是共用的准入判定 `admit_event`（身份、作用域、所有权、投影），然后是 v1 自己的主题白名单 `V1_EVENT_TOPICS`（`src/gateway/server/connection/event_admission.rs`、`src/gateway/server/connection/mod.rs`）。
+
+白名单里只有六个主题：
+
+| 主题 | 含义 |
+|------|------|
+| `stream.run_accepted` | 一次 run 被接受 |
+| `stream.response_chunk` | 响应增量 |
+| `stream.run_complete` | run 正常结束 |
+| `stream.run_error` | run 出错 |
+| `stream.chat_tool` | 工具调用的呈现层变更 |
+| `connection.warning` | 连接级警告（溢出、丢帧） |
+
+`stream.chat_tool` 只在同时协商到 `live_events` 与 `chat_transcript` 时才产生，它推送的呈现层数据与 `chat.transcript_details` 方法返回的是同一份投影（`src/gateway/handlers/chat_presentation.rs`）。方法面的说明见 [chat 方法](./methods/chat)。
+
+v1 直接订阅事件总线，因此丢帧会以 `Lagged` 的形式出现在这条连接上，而不会被缓冲悄悄吞掉。丢帧时服务端先发一帧 `connection.warning`（`reason` 为 `events_overflow`），再结束连接，客户端需要自行重同步；而单帧超出上限时只发警告、连接继续服务（`src/gateway/server/connection/forward.rs`、`src/gateway/server/connection/event_admission.rs`）。
 
 ## 错误模型
 
