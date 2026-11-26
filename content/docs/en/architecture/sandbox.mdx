@@ -36,7 +36,7 @@ Production boot wires an `Arc<dyn Sandbox>` pointing at `WorkspaceSandbox`. `Wor
 ## Architecture
 
 ```
-exec-class tool (code_exec, bash_exec)
+exec-class tool (code_exec, bash)
         │   Arc<dyn Sandbox>
         ▼
 WorkspaceSandbox   ──► ApprovalGate
@@ -46,7 +46,7 @@ WorkspaceSandbox   ──► ApprovalGate
 OsSandboxDriver    ──► macOS sandbox-exec / Linux bwrap
 ```
 
-The exec-class tool (`code_exec`, `bash_exec`, etc.) holds an `Arc<dyn Sandbox>` injected at boot. When the tool's `execute` method is called, it builds a `SandboxCommand` and passes it through the sandbox seam. `WorkspaceSandbox` handles workspace resolution, capability checking, and approval gating before delegating the actual subprocess launch to the OS-specific driver.
+The exec-class tool (`code_exec`, `bash`, etc.) holds an `Arc<dyn Sandbox>` injected at boot. When the tool's `execute` method is called, it builds a `SandboxCommand` and passes it through the sandbox seam. `WorkspaceSandbox` handles workspace resolution, capability checking, and approval gating before delegating the actual subprocess launch to the OS-specific driver.
 
 ---
 

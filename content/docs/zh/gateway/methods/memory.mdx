@@ -168,8 +168,10 @@ Panel 的"Memory"标签和 LLM 通过**内建聊天工具**访问平行面——
 | `memory_reflect` | 从记忆中合成连贯答案,而不是返回原始事实 |
 | `session_search` | 跨会话记录搜索 |
 | `remember` | 将事实固定到精选热记忆 |
-| `forget` | 从记忆中移除事实 |
 | `memory_runtime_status` | 记忆系统健康 + 统计（`MemoryStatus`） |
+
+没有单独的 `forget` 工具 —— 移除一条已固定的事实走 `remember` 的 Remove 操作；
+按记录删除则走上面的 `memory.delete` RPC。
 
 ## 历史：已删除的记忆方法
 

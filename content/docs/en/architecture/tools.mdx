@@ -239,7 +239,7 @@ The registry emits `RegistryChange` events on registration/unregistration, which
 When the Thinker decides to call a tool, the request flows through the middleware stack:
 
 ```
-Thinker Decision: tool_use("bash_exec", {"command": "ls -la"})
+Thinker Decision: tool_use("bash", {"cmd": "ls -la"})
     │
     ▼
 ┌──────────────────────────────────────────────┐
@@ -337,9 +337,9 @@ Built-in tools are compiled directly into the Aleph binary. They execute as nati
 
 | Tool | Description | Key Args |
 |------|-------------|----------|
-| `bash` | Run a shell command | `cmd`, `working_dir?`, `timeout?`, `allow_network?` |
-| `code_exec` | Execute a code snippet | `language`, `code`, `working_dir?` |
-| `code_check` | Statically check code | `language`, `code` |
+| `bash` | Run a shell command | `cmd`, `working_dir?`, `timeout?`, `allow_network?`, `allow_subprocess?`, `extra_writable_paths?`, `background?`, `process_action?`, `process_id?` |
+| `code_exec` | Execute a code snippet | `language`, `code`, `working_dir?`, `timeout?`, `allow_network?`, `allow_subprocess?`, `extra_writable_paths?` |
+| `code_check` | Statically check code | `path?`, `command?`, `timeout_seconds?` |
 
 ### Web and Search
 
@@ -371,7 +371,7 @@ Built-in tools are compiled directly into the Aleph binary. They execute as nati
 | `session_compact` | Compact the context by hand | `instructions?` |
 | `session_rename` / `session_set_mode` / `session_search` | Rename / switch mode / search sessions | -- |
 | `agent_create` / `agent_list` / `agent_switch` | Create / list / switch sub-agents | -- |
-| `subagent` | Spawn a sub-agent (a registry-only tool, not in the definitions catalog) | -- |
+| `subagent` | Spawn a sub-agent (outside the catalogue: `TOOLS_OUTSIDE_DEFINITIONS`, not in `BUILTIN_TOOL_DEFINITIONS`) | -- |
 
 ### Perception and Generation
 

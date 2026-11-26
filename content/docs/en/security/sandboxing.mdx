@@ -33,7 +33,7 @@ Production boots an `Arc<dyn Sandbox>` pointing at `WorkspaceSandbox`
    `AppContainer` / `RestrictedToken` / `JobObject`).
 
 ```
-exec-class tool (bash_exec, code_exec, …)
+exec-class tool (bash, code_exec, …)
         │   Arc<dyn Sandbox>
         ▼
 WorkspaceSandbox   ──► ApprovalGate (capability elevation)
@@ -419,7 +419,7 @@ OS sandboxing:
   Unit tests use this to drive every branch of step 3.
 - **`MockSandbox`** (`src/sandbox/mod.rs:89`, `#[cfg(test)]`) — records
   every `SandboxCommand` and returns canned `SandboxOutput`. Used by
-  exec-class tools (`bash_exec`, `code_exec`) to assert they route through
+  exec-class tools (`bash`, `code_exec`) to assert they route through
   the sandbox seam.
 - **Integration** — `tests/sandbox_capability_approval.rs` drives the
   full pipeline via the public surface (`build_sandbox`,

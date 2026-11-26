@@ -168,8 +168,11 @@ The Panel's "Memory" tab and the LLM reach a parallel surface through **builtin 
 | `memory_reflect` | Synthesise a coherent answer from memory instead of returning raw facts |
 | `session_search` | Search across session transcripts |
 | `remember` | Pin a fact to curated hot memory |
-| `forget` | Remove a fact from memory |
 | `memory_runtime_status` | Health + statistics for the memory system (`MemoryStatus`) |
+
+There is no separate `forget` tool — removing a pinned fact goes through the
+Remove operation of `remember`; per-record deletion goes through the
+`memory.delete` RPC above.
 
 ## History: removed memory methods
 

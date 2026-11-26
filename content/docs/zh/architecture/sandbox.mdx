@@ -36,7 +36,7 @@ pub trait Sandbox: Send + Sync + 'static {
 ## 架构
 
 ```
-exec 类工具 (code_exec, bash_exec)
+exec 类工具 (code_exec, bash)
         │   Arc<dyn Sandbox>
         ▼
 WorkspaceSandbox   ──► ApprovalGate
@@ -46,7 +46,7 @@ WorkspaceSandbox   ──► ApprovalGate
 OsSandboxDriver    ──► macOS sandbox-exec / Linux bwrap
 ```
 
-exec 类工具（`code_exec`、`bash_exec` 等）在启动时注入一个 `Arc<dyn Sandbox>`。当工具的 `execute` 方法被调用时，它构建一个 `SandboxCommand` 并将其通过沙箱接缝传递。`WorkspaceSandbox` 在将实际子进程启动委托给 OS 特定驱动程序之前处理工作空间解析、能力检查和审批门控。
+exec 类工具（`code_exec`、`bash` 等）在启动时注入一个 `Arc<dyn Sandbox>`。当工具的 `execute` 方法被调用时，它构建一个 `SandboxCommand` 并将其通过沙箱接缝传递。`WorkspaceSandbox` 在将实际子进程启动委托给 OS 特定驱动程序之前处理工作空间解析、能力检查和审批门控。
 
 ---
 

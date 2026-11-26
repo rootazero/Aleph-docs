@@ -33,7 +33,7 @@ pub trait Sandbox: Send + Sync + 'static {
    `AppContainer` / `RestrictedToken` / `JobObject`）。
 
 ```
-exec-class 工具 (bash_exec, code_exec, …)
+exec-class 工具 (bash, code_exec, …)
         │   Arc<dyn Sandbox>
         ▼
 WorkspaceSandbox   ──► ApprovalGate（能力升级）
@@ -407,7 +407,7 @@ hard-filter，模仿 clawshell 的 DLP `[[patterns]]` 引擎，但专门用于 s
   驱动步骤 3 的每个分支（approve / deny / cached）。
 - **`MockSandbox`**（`src/sandbox/mod.rs:89`，`#[cfg(test)]`）—— 记录
   每个 `SandboxCommand` 并返回 canned `SandboxOutput`。被 exec-class 工具
-  （`bash_exec`、`code_exec`）用来断言它们走沙箱 seam。
+  （`bash`、`code_exec`）用来断言它们走沙箱 seam。
 - **集成** —— `tests/sandbox_capability_approval.rs` 用 fake driver + fake
   requester 装配走完整管道。四种情况：strict caps 跳过审批；网络提升
   approve 到达驱动；spawn denied 返回 `CapabilityDenied` 不到达驱动；

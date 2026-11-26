@@ -34,7 +34,7 @@ Executor
            Resolves a name to a UnifiedTool, executes the call
 ```
 
-Exec-class tools (`code_exec`, `bash_exec`) route through an additional **Sandbox layer** (`src/sandbox/`). The sandbox owns per-session workspace provisioning, capability enforcement, and OS-level seatbelt isolation (macOS sandbox-exec / Windows job-object / Linux cgroups-v2 / seccomp).
+Exec-class tools (`code_exec`, `bash`) route through an additional **Sandbox layer** (`src/sandbox/`). The sandbox owns per-session workspace provisioning, capability enforcement, and OS-level seatbelt isolation (macOS sandbox-exec / Windows job-object / Linux cgroups-v2 / seccomp).
 
 ---
 
@@ -190,7 +190,7 @@ The slash fast path (`execute_slash_command_fast_path`), `tools.invoke`, and the
 
 ## Exec-class tools & sandbox
 
-- `code_exec`, `bash_exec` route through the Sandbox layer
+- `code_exec`, `bash` route through the Sandbox layer
 - `Sandbox` trait → `WorkspaceSandbox` → `OsSandboxDriver`
 - Per-session workspace at `~/.aleph/workspaces/{hash(session_id)}/`
 - Tool-level permissions (`[policies.tool_permissions]` and `exec_tier`) gate *whether* a call runs

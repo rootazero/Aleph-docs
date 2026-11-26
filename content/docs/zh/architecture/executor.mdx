@@ -34,7 +34,7 @@ ToolService (scoped tool stack: src/tools/scoped/builder.rs)
            把名称解析为 UnifiedTool，执行工具调用
 ```
 
-Exec 类工具（`code_exec`、`bash_exec`）通过 `src/sandbox/` 之间的**沙箱层**。沙箱拥有每会话工作空间配置、能力执行、以及通过 `OsSandboxDriver` 的 OS 级 seatbelt 隔离（macOS sandbox-exec / Windows job-object / Linux cgroups-v2 / seccomp）。
+Exec 类工具（`code_exec`、`bash`）通过 `src/sandbox/` 之间的**沙箱层**。沙箱拥有每会话工作空间配置、能力执行、以及通过 `OsSandboxDriver` 的 OS 级 seatbelt 隔离（macOS sandbox-exec / Windows job-object / Linux cgroups-v2 / seccomp）。
 
 ---
 
@@ -186,7 +186,7 @@ pub fn is_builtin_tool_name(name: &str) -> bool;
 
 ## Exec 类工具与沙箱
 
-- `code_exec`、`bash_exec` 通过沙箱层路由
+- `code_exec`、`bash` 通过沙箱层路由
 - `Sandbox` trait → `WorkspaceSandbox` → `OsSandboxDriver`
 - 每会话工作空间位于 `~/.aleph/workspaces/{hash(session_id)}/`
 - 工具级权限（`[policies.tool_permissions]` 与 `exec_tier`）控制**是否**允许调用

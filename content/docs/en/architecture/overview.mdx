@@ -347,7 +347,7 @@ Thinker Decision (tool_use)
             • Plugin runtime execution
 ```
 
-Exec-class tools (`code_exec`, `bash_exec`) route through an additional **Sandbox layer** (`src/sandbox/`) between the tool and process execution. The sandbox owns per-session workspace provisioning (`~/.aleph/workspaces/{session_id}/`), capability enforcement, and OS-level seatbelt isolation via `OsSandboxDriver`.
+Exec-class tools (`code_exec`, `bash`) route through an additional **Sandbox layer** (`src/sandbox/`) between the tool and process execution. The sandbox owns per-session workspace provisioning (`~/.aleph/workspaces/{session_id}/`), capability enforcement, and OS-level seatbelt isolation via `OsSandboxDriver`.
 
 ---
 

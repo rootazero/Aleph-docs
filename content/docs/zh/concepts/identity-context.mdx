@@ -190,7 +190,7 @@ let metadata = SessionIdentityMeta::guest(
 let identity = metadata.to_identity_context(session_key);
 // identity.role == Role::Guest
 // identity.scope.allows_tool("translate")   == true
-// identity.scope.allows_tool("bash_exec")    == false
+// identity.scope.allows_tool("bash")    == false
 ```
 
 ## 另请参阅

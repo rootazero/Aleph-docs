@@ -239,7 +239,7 @@ impl ToolRegistry {
 当思考器决定调用工具时，请求流经中间件栈：
 
 ```
-Thinker 决策: tool_use("bash_exec", {"command": "ls -la"})
+Thinker 决策: tool_use("bash", {"cmd": "ls -la"})
     │
     ▼
 ┌──────────────────────────────────────────────┐
@@ -337,9 +337,9 @@ pub struct ToolOutputMetadata {
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `bash` | 运行 shell 命令 | `cmd`、`working_dir?`、`timeout?`、`allow_network?` |
-| `code_exec` | 执行代码片段 | `language`、`code`、`working_dir?` |
-| `code_check` | 静态检查代码 | `language`、`code` |
+| `bash` | 运行 shell 命令 | `cmd`、`working_dir?`、`timeout?`、`allow_network?`、`allow_subprocess?`、`extra_writable_paths?`、`background?`、`process_action?`、`process_id?` |
+| `code_exec` | 执行代码片段 | `language`、`code`、`working_dir?`、`timeout?`、`allow_network?`、`allow_subprocess?`、`extra_writable_paths?` |
+| `code_check` | 静态检查代码 | `path?`、`command?`、`timeout_seconds?` |
 
 ### 网页和搜索
 
@@ -371,7 +371,7 @@ pub struct ToolOutputMetadata {
 | `session_compact` | 手动压缩上下文 | `instructions?` |
 | `session_rename` / `session_set_mode` / `session_search` | 重命名 / 切换模式 / 检索会话 | -- |
 | `agent_create` / `agent_list` / `agent_switch` | 子代理的创建 / 列举 / 切换 | -- |
-| `subagent` | 派生子代理（注册表专用工具，不在定义目录里） | -- |
+| `subagent` | 派生子代理（目录外工具：`TOOLS_OUTSIDE_DEFINITIONS`，不进 `BUILTIN_TOOL_DEFINITIONS`） | -- |
 
 ### 感知和生成
 
