@@ -67,7 +67,7 @@ description: "AgentDef 和 FlowSpec 解析、HarnessDeps 组装，以及分发�
 | `priority` | 调度优先级（0-255，默认 128） |
 | `overrides` | `FlowOverrides { max_iterations, context_mode, extra_system_prompt }` |
 
-`FlowRequest`（运行时）把请求级覆盖与声明式 `FlowSpec` 合并，并携带 `tool_service` / `trace_sink` / `interaction_manifest` / `sandbox_override` / `workspace_override` / `max_iterations_override` / `transient_context` / `think_level` / `envelope` / `model_directive` 等可空字段，供 `HarnessRunner` 实现按需覆盖默认行为。
+`FlowRequest`（运行时）把请求级覆盖与声明式 `FlowSpec` 合并，并携带 `tool_service` / `trace_sink` / `interaction_manifest` / `workspace_override` / `max_iterations_override` / `transient_context` / `think_level` / `envelope` / `model_directive` 等可空字段，供 `HarnessRunner` 实现按需覆盖默认行为。
 
 ---
 

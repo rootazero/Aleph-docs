@@ -79,7 +79,7 @@ L1 表现为为思考器组件提供动力的 LLM 提供商（OpenAI、Anthropic
 
 ### 在 Aleph 中
 
-L2 的领域分类由 LLM 一次推理自然完成（R7/R9），不设置独立的意图分类中间件。结构性的领域标注由记忆系统的 `ContextAnchor` 值对象（`src/memory/context/mod.rs`）承担：事实携带上下文锚点，检索时可据此过滤。
+L2 的领域分类由 LLM 一次推理自然完成（R7/R9），不设置独立的意图分类中间件。结构性的领域标注由记忆系统的 `FactSource` 枚举（`src/memory/context/enums.rs`）承担：事实携带来源，检索时可据此过滤。
 
 工具路由同样由 LLM 一次推理决定——编码问题路由到代码执行工具，研究问题路由到网络搜索工具，调度问题路由到日历工具；模型在 prompt 中已经看到完整工具 schema 与记忆上下文，按需选择即可（受 R10 的 5 个「不」约束）。
 
@@ -167,7 +167,7 @@ L5 多态代理 = Gateway + Harness (Think→Act) + Memory + teams/dispatcher + 
 | 层 | Aleph 组件 | 关键职责 |
 |-------|----------------|-------------------|
 | L1 | Thinker + Memory Store | LLM 访问 + 原始事实存储 |
-| L2 | LLM 一次推理 + `ContextAnchor` | 领域分类 + 路由（无独立子系统） |
+| L2 | LLM 一次推理 + `FactSource` | 领域分类 + 路由（无独立子系统） |
 | L3 | `src/memory/dreaming/`（SkillOpt 纪律） | 模式提取 + 技能提升 |
 | L4 | `src/teams/dispatcher/` + `src/tools/concurrency.rs` | 任务组合 + 并行分桶调度 |
 | L5 | `src/harness/`（Think→Act）+ Gateway | 自主行为 + 多通道存在 |
@@ -178,7 +178,7 @@ L5 多态代理 = Gateway + Harness (Think→Act) + Memory + teams/dispatcher + 
 
 1. L5 代理行为生成新经验（`session_complete` + dreaming 管线）
 2. L3 dreaming 提炼这些经验，按 SkillOpt 四道门约束晋升
-3. L2 领域标注被新晋升技能细化（写入 `ContextAnchor` 与 notes 元数据）
+3. L2 领域标注被新晋升技能细化（写入 `FactSource` 与 notes 元数据）
 4. L1 记忆由成功操作中的新事实丰富
 5. 丰富的 L1 反馈到 L5 的下一次推理，再次开始循环
 

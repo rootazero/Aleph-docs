@@ -32,7 +32,7 @@ description: "两层数据模型（L0 原始 / L1 笔记）、四个存储 trait
    整合 / 漂移 / 综合 / 清理 / 衰减 / 摘要
     │
     ▼
- 查询：NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
+ 查询：NoteFactRetrieval.retrieve() → ScoredFact
 ```
 
 网关通过 `RawMemoryStore` 把会话轮次写入 `raw_memories`。`CompressionService` 周期性地排空未处理行，让 LLM 抽取持久事实，并把它们作为 markdown 笔记写回 `~/.aleph/memory/note/{agent}/{category}/`。`NoteIndexer` 在每次写入时保持 SQLite 侧（索引、wikilink、FTS5、按维度的 vec0 表）同步。离线时，Dream 守护进程整合集群、解决漂移、综合洞察、检查模式、衰减弱笔记，并发出摘要。查询通过 `NoteFactRetrieval` 流过，返回 `ScoredFact<MemoryFact>`。
@@ -111,7 +111,7 @@ pub trait NoteFactRetrieval: Send + Sync {
         query: &str,
         agent_id: &str,
         limit: usize,
-    ) -> Result<Vec<ScoredFact<MemoryFact>>, AlephError>;
+    ) -> Result<Vec<ScoredFact>, AlephError>;
 }
 ```
 
@@ -124,19 +124,16 @@ pub trait NoteFactRetrieval: Send + Sync {
   └── RRF 融合 → 统一排名列表
 ```
 
-倒数排名融合（RRF）：`RRF_score = Σ 1 / (k + rank_i)`，其中 `k = 60`。
+倒数排名融合（RRF）：`RRF_score = Σ 1 / (k + rank_i + 1)`，其中 `k = 60`；FTS 命中额外乘一个 `bm25_bonus_weight` 提升。
 
 ### 评分管道
 
 | 阶段 | 说明 | 默认 |
 |---|---|---|
-| `cosine_rerank` | 把向量检索分数与新鲜的余弦相似度混合 | 启用 |
-| `recency_boost` | 对最近创建的事实加性提升 | +0.1 |
-| `length_normalization` | 惩罚非常长的内容 | 启用 |
-| `time_decay` | 按年龄的指数衰减，下限 0.5 | 半衰期 30 天 |
-| `hard_min_score` | 删除低于阈值的候选 | 0.35 |
-| `mmr_diversity` | 最大边际相关性——将近似重复推迟到尾部 | λ = 0.5 |
-| `reinforcement` | 来自 `recall_signals` 计数的热度上浮 | 启用 |
+| `rerank` | 交叉编码器重排，与融合分按 `rerank_weight` 混合；失败保留原序 | 仅配置了 reranker 时 |
+| `recency_decay` | 按年龄的指数衰减调权（`0.5^(age/half_life)`） | 启用，半衰期 90 天，权重 0.3 |
+| `reinforcement` | 来自 `recall_signals` 计数的热度上浮（`score*(1+w*ln(1+hits))`） | 启用，权重 0.3 |
+| `mmr_diversity` | 最大边际相关性——将近似重复推迟到尾部 | 关闭，λ = 0.7 |
 
 `memory.retrieve_with_trace` 返回每阶段的 `StageTrace`（遥测），让调试面板能精确看到某个事实被提升、降权或丢弃的位置。trace 观测的是生产运行的同一管道。
 

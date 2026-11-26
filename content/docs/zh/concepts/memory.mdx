@@ -8,7 +8,7 @@ description: "Aleph 的长期记忆：raw_memories (L0) + notes (L1) 双层架�
 ## 设计哲学
 
 1. **Markdown 优先** — L1 是磁盘上的 `.md` 文件 + SQLite 索引。L1 索引 100% 可由磁盘重建：删了 `memory.db` 不会丢任何笔记内容，重建即可。
-2. **混合检索** — `notes_fts`（`unicode61` + `trigram` 双 FTS 表）+ `notes_vec_{dim}`（sqlite-vec per-dim 虚拟表），RRF 融合 + 6 阶段评分（`cosine_rerank` / `recency_boost` / `length_normalization` / `time_decay` / `hard_min_score` / `mmr_diversity`）。
+2. **混合检索** — `notes_fts`（`unicode61` + `trigram` 双 FTS 表）+ `notes_vec_{dim}`（sqlite-vec per-dim 虚拟表），RRF 融合 + 检索期调权（`recency_decay` / `reinforcement` / `mmr_diversity`）。
 3. **LLM 主权** — 检索给候选，模型自己判断哪些是真相；没有「记忆层替模型判定相关性」的认知判断。
 4. **事件溯源** — 每条笔记变更都记为不可变 `MemoryEvent`，重放可重建任意时点状态（默认 L0 全部 compress 完，事件不重放）。
 5. **持久 + 离线** — `Memory` 是 26.7.x 后唯一落盘位置；L0 `is_processed` 是消费标记，不动语义。
@@ -42,7 +42,7 @@ Gateway / Agent Loop
    consolidate → drift → lint → decay → digest
     │
     ▼
-   NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
+   NoteFactRetrieval.retrieve() → ScoredFact
 ```
 
 `CompressionService` / `CompoundIngestor` 是写入 L1 的唯一途径；`NoteIndexer` 是 L1 索引、链接、FTS、向量、来源、去重、社区缓存的写者；`DreamDaemon` 后台维护 L1 的去重 / 链接 / 社区 / 蒸馏。
@@ -260,12 +260,17 @@ Markdown 后端用同样的两张表实现同一套语义（`src/memory/store/ma
 ```text
 1. FTS5 search notes_fts (or notes_fts_trigram for CJK) → score_f
 2. sqlite-vec KNN on notes_vec_{dim} (matching embedder dim) → score_v
-3. RRF fusion: rrf(d) = 1 / (k + rank), k = 60
-4. Stage pipeline:
-   cosine_rerank → recency_boost → length_normalization →
-   time_decay (exp(-age/half_life)) → hard_min_score (0.35) →
-   mmr_diversity (λ ~ 0.7, penalize near-duplicates)
-5. Return ScoredFact<MemoryFact> with provenance
+3. RRF fusion: rrf(d) = 1 / (k + rank + 1), k = 60
+   (FTS hits get an extra bm25_bonus_weight lift)
+4. Optional cross-encoder rerank: blend_scores with rerank_weight;
+   a failing reranker keeps the original order
+5. Retrieval-time reweight:
+   recency_decay (0.5^(age/half_life), weight 0.3, 90 d half-life) →
+   reinforcement (score*(1+w*ln(1+hits)), weight 0.3) →
+   re-sort by the adjusted score →
+   mmr_diversity (λ = 0.7, opt-in, penalize near-duplicates)
+6. surface_relations: backlink counts + structural-strong relations
+7. Return ScoredFact with provenance
 ```
 
 当前 session 的近期上下文走**独立路径**：assembler 从 raw store 按前缀 `aleph://session/{sid}/raw/` 取回本 session 的原始片段（上限 5 条），标成 `SlotKind::SessionRecent`；上一 session 的快照（`SessionSnapshot`，只存摘要）由 `SnapshotReader` 读入，同样进 `SessionRecent` 槽。槽位归类由 `rerank.rs` 的 LLM 重排给出，不是按某个分数线性加权。这些路径与笔记检索结果在 `HybridAssembler::assemble`（`src/memory/assembler/`）合并为 `MemoryEnvelope`：
@@ -360,22 +365,21 @@ pub struct GraphSnapshot {
 
 ## 检索 Score 流水线
 
-`NoteFactRetrieval::retrieve` 的 6 阶段评分（`src/memory/note_retrieval/`）：
+`NoteFactRetrieval::retrieve` 的检索期调权（`src/memory/note_retrieval/`）：
 
 ```text
-原始:  (cosine_sim, recency_age, fact_count)
+融合分: RRF(d) = 1 / (k + rank + 1), k = 60
  ↓
-1. cosine_rerank   — 用 embedder 重算 cosine（vs FTS/vec 各自的近似）
-2. recency_boost    — 新笔记加分（线性）
-3. length_normalization — 长度归一（避免长笔记垄断）
-4. time_decay       — exp(-age/half_life)（默认 90 d 半衰期）
-5. hard_min_score   — 低于 0.35 一律丢
-6. mmr_diversity     — 惩罚近重复
+1. rerank          — 交叉编码器重排，与融合分按 rerank_weight 混合；失败保留原序
+2. recency_decay   — 0.5^(age/half_life) 调权（默认 90 d 半衰期，权重 0.3）
+3. reinforcement   — score*(1+w*ln(1+hits))，命中数来自 recall_signals（权重 0.3）
+   ↓ 按调整后的分数重排
+4. mmr_diversity   — 惩罚近重复（默认关闭，λ = 0.7）
  ↓
-ScoredFact<MemoryFact>[]（带 provenance 链）
+ScoredFact[]（带 provenance 链）
 ```
 
-`hybrid_search_notes` 走 **RRF**（Reciprocal Rank Fusion，k=60）融合 FTS 与向量结果；融合后上述 6 阶段评分再作用。
+`hybrid_search_notes` 走 **RRF**（Reciprocal Rank Fusion，k=60）融合 FTS 与向量结果，FTS 命中额外乘一个 `bm25_bonus_weight` 提升；融合后上述调权再作用。开关在 `[memory.retrieval_scoring]`（`RetrievalScoringConfig`）：`recency_enabled` 与 `reinforcement_enabled` 默认开，`mmr_enabled` 默认关。
 
 ---
 

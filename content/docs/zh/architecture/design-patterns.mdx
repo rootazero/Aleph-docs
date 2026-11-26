@@ -83,7 +83,7 @@ pub struct HarnessDeps {
 ### 源码位置
 
 - `HarnessDeps` —— `src/harness/deps.rs`
-- `RunContext` —— `src/agents/run_context.rs`
+- agent id 的任务局部上下文 —— `src/agents/run_context.rs`（`with_agent_id` / `current_agent_id`）
 
 ---
 
@@ -168,7 +168,7 @@ impl SubscriptionId {
 
 | 必需 | 推荐 | 可选 |
 |---|---|---|
-| `Debug`、`Clone`、`PartialEq`/`Eq`、`Hash` | `Display`、`From<T>`、`Deref`、`Serialize`/`Deserialize` | `FromStr`、`FromIterator`、`Default` |
+| `Debug`、`Clone`、`PartialEq`/`Eq`、`Hash` | `Display`、`From<T>`、`Deref`、`Serialize`/`Deserialize` | `FromStr`、`Default` |
 
 ### Newtype 目录
 
@@ -259,27 +259,19 @@ let status = config.get("status")?.parse::<TaskStatus>()?;
 ### 实现
 
 ```rust
-// src/agents/run_context.rs（示意）
-impl RunContext {
-    pub fn new(/* required params */) -> Self { /* … */ }
-
-    pub fn with_abort_signal(mut self, signal: watch::Receiver<bool>) -> Self {
-        self.abort_signal = Some(signal);
-        self
-    }
-
-    pub fn with_initial_history(mut self, history: impl Into<String>) -> Self {
-        self.initial_history = Some(history);
-        self
-    }
-}
+// src/agents/types.rs：AgentDef 的链式 builder
+let agent = AgentDef::new("explore", AgentMode::SubAgent)
+    .with_description("定位实现并给出结论")
+    .with_when_to_use("需要先找到代码位置再动手时")
+    .with_system_prompt("你是一个只读的探索代理。")
+    .with_allowed_tools(vec!["file_read".to_string(), "grep".to_string()]);
 
 // src/tool_metadata/types/unified/builders.rs：UnifiedTool 的链式 builder
 let tool = UnifiedTool::new(id, name, description, source)
     .with_routing_regex("^/foo\\s+")
     .with_routing_strip_prefix(true)
     .with_routing_intent_type("skills")
-    .with_alias("foo")
+    .with_aliases(["foo"])
     .with_visible_channels(vec![ChannelType::Cli, ChannelType::Web])
     .with_sort_order(100);
 

@@ -90,7 +90,7 @@ pub trait HarnessRunner: Send + Sync {
 | 3 | agent 查找下放到 `HarnessRunner`（它持有 `AgentRegistry`） | — |
 | 4 | 解析会话 key + 获取每个会话的锁 | `resolver::resolve_session` + `active_sessions` |
 | 5 | brain 选择下放到 `HarnessRunner`（`ProviderRegistry` 在它那里） | — |
-| 6 | 配置沙箱（per-request `sandbox_override` 短路工厂） | `sandbox_factory` |
+| 6 | 配置沙箱（per-request `workspace_override` 短路工厂） | `sandbox_factory` |
 | 7 | 生成工具链任务；把 event / completion / cancel 接回调用方 | `tokio::spawn(harness.run(...))` |
 
 生成动作还在新任务内部重建 `current_project_root` 与 `current_agent_id` task-locals——`tokio::spawn` 不继承 task-locals，而 per-project 记忆缝（`note_manage`、检索汇编器、会话压缩）以及 agent 范围的技能发现（`~/.aleph/agents/<id>/skills`）都读取这些环境值。工具链显式接收 `workspace_override` 用于 CWD + 提示上下文，但 task-locals 必须重新设置，跨会话工具才能看到正确的作用域。

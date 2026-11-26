@@ -58,7 +58,7 @@ pub trait ValueObject: Eq + Clone {}
 
 ValueObject 没有身份 —— 它们是纯数据。更改任何属性都会创建一个新的 ValueObject。**注意：实际 trait 不带 `validate()` 方法** —— 校验由具体类型的构造器（`parse, don't validate`）或领域用例承担，不在 trait 契约里。
 
-**示例：** `TaskStatus`, `FactType`, `GuestScope`, `FileContent`
+**示例：** `TaskStatus`, `NoteType`, `GuestScope`, `FileContent`
 
 ---
 
@@ -116,7 +116,7 @@ Aleph 的领域被组织成限界上下文，每个上下文都有自己的通�
 
 | 上下文 | 关键类型 | 位置 |
 |---|---|---|
-| **Memory** | `MemoryFact`, `ContextAnchor`, `NoteRelationArg` | `src/memory/` |
+| **Memory** | `MemoryFact`, `FactSource`, `NoteRelationArg` | `src/memory/` |
 | **Identity** | `IdentityContext`, `GuestScope`, `Role` | `shared/protocol/src/auth.rs`、`src/gateway/session_manager/` |
 | **Skill** | `TrustLevel`, `ThreatLevel` | `src/skill/guard.rs` |
 | **A2A** | `Credentials`, `FileContent`, `SecurityScheme` | `src/a2a/domain/` |
@@ -125,7 +125,7 @@ Aleph 的领域被组织成限界上下文，每个上下文都有自己的通�
 | **Artifact** | `ArtifactRecord` | `src/artifacts/store.rs` |
 | **Team** | `TaskStatus`, `ArtifactType` | `src/teams/artifacts.rs` |
 
-跨上下文引用走显式映射层 —— `IdentityContext` 在 `aleph_protocol`（跨进程共享），而 `src/memory/` 持有自己的 `MemoryFact` 与 `ContextAnchor`，两者不直接共用类型。
+跨上下文引用走显式映射层 —— `IdentityContext` 在 `aleph_protocol`（跨进程共享），而 `src/memory/` 持有自己的 `MemoryFact` 与 `FactSource`，两者不直接共用类型。
 
 ---
 

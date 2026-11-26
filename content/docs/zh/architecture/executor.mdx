@@ -159,21 +159,26 @@ pub fn is_builtin_tool_name(name: &str) -> bool;
 
 ---
 
-## 中间件栈
+## 审批闸链
 
-所有工具调用都经过 `src/tools/scoped/` 中的标准中间件栈：
+> **历史。** 本页早期版本描述过一个五层装饰器栈（`ExecAuditLayer` → `PermissionLayer` → `ContextRuleLayer` → `TimeoutLayer` → `CoreDispatch`）。该栈已不存在于源码树中；同样的职责现在由 `src/tools/scoped/` 的单个 `ScopedToolService` 承担。
+
+所有工具调用都经过 `ScopedToolService::execute_gated`（`src/tools/scoped/dispatch.rs`）的同一道闸链：
 
 ```
-ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → CoreDispatch
+名称规范化 → 规范能力条目捕获 → 能力运行期准入 → 规则链 → 操作员闸 → 确认闸 → 扩展钩子 → 分发
 ```
 
-| 层 | 用途 |
-|-------|---------|
-| `ExecAuditLayer` | 审计日志 |
-| `PermissionLayer` | 权限检查（`SmartFilter`） |
-| `ContextRuleLayer` | 基于上下文的规则 |
-| `TimeoutLayer` | 超时执行 |
-| `CoreDispatch` | 最内层，持有 `ToolRegistry` |
+| 闸 | 作用 | 关键符号 |
+|---|---|---|
+| 名称规范化 | 把 `.`/`_` 互换的别名先解析成注册名，再评估后续所有闸 | `resolve` |
+| 规范能力条目捕获 | 捕获规范条目与后端租约，校验投影来源与 MCP 可见性 | `capture_entry`、`resolve_with_capture_for_call` |
+| 能力运行期准入 | 运行期约束附件准入（事实快照、租约一致性、约束评估） | `admit_capability_runtime` |
+| 规则链 | 决定并命名拦住调用的理由（策略拒绝、侧问题、工具自带确认、破坏性参数、计划模式） | `GateRule`（`src/tools/scoped/gate_chain.rs`） |
+| 操作员闸 | 需要操作员批准的调用直接失败关闭 | `check_operator_gate` |
+| 确认闸 | 需要用户确认的调用挂起等待回执 | `check_confirmation_gate` |
+| 扩展钩子 | 扩展的 `BeforeToolCall` 拦截器可以阻断、拒绝或改写入参 | `run_before_tool_hooks` |
+| 分发 | 命中目标并执行，产出 `ToolOutput` | `route_and_execute` |
 
 斜杠快路径（`execute_slash_command_fast_path`）、`tools.invoke`、后台延续旁路**全部**被强制走 `src/tools/scoped/` 审批门——这是 26.7.15+ 的修复，确保审批对实际命令可见。
 
@@ -184,7 +189,7 @@ ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → Cor
 - `code_exec`、`bash_exec` 通过沙箱层路由
 - `Sandbox` trait → `WorkspaceSandbox` → `OsSandboxDriver`
 - 每会话工作空间位于 `~/.aleph/workspaces/{hash(session_id)}/`
-- 工具级权限（`SmartFilter`）控制**是否**允许调用
+- 工具级权限（`[policies.tool_permissions]` 与 `exec_tier`）控制**是否**允许调用
 - 沙箱的能力检查控制一旦允许**子进程可以做什么**
 
 ---

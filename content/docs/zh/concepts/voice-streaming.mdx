@@ -103,7 +103,7 @@ prompt = ""                       # 空 → 内置默认（"言语精炼师" pro
 
 > **`provider = "whisperlive"` 配自托管 WhisperLiveKit 必须带 `--pcm-input`**——它跳过 FFmpeg 解码、直接吃 PCM；该标志缺失会触发 OS 层解封装错误，**首句即空**。Aleph 端 `PCM = s16le, 16 kHz, mono` 字节直送。
 
-`pcm_input` 不是 `StreamingConfig` 字段；它属于 WhisperLiveKit **服务端**启动参数。`Aleph` 在握手时固定 `audio_format = int16`，客户端 s16le / 16 kHz / mono 直送，**不**走 FFmpeg 重采样（`audio` 配置的 `sample_rate` 决定 Panel 端的下采样率）。
+`--pcm-input` 不是 `StreamingConfig` 字段；它属于 WhisperLiveKit **服务端**启动参数。`Aleph` 在握手时固定 `audio_format = int16`，客户端 s16le / 16 kHz / mono 直送，**不**走 FFmpeg 重采样（`audio` 配置的 `sample_rate` 决定 Panel 端的下采样率）。
 
 ---
 

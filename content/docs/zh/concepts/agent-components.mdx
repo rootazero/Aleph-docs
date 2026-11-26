@@ -150,7 +150,7 @@ orchestrator 是 **DI 装配器**，不是协调器。每个 run 它只做一个
 
 ## 子代理平面 —— 故意保留分离
 
-原本计划搞一个 `SubagentOrchestrator` trait，带 `Fork` / `Handoff` / `Graph`
+原本计划搞一个统一的子代理编排 trait，带 `Fork` / `Handoff` / `Graph`
 模式。因为零消费者被（P5 retraction）撤回——没有任何调用点要这个 trait。今天
 四个平面正交共存：
 

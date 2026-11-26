@@ -8,7 +8,7 @@ The `memory` module gives Aleph long-term memory. L0 is a rebuildable SQLite tab
 ## Design Philosophy
 
 1. **Markdown-first** — L1 is `.md` files on disk plus a SQLite index. The L1 index is 100% rebuildable from disk: deleting `memory.db` loses no note content; a rebuild restores everything.
-2. **Hybrid retrieval** — `notes_fts` (`unicode61` + `trigram` dual FTS tables) + `notes_vec_{dim}` (sqlite-vec per-dim virtual tables), RRF fusion + a 6-stage scoring pipeline (`cosine_rerank` / `recency_boost` / `length_normalization` / `time_decay` / `hard_min_score` / `mmr_diversity`).
+2. **Hybrid retrieval** — `notes_fts` (`unicode61` + `trigram` dual FTS tables) + `notes_vec_{dim}` (sqlite-vec per-dim virtual tables), RRF fusion + retrieval-time reweighting (`recency_decay` / `reinforcement` / `mmr_diversity`).
 3. **LLM sovereignty** — retrieval gives candidates; the model decides what matters. No "memory layer judges relevance on the model's behalf" cognitive verdict.
 4. **Event-sourced** — every note mutation is recorded as an immutable `MemoryEvent`; replay can reconstruct any past state (L0 fully compressed by default; events not currently replayed).
 5. **Persistent + offline** — `Memory` is the only persistence site after 26.7.x; `L0.is_processed` is a consumption flag, not a semantic field.
@@ -42,7 +42,7 @@ Gateway / Agent Loop
    consolidate → drift → lint → decay → digest
     │
     ▼
-   NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
+   NoteFactRetrieval.retrieve() → ScoredFact
 ```
 
 `CompressionService` / `CompoundIngestor` are the only path that writes to L1; `NoteIndexer` is the writer for L1's index, links, FTS, vectors, sources, dedup, and community cache; `DreamDaemon` maintains L1's dedup / links / communities / distillation offline.
@@ -262,12 +262,17 @@ Flipping that order loses a note every time. The old order (retire the original,
 ```text
 1. FTS5 search notes_fts (or notes_fts_trigram for CJK) → score_f
 2. sqlite-vec KNN on notes_vec_{dim} (matching embedder dim) → score_v
-3. RRF fusion: rrf(d) = 1 / (k + rank), k = 60
-4. Stage pipeline:
-   cosine_rerank → recency_boost → length_normalization →
-   time_decay (exp(-age/half_life)) → hard_min_score (0.35) →
-   mmr_diversity (λ ~ 0.7, penalize near-duplicates)
-5. Return ScoredFact<MemoryFact> with provenance
+3. RRF fusion: rrf(d) = 1 / (k + rank + 1), k = 60
+   (FTS hits get an extra bm25_bonus_weight lift)
+4. Optional cross-encoder rerank: blend_scores with rerank_weight;
+   a failing reranker keeps the original order
+5. Retrieval-time reweight:
+   recency_decay (0.5^(age/half_life), weight 0.3, 90 d half-life) →
+   reinforcement (score*(1+w*ln(1+hits)), weight 0.3) →
+   re-sort by the adjusted score →
+   mmr_diversity (λ = 0.7, opt-in, penalize near-duplicates)
+6. surface_relations: backlink counts + structural-strong relations
+7. Return ScoredFact with provenance
 ```
 
 The current session's recent context takes a **separate path**: the assembler reads this session's raw fragments back from the raw store by the path prefix `aleph://session/{sid}/raw/` (up to 5 of them) and slots them as `SlotKind::SessionRecent`; the previous session's snapshot (`SessionSnapshot`, summary only) is loaded by `SnapshotReader` and lands in the same `SessionRecent` slot. Slot assignment comes from the LLM re-rank in `rerank.rs`, not from a linear score boost. These paths and the note-retrieval results merge in `HybridAssembler::assemble` (`src/memory/assembler/`) into a `MemoryEnvelope`:
@@ -362,22 +367,22 @@ The `note_graph_query` tool: bidirectional BFS, typed-relation edges, supersessi
 
 ## Retrieval Score Pipeline
 
-`NoteFactRetrieval::retrieve`'s 6-stage scoring (`src/memory/note_retrieval/`):
+`NoteFactRetrieval::retrieve`'s retrieval-time reweighting (`src/memory/note_retrieval/`):
 
 ```text
-Input:  (cosine_sim, recency_age, fact_count)
+Fused:  RRF(d) = 1 / (k + rank + 1), k = 60
  ↓
-1. cosine_rerank   — recompute cosine via the embedder (vs the FTS/vec approximations)
-2. recency_boost    — linear boost for newer notes
-3. length_normalization — length normalisation (avoid long notes dominating)
-4. time_decay       — exp(-age/half_life) (default 90 d half-life)
-5. hard_min_score   — drop everything below 0.35
-6. mmr_diversity     — penalize near-duplicates
+1. rerank          — cross-encoder rerank, blended with the fused score via
+   rerank_weight; a failing reranker keeps the original order
+2. recency_decay   — 0.5^(age/half_life) reweight (default 90 d half-life, weight 0.3)
+3. reinforcement   — score*(1+w*ln(1+hits)); hits come from recall_signals (weight 0.3)
+   ↓ re-sort by the adjusted score
+4. mmr_diversity   — penalize near-duplicates (opt-in, λ = 0.7)
  ↓
-ScoredFact<MemoryFact>[] (with provenance chain)
+ScoredFact[] (with provenance chain)
 ```
 
-`hybrid_search_notes` uses **RRF** (Reciprocal Rank Fusion, k=60) to combine FTS and vector results; the 6-stage scoring pipeline then refines the fused ranking.
+`hybrid_search_notes` uses **RRF** (Reciprocal Rank Fusion, k=60) to combine FTS and vector results; FTS hits get an extra `bm25_bonus_weight` lift. The reweighting above then refines the fused ranking. The switches live in `[memory.retrieval_scoring]` (`RetrievalScoringConfig`): `recency_enabled` and `reinforcement_enabled` default on, `mmr_enabled` defaults off.
 
 ---
 

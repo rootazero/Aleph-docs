@@ -89,7 +89,7 @@ A dedicated **`node_file(node, direction, local_path, remote_path)`** tool moves
 
 The whole lifecycle reuses the existing pairing / token / tool machinery — there is no parallel enrollment system.
 
-1. **Enroll.** On node B, the operator says (in natural language) "join this machine to `<center URL>`." B's `aleph-server node` arm dials out to the center and runs the **interactive pairing** flow: the center issues a 6-digit code, B prints it to stdout, and the center operator approves it from the **Panel** (the same approval surface used for cold-browser pairing). On approval the center mints a `DeviceRole::Node` token, which B persists at `~/.aleph/node/<name>.json` (mode `0600`).
+1. **Enroll.** On node B, the operator says (in natural language) "join this machine to `<center URL>`." B's `aleph-server node` arm dials out to the center and runs the **interactive pairing** flow: the center issues a 6-digit code, B prints it to stdout, and the center operator approves it from the **Panel** (the same approval surface used for cold-browser pairing). On approval the center mints a node device token and registers a device row in the security store with `role` `node` and scopes `node`, which B persists at `~/.aleph/node/<name>.json` (mode `0600`).
 2. **Declare.** Once connected, B reports the **command catalog it is willing to expose** (names + JSON Schema), sourced from B's local tools/skills. **Default deny, explicit allowlist** — the center can only call what B approved.
 3. **Invoke.** The center LLM calls `node_invoke("node:B", "bash", { ... })` → the `node_invoke` tool → `NodeRegistry` finds B's session → the call is delivered over the always-open WS as a reverse-RPC `tool.call` frame → B's node CLI dispatches it through `CommandTable` to a **local** tool → the result returns by id → the pending table wakes → control returns to the LLM. Long tasks stream back over the event channel.
 4. **Perceive.** B's daemon events and sub-agent progress push back over the same WS. The center routes them by topic to subscribers — Panel rendering, and the center LLM reacting proactively.
@@ -165,7 +165,7 @@ The cluster adds capability without touching the agent loop. The harness still o
 
 | Redline | How it holds |
 |---------|--------------|
-| **R1 — Brain/limb separation** | Federation is core↔node, all Rust. A node's platform capabilities still go through its local `DesktopCapability` trait + bridge; `src` never touches platform APIs. |
+| **R1 — Brain/limb separation** | Federation is core↔node, all Rust. A node's platform capabilities still go through its local command allowlist (`NodeCommand` and `CommandTable` in `src/cluster/node_runtime.rs`); `src` never touches platform APIs. |
 | **R3 — Core minimalism** | Zero new heavy dependencies; reuses the existing WS / JSON-RPC / DashMap stack. |
 | **R4 — Interface is pure I/O** | The Panel only *renders* `environments` (a thin contract) — it does not aggregate, route, or persist. |
 | **R6 — One core, many channels** | The single center is the only brain; the cluster is its "one core, many bodies" extension. |

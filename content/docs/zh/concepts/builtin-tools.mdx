@@ -41,19 +41,14 @@ Aleph 的内置工具分为两层：`src/executor/builtin_registry/definitions.r
 
 这套机制优化的是工具展示和上下文成本，不替代权限检查；被隐藏的工具仍可能在执行层被拒绝。
 
-## 进度回调
+## 进度通知
 
-`ToolProgressCallback` 位于 `src/builtin_tools/mod.rs:272`，提供工具开始、完成和流式块事件：
+内置工具层不再有进度回调 trait。`src/builtin_tools/mod.rs:308` 只保留三个
+legacy no-op 函数——`notify_tool_start`、`notify_tool_result`、
+`notify_tool_streaming_chunk`——它们没有消费者，只为让约 85 处历史调用点保持编译。
 
-```rust
-pub trait ToolProgressCallback: Send + Sync {
-    fn on_tool_start(&self, tool_name: &str, args_summary: &str);
-    fn on_tool_result(&self, tool_name: &str, result_summary: &str, success: bool);
-    fn on_tool_streaming_chunk(&self, tool_name: &str, chunk: &str);
-}
-```
-
-全局处理器使用 `Mutex<Option<Arc<...>>>` 保存；流式回调会先克隆处理器，再在释放锁后调用。
+工具进度现在走网关事件总线：`notify_tool_result` → `GatewayEventEmitter`，接线在
+`src/executor/builtin_registry/registry/tool_registry_impl.rs`。
 
 ## 代码位置
 

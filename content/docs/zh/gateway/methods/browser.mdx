@@ -1,31 +1,82 @@
 ---
 title: "browser.*"
-description: "浏览器内建工具与 Gateway 配置接口的区别"
+description: "浏览器查看器 RPC 与浏览器内建工具的区别"
 ---
 
-当前 `aleph-server` 运行时**没有** `browser.*` JSON-RPC 方法。浏览器自动化流水线以**内建工具**(`browser_navigate`、`browser_click`、`browser_type`、`browser_snapshot` 等)实现,由代理循环调用,而不是作为网关 RPC 暴露。`src/gateway/handlers/browser_config.rs` 只导出 `browser_config.*` 配置命名空间;CDP 驱动本身位于 `src/browser/`。
+`browser.*` 命名空间在当前 `aleph-server` 运行时注册了 **4 个** JSON-RPC 方法，全部服务于「浏览器查看器」：签发与撤销查看授权、裁决实时资源、列出自己的实时资源。浏览器自动化本身（导航、点击、输入、截图）**不是** JSON-RPC，而是内建工具，由代理循环调用。
+
+浏览器查看器的授权签发与资源裁决在核心侧实现（`src/browser/live/`），网关层只做身份与参数适配（`src/gateway/handlers/browser_viewer.rs`）。配置命名空间是另一个 `browser_config.*`（见 [config](./config)）。
 
 
 ## 方法
 
-下表列出代理侧内建工具，**不是 Gateway RPC**。定义见 `src/builtin_tools/browser_tools/`；客户端通过 `chat.send` / `agent.run` 触发代理循环。
+| 方法 | 等级 | 说明 |
+|------|------|------|
+| `browser.viewer.grant.issue` | Open | 为某个实时资源签发查看授权，返回可打开的 URL |
+| `browser.viewer.grant.revoke` | Open | 撤销已签发的查看授权 |
+| `browser.viewer.resource.decide` | Open | 裁决某个实时资源（放行或拒绝） |
+| `browser.viewer.resource.list` | Open | 列出调用者自己的、未过期的实时资源 |
 
-| 方法 | 说明 |
+这四个方法都要求**已验证的 RPC 用户**（握手阶段完成身份验证）。没有验证用户时一律返回 `PERMISSION_DENIED`，消息为 `denied`；参数必须为空对象或缺省。
+
+### browser.viewer.grant.issue
+
+请求参数 `IssueViewerGrantRequest`（`shared/protocol/src/browser_live.rs`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `resource_id` | string | 要查看的实时资源 id（不透明） |
+| `permissions` | 数组 | 授权位：`Frames`、`HumanInput`、`Navigate` |
+
+响应 `IssueViewerGrantResponse`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `launch_url` | string | 客户端打开该 URL 即可进入查看会话 |
+| `grant_id` | string | 授权 id，供后续撤销使用 |
+| `expires_at_ms` | number | 过期时间（Unix 毫秒） |
+
+### browser.viewer.grant.revoke
+
+请求参数 `RevokeViewerGrantRequest`：`grant_id`（string）。响应 `RevokeViewerGrantResponse`：`revoked`（boolean）。
+
+### browser.viewer.resource.decide
+
+请求参数 `DecideResourceRequest`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `resource_id` | string | 要裁决的实时资源 id |
+| `expected_revision` | number | 调用方看到的当前修订号，必须与服务器当前修订号完全一致 |
+| `decision` | 枚举 | `Safe`（放行）或 `Refused`（拒绝） |
+
+参数采用 `deny_unknown_fields`：绑定关系、用户、目标、过期时间一律由服务端决定，客户端自带这些字段会被拒绝。修订号不匹配时按拒绝处理。
+
+### browser.viewer.resource.list
+
+请求参数为空（`ListResourcesRequest` 是一个空结构体，带 `deny_unknown_fields`）。响应是调用者自己的、未过期的实时资源快照——`Safe` 与 `Pending` 状态的资源都在内，`Refused` 的资源不会出现在列表里。列表按 `resource_id` 排序。
+
+## 内建工具（不是 RPC）
+
+浏览器自动化由内建工具实现，定义见 `src/builtin_tools/browser_tools/`，客户端通过 `chat.send` / `agent.run` 触发代理循环：
+
+| 工具 | 说明 |
 |------|------|
-| `browser_navigate` | (工具) 在当前标签页中导航到 URL |
-| `browser_click` | (工具) 通过选择器、ref 或视口坐标点击元素 |
-| `browser_type` | (工具) 在输入元素中键入文本 |
-| `browser_screenshot` | (工具) 截取页面或特定元素的截图 |
-| `browser_evaluate` | (工具) 执行 JavaScript 表达式并返回结果 |
-| `browser_snapshot` | (工具) 获取页面的 ARIA 无障碍快照 |
+| `browser_navigate` | 在当前标签页中导航到 URL |
+| `browser_click` | 通过选择器、ref 或视口坐标点击元素 |
+| `browser_type` | 在输入元素中键入文本 |
+| `browser_screenshot` | 截取页面或特定元素的截图 |
+| `browser_evaluate` | 执行 JavaScript 表达式并返回结果 |
+| `browser_snapshot` | 获取页面的 ARIA 无障碍快照 |
 
-**配置 RPC 与工具的区别**:
+这些工具由模型通过代理循环分发，不通过 JSON-RPC 暴露。
 
-- `browser_config.get` / `browser_config.update`——读写 `[browser]` 配置段(`mode`、`headless`、`cdp_port`)。
-- `browser_navigate`、`browser_click`、`browser_type`、`browser_evaluate`、`browser_snapshot` 由 LLM 通过代理循环分发,不通过 JSON-RPC 暴露。
+## 配置 RPC
+
+`browser_config.get` / `browser_config.update` 读写 `[browser]` 配置段（`BrowserSystemConfig`，`src/browser/profile.rs`）：`profiles`、`policy`、`playwright_cli`、`chrome_mcp`、`runtime`、`obscura`、`default_engine`、`cdp_command_timeout_secs`。单个 profile 的字段（`ProfileConfig`）是 `browser`、`headless`、`proxy`、`user_data_dir`、`extra_args`、`idle_timeout_secs`、`driver`、`engine`、`max_tabs_per_profile`、`tab_idle_timeout_secs`。
 
 ## 另请参阅
 
 - [方法参考](/docs/zh/gateway/methods)——所有当前已注册命名空间
-- [browser_config.*](#)——浏览器配置
+- [config](./config)——`browser_config.*` 配置方法
 - [agent.*](/docs/zh/gateway/methods/agent)——浏览器工具的调用入口

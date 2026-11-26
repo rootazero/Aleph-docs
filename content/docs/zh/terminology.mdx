@@ -255,7 +255,6 @@ description: "Aleph 概念的标准化术语和翻译"
 | `AiProvider` | AI Provider |
 | `StopHookHandler` | Stop Hook |
 | `ContextBudget` | Context Budget |
-| `SkillPrefetcher` | Skill Prefetcher |
 | `TraceSink` | Trace Sink |
 | `InProcessActorSessionService` | In-Process Session Service |
 | `WorkspaceSandbox` | Workspace Sandbox |
@@ -298,7 +297,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | Skill System v1 | Skill System v2 | 完全重写 |
 | EvolutionTracker | Registry | 旧技能系统的一部分 |
 | SolidificationDetector | EligibilityService | 旧技能系统的一部分 |
-| SubagentTool | （保留为子代理生成工具，`src/agents/subagent_tool/`） | 流程侧没有独立的 FlowRunTool 工具：流程编排改为声明式 `FlowSpec`（`src/orchestrator/flow_spec.rs`）经 `FlowRegistry`（`src/orchestrator/flow_registry.rs`）解析派发 |
+| SubagentTool | （保留为子代理生成工具，`src/agents/subagent_tool/`） | 流程侧没有独立的流程运行工具：流程编排改为声明式 `FlowSpec`（`src/orchestrator/flow_spec.rs`）经 `FlowRegistry`（`src/orchestrator/flow_registry.rs`）解析派发；唯一的工作流工具是 `WorkflowTool`（`src/builtin_tools/workflow_tool.rs`） |
 | LoopToolRegistry | ToolService | 统一工具外观 |
 | ClawHub 设置标签页 | 扩展商店 | ClawHub 降级为长尾；设置标签页已移除 |
 | `teams.run` | `teams.chat.send` / 协调任务 | 该方法从不存在——团队使用聊天线程 + 任务 |

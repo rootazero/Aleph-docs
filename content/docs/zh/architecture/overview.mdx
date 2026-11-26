@@ -378,40 +378,42 @@ HarnessRunner::run(flow, deps).await
 
 ### 新类型模式
 
-将原始类型包装在 distinct 结构体中以实现编译时安全。你不能意外地将 `SessionId` 传递给需要 `ExperimentId` 的地方：
+将原始类型包装在 distinct 结构体中以实现编译时安全。你不能意外地将 `SessionId` 传递给需要 `ProviderId` 的地方：
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExperimentId(String);
+// src/domain/skill.rs
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(String);
 
-impl ExperimentId {
+impl SkillId {
     pub fn new(id: impl Into<String>) -> Self { Self(id.into()) }
     pub fn as_str(&self) -> &str { &self.0 }
 }
-
-impl Deref for ExperimentId {
-    type Target = str;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
 ```
 
+这些 newtype **不实现 `Deref`**：全仓唯一的 `Deref` 实现是 `src/extension/hooks/registry.rs` 的 `HookReadGuard<'_>`（`Target = HookExecutor`）。隐式解引用会让「本该是 ID 的地方」悄悄变成字符串比较，因此访问一律走 `as_str()`。
+
 **新类型目录：**
-- **ID**: `ExperimentId`, `VariantId`, `ContextId`, `TaskId`, `SubscriptionId`
-- **集合**: `Ruleset` (权限规则)
-- **值**: `Answer` (问题响应)
+- **ID**: `SkillId`, `PluginId`, `ProviderId`, `RunId`, `TaskId`, `SubscriptionId`
+- **集合**: `DedupKey`（事件去重身份，`src/gateway/telecom/protocol.rs`）
+- **值**: `SkillContent`（技能正文，`src/domain/skill.rs`）
 
 ### FromStr Trait 模式
 
 在整个代码库中提供一致的解析接口：
 
 ```rust
-impl FromStr for TaskStatus {
+// src/resilience/types.rs
+impl std::str::FromStr for TaskStatus {
     type Err = String;
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            _ => Err(format!("Invalid TaskStatus: {}", s)),
+        if s.eq_ignore_ascii_case("pending") {
+            Ok(Self::Pending)
+        } else if s.eq_ignore_ascii_case("running") {
+            Ok(Self::Running)
+        } else {
+            Err(format!("Unknown task status: {s}"))
         }
     }
 }
@@ -420,7 +422,7 @@ impl FromStr for TaskStatus {
 let status: TaskStatus = "pending".parse()?;
 ```
 
-**已实现于：** `FactType`, `HookKind`, `DeviceType`, `TaskStatus`, `RuntimeKind` 和 10+ 其他类型。
+**已实现于：** `TaskStatus`, `NoteType`, `FactSource`, `FactSpecificity`, `TemporalScope`, `MemoryLayer`, `MemoryCategory`, `EventActor`, `ExtensionKind`, `RuntimeKind`, `Os`, `PromptScope`, `InstallKind`, `LedgerAction`, `LedgerOutcome`, `RiskLevel`, `Lane`, `TeamStatus`, `TeamMemberKind`, `BindingPeerKind`。
 
 ---
 

@@ -108,7 +108,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 |------|------|------|
 | Crate 名称 | `kebab-case` | `aleph-protocol` |
 | 模块名称 | `snake_case` | `agent_loop` |
-| 类型（struct, enum） | `PascalCase` | `RunContext`, `TaskStatus` |
+| 类型（struct, enum） | `PascalCase` | `InboundContext`, `TaskStatus` |
 | 函数、方法 | `snake_case` | `execute_tool`, `parse_config` |
 | 常量 | `SCREAMING_SNAKE_CASE` | `DEFAULT_PORT`, `MAX_RETRIES` |
 | 特性标志 | `kebab-case` | `control-plane`, `plugin-wasm` |
@@ -161,7 +161,7 @@ Aleph 使用两层错误策略：
 - 当文件包含多个概念时，保持文件在 500 行以下
 - 将类型定义（`types.rs`）与业务逻辑分离
 - 使用 `mod.rs` 作为精简的入口点并重新导出，而不是倾倒场
-- 在 `#[cfg(test)]` 下门控测试替身（`MockFoo`）
+- 在 `#[cfg(test)]` 下门控测试替身（`MockExecutionAdapter`）
 
 ## 提交信息约定
 

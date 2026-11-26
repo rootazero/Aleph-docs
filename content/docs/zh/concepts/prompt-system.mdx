@@ -86,7 +86,7 @@ stable 侧，`<strategy_reminder>` echo 落在 dynamic 侧）。Anthropic 适配
 
 ### token 预算
 
-`TokenBudget::fit_dynamic_suffix`（`src/thinker/prompt_budget.rs`）只在
+`fit_dynamic_suffix_with_content`（`src/thinker/prompt_budget.rs`）只在
 **dynamic 侧**超预算时做 trim。stable 前缀是被保护的底——persona / tools /
 security / skills——所以 dynamic 后缀被替换成截断提示也不会让缓存作废。
 
@@ -225,7 +225,7 @@ AgentRoleLayer / SoulLayer / ProfileLayer 的测试把这些缓存层的 `Cached
 - `src/thinker/prompt_layer.rs` ——`PromptLayer` trait、`AssemblyPath`、
   `LayerStability`、`LayerInput`
 - `src/thinker/prompt_mode.rs` ——`PromptMode::{Full, Compact, Minimal}`
-- `src/thinker/prompt_budget.rs` ——`TokenBudget`、`fit_dynamic_suffix`
+- `src/thinker/prompt_budget.rs` ——`TokenBudget`、`fit_dynamic_suffix_with_content`
 - `src/thinker/prompt_contract.rs` ——`reachable_layers`、
   `scaffold_bytes_ratchet`、`no_sentence_is_stated_twice`
 - `src/thinker/layers/` ——层实现：`soul`、`agent_role`、

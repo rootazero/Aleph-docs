@@ -86,7 +86,7 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
 
 整个生命周期复用现有的 pairing / token / tool 设施 —— 没有另起一套入伙系统。
 
-1. **入伙（enroll）。** 在节点 B 上，operator 用自然语言说「把这台机器加入 `<中心 URL>`」。B 的 `aleph-server node` 执行臂拨出到中心，走**交互式配对**流程：中心签发 6 位码，B 打印到 stdout，中心 operator 在 **Panel** 批准（与冷浏览器配对同一审批面）。批准后中心铸造 `DeviceRole::Node` token，B 持久化到 `~/.aleph/node/<name>.json`（权限 `0600`）。
+1. **入伙（enroll）。** 在节点 B 上，operator 用自然语言说「把这台机器加入 `<中心 URL>`」。B 的 `aleph-server node` 执行臂拨出到中心，走**交互式配对**流程：中心签发 6 位码，B 打印到 stdout，中心 operator 在 **Panel** 批准（与冷浏览器配对同一审批面）。批准后中心铸造一枚节点设备 token，并在安全存储里登记一行 `role` 为 `node`、`scopes` 为 `node` 的设备记录，B 持久化到 `~/.aleph/node/<name>.json`（权限 `0600`）。
 2. **声明（declare）。** 连上后，B 上报**它愿意暴露的命令目录**（名字 + JSON Schema），来源是 B 本地的工具/skill。**默认 deny，显式白名单** —— 中心只能调被 B 批准的。
 3. **调用（invoke）。** 中心 LLM 调 `node_invoke("node:B", "bash", { ... })` → `node_invoke` 工具 → `NodeRegistry` 查到 B 的 session → 经常开 WS 以反向 RPC `tool.call` 帧下发 → B 上的节点 CLI 通过 `CommandTable` 派给**本地**工具 → 结果按 id 回中心 → pending 表唤醒 → 回到 LLM。长任务经事件通道流式回推。
 4. **感知（perceive）。** B 的 daemon 事件和子代理进度经同一条 WS 回推。中心按 topic 路由给订阅者 —— Panel 渲染，以及中心 LLM 主动反应。
@@ -161,7 +161,7 @@ Aleph 刻意否决对称网格、多主和分布式共识。集群是**一个中
 
 | 红线 | 如何守住 |
 |------|----------|
-| **R1 — 大脑/四肢分离** | 联邦是核↔节点，全 Rust。节点的平台能力仍走其本地 `DesktopCapability` trait + bridge；`src` 不碰平台 API。 |
+| **R1 — 大脑/四肢分离** | 联邦是核↔节点，全 Rust。节点的平台能力仍走其本地命令白名单（`src/cluster/node_runtime.rs` 的 `NodeCommand` trait 与 `CommandTable`）；`src` 不碰平台 API。 |
 | **R3 — 核心轻量化** | 零新重依赖；复用现有 WS / JSON-RPC / DashMap 栈。 |
 | **R4 — Interface 纯 I/O** | Panel 只**渲染** `environments`（薄契约），不聚合、不路由、不持久化。 |
 | **R6 — 一核多端** | 单中心 = 唯一大脑；集群是其「一核多体」延伸。 |

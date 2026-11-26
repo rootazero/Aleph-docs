@@ -79,7 +79,7 @@ Domain classification is what allows an AI to know that a question about "Python
 
 ### In Aleph
 
-L2 domain classification is handled naturally by a single LLM inference call (R7/R9), without a standalone intent-classification middleware layer. Structural domain annotation lives in the Memory system's `ContextAnchor` value object (`src/memory/context/mod.rs`): facts carry context anchors that retrieval can use for filtering.
+L2 domain classification is handled naturally by a single LLM inference call (R7/R9), without a standalone intent-classification middleware layer. Structural domain annotation lives in the Memory system's `FactSource` enum (`src/memory/context/enums.rs`): facts carry a source that retrieval can use for filtering.
 
 Tool routing follows the same rule — a coding question routes to code-execution tools, a research question to web-search tools, a scheduling question to calendar tools. The model sees the full tool schema and the memory context in its prompt and picks accordingly, governed by R10's five "Don'ts".
 
@@ -167,7 +167,7 @@ The five-layer model is not just theoretical. It describes concrete mechanisms i
 | Layer | Aleph Component | Key Responsibility |
 |-------|----------------|-------------------|
 | L1 | Thinker + Memory Store | LLM access + raw fact storage |
-| L2 | Single LLM inference + `ContextAnchor` | Domain classification + routing (no standalone subsystem) |
+| L2 | Single LLM inference + `FactSource` | Domain classification + routing (no standalone subsystem) |
 | L3 | `src/memory/dreaming/` (SkillOpt discipline) | Pattern extraction + skill promotion |
 | L4 | `src/teams/dispatcher/` + `src/tools/concurrency.rs` | Task composition + parallel bucket dispatch |
 | L5 | `src/harness/` (Think→Act) + Gateway | Autonomous behavior + multi-channel presence |
@@ -178,7 +178,7 @@ The layers are not a one-way stack. There is a continuous feedback loop where hi
 
 1. L5 agent behavior generates new experiences (`session_complete` + the dreaming pipeline)
 2. L3 dreaming distills those experiences, gating promotion with SkillOpt's four primitives
-3. L2 domain annotation is refined by newly promoted skills (written into `ContextAnchor` and notes metadata)
+3. L2 domain annotation is refined by newly promoted skills (written into `FactSource` and notes metadata)
 4. L1 memory is enriched with new facts from successful operations
 5. The enriched L1 feeds back into L5's next inference, starting the cycle again
 

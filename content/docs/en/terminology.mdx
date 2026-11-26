@@ -255,7 +255,6 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `AiProvider` | AI Provider |
 | `StopHookHandler` | Stop Hook |
 | `ContextBudget` | Context Budget |
-| `SkillPrefetcher` | Skill Prefetcher |
 | `TraceSink` | Trace Sink |
 | `InProcessActorSessionService` | In-Process Session Service |
 | `WorkspaceSandbox` | Workspace Sandbox |
@@ -298,7 +297,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | Skill System v1 | Skill System v2 | Complete rewrite |
 | EvolutionTracker | Registry | Part of old skill system |
 | SolidificationDetector | EligibilityService | Part of old skill system |
-| SubagentTool | (retained as the sub-agent spawn tool, `src/agents/subagent_tool/`) | There is no separate FlowRunTool on the flow side: flow orchestration is declarative `FlowSpec` (`src/orchestrator/flow_spec.rs`) resolved and dispatched through `FlowRegistry` (`src/orchestrator/flow_registry.rs`) |
+| SubagentTool | (retained as the sub-agent spawn tool, `src/agents/subagent_tool/`) | The flow side has no separate flow-run tool: flow orchestration is declarative `FlowSpec` (`src/orchestrator/flow_spec.rs`) resolved and dispatched through `FlowRegistry` (`src/orchestrator/flow_registry.rs`); the only workflow tool is `WorkflowTool` (`src/builtin_tools/workflow_tool.rs`) |
 | LoopToolRegistry | ToolService | Unified tool façade |
 | ClawHub settings tab | Extensions Store | ClawHub demoted to long-tail; settings tab removed |
 | `teams.run` | `teams.chat.send` / Coord Tasks | Not a method — teams use the chat thread + tasks |

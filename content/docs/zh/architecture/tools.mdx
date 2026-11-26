@@ -41,7 +41,7 @@ pub trait ToolService: Send + Sync + 'static {
 
 ## 限定作用域的执行管线
 
-> **历史。** 本页早期版本描述过一个五层装饰器栈（`ExecAuditLayer` → `PermissionLayer` → `ContextRuleLayer` → `TimeoutLayer` → `CoreDispatch`），位于 `src/tools/` 下的 `middleware/` 目录，由同级 `facade.rs` 中的 `build_tool_service()` 构建。该栈已不在源码树中；它的职责由下面描述的单个 `ScopedToolService` 承担。
+> **历史。** 本页早期版本描述过一个五层装饰器栈（`ExecAuditLayer` → `PermissionLayer` → `ContextRuleLayer` → `TimeoutLayer` → `CoreDispatch`），位于 `src/tools/` 下的 `middleware/` 目录，由同级 `facade.rs` 中的 `build_tool_service()` 构建。该栈已不存在于源码树中；它的职责由下面描述的单个 `ScopedToolService` 承担。
 
 `ScopedToolService` 按关注点拆分（`src/tools/scoped/`）：
 
@@ -52,7 +52,7 @@ pub trait ToolService: Send + Sync + 'static {
 | `src/tools/scoped/dispatch.rs` | 执行管线：确认门、`BeforeToolCall` hook、超时、重试、第 2 层结果预算、`AfterToolCall` hook、错误脱敏 |
 | `src/tools/scoped/artifact_harvest.rs` | 把工具输出中的 `_media` 落入工件存储 |
 | `src/tools/scoped/ledger.rs` | 在该咽喉点向签名操作账本记录的内容 |
-| `src/tools/scoped/traits.rs` | 公共扩展点（`ToolDefinitionRewriter`、`CapabilityConstraintContextSource`） |
+| `src/tools/scoped/traits.rs` | 公共扩展点（`ToolDefinitionRewriter`） |
 
 该服务是注册表之上的只读适配器：不会修改底层注册表，`list()` / `describe()` 是已注册能力描述符的投影。
 
@@ -107,7 +107,7 @@ pub trait AlephTool: Clone + Send + Sync + 'static {
 - **`Args` 使用 `schemars::JsonSchema`**: `Args` 上的 trait 边界意味着 JSON Schema 在编译时从 Rust 类型定义生成。结构体字段上的文档注释成为模式的 `description`，LLM 使用它来理解每个参数。
 - **`call_json` 是自动实现的**: trait 提供默认的 JSON-in/JSON-out 包装器，因此实现者只编写类型化的 `call` 方法。
 - **`definition()` 是自动实现的**: 工具定义（名称、描述、模式、示例）是自动派生的——无需手动 JSON 维护。
-- **`examples()` 用于少样本学习**: 覆盖以提供使用示例，这些示例被注入到工具定义的 `llm_context` 字段中。
+- **`examples()` 用于少样本学习**: 覆盖以提供使用示例，这些示例被注入到工具定义的描述字段中（`ToolDefinition` 的 `description`）。
 
 ### 动态分发
 
@@ -325,62 +325,72 @@ pub struct ToolOutputMetadata {
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `file_read` | 读取文件内容 | `path`、`encoding?` |
-| `file_write` | 写入文件 | `path`、`content` |
-| `file_list` | 列出目录 | `path`、`recursive?` |
-| `file_delete` | 删除文件或目录 | `path` |
-| `file_mkdir` | 创建目录 | `path` |
-| `file_chmod` | 更改权限 | `path`、`mode` |
+| `file_read` | 读取文件内容 | `path`、`offset?`、`limit?` |
+| `file_write` | 写入文件 | `file_path`、`content`、`create_parents?` |
+| `file_edit` | 定点替换文件内容 | `file_path`、`old_string`、`new_string`、`replace_all?` |
+| `apply_patch` | 应用统一补丁 | `patch` |
+| `file_ops` | 目录与批量文件操作（`FileOperation`：List/Move/Copy/Delete/Mkdir/Search/BatchMove/Organize/Stats） | `operation`、`path`、`destination?`、`pattern?` |
+| `grep` | 按内容正则搜索 | `pattern`、`path?`、`glob?`、`ignore_case?`、`limit?` |
+| `find` | 按文件名查找 | `pattern`、`path?`、`limit?` |
 
 ### 代码执行
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `bash_exec` | 运行 bash 命令 | `command`、`timeout?` |
-| `code_exec` | 执行代码片段 | `language`、`code` |
-| `python_exec` | 运行 Python | `code`、`requirements?` |
+| `bash` | 运行 shell 命令 | `cmd`、`working_dir?`、`timeout?`、`allow_network?` |
+| `code_exec` | 执行代码片段 | `language`、`code`、`working_dir?` |
+| `code_check` | 静态检查代码 | `language`、`code` |
 
 ### 网页和搜索
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `web_fetch` | 获取 URL 内容 | `url`、`method?`、`headers?` |
-| `web_search` | 搜索网页 | `query`、`engine?` |
+| `search` | 联网搜索（可多路 query） | `query`、`queries?`、`limit?`、`recency?`、`domains?` |
+| `web_fetch` | 抓取 URL 并提取正文 | `url`、`extract_mode?`、`prompt?` |
 
 ### 记忆
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `memory_store` | 存储事实 | `content`、`tags?` |
-| `memory_search` | 带去重的混合搜索 | `query`、`max_results?` |
-| `memory_forget` | 删除事实 | `fact_id` |
-| `memory_browse` | 浏览记忆集群 | `query`、`path?` |
-| `memory_reflect` | 反思记忆洞察 | `topic`、`depth?` |
-| `memory_timeline` | 记忆时间线视图 | `query`、`range?` |
+| `remember` | 写入 curated 记忆（Add/Replace/Remove/Batch） | `content` / `old_text`+`content` / `old_text` / `operations` |
+| `memory_search` | 混合检索（可跨工作空间） | `query`、`max_results?`、`workspace?`、`workspaces?`、`cross_workspace?`、`scope?` |
+| `memory_browse` | 浏览记忆目录树 | `action`、`path?` |
+| `memory_explore` | 沿关系多跳探索 | `query`、`max_hops?`、`max_per_hop?` |
+| `memory_timeline` | 单条事实的时间线解释 | `fact_id` |
+| `memory_reflect` | 反思综合 | `query` |
+| `memory_trace` | 证据追溯 | `target`、`kind`、`max_results?` |
+| `flag_user_correction` | 记录用户纠正（进入纠正流） | `content` |
 
 ### 会话和代理
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `sessions_spawn` | 生成子代理 | `model?`、`thinking?`、`prompt` |
-| `sessions_send` | 向子代理发送消息 | `session_key`、`message` |
-| `sessions_list` | 列出活动子代理 | -- |
+| `session_list` | 列出会话 | -- |
+| `session_send` | 向会话发消息 | `session_key`、`message` |
+| `session_new` | 新建会话 | -- |
+| `session_compact` | 手动压缩上下文 | `instructions?` |
+| `session_rename` / `session_set_mode` / `session_search` | 重命名 / 切换模式 / 检索会话 | -- |
+| `agent_create` / `agent_list` / `agent_switch` | 子代理的创建 / 列举 / 切换 | -- |
+| `subagent` | 派生子代理（注册表专用工具，不在定义目录里） | -- |
 
 ### 感知和生成
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `snapshot_capture` | 捕获 AX 树 + OCR | `target`、`region?`、`include_vision?` |
 | `image_generate` | 生成图像 | `prompt`、`provider?`、`size?` |
-| `speech_generate` | 文本转语音 | `text`、`voice?` |
 | `pdf_generate` | 生成 PDF | `content`、`template?` |
+| `document_extract` | 抽取文档正文 | -- |
+| `media_understand` | 理解图片 | -- |
+| `audio_transcribe` | 语音转写 | -- |
+| `desktop_ax_snapshot` / `desktop_gui_locate` | 桌面无障碍树快照 / 控件定位 | -- |
 
 ### 元工具
 
 | 工具 | 说明 | 关键参数 |
 |------|-------------|----------|
-| `list_tools` | 按类别列出可用工具 | `category?` |
-| `get_tool_schema` | 获取工具的 JSON Schema | `tool_name` |
+| `tool_search` | 按类别查找可用工具 | -- |
+| `ctx_search` | 搜索当前上下文 | -- |
+| `recall_events` | 回放事件 | -- |
 
 **位置**: `src/builtin_tools/`
 

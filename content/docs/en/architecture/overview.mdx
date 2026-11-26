@@ -378,40 +378,42 @@ HarnessRunner::run(flow, deps).await
 
 ### Newtype Pattern
 
-Wraps primitive types in distinct structs for compile-time safety. You cannot accidentally pass a `SessionId` where an `ExperimentId` is expected:
+Wraps primitive types in distinct structs for compile-time safety. You cannot accidentally pass a `SessionId` where a `ProviderId` is expected:
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExperimentId(String);
+// src/domain/skill.rs
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(String);
 
-impl ExperimentId {
+impl SkillId {
     pub fn new(id: impl Into<String>) -> Self { Self(id.into()) }
     pub fn as_str(&self) -> &str { &self.0 }
 }
-
-impl Deref for ExperimentId {
-    type Target = str;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
 ```
 
+These newtypes deliberately **do not implement `Deref`**: the only `Deref` implementation in the tree is `HookReadGuard<'_>` in `src/extension/hooks/registry.rs` (`Target = HookExecutor`). Implicit dereferencing would silently turn "this must stay an ID" into a string comparison, so access always goes through `as_str()`.
+
 **Newtype Catalog:**
-- **IDs**: `ExperimentId`, `VariantId`, `ContextId`, `TaskId`, `SubscriptionId`
-- **Collections**: `Ruleset` (permission rules)
-- **Values**: `Answer` (question responses)
+- **IDs**: `SkillId`, `PluginId`, `ProviderId`, `RunId`, `TaskId`, `SubscriptionId`
+- **Collections**: `DedupKey` (event dedup identity, `src/gateway/telecom/protocol.rs`)
+- **Values**: `SkillContent` (skill body, `src/domain/skill.rs`)
 
 ### FromStr Trait Pattern
 
 Provides consistent parsing interface across the codebase:
 
 ```rust
-impl FromStr for TaskStatus {
+// src/resilience/types.rs
+impl std::str::FromStr for TaskStatus {
     type Err = String;
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            _ => Err(format!("Invalid TaskStatus: {}", s)),
+        if s.eq_ignore_ascii_case("pending") {
+            Ok(Self::Pending)
+        } else if s.eq_ignore_ascii_case("running") {
+            Ok(Self::Running)
+        } else {
+            Err(format!("Unknown task status: {s}"))
         }
     }
 }
@@ -420,7 +422,7 @@ impl FromStr for TaskStatus {
 let status: TaskStatus = "pending".parse()?;
 ```
 
-**Implemented for:** `FactType`, `HookKind`, `DeviceType`, `TaskStatus`, `RuntimeKind`, and 10+ other types.
+**Implemented for:** `TaskStatus`, `NoteType`, `FactSource`, `FactSpecificity`, `TemporalScope`, `MemoryLayer`, `MemoryCategory`, `EventActor`, `ExtensionKind`, `RuntimeKind`, `Os`, `PromptScope`, `InstallKind`, `LedgerAction`, `LedgerOutcome`, `RiskLevel`, `Lane`, `TeamStatus`, `TeamMemberKind`, `BindingPeerKind`.
 
 ---
 

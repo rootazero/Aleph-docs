@@ -90,7 +90,7 @@ pub trait HarnessRunner: Send + Sync {
 | 3 | Defer agent lookup to `HarnessRunner` (it owns `AgentRegistry`) | — |
 | 4 | Resolve session key + acquire per-session lock | `resolver::resolve_session` + `active_sessions` |
 | 5 | Defer brain pick to `HarnessRunner` (`ProviderRegistry` lives there) | — |
-| 6 | Provision sandbox (per-request `sandbox_override` short-circuits the factory) | `sandbox_factory` |
+| 6 | Provision sandbox (per-request `workspace_override` short-circuits the factory) | `sandbox_factory` |
 | 7 | Spawn harness task; plumb event/completion/cancel back to caller | `tokio::spawn(harness.run(...))` |
 
 The spawn also re-establishes `current_project_root` and `current_agent_id` task-locals inside the new task — `tokio::spawn` does not inherit task-locals, and per-project memory seams (`note_manage`, retrieval assembler, session compaction) plus agent-scoped skill discovery (`~/.aleph/agents/<id>/skills`) both read these ambient values. The harness receives `workspace_override` explicitly for CWD + prompt context, but the task-locals must be re-set so cross-session tools see the right scope.

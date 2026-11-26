@@ -141,13 +141,13 @@ Aleph 的领域被划分为限界上下文 —— 具有自己的通用语言、
 | 类型 | DDD 角色 | 位置 |
 |------|----------|----------|
 | `MemoryFact` | 聚合根 | `src/memory/context/fact.rs` |
-| `ContextAnchor` | 值对象 | `src/memory/context/mod.rs` |
+| `FactSource` | 值对象（enum） | `src/memory/context/enums.rs` |
 | `NoteType` | 值对象（enum） | `src/memory/context/enums.rs` |
 
-> **更正**：上表的路径与类型名是源码中的真实位置（`memory/context` 是一个目录而非文件，类型名是 `NoteType` 而非 `FactType`）。`MemoryFact` 的 `impl Entity` 与 `impl AggregateRoot` 见 `src/memory/context/fact.rs`。
+> **更正**：上表的路径与类型名是源码中的真实位置（`memory/context` 是一个目录而非文件，事实类型名是 `NoteType`）。`MemoryFact` 的 `impl Entity` 与 `impl AggregateRoot` 见 `src/memory/context/fact.rs`。
 
 `MemoryFact` 聚合根确保：
-- 事实正确锚定到其上下文（对话、主题、领域），由 `ContextAnchor` 表达。
+- 事实正确锚定到其来源（对话、主题、领域），由 `FactSource` 表达。
 - 事实类型一致且有效，由 `NoteType` 枚举约束。
 - 压缩操作保留基本信息（`src/memory/compression/` + `session_compactor/`）。
 

@@ -94,7 +94,7 @@ pub trait MediaProvider: Send + Sync {
 **内置提供商：**
 - `ImageMediaProvider` — 将图像路由到 VisionPipeline
 - `TextDocumentProvider` — 从 Markdown、TXT、PDF 中提取文本
-- `AudioStubProvider` — 音频处理的占位符
+- `AudioMediaProvider` — 把音频转发给 `TranscriptionService`（支持 mp3/wav/ogg/flac/m4a）
 
 ### 格式检测
 
@@ -186,8 +186,7 @@ if !provider.capabilities().image_understanding {
 ```
 
 **当前提供商：**
-- `ClaudeVisionProvider` — 返回错误（待 API 接线）
-- `PlatformOcrProvider` — 委托给 Desktop Bridge 进行 OCR
+- `PlatformOcrProvider` — 委托给 Desktop Bridge 进行 OCR（唯一的视觉提供商）
 
 ### ImageInput
 

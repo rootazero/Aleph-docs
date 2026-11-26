@@ -11,61 +11,75 @@ description: "Aleph 特有的设计模式 —— Context、Newtype、Builder、F
 
 ### 问题
 
-随着 API 的演进，函数签名会累积参数。一个带有七个参数的函数难以阅读、难以扩展且容易误用：
+随着 API 的演进，函数签名会累积参数。一个带有九个参数的函数难以阅读、难以扩展且容易误用：
 
 ```rust
-// 之前：7 个位置参数
-pub async fn run(
+// 之前：9 个位置参数
+pub async fn handle(
     &self,
-    request: String,
-    context: RequestContext,
-    tools: Vec<UnifiedTool>,
-    identity: IdentityContext,
-    callback: impl LoopCallback,
-    abort_signal: Option<watch::Receiver<bool>>,
-    initial_history: Option<String>,
-) -> LoopResult
+    message: InboundMessage,
+    channel_id: ChannelId,
+    conversation_id: ConversationId,
+    session_key: SessionKey,
+    is_authorized: bool,
+    is_mentioned: bool,
+    sender_normalized: String,
+    workspace: Option<PathBuf>,
+) -> Result<(), GatewayError> { ... }
 ```
+
+布尔开关尤其危险：`handle(message, route, key, true, false, sender, None)` 在调用点上完全无法自解释。
 
 ### 解决方案
 
-将相关参数分组到 **context 结构体**中。必需参数放在构造函数中；可选参数使用 builder 风格的 `with_*` 方法：
+将相关参数分组到 **context 结构体**中。必需参数放在构造函数里；可选参数使用 builder 风格的 `with_*` 方法：
 
 ```rust
-#[derive(Clone)]
-pub struct RunContext {
-    pub request: String,
-    pub context: RequestContext,
-    pub tools: Vec<UnifiedTool>,
-    pub identity: IdentityContext,
-    pub abort_signal: Option<watch::Receiver<bool>>,
-    pub initial_history: Option<String>,
+#[derive(Debug, Clone)]
+pub struct InboundContext {
+    pub message: InboundMessage,
+    pub reply_route: ReplyRoute,
+    pub session_key: SessionKey,
+    pub is_authorized: bool,
+    pub is_mentioned: bool,
+    pub sender_normalized: String,
+    pub voice_reply_hint: bool,
+    pub transcribed_input: bool,
+    pub workspace: Option<std::path::PathBuf>,
 }
 
-impl RunContext {
+impl InboundContext {
     pub fn new(
-        request: impl Into<String>,
-        context: RequestContext,
-        tools: Vec<UnifiedTool>,
-        identity: IdentityContext,
+        message: InboundMessage,
+        reply_route: ReplyRoute,
+        session_key: SessionKey,
     ) -> Self {
+        let sender_normalized = message.sender_id.as_str().to_string();
         Self {
-            request: request.into(),
-            context,
-            tools,
-            identity,
-            abort_signal: None,
-            initial_history: None,
+            message,
+            reply_route,
+            session_key,
+            is_authorized: false,
+            is_mentioned: false,
+            sender_normalized,
+            voice_reply_hint: false,
+            transcribed_input: false,
+            workspace: None,
         }
     }
 
-    pub fn with_abort_signal(mut self, signal: watch::Receiver<bool>) -> Self {
-        self.abort_signal = Some(signal);
+    pub const fn authorize(mut self) -> Self {
+        self.is_authorized = true;
         self
     }
 
-    pub fn with_initial_history(mut self, history: impl Into<String>) -> Self {
-        self.initial_history = Some(history.into());
+    pub const fn with_mention(mut self, mentioned: bool) -> Self {
+        self.is_mentioned = mentioned;
+        self
+    }
+
+    pub fn with_workspace(mut self, workspace: Option<std::path::PathBuf>) -> Self {
+        self.workspace = workspace;
         self
     }
 }
@@ -74,27 +88,30 @@ impl RunContext {
 函数签名变得简洁且稳定：
 
 ```rust
-// 之后：2 个参数
-pub async fn run(
-    &self,
-    run_context: RunContext,
-    callback: impl LoopCallback,
-) -> LoopResult
+// 之后：1 个参数
+pub async fn handle(&self, ctx: InboundContext) -> Result<(), GatewayError> { ... }
 ```
+
+注意 `new` 只接收三个必需参数，剩下的字段全部通过 `with_*` 补齐。`with_*` 方法返回 `Self`（消费并返回自身），所以可以链式调用。
 
 ### 用法
 
 ```rust
-let run_context = RunContext::new(request, RequestContext::empty(), tools, identity)
-    .with_abort_signal(abort_rx)
-    .with_initial_history(history);
+let route = ReplyRoute::new(channel_id, conversation_id)
+    .with_reply_to(message_id);
 
-let result = agent_loop.run(run_context, callback).await;
+let ctx = InboundContext::new(message, route, session_key)
+    .authorize()
+    .with_mention(true)
+    .with_workspace(Some(workspace));
+
+let result = router.handle(ctx).await;
 ```
 
 ### 何时应用
 
 - 函数有 **5 个或更多**参数
+- 参数里出现两个以上的布尔开关
 - 多个参数是可选的
 - 参数形成一个逻辑组
 - API 可能会随着新参数而演进
@@ -102,7 +119,9 @@ let result = agent_loop.run(run_context, callback).await;
 
 ### 代码库中的位置
 
-- `agent_loop::RunContext` —— agent 循环执行参数
+- `src/gateway/inbound_context.rs` —— `InboundContext` 与 `ReplyRoute` 的定义
+- `src/gateway/inbound_router/` —— 路由与命令分发，context 在这里流转
+- `src/gateway/pipeline/mod.rs` —— 流水线装配处消费 context
 
 ## Newtype 模式
 
@@ -111,10 +130,10 @@ let result = agent_loop.run(run_context, callback).await;
 原始类型不携带语义含义。一个接受两个 `String` 参数（用于不同类型的 ID）的函数，即使在参数交换时也能编译：
 
 ```rust
-fn assign(experiment_id: String, variant_id: String) { ... }
+fn assign(skill_id: String, plugin_id: String) { ... }
 
 // 能编译，但是错误的 —— 参数被交换了
-assign(variant_id, experiment_id);
+assign(plugin_id, skill_id);
 ```
 
 ### 解决方案
@@ -122,12 +141,14 @@ assign(variant_id, experiment_id);
 将原始类型包装在 **newtype 结构体**中，在类型级别赋予它们不同的标识：
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExperimentId(String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillId(String);
 
-impl ExperimentId {
+impl SkillId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "SkillId must not be empty");
+        Self(id)
     }
 
     pub fn as_str(&self) -> &str {
@@ -135,22 +156,15 @@ impl ExperimentId {
     }
 }
 
-impl Deref for ExperimentId {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Display for ExperimentId {
+impl fmt::Display for SkillId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl From<String> for ExperimentId {
-    fn from(s: String) -> Self {
-        Self(s)
+impl From<&str> for SkillId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
     }
 }
 ```
@@ -158,43 +172,32 @@ impl From<String> for ExperimentId {
 现在编译器会捕获这个错误：
 
 ```rust
-fn assign(experiment_id: ExperimentId, variant_id: VariantId) { ... }
+fn assign(skill_id: SkillId, plugin_id: PluginId) { ... }
 
-let exp = ExperimentId::new("exp-001");
-let var = VariantId::new("control");
+let skill = SkillId::new("core:search");
+let plugin = PluginId::new("core");
 
-assign(exp, var);   // 正确
-assign(var, exp);   // 编译错误！
+assign(skill, plugin);   // 正确
+assign(plugin, skill);   // 编译错误！
 ```
+
+Aleph 的 newtype **不实现 `Deref`**。调用方必须显式写 `as_str()`，这样"这到底是不是字符串"永远不会被隐式决定。全仓唯一的 `Deref` 实现是 `src/extension/hooks/registry.rs` 里 `HookReadGuard<'_>` 指向 `HookExecutor` 的那次，属于锁守卫的特例，不是 ID 类型的惯例。
 
 ### 集合 Newtype
 
-Newtype 也适用于带有领域特定操作的集合：
+Newtype 也适用于带有领域特定语义的集合。`DedupKey` 是电信事件的去重身份：
 
 ```rust
-#[derive(Debug, Clone)]
-pub struct Ruleset(Vec<PermissionRule>);
+/// Opaque, collision-free dedup identity (parts are compared as a vector, so
+/// no delimiter can be spoofed by a provider id containing one).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DedupKey(Vec<String>);
 
-impl Ruleset {
-    pub fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    pub fn add(&mut self, rule: PermissionRule) {
-        self.0.push(rule);
-    }
-
-    pub fn rules(&self) -> &[PermissionRule] {
-        &self.0
-    }
-}
-
-impl FromIterator<PermissionRule> for Ruleset {
-    fn from_iter<T: IntoIterator<Item = PermissionRule>>(iter: T) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
+/// Derive the dedup key of an event from provider identity only.
+pub fn dedup_key(env: &TelecomEnvelope) -> DedupKey { ... }
 ```
+
+集合 newtype 由**具名构造函数**产出，而不是从迭代器直接收集：去重键的组成规则（提供方账号 + 事件类型 + 提供方事件 id）是协议的一部分，藏在 `collect` 里会让这条规则无从复核。
 
 ### 标准 Trait 清单
 
@@ -208,55 +211,61 @@ impl FromIterator<PermissionRule> for Ruleset {
 
 **推荐：**
 - `Display` —— 面向用户的字符串输出
-- `From<T>` —— 符合人体工程学的构造
-- `Deref` —— 透明访问内部类型
+- `as_str()` —— 显式访问内部字符串
+- `From<&str>`, `From<String>` —— 符合人体工程学的构造
 - `Serialize`, `Deserialize` —— JSON/TOML 支持
 
 **可选：**
-- `FromStr` —— 从字符串解析
-- `FromIterator` —— 用于集合 newtype
+- `FromStr` —— 从字符串解析（主要用于枚举型 ID）
 - `Default` —— 如果存在合理的默认值
+
+**不建议：**
+- `Deref` —— 让调用方忘记"这是一个 ID"。用 `as_str()` 代替
 
 ### Newtype 目录
 
 | 类型 | 内部类型 | 用途 | 模块 |
 |------|----------|------|------|
-| `ExperimentId` | `String` | A/B 测试实验 ID | `ab_testing/types` |
-| `VariantId` | `String` | A/B 测试变体 ID | `ab_testing/types` |
-| `ContextId` | `String` | 浏览器上下文 ID | `browser/context_registry` |
-| `TaskId` | `String` | 浏览器任务 ID | `browser/context_registry` |
-| `SubscriptionId` | `String` | 事件总线订阅 ID | `event/global_bus` |
-| `Ruleset` | `Vec<PermissionRule>` | 权限规则集合 | `permission/rule` |
-| `Answer` | `Vec<String>` | 用户问题选择 | `event/question` |
+| `SkillId` | `String` | 技能 ID（约定 `plugin:skill_name`） | `src/domain/skill.rs` |
+| `PluginId` | `String` | 插件 ID | `src/domain/skill.rs` |
+| `SkillContent` | `String` | 技能正文 | `src/domain/skill.rs` |
+| `ProviderId` | `String` | 能力提供者 ID | `src/capability/provider.rs` |
+| `RunId` | `String` | 运行 ID | `src/capability/ownership.rs` |
+| `TaskId` | `String` | 任务 ID | `src/capability/ownership.rs` |
+| `SubscriptionId` | `String` | 事件总线订阅 ID | `src/event/global_bus.rs` |
+| `DedupKey` | `Vec<String>` | 电信事件去重身份 | `src/gateway/telecom/protocol.rs` |
+| `CallerDigest` | `String` | 主叫号码加盐摘要 | `src/gateway/telecom/public_context.rs` |
+
+两个反例值得注意：`SkillContent` 刻意**不实现** `Display`，避免技能正文被随手打印；`CallerDigest` 手写 `Debug` 输出 `CallerDigest(<redacted>)`，不泄露号码。
 
 ## Builder 模式
 
 ### 问题
 
-复杂对象有很多字段，有些是必需的，有些是可选的。一个有 10 个参数的构造函数不可用，而手动填写每个字段既冗长又容易出错。
+复杂对象有很多字段，有些是必需的，有些是可选的。一个有十个参数的构造函数不可用，而手动填写每个字段既冗长又容易出错。
 
 ### 解决方案
 
 为必需参数提供**构造函数**，为可选参数提供**流畅的 `with_*` 方法**：
 
 ```rust
-impl RunContext {
-    // 构造函数中的必需参数
-    pub fn new(
-        request: impl Into<String>,
-        context: RequestContext,
-        tools: Vec<UnifiedTool>,
-        identity: IdentityContext,
-    ) -> Self { ... }
+impl AgentDef {
+    // 构造函数只接收必需参数
+    pub fn new(id: impl Into<String>, mode: AgentMode) -> Self { ... }
 
     // 通过 builder 方法设置可选参数
-    pub fn with_abort_signal(mut self, signal: watch::Receiver<bool>) -> Self {
-        self.abort_signal = Some(signal);
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = desc.into();
         self
     }
 
-    pub fn with_initial_history(mut self, history: impl Into<String>) -> Self {
-        self.initial_history = Some(history.into());
+    pub fn with_when_to_use(mut self, hint: impl Into<String>) -> Self {
+        self.when_to_use = Some(hint.into());
+        self
+    }
+
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
         self
     }
 }
@@ -265,9 +274,10 @@ impl RunContext {
 用法读起来像一个句子：
 
 ```rust
-let context = RunContext::new(request, ctx, tools, identity)
-    .with_abort_signal(abort_rx)
-    .with_initial_history(history);
+let def = AgentDef::new("explore", AgentMode::SubAgent)
+    .with_description("只读探索陌生模块")
+    .with_when_to_use("需要先摸清一个不熟悉的代码区域时")
+    .with_system_prompt("你是探索子代理，只汇报发现，不改动文件。");
 ```
 
 ### 好处
@@ -290,16 +300,20 @@ let context = RunContext::new(request, ctx, tools, identity)
 实现 `FromStr` 以与 Rust 的标准 `str::parse()` 集成：
 
 ```rust
-impl FromStr for TaskStatus {
+impl std::str::FromStr for TaskStatus {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
-            "failed" => Ok(Self::Failed),
-            _ => Err(format!("Invalid TaskStatus: {}", s)),
+        if s.eq_ignore_ascii_case("pending") {
+            Ok(Self::Pending)
+        } else if s.eq_ignore_ascii_case("running") {
+            Ok(Self::Running)
+        } else if s.eq_ignore_ascii_case("completed") {
+            Ok(Self::Completed)
+        } else if s.eq_ignore_ascii_case("failed") {
+            Ok(Self::Failed)
+        } else {
+            Err(format!("Unknown task status: {s}"))
         }
     }
 }
@@ -324,18 +338,22 @@ fn parse_config<T: FromStr>(value: &str) -> Result<T, T::Err> {
 
 以下类型为实现一致解析而实现 `FromStr`：
 
-- **任务/会话类型：** `TaskStatus`, `SessionStatus`, `TraceRole`
-- **内存类型：** `FactType`, `FactSpecificity`, `TemporalScope`
-- **扩展类型：** `HookKind`, `HookPriority`, `PromptScope`
-- **设备类型：** `DeviceType`, `DeviceRole`
-- **运行时类型：** `RuntimeKind`, `EvolutionStatus`, `EventType`
-- **风险类型：** `RiskLevel`, `Lane`
+- **团队类型：** `TeamStatus`, `TeamMemberKind`（`src/teams/types.rs`）
+- **记忆上下文类型：** `NoteType`, `FactSource`, `FactSpecificity`, `TemporalScope`, `MemoryLayer`, `MemoryCategory`（`src/memory/context/enums.rs`）
+- **事件与账本类型：** `EventActor`（`src/memory/events/mod.rs`）, `LedgerAction`, `LedgerOutcome`（`src/identity/record.rs`）
+- **技能与安装类型：** `Os`, `PromptScope`, `InstallKind`（`src/domain/skill.rs`）
+- **韧性类型：** `TaskStatus`, `RiskLevel`, `Lane`（`src/resilience/types.rs`）
+- **扩展与钩子类型：** `ExtensionKind`（`src/hub/types.rs`）, `ThinkLevel`（`crates/aleph-slot-api/src/ai.rs`）, `HookKind`, `HookPriority`（`crates/aleph-slot-api/src/hooks.rs`）
+- **MCP 运行时类型：** `RuntimeKind`（`src/mcp/external/runtime.rs`）
+
+注意 `SessionStatus` 和 `EventType` 虽然存在，但**没有**实现 `FromStr` —— 不是每个枚举都值得支持字符串解析。
 
 ### 约定
 
-- 使用 `to_lowercase()` 进行不区分大小写的解析
-- 返回 `String` 作为错误类型（简单，无额外依赖）
+- 使用 `eq_ignore_ascii_case` 逐分支比较，不分配小写副本
+- 错误类型多数是 `String`（简单，无额外依赖）；`Os` 用专门的 `ParseOsError`
 - 匹配所有已知变体，对未知值返回 `Err`
+- 错误文案里带上原始输入，例如 `Unknown task status: {s}`
 
 ## 模式组合
 
@@ -343,30 +361,31 @@ Aleph 中的模式很少单独使用。最常见的组合：
 
 ### Context + Builder
 
-`RunContext` 使用 Context 模式来分组参数，使用 Builder 模式来处理可选字段：
+`InboundContext` 使用 Context 模式来分组参数，使用 Builder 模式来处理可选字段：
 
 ```rust
-let run_context = RunContext::new(required_params)
-    .with_optional_param1(value1)
-    .with_optional_param2(value2);
+let ctx = InboundContext::new(message, route, session_key)
+    .authorize()
+    .with_mention(true)
+    .with_workspace(Some(workspace));
 ```
 
 ### Newtype + FromStr
 
-许多 newtype 实现 `FromStr`，以便可以从配置文件解析：
+许多枚举型 newtype 实现 `FromStr`，以便可以从配置文件解析：
 
 ```rust
 let status: TaskStatus = "pending".parse()?;
-let device: DeviceType = config.get("device")?.parse()?;
+let note: NoteType = config.get("note_type")?.parse()?;
 ```
 
-### Newtype + Deref
+### Newtype + 显式访问器
 
-包装 `String` 的 Newtype 实现 `Deref<Target = str>` 以实现透明访问：
+包装 `String` 的 newtype 用 `as_str()` 暴露内部字符串，而不是实现 `Deref`：
 
 ```rust
-let id = ExperimentId::new("exp-001");
-if id.starts_with("exp-") { ... }  // 通过 Deref 到 str 工作
+let id = SkillId::new("core:search");
+if id.as_str().starts_with("core:") { ... }
 ```
 
 ## 错误处理约定
@@ -380,16 +399,19 @@ Aleph 使用两层错误处理方法：
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
-    #[error("authentication failed: {0}")]
-    AuthFailed(String),
-    #[error("session not found: {0}")]
-    SessionNotFound(String),
-    #[error("rate limit exceeded for client {client_id}")]
-    RateLimited { client_id: String },
-    #[error("internal error: {0}")]
-    Internal(#[from] anyhow::Error),
+    #[error("Failed to bind to {addr}: {source}")]
+    BindFailed {
+        addr: SocketAddr,
+        source: std::io::Error,
+    },
+    #[error("Connection error: {0}")]
+    ConnectionError(String),
+    #[error("Protocol error: {0}")]
+    ProtocolError(String),
 }
 ```
+
+`thiserror` 适合"调用者需要按变体分支处理"的错误。变体数量保持少而正交 —— 需要十几个变体通常说明这个错误类型混了多个关注点。
 
 ### 内部错误：`anyhow`
 
@@ -398,12 +420,8 @@ pub enum GatewayError {
 ```rust
 use anyhow::{Context, Result};
 
-fn load_plugin(path: &Path) -> Result<Plugin> {
-    let bytes = std::fs::read(path)
-        .context("failed to read plugin file")?;
-    let manifest = parse_manifest(&bytes)
-        .context("invalid plugin manifest")?;
-    Ok(Plugin::from_manifest(manifest))
+fn load_manifest(dir: &Path) -> Result<PluginManifest> {
+    parse_manifest_from_dir_sync(dir).context("invalid plugin manifest")
 }
 ```
 
@@ -412,6 +430,7 @@ fn load_plugin(path: &Path) -> Result<Plugin> {
 - 如果错误跨越 **crate 边界**或是 **公共 API** 的一部分，使用 `thiserror`
 - 如果错误在 **单个模块** 或 **二进制入口点** 内处理，使用 `anyhow`
 - 在 `anyhow` 错误上使用 `.context()` 添加人类可读的描述
+- 领域错误类型统一放在该领域的 `error.rs` 里，并同时提供 `Result` 别名（如 `ExtensionResult`）
 
 ## 模块组织
 
@@ -425,7 +444,7 @@ fn load_plugin(path: &Path) -> Result<Plugin> {
 
 | 关注点 | 文件名 |
 |--------|--------|
-| 类型定义（struct/enum） | `types.rs` 或 `model.rs` |
+| 类型定义（struct/enum） | `types.rs` |
 | 业务逻辑 | 主模块文件 |
 | 外部集成（数据库、网络） | `store.rs`, `executor.rs` |
 | 测试替身 | `mock.rs`，位于 `#[cfg(test)]` 下 |
@@ -435,18 +454,23 @@ fn load_plugin(path: &Path) -> Result<Plugin> {
 
 ### 标准文件名
 
-| 文件名 | 内容 |
-|--------|------|
-| `mod.rs` | 模块入口点，重新导出（保持精简） |
-| `types.rs` | 枚举和值对象 |
-| `model.rs` | 聚合根和实体 |
-| `pool.rs` | 连接/资源池 |
-| `factory.rs` | 构造函数，builder |
-| `executor.rs` | 调用外部系统的逻辑 |
-| `registry.rs` | 查找和查询逻辑 |
-| `callback.rs` | 事件处理程序和钩子 |
-| `mock.rs` | 测试替身（位于 `#[cfg(test)]` 下） |
-| `error.rs` | 领域特定错误枚举 |
+`src/` 下的实际分布（按文件数）：
+
+| 文件名 | 内容 | `src/` 内文件数 |
+|--------|------|------|
+| `types.rs` | 枚举和值对象 | 72 |
+| `error.rs` | 领域特定错误枚举 | 18 |
+| `store.rs` | 持久化实现 | 18 |
+| `registry.rs` | 查找、注册与查询逻辑 | 16 |
+| `executor.rs` | 调用外部系统的逻辑 | 6 |
+| `builder.rs` | 构造与装配 | 5 |
+| `manager.rs` | 长生命周期管理器 | 5 |
+| `callback.rs` | 事件处理程序和钩子 | 4 |
+| `factory.rs` | 工厂函数 | 3 |
+| `pool.rs` | 连接/资源池 | 1 |
+| `mock.rs` | 测试替身（位于 `#[cfg(test)]` 下） | 1 |
+
+`model.rs` 在 `src/` 下**一次都没有出现** —— 聚合根放在主模块文件里，别再新增这个名字。
 
 ### 何时拆分文件
 
@@ -465,59 +489,59 @@ fn load_plugin(path: &Path) -> Result<Plugin> {
 
 **单结构体模块** —— 用于以一个结构体为中心的模块：
 ```
-my_module/
-├── mod.rs      # MyStruct 定义 + 核心 impl
-├── types.rs    # 支持枚举和值对象
-└── error.rs    # MyModuleError 枚举
+src/capability/
+├── provider.rs          # ProviderId, ProviderState, ProviderLifecycle
+├── provider_registry.rs # ProviderRegistry, ProviderActivator
+└── events.rs            # CapabilityEvent
 ```
 
 **领域模型模块** —— 用于具有多种类型的丰富领域模型：
 ```
-memory/
-├── mod.rs      # 模块入口，重新导出
-├── types.rs    # FactType, MemoryLayer, MemoryCategory 等
-├── model.rs    # MemoryFact（聚合根）, CompressionSession
-├── anchor.rs   # ContextAnchor, MemoryEntry（查询结构）
-└── store/      # 持久化实现
-    └── lance/
-        └── facts.rs
+src/memory/context/
+├── mod.rs          # 模块入口，重新导出
+├── enums.rs        # NoteType, FactSource, MemoryLayer, MemoryCategory 等
+├── fact.rs         # MemoryFact（聚合根）
+├── compression.rs  # CompressionResult
+└── paths.rs        # 路径派生
 ```
 
 **Manager Facade** —— 用于将工作委派给子组件的大型 manager：
 ```
-extension/
+src/extension/
 ├── mod.rs          # ExtensionManager（精简 facade，委派）
-├── executor.rs     # PluginExecutor —— 工具/钩子执行
-├── registry.rs     # SkillRegistry —— 技能/命令查找
-├── controller.rs   # ServiceController —— 启动/停止/状态
 ├── loader.rs       # 插件加载和发现
-└── types.rs        # ExtensionConfig, LoadSummary
+├── lifecycle.rs    # 挂载 / 卸载 / 重载
+├── registry/       # 插件注册表
+├── types/          # ExtensionConfig, LoadSummary 等
+├── manifest/       # 清单解析
+└── error.rs        # ExtensionError
 ```
 
 **Startup Builder** —— 用于复杂的初始化序列：
 ```
-bin/aleph_server/commands/
-├── start.rs        # 入口点：解析参数，调用 builder
-└── builder/
-    ├── mod.rs      # ServerBuilder 结构体
-    ├── providers.rs
-    ├── tools.rs
-    ├── gateway.rs
-    ├── channels.rs
-    └── config.rs
+src/bin/aleph-server/commands/start/
+├── mod.rs               # 入口点：解析参数，调用 builder
+├── builder/
+│   ├── mod.rs           # ServerBuilder
+│   ├── agent_init/
+│   ├── handlers/
+│   ├── startup_resources.rs
+│   └── subsystems.rs
+├── capability_init.rs
+└── runtime_warmup.rs
 ```
 
 ### 需要避免的反模式
 
 - **上帝对象：** 一个结构体有 40+ 个方法跨越不相关的关注点。拆分为一个委派给专注子组件的 facade。
 - **扁平脚本：** 一个 700 行的初始化函数。提取一个具有单独 `initialize_*` 方法的 builder。
-- **类型倾倒场：** 一个文件中有 14 个类型和 31 个 impl 块。分离到 `types.rs`、`model.rs` 和领域特定文件中。
+- **类型倾倒场：** 一个文件中有 14 个类型和 31 个 impl 块。分离到 `types.rs` 和领域特定文件中。
 
 ## 迁移指南
 
 ### 添加 Context 模式
 
-1. 识别一个有 5+ 参数的函数（几个可选）
+1. 识别一个有 5+ 参数的函数（几个可选，或有两个以上布尔开关）
 2. 创建一个 context 结构体，包含必需字段 + 可选字段的 `Option`
 3. 实现 `new()`，只有必需参数
 4. 为每个可选参数添加 `with_*` builder 方法
@@ -530,14 +554,14 @@ bin/aleph_server/commands/
 1. 识别一个携带语义含义的原始类型
 2. 创建一个包装该原始的元组结构体
 3. 派生 `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`
-4. 实现 `new()`, `as_str()`（或等效访问器）
-5. 根据需要实现 `Deref`, `Display`, `From<T>`
+4. 实现 `new()`、`as_str()`（或等效访问器）
+5. 根据需要实现 `Display`, `From<T>`；**不要**实现 `Deref`
 6. 更新所有使用点以使用 newtype
 7. 将类型添加到 newtype 目录
 
 ---
 
-## 26.7.x 补充
+## 26.7.x 以来确立的硬约束
 
 ### Rust toolchain 1.99+
 
@@ -568,12 +592,12 @@ bin/aleph_server/commands/
 
 R9 提示词骨架大小校验命令。
 
-### 完整 RPC ~265
+### 完整 RPC 目录
 
-26.7.x 网关暴露 **~265 个 RPC 方法**——开发新方法时参考 [网关方法参考](/docs/zh/gateway/methods)。
+网关当前暴露 **396 个** RPC 方法（口径见 `src/gateway/method_census.rs` 的方法普查）——开发新方法时参考 [网关方法参考](/docs/zh/gateway/methods)。
 
 ### 详见
 
 - [架构红线 R1–R10](/docs/zh/philosophy/redlines) — 硬约束
 - [Harness 哲学](/docs/zh/philosophy/harness-philosophy) — 完整论述
-- [CHANGELOG](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md) — 26.7.x 系列变更
+- [CHANGELOG](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md) — 版本变更记录

@@ -92,7 +92,7 @@ places the prompt-cache breakpoint at the stable/dynamic boundary.
 
 ### Token budget
 
-`TokenBudget::fit_dynamic_suffix` (`src/thinker/prompt_budget.rs`) only trims
+`fit_dynamic_suffix_with_content` (`src/thinker/prompt_budget.rs`) only trims
 the **dynamic** side when the budget is exceeded. The stable prefix is the
 protected floor — persona / tools / security / skills — so the cache stays
 valid even when the dynamic suffix is replaced with a truncation notice.
@@ -251,7 +251,7 @@ as the source of truth.
 - `src/thinker/prompt_layer.rs` — `PromptLayer` trait, `AssemblyPath`,
   `LayerStability`, `LayerInput`
 - `src/thinker/prompt_mode.rs` — `PromptMode::{Full, Compact, Minimal}`
-- `src/thinker/prompt_budget.rs` — `TokenBudget`, `fit_dynamic_suffix`
+- `src/thinker/prompt_budget.rs` — `TokenBudget`, `fit_dynamic_suffix_with_content`
 - `src/thinker/prompt_contract.rs` — `reachable_layers`,
   `scaffold_bytes_ratchet`, `no_sentence_is_stated_twice`
 - `src/thinker/layers/` — Layer implementations (`soul`, `agent_role`,

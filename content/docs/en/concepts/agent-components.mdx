@@ -161,7 +161,7 @@ control flows into the harness.
 
 ## Subagent Surfaces — Kept Separate on Purpose
 
-Originally planned as a single `SubagentOrchestrator` trait with `Fork` /
+Originally planned as a single unified subagent-orchestration trait with `Fork` /
 `Handoff` / `Graph` modes. Withdrawn (P5 retraction) as a zero-consumer
 abstraction — there were no call sites asking for that trait. Today the four
 surfaces coexist orthogonally:

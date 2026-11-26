@@ -94,7 +94,7 @@ pub trait MediaProvider: Send + Sync {
 **Built-in providers:**
 - `ImageMediaProvider` — Routes images to VisionPipeline
 - `TextDocumentProvider` — Extracts text from Markdown, TXT, PDF
-- `AudioStubProvider` — Placeholder for audio processing
+- `AudioMediaProvider` — Forwards audio to a `TranscriptionService` (mp3/wav/ogg/flac/m4a)
 
 ### Format Detection
 
@@ -186,8 +186,7 @@ if !provider.capabilities().image_understanding {
 ```
 
 **Current providers:**
-- `ClaudeVisionProvider` — Returns errors (pending API wiring)
-- `PlatformOcrProvider` — Delegates to Desktop Bridge for OCR
+- `PlatformOcrProvider` — Delegates to Desktop Bridge for OCR (the only vision provider)
 
 ### ImageInput
 

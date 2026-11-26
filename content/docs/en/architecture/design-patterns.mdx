@@ -83,7 +83,7 @@ pub struct HarnessDeps {
 ### Locations
 
 - `HarnessDeps` — `src/harness/deps.rs`
-- `RunContext` — `src/agents/run_context.rs`
+- the task-local agent id context — `src/agents/run_context.rs` (`with_agent_id` / `current_agent_id`)
 
 ---
 
@@ -167,7 +167,7 @@ impl SubscriptionId {
 
 | Required | Recommended | Optional |
 |---|---|---|
-| `Debug`, `Clone`, `PartialEq`/`Eq`, `Hash` | `Display`, `From<T>`, `Deref`, `Serialize`/`Deserialize` | `FromStr`, `FromIterator`, `Default` |
+| `Debug`, `Clone`, `PartialEq`/`Eq`, `Hash` | `Display`, `From<T>`, `Deref`, `Serialize`/`Deserialize` | `FromStr`, `Default` |
 
 ### Newtype catalog
 
@@ -258,27 +258,19 @@ Ergonomic construction of complex objects with optional parameters.
 ### Implementation
 
 ```rust
-// src/agents/run_context.rs (illustrative)
-impl RunContext {
-    pub fn new(/* required params */) -> Self { /* … */ }
-
-    pub fn with_abort_signal(mut self, signal: watch::Receiver<bool>) -> Self {
-        self.abort_signal = Some(signal);
-        self
-    }
-
-    pub fn with_initial_history(mut self, history: impl Into<String>) -> Self {
-        self.initial_history = Some(history);
-        self
-    }
-}
+// src/agents/types.rs — AgentDef's chained builder
+let agent = AgentDef::new("explore", AgentMode::SubAgent)
+    .with_description("locate the implementation and report back")
+    .with_when_to_use("when the code location must be found before editing")
+    .with_system_prompt("You are a read-only explorer agent.")
+    .with_allowed_tools(vec!["file_read".to_string(), "grep".to_string()]);
 
 // src/tool_metadata/types/unified/builders.rs — UnifiedTool's chained builder
 let tool = UnifiedTool::new(id, name, description, source)
     .with_routing_regex("^/foo\\s+")
     .with_routing_strip_prefix(true)
     .with_routing_intent_type("skills")
-    .with_alias("foo")
+    .with_aliases(["foo"])
     .with_visible_channels(vec![ChannelType::Cli, ChannelType::Web])
     .with_sort_order(100);
 

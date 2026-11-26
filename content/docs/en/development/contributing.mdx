@@ -108,7 +108,7 @@ Common Clippy fixes:
 |------|-----------|---------|
 | Crate names | `kebab-case` | `aleph-protocol` |
 | Module names | `snake_case` | `agent_loop` |
-| Types (struct, enum) | `PascalCase` | `RunContext`, `TaskStatus` |
+| Types (struct, enum) | `PascalCase` | `InboundContext`, `TaskStatus` |
 | Functions, methods | `snake_case` | `execute_tool`, `parse_config` |
 | Constants | `SCREAMING_SNAKE_CASE` | `DEFAULT_PORT`, `MAX_RETRIES` |
 | Feature flags | `kebab-case` | `control-plane`, `plugin-wasm` |
@@ -161,7 +161,7 @@ See [Design Patterns](./design-patterns) for detailed patterns. Key rules:
 - Keep files under 500 lines when they contain multiple concepts
 - Separate type definitions (`types.rs`) from business logic
 - Use `mod.rs` as a thin entry point with re-exports, not a dumping ground
-- Gate test doubles (`MockFoo`) under `#[cfg(test)]`
+- Gate test doubles (`MockExecutionAdapter`) under `#[cfg(test)]`
 
 ## Commit Message Conventions
 

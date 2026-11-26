@@ -103,7 +103,7 @@ prompt = ""                       # empty → built-in default ("speech refiner"
 
 > **`provider = "whisperlive"` with self-hosted WhisperLiveKit must be started with `--pcm-input`** — it bypasses FFmpeg decode and feeds PCM directly; without that flag, the server pipes headerless PCM into FFmpeg, which decodes nothing — **the stream connects, no transcript ever arrives, and the Panel silently strikes out to the batch path after two empty utterances**. The Aleph end fixed `audio_format = int16` in the handshake, so s16le / 16 kHz / mono frames flow straight to the backend.
 
-`pcm_input` is not a `StreamingConfig` field; it is a **server-side** WhisperLiveKit startup parameter. Aleph's audio config's `sample_rate` determines the Panel-side downsampling rate.
+`--pcm-input` is not a `StreamingConfig` field; it is a **server-side** WhisperLiveKit startup parameter. Aleph's audio config's `sample_rate` determines the Panel-side downsampling rate.
 
 ---
 

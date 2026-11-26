@@ -41,19 +41,11 @@ The current discovery path is:
 
 This mechanism optimizes presentation and context cost; it does not replace permission checks. A hidden tool can still be rejected at execution time.
 
-## Progress Callbacks
+## Progress Notifications
 
-`ToolProgressCallback` is defined at `src/builtin_tools/mod.rs:272` and emits tool-start, completion, and streaming-chunk events:
+The built-in tool layer no longer has a progress-callback trait. `src/builtin_tools/mod.rs:308` keeps only three legacy no-op functions — `notify_tool_start`, `notify_tool_result`, and `notify_tool_streaming_chunk`. They have no consumer and exist purely so the roughly 85 historical call sites stay compile-clean.
 
-```rust
-pub trait ToolProgressCallback: Send + Sync {
-    fn on_tool_start(&self, tool_name: &str, args_summary: &str);
-    fn on_tool_result(&self, tool_name: &str, result_summary: &str, success: bool);
-    fn on_tool_streaming_chunk(&self, tool_name: &str, chunk: &str);
-}
-```
-
-The global handler is stored in `Mutex<Option<Arc<...>>>`; streaming callbacks clone the handler before invoking it outside the lock.
+Tool progress now flows through the gateway event bus: `notify_tool_result` → `GatewayEventEmitter`, wired from `src/executor/builtin_registry/registry/tool_registry_impl.rs`.
 
 ## Code Location
 

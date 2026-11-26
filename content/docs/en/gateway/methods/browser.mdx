@@ -1,31 +1,82 @@
 ---
 title: "browser.*"
-description: "Browser tools versus Gateway configuration RPCs"
+description: "Browser viewer RPCs versus browser builtin tools"
 ---
 
-There is **no `browser.*` JSON-RPC method** in the current `aleph-server` runtime. The browser automation pipeline is implemented as **builtin tools** (`browser_navigate`, `browser_click`, `browser_type`, `browser_snapshot`, etc.) consumed by the agent loop, not as gateway RPCs. `src/gateway/handlers/browser_config.rs` exposes only the configuration namespace `browser_config.*`; the CDP driver itself lives in `src/browser/`.
+The `browser.*` namespace registers **4** JSON-RPC methods in the current `aleph-server` runtime. All of them serve the browser viewer: issuing and revoking viewer grants, deciding live resources, and listing your own live resources. Browser automation itself (navigation, clicking, typing, screenshots) is **not** JSON-RPC — those are builtin tools invoked by the agent loop.
+
+Viewer grant issuance and resource decisions live in the core (`src/browser/live/`); the gateway layer only adapts identity and parameters (`src/gateway/handlers/browser_viewer.rs`). The configuration namespace is a separate `browser_config.*` (see [config](./config)).
 
 
 ## Methods
 
-The table lists agent-side built-in tools, **not Gateway RPCs**. See `src/builtin_tools/browser_tools/`; clients invoke the agent loop through `chat.send` / `agent.run`.
+| Method | Class | Description |
+|--------|-------|-------------|
+| `browser.viewer.grant.issue` | Open | Issue a viewer grant for a live resource; returns a launchable URL |
+| `browser.viewer.grant.revoke` | Open | Revoke an issued viewer grant |
+| `browser.viewer.resource.decide` | Open | Decide a live resource (allow or refuse) |
+| `browser.viewer.resource.list` | Open | List your own unexpired live resources |
 
-| Method | Description |
-|--------|-------------|
-| `browser_navigate` | (Tool) Navigate the current tab to a URL. |
-| `browser_click` | (Tool) Click an element by selector, ref, or viewport coordinates. |
-| `browser_type` | (Tool) Type text into an input element. |
-| `browser_screenshot` | (Tool) Capture a screenshot of the page or a specific element. |
-| `browser_evaluate` | (Tool) Execute a JavaScript expression and return the result. |
-| `browser_snapshot` | (Tool) Take an ARIA accessibility snapshot of the page. |
+All four require a **verified RPC user** (identity established during the handshake). Without one, the server returns `PERMISSION_DENIED` with the message `denied`; params must be absent or `{}`.
 
-**Configuration RPCs versus tools**:
+### browser.viewer.grant.issue
 
-- `browser_config.get` / `browser_config.update` — read or write the `[browser]` config section (`mode`, `headless`, `cdp_port`).
-- `browser_navigate`, `browser_click`, `browser_type`, `browser_evaluate`, `browser_snapshot` are dispatched by the LLM via the agent loop, not over the JSON-RPC surface.
+Request params `IssueViewerGrantRequest` (`shared/protocol/src/browser_live.rs`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `resource_id` | string | The opaque id of the live resource to view |
+| `permissions` | array | Permission bits: `Frames`, `HumanInput`, `Navigate` |
+
+Response `IssueViewerGrantResponse`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `launch_url` | string | Open this URL to enter the viewing session |
+| `grant_id` | string | Grant id, used later for revocation |
+| `expires_at_ms` | number | Expiry timestamp (Unix milliseconds) |
+
+### browser.viewer.grant.revoke
+
+Request params `RevokeViewerGrantRequest`: `grant_id` (string). Response `RevokeViewerGrantResponse`: `revoked` (boolean).
+
+### browser.viewer.resource.decide
+
+Request params `DecideResourceRequest`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `resource_id` | string | The live resource to decide |
+| `expected_revision` | number | The revision the caller saw; it must equal the server's current revision |
+| `decision` | enum | `Safe` (allow) or `Refused` (deny) |
+
+Params use `deny_unknown_fields`: binding, user, target, and expiry are decided server-side, so a client that supplies them is rejected. A revision mismatch is treated as a refusal.
+
+### browser.viewer.resource.list
+
+Params are empty (`ListResourcesRequest` is an empty struct with `deny_unknown_fields`). The response is a snapshot of the caller's own unexpired live resources — both `Safe` and `Pending` resources appear, while a `Refused` resource is never live. The list is ordered by `resource_id`.
+
+## Builtin tools (not RPCs)
+
+Browser automation is implemented as builtin tools; definitions live in `src/builtin_tools/browser_tools/`, and clients drive the agent loop through `chat.send` / `agent.run`:
+
+| Tool | Description |
+|------|-------------|
+| `browser_navigate` | Navigate the current tab to a URL |
+| `browser_click` | Click an element by selector, ref, or viewport coordinates |
+| `browser_type` | Type text into an input element |
+| `browser_screenshot` | Capture a screenshot of the page or a specific element |
+| `browser_evaluate` | Execute a JavaScript expression and return the result |
+| `browser_snapshot` | Take an ARIA accessibility snapshot of the page |
+
+These tools are dispatched by the model through the agent loop, not over the JSON-RPC surface.
+
+## Configuration RPCs
+
+`browser_config.get` / `browser_config.update` read and write the `[browser]` config section (`BrowserSystemConfig`, `src/browser/profile.rs`): `profiles`, `policy`, `playwright_cli`, `chrome_mcp`, `runtime`, `obscura`, `default_engine`, `cdp_command_timeout_secs`. A single profile's fields (`ProfileConfig`) are `browser`, `headless`, `proxy`, `user_data_dir`, `extra_args`, `idle_timeout_secs`, `driver`, `engine`, `max_tabs_per_profile`, `tab_idle_timeout_secs`.
 
 ## See Also
 
 - [Methods Reference](/docs/en/gateway/methods) -- All currently registered namespaces
-- [browser_config.*](#) -- Browser configuration (lives under `config_handlers` in this repo)
+- [config](./config) -- The `browser_config.*` configuration methods
 - [agent.*](/docs/en/gateway/methods/agent) -- Where browser tools are dispatched

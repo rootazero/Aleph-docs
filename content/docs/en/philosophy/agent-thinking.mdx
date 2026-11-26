@@ -47,7 +47,7 @@ The Act stage executes the plan through the tool system:
 - **Deduplication and memo**: a duplicate `(name, args)` within or across batches reuses the first result
 - **Response generation**: emit text, code, or structured output for the user
 - **State modification**: update memory, session state, the command signing ledger (`src/builtin_tools/command_ledger.rs`)
-- **Subtask orchestration**: spawn child agents via `FlowRunTool` / Teams
+- **Subtask orchestration**: spawn child agents via the `subagent` builtin tool / Teams
 
 All actions go through the security guard system. Potentially-dangerous operations require explicit approval (Ask / Auto / Full three-tier exec permissions + the `[sandbox.command_policy]` hard floor).
 

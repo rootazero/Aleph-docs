@@ -32,10 +32,10 @@ Gateway / Agent Loop
    consolidate / drift / synthesis / lint / decay / digest
     │
     ▼
- queries: NoteFactRetrieval.retrieve() → ScoredFact<MemoryFact>
+ queries: NoteFactRetrieval.retrieve() → ScoredFact
 ```
 
-Gateway writes conversation turns to `raw_memories` through `RawMemoryStore`. `CompressionService` periodically drains unprocessed rows, asks an LLM to extract durable facts, and writes them back as markdown notes under `~/.aleph/memory/note/{agent}/{category}/`. `NoteIndexer` keeps the SQLite side (index, wikilinks, FTS5, per-dimension vec0 tables) in sync on every write. Offline, the Dream Daemon consolidates clusters, resolves drift, synthesizes insights, lints schemas, decays weak notes, and emits digests. Queries flow through `NoteFactRetrieval` and return `ScoredFact<MemoryFact>`.
+Gateway writes conversation turns to `raw_memories` through `RawMemoryStore`. `CompressionService` periodically drains unprocessed rows, asks an LLM to extract durable facts, and writes them back as markdown notes under `~/.aleph/memory/note/{agent}/{category}/`. `NoteIndexer` keeps the SQLite side (index, wikilinks, FTS5, per-dimension vec0 tables) in sync on every write. Offline, the Dream Daemon consolidates clusters, resolves drift, synthesizes insights, lints schemas, decays weak notes, and emits digests. Queries flow through `NoteFactRetrieval` and return `ScoredFact`.
 
 ### Cognitive-Layer View
 
@@ -111,7 +111,7 @@ pub trait NoteFactRetrieval: Send + Sync {
         query: &str,
         agent_id: &str,
         limit: usize,
-    ) -> Result<Vec<ScoredFact<MemoryFact>>, AlephError>;
+    ) -> Result<Vec<ScoredFact>, AlephError>;
 }
 ```
 
@@ -124,19 +124,16 @@ Query
   └── RRF Fusion → unified ranked list
 ```
 
-Reciprocal Rank Fusion (RRF): `RRF_score = Σ 1 / (k + rank_i)`, with `k = 60`.
+Reciprocal Rank Fusion (RRF): `RRF_score = Σ 1 / (k + rank_i + 1)`, with `k = 60`; FTS hits get an extra `bm25_bonus_weight` lift.
 
 ### Scoring Pipeline
 
 | Stage | Description | Default |
 |---|---|---|
-| `cosine_rerank` | Blend vector-search score with fresh cosine similarity | enabled |
-| `recency_boost` | Additive boost for recently created facts | +0.1 |
-| `length_normalization` | Penalize very long content | enabled |
-| `time_decay` | Exponential decay by age, floor 0.5 | half-life 30 days |
-| `hard_min_score` | Drop candidates below threshold | 0.35 |
-| `mmr_diversity` | Maximal Marginal Relevance — defer near-duplicates to tail | λ = 0.5 |
-| `reinforcement` | Hot-surfacing from `recall_signals` counts | enabled |
+| `rerank` | Cross-encoder rerank, blended with the fused score via `rerank_weight`; failures keep the original order | only when a reranker is configured |
+| `recency_decay` | Exponential recency reweight (`0.5^(age/half_life)`) | on, half-life 90 days, weight 0.3 |
+| `reinforcement` | Hot-surfacing from `recall_signals` counts (`score*(1+w*ln(1+hits))`) | on, weight 0.3 |
+| `mmr_diversity` | Maximal Marginal Relevance — defer near-duplicates to tail | off, λ = 0.7 |
 
 `memory.retrieve_with_trace` returns the per-stage `StageTrace` (telemetry) so a debugging panel can see exactly where a fact was boosted, demoted, or dropped. The trace observes the same pipeline production runs.
 

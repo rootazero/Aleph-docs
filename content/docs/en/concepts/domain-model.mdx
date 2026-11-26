@@ -58,7 +58,7 @@ pub trait ValueObject: Eq + Clone {}
 
 ValueObjects have no identity — they are pure data. Changing any attribute creates a new ValueObject. **Note: the actual trait does not carry a `validate()` method** — validation lives in the constructing function (parse, don't validate) or in the use-site that needs the rule, not in the trait contract.
 
-**Examples:** `TaskStatus`, `FactType`, `GuestScope`, `FileContent`
+**Examples:** `TaskStatus`, `NoteType`, `GuestScope`, `FileContent`
 
 ---
 
@@ -116,7 +116,7 @@ Aleph's domain is organized into bounded contexts, each with its own ubiquitous 
 
 | Context | Key Types | Location |
 |---|---|---|
-| **Memory** | `MemoryFact`, `ContextAnchor`, `NoteRelationArg` | `src/memory/` |
+| **Memory** | `MemoryFact`, `FactSource`, `NoteRelationArg` | `src/memory/` |
 | **Identity** | `IdentityContext`, `GuestScope`, `Role` | `shared/protocol/src/auth.rs`, `src/gateway/session_manager/` |
 | **Skill** | `TrustLevel`, `ThreatLevel` | `src/skill/guard.rs` |
 | **A2A** | `Credentials`, `FileContent`, `SecurityScheme` | `src/a2a/domain/` |
@@ -125,7 +125,7 @@ Aleph's domain is organized into bounded contexts, each with its own ubiquitous 
 | **Artifact** | `ArtifactRecord` | `src/artifacts/store.rs` |
 | **Team** | `TaskStatus`, `ArtifactType` | `src/teams/artifacts.rs` |
 
-Cross-context references go through explicit mapping layers — `IdentityContext` lives in `aleph_protocol` (cross-process), while `src/memory/` carries its own `MemoryFact` and `ContextAnchor`; the two do not share types directly.
+Cross-context references go through explicit mapping layers — `IdentityContext` lives in `aleph_protocol` (cross-process), while `src/memory/` carries its own `MemoryFact` and `FactSource`; the two do not share types directly.
 
 ---
 

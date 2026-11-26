@@ -141,13 +141,13 @@ The Memory context manages the agent's persistent knowledge — storing facts, r
 | Type | DDD Role | Location |
 |------|----------|----------|
 | `MemoryFact` | AggregateRoot | `src/memory/context/fact.rs` |
-| `ContextAnchor` | ValueObject | `src/memory/context/mod.rs` |
+| `FactSource` | ValueObject (enum) | `src/memory/context/enums.rs` |
 | `NoteType` | ValueObject (enum) | `src/memory/context/enums.rs` |
 
-> **Correction**: the paths and type names above are the real locations in the source tree (`memory/context` is a directory, not a file; the type is `NoteType`, not `FactType`). `MemoryFact`'s `impl Entity` and `impl AggregateRoot` live in `src/memory/context/fact.rs`.
+> **Correction**: the paths and type names above are the real locations in the source tree (`memory/context` is a directory, not a file; the fact type is `NoteType`). `MemoryFact`'s `impl Entity` and `impl AggregateRoot` live in `src/memory/context/fact.rs`.
 
 The `MemoryFact` aggregate root ensures that:
-- Facts are properly anchored to their context (conversation, topic, domain), expressed via `ContextAnchor`.
+- Facts are properly anchored to their source (conversation, topic, domain), expressed via `FactSource`.
 - Fact types are consistent and valid, gated by the `NoteType` enum.
 - Compression operations preserve essential information (`src/memory/compression/` + `session_compactor/`).
 

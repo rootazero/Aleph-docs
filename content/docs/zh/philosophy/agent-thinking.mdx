@@ -47,7 +47,7 @@ Act 阶段通过工具系统执行计划：
 - **去重与备忘**：相同 `(name, args)` 在批次内或跨批次的二次调用复用首次结果
 - **响应生成**：为用户生成文本、代码或结构化输出
 - **状态修改**：更新记忆、会话状态、命令签名账本（`src/builtin_tools/command_ledger.rs`）
-- **子任务编排**：通过 `FlowRunTool` / Team 创建子代理
+- **子任务编排**：通过 `subagent` 内建工具 / Team 创建子代理
 
 所有操作都通过安全守卫系统。潜在危险的操作在执行前需要显式审批（Ask / Auto / Full 三级执行权限 + `[sandbox.command_policy]` 硬底）。
 

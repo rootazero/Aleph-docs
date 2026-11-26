@@ -163,21 +163,26 @@ Loop-exit causes are not an executor type: they are `TerminateReason` in `src/or
 
 ---
 
-## Middleware stack
+## Approval Gate Chain
 
-Every tool call passes through the standard middleware stack in `src/tools/scoped/`:
+> **History.** Earlier revisions of this page described a five-layer decorator stack (`ExecAuditLayer` → `PermissionLayer` → `ContextRuleLayer` → `TimeoutLayer` → `CoreDispatch`). That stack no longer exists in the source tree; the same responsibilities now live in the single `ScopedToolService` under `src/tools/scoped/`.
+
+Every tool call passes through the same gate chain in `ScopedToolService::execute_gated` (`src/tools/scoped/dispatch.rs`):
 
 ```
-ExecAuditLayer → PermissionLayer → ContextRuleLayer → TimeoutLayer → CoreDispatch
+name canonicalization → canonical entry capture → capability runtime admission → rule chain → operator gate → confirmation gate → extension hooks → dispatch
 ```
 
-| Layer | Purpose |
-|-------|---------|
-| `ExecAuditLayer` | Audit logging |
-| `PermissionLayer` | Permission checks (`SmartFilter`) |
-| `ContextRuleLayer` | Context-based rules |
-| `TimeoutLayer` | Timeout enforcement |
-| `CoreDispatch` | Innermost layer holding the `ToolRegistry` |
+| Gate | Purpose | Key symbol |
+|---|---|---|
+| Name canonicalization | Resolves the `.`/`_` alias forms to the registered name *before* every later gate is evaluated | `resolve` |
+| Canonical entry capture | Captures the canonical entry and the backend lease, then checks the projection source and MCP visibility | `capture_entry`, `resolve_with_capture_for_call` |
+| Capability runtime admission | Runtime constraint-attachment admission (fact snapshot, lease agreement, constraint evaluation) | `admit_capability_runtime` |
+| Rule chain | Decides — and names — what gated the call (policy deny, side question, tool-declared confirmation, destructive arguments, plan mode) | `GateRule` (`src/tools/scoped/gate_chain.rs`) |
+| Operator gate | Calls that need operator approval fail closed | `check_operator_gate` |
+| Confirmation gate | Calls that need user confirmation park until a receipt arrives | `check_confirmation_gate` |
+| Extension hooks | An extension's `BeforeToolCall` interceptor can block, deny, or rewrite the input | `run_before_tool_hooks` |
+| Dispatch | Hits the target and runs it, producing a `ToolOutput` | `route_and_execute` |
 
 The slash fast path (`execute_slash_command_fast_path`), `tools.invoke`, and the background-continuation bypass are **all** forced through the `src/tools/scoped/` approval gate — this is the 26.7.15+ fix that makes the approval dialog see the actual command.
 
@@ -188,7 +193,7 @@ The slash fast path (`execute_slash_command_fast_path`), `tools.invoke`, and the
 - `code_exec`, `bash_exec` route through the Sandbox layer
 - `Sandbox` trait → `WorkspaceSandbox` → `OsSandboxDriver`
 - Per-session workspace at `~/.aleph/workspaces/{hash(session_id)}/`
-- Tool-level permissions (`SmartFilter`) gate *whether* a call runs
+- Tool-level permissions (`[policies.tool_permissions]` and `exec_tier`) gate *whether* a call runs
 - The sandbox's capability check gates *what the subprocess can do* once allowed
 
 ---

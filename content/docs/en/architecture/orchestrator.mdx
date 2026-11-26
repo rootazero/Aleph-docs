@@ -67,7 +67,7 @@ The orchestrator **does not** call the LLM, **does not** invoke tools, **does no
 | `priority` | Dispatch priority (0-255, default 128) |
 | `overrides` | `FlowOverrides { max_iterations, context_mode, extra_system_prompt }` |
 
-`FlowRequest` (runtime) merges request-level overrides with the declarative `FlowSpec` and carries optional `tool_service` / `trace_sink` / `interaction_manifest` / `sandbox_override` / `workspace_override` / `max_iterations_override` / `transient_context` / `think_level` / `envelope` / `model_directive` so the `HarnessRunner` implementation can override defaults per call.
+`FlowRequest` (runtime) merges request-level overrides with the declarative `FlowSpec` and carries optional `tool_service` / `trace_sink` / `interaction_manifest` / `workspace_override` / `max_iterations_override` / `transient_context` / `think_level` / `envelope` / `model_directive` so the `HarnessRunner` implementation can override defaults per call.
 
 ---
 
