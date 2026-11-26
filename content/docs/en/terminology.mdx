@@ -95,6 +95,10 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Memo / Cross-batch Dedup** | 备忘 / 跨批次去重 | Reuse of the first result for a duplicate `(name, args)` within or across batches |
 | **session_compact** | 会话压缩 | `session.compact` tool — equivalent to `/compact` available on every surface |
 | **Slash Command** | 斜杠命令 | Reference-driven single-source alias table supporting `/help` and friendly shortcuts |
+| **Background Job** | 后台作业 | The `background: true` mode of `bash` — a managed command that returns a `process_id` right away; what it skips is the 180-second foreground ceiling, not the sandbox pipeline |
+| **Process Registry** | 进程登记簿 | `src/builtin_tools/process_registry.rs` — the source of truth for background job state; isolated per session, bounded in size, in memory only, lost on restart |
+| **Content Gate** | 内容门 | `src/builtin_tools/partial_output.rs` — the one gate background job output passes before `poll` or `wait` hands it to the model |
+| **Controlled JSONL** | 受控 JSONL | The planned controlled live input shape: one JSON record per write, each separately approved; not implemented yet |
 
 ## Extensions
 
@@ -310,6 +314,11 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `PanelProjection` | Panel Projection |
 | `PanelLoader` | Panel Loader |
 | `PanelSdk` | Panel SDK |
+| `src/builtin_tools/bash_exec.rs` | Builtin tool `bash` |
+| `src/builtin_tools/process_registry.rs` | Process registry / Background jobs |
+| `src/builtin_tools/partial_output.rs` | Content gate |
+| `src/builtin_tools/process_journal.rs` | Process journal |
+| `src/sandbox/live_tail.rs` | Live tail |
 
 ## Deprecated Terms (Do Not Use)
 
@@ -340,6 +349,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | `aleph.svg` hardcoded static path | `core_path("/aleph.svg")` | Follows the core migration |
 | Hard stops outside `max_iterations` | `max_iterations` + tool-loop verifier only | R10 forbids deterministic completion judgments inside the loop |
 | Ephemeral session (former model) / dual-layer session | `SessionEventRecord` + `TurnId` | SessionEvent system |
+| `bash_exec` | `bash` | Only the module file name `src/builtin_tools/bash_exec.rs`; the registered tool name is `bash`, and `bash_exec` should not appear in the docs |
 
 ## See Also
 

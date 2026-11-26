@@ -95,6 +95,10 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Memo / Cross-batch Dedup** | 备忘 / 跨批次去重 | 在一个批次或跨批次内对相同 `(name, args)` 的二次调用复用首次结果 |
 | **session_compact** | 会话压缩 | `session.compact` 工具——等价于每个面都能用的 `/compact` |
 | **Slash Command** | 斜杠命令 | 由 reference-driven 单源别名表支持的 `/help` 等命令 |
+| **Background Job** | 后台作业 | `bash` 的 `background: true` 模式——立即返回 `process_id` 的受管命令；它绕开的是 180 秒前台上限，沙箱管道照旧 |
+| **Process Registry** | 进程登记簿 | `src/builtin_tools/process_registry.rs`——后台作业的状态真值源；按会话隔离、条目有上限、纯内存，重启即失 |
+| **Content Gate** | 内容门 | `src/builtin_tools/partial_output.rs`——后台作业的输出在被 `poll` / `wait` 交给模型之前必须通过的唯一闸门 |
+| **Controlled JSONL** | 受控 JSONL | 规划中的受控实时输入形态：每次写入一条 JSON 记录并单独审批；尚未实现 |
 
 ## 扩展
 
@@ -310,6 +314,11 @@ description: "Aleph 概念的标准化术语和翻译"
 | `PanelProjection` | Panel Projection |
 | `PanelLoader` | Panel Loader |
 | `PanelSdk` | Panel SDK |
+| `src/builtin_tools/bash_exec.rs` | 内置工具 `bash` |
+| `src/builtin_tools/process_registry.rs` | 进程登记簿 / 后台作业 |
+| `src/builtin_tools/partial_output.rs` | 内容门 |
+| `src/builtin_tools/process_journal.rs` | 进程流水 |
+| `src/sandbox/live_tail.rs` | 实时尾随 |
 
 ## 已弃用术语（请勿使用）
 
@@ -340,6 +349,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | `aleph.svg` 静态路径硬编码 | `core_path("/aleph.svg")` | 跟随核心迁移 |
 | `max_iterations` 之外硬停 | 仅 `max_iterations` + 工具循环验证器 | R10 禁止循环内确定性完成判断 |
 | Ephemeral session (former model) / 双层 session | `SessionEventRecord` + TurnId | SessionEvent 体系 |
+| `bash_exec` | `bash` | 这只是模块文件名 `src/builtin_tools/bash_exec.rs`；注册的工具名是 `bash`，文档里不该出现 `bash_exec` |
 
 ## 另请参阅
 
