@@ -40,6 +40,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_baseline import load_baseline, split_violations, update_section  # noqa: E402
 
 CENSUS_RE = re.compile(r'\(\s*"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"\s*,\s*Class::(Admin|Open)')
+# 部分 census 条目不是字面量，而是协议 crate 里的常量，例如
+# `aleph_protocol::chat_transcript::CHAT_TRANSCRIPT_DETAILS_METHOD`。
+# 只认字面量的门会让这类方法凭空消失：注册了，却永远不会被判成「已注册未文档化」。
+CENSUS_CONST_RE = re.compile(
+    r'\(\s*([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\s*,\s*Class::(Admin|Open)\s*,?\s*\)',
+    re.S,
+)
+CONST_VALUE_RE = re.compile(r'pub\s+const\s+([A-Z][A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]+)"')
 DOC_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)`")
 NON_METHOD_SUFFIXES = (".rs", ".toml", ".md", ".mdx", ".json", ".js", ".ts", ".tsx", ".yml", ".yaml")
 # 这些前缀是**源码/文档路径**，不是 RPC 方法名。注意 `config.` 不在此列：
@@ -132,6 +140,25 @@ def code_literals(repo: Path) -> set[str]:
     return found
 
 
+def protocol_constants(repo: Path) -> dict[str, str]:
+    """`pub const NAME: &str = "..."` 的常量名 → 字符串值。
+
+    只扫描协议与实现 crate 的源码目录；常量值即 RPC 方法名。
+    """
+    found: dict[str, str] = {}
+    for root in ("shared", "src", "interfaces", "desktop", "crates"):
+        base = repo / root
+        if not base.exists():
+            continue
+        for path in base.rglob("*.rs"):
+            if ".worktrees" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for name, value in CONST_VALUE_RE.findall(text):
+                found.setdefault(name, value)
+    return found
+
+
 def census_methods(repo: Path) -> dict[str, str]:
     path = repo / "src" / "gateway" / "method_census.rs"
     if not path.exists():
@@ -140,6 +167,13 @@ def census_methods(repo: Path) -> dict[str, str]:
     found: dict[str, str] = {}
     for name, cls in CENSUS_RE.findall(text):
         found[name] = cls.lower()
+    constants = protocol_constants(repo)
+    for path_expr, cls in CENSUS_CONST_RE.findall(text):
+        const_name = path_expr.split("::")[-1]
+        value = constants.get(const_name)
+        if value is None:
+            continue
+        found.setdefault(value, cls.lower())
     return found
 
 
