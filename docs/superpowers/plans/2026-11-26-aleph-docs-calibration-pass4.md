@@ -33,9 +33,9 @@
 3. `EXEMPT_NAMES` 豁免清单，每条写明理由（dev-dependency crate、示例假想名、内部诊断工具）。
 4. 与 G1b 同款 CLI：`--repo/--docs/--baseline/--files/--files-from/--raw/--json/--update-baseline`，
    基线段名 `tool_ghost` / `tool_missing`，复用 `scripts/gate_baseline.py`。
-- [ ] **Step 1**: 写脚本，跑 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`。
-- [ ] **Step 2**: 核对 census 数量与名单（应为 209 / 幽灵 9 / 未登记 24 / 豁免 6）。
-- [ ] **Step 3**: 用 `--json` 导出完整清单存档到 `/tmp`（不入库），作为 S1–S4 的底账。
+- [x] **Step 1**: 写脚本，跑 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`。
+- [x] **Step 2**: 核对 census 数量与名单（应为 209 / 幽灵 9 / 未登记 24 / 豁免 6）。
+- [x] **Step 3**: 用 `--json` 导出完整清单存档到 `/tmp`（不入库），作为 S1–S4 的底账。
 **提交**：`docs(gates): add the builtin tool name census gate`
 
 ### Task S0.2 接入总门 + 基线棘轮 + 本轮台账
@@ -49,9 +49,9 @@
 2. `baseline.json` 两段先写当前实测集合（幽灵 9 + 未登记 24），让门在修复过程中保持绿；
    **只棘轮已知旧债**，任何新幽灵立即让门变红。
 3. 写本 ROADMAP 与执行计划。
-- [ ] **Step 1**: 改 `run_gates.py` 与 `baseline.json`，跑 `python3 scripts/run_gates.py --repo ../Aleph`，
+- [x] **Step 1**: 改 `run_gates.py` 与 `baseline.json`，跑 `python3 scripts/run_gates.py --repo ../Aleph`，
       确认七门全绿（G5 不带 `--build` 时不跑）。
-- [ ] **Step 2**: 写 ROADMAP 与本文。
+- [x] **Step 2**: 写 ROADMAP 与本文。
 **提交**：`docs(gates): wire the tool name gate into the gate runner and baseline`
 ---
 ## S1 — 内置工具目录校准
@@ -75,11 +75,11 @@
 6. 目录补齐属于目录本身的真实工具（按 S4 的归类结果落位）：`workspace_manage`、`project_manage`、
    `runtime_manage`、`context_plugin`、`tool_usage`、`agent_update`、`agent_unbind`、
    `hub_catalog_search`、`browser_companion`、`session_decompress` 等。
-- [ ] **Step 1**: 按 1–5 改 zh/en 两页，保持标题骨架一致（G4 要求）。
-- [ ] **Step 2**: 跑 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`，
+- [x] **Step 1**: 按 1–5 改 zh/en 两页，保持标题骨架一致（G4 要求）。
+- [x] **Step 2**: 跑 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`，
       幽灵名应从 9 降到 0（`forget` 在 S2 修，`bash_exec` 的架构页调用点在 S2 修——本阶段先保证
       目录页不再宣称幽灵名）。
-- [ ] **Step 3**: 跑 `python3 scripts/run_gates.py --repo ../Aleph`。
+- [x] **Step 3**: 跑 `python3 scripts/run_gates.py --repo ../Aleph`。
 **提交**：`docs(phase-S1): calibrate the builtin tool catalogue`
 
 ### Task S1.2 `tools/overview.mdx` + `concepts/builtin-tools.mdx`（zh + en）
@@ -92,8 +92,8 @@
 1. `tools/overview.mdx` 的「内置」一行里 `bash_exec` 改为 `bash`。
 2. `concepts/builtin-tools.mdx` 复核「什么算内置工具」的定义，与代码的目录/注册表外/按请求注入
    三层结构对齐（`subagent`、`tool_search`、`get_tool_schema` 属于后两层）。
-- [ ] **Step 1**: 改 zh/en 四页。
-- [ ] **Step 2**: 跑 G1d 与全门。
+- [x] **Step 1**: 改 zh/en 四页。
+- [x] **Step 2**: 跑 G1d 与全门。
 **提交**：`docs(phase-S1): align the builtin tool concept pages`
 ---
 ## S2 — 工具调用面校准
@@ -118,10 +118,10 @@
    线上字段名是 `timeout`（schemars rename），serde 仍接受 `timeout_seconds`。
 5. `architecture/tools.mdx` 的 `subagent` 行核对：`subagent` 是真实工具（目录外注册，
    `src/agents/subagent_tool/mod.rs` 的 `SUBAGENT_TOOL_NAME`），描述「不在定义目录里」成立，保留并补出处。
-- [ ] **Step 1**: 改 zh/en 六页。
-- [ ] **Step 2**: 跑 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`，
+- [x] **Step 1**: 改 zh/en 六页。
+- [x] **Step 2**: 跑 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`，
       幽灵名应降到 0。
-- [ ] **Step 3**: 跑全门。
+- [x] **Step 3**: 跑全门。
 **提交**：`docs(phase-S2): calibrate tool call sites and argument tables`
 
 ### Task S2.2 沙箱与执行架构页（zh + en）
@@ -136,8 +136,8 @@
    `Arc<dyn Sandbox>`，经 `SandboxCommand` 过接缝，driver 为 `OsSandboxDriver`。
 3. `gateway/methods/memory.mdx` 的记忆工具表里的 `forget` 删除（代码里没有这个工具；删除事实走
    `remember` 的 Remove 操作），zh/en 同步。
-- [ ] **Step 1**: 改 zh/en 八页 + `gateway/methods/memory.mdx` 两页。
-- [ ] **Step 2**: 跑 G1d（幽灵应为 0）与全门。
+- [x] **Step 1**: 改 zh/en 八页 + `gateway/methods/memory.mdx` 两页。
+- [x] **Step 2**: 跑 G1d（幽灵应为 0）与全门。
 **提交**：`docs(phase-S2): align sandbox and executor pages with the registered tool names`
 ---
 ## S3 — 后台作业与执行现状补齐
@@ -163,8 +163,8 @@
      `src/sandbox/live_tail.rs` 负责实时尾随；
    - 子进程环境变量 `ALEPH_SESSION_ID`、`ALEPH_TOOL_NAME=bash`。
 2. `architecture/sandbox.mdx` 补一句：后台作业同样走沙箱接缝，后台只是不阻塞调用方。
-- [ ] **Step 1**: 改 zh/en 四页，事实逐条对源码。
-- [ ] **Step 2**: 跑全门 + `scripts/anchor_check.py` 复核新增路径锚点。
+- [x] **Step 1**: 改 zh/en 四页，事实逐条对源码。
+- [x] **Step 2**: 跑全门 + `scripts/anchor_check.py` 复核新增路径锚点。
 **提交**：`docs(phase-S3): document the background job surface of the bash tool`
 ---
 ## S4 — 未登记工具逐个落位或豁免
@@ -194,9 +194,9 @@
 2. 每个落位都要 zh/en 同批改，保持标题骨架一致。
 3. 收尾时 `python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw` 的未登记数降到 0
    （豁免项除外），棘轮 `tool_missing` 段。
-- [ ] **Step 1**: 逐个定性，产出「工具 → 落位页 / 豁免」对照表。
-- [ ] **Step 2**: 改页面（zh + en）。
-- [ ] **Step 3**: 跑 G1d 与全门，棘轮基线。
+- [x] **Step 1**: 逐个定性，产出「工具 → 落位页 / 豁免」对照表。
+- [x] **Step 2**: 改页面（zh + en）。
+- [x] **Step 3**: 跑 G1d 与全门，棘轮基线。
 **提交**：`docs(phase-S4): place or exempt every registered builtin tool`
 ---
 ## S5 — 未合并分支能力标「规划中」
@@ -221,8 +221,8 @@
    - **受控实时 JSONL stdin**：设计稿 `docs/superpowers/specs/2026-11-26-shell-capability-jsonl-design.md`，
      尚未实现。
 2. 横幅里点明这些能力**不在 `main`**（`main` == `7fb540b44`），当前 `bash` 工具的现状仍以 S3 写的为准。
-- [ ] **Step 1**: 改 zh/en 六页。
-- [ ] **Step 2**: 跑全门（注意 G1/G1c 的免检规则：横幅行需带完成态/规划态标记）。
+- [x] **Step 1**: 改 zh/en 六页。
+- [x] **Step 2**: 跑全门（注意 G1/G1c 的免检规则：横幅行需带完成态/规划态标记）。
 **提交**：`docs(phase-S5): mark unmerged shell capability work as planned`
 ---
 ## S6 — 术语 · 导航 · changelog
@@ -239,8 +239,8 @@
    `get_tool_schema`）。
 2. changelog 补 2026-11 第四轮条目（zh + en），带真实提交号。
 3. 复核 `meta.json` 收录完整（G3 结构门会兜底，但导航顺序按逻辑微调）。
-- [ ] **Step 1**: 改四页 + 必要时 `meta.json`。
-- [ ] **Step 2**: 跑全门（含 `--build`）。
+- [x] **Step 1**: 改四页 + 必要时 `meta.json`。
+- [x] **Step 2**: 跑全门（含 `--build`）。
 **提交**：`docs(phase-S6): refresh terminology navigation and changelog`
 ---
 ## S7 — 终验
@@ -253,9 +253,9 @@
 2. 附七门输出（含 G5）、基线九段、仍未文档化的工具清单（应为 0 或只剩显式豁免项）、
    仍标「规划中」的条目清单及其蓝图出处。
 3. 报告脚本沿用第三轮做法：判定词用「沿用前轮」，阶段归属从提交信息推导。
-- [ ] **Step 1**: 跑全部七门（含 `--build`）。
-- [ ] **Step 2**: 生成逐页判定表。
-- [ ] **Step 3**: 列出所有「规划中」条目及其蓝图出处、所有豁免工具及理由。
+- [x] **Step 1**: 跑全部七门（含 `--build`）。
+- [x] **Step 2**: 生成逐页判定表。
+- [x] **Step 3**: 列出所有「规划中」条目及其蓝图出处、所有豁免工具及理由。
 **提交**：`docs(phase-S7): add the fourth-pass verification report`
 ---
 ## Self-Review

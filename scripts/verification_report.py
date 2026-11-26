@@ -151,6 +151,7 @@ def main() -> int:
         ("G1 锚点门", "anchor_check.py", []),
         ("G1b 方法册", "method_audit.py", []),
         ("G1c 符号门", "symbol_check.py", []),
+        ("G1d 工具名门", "tool_audit.py", []),
         ("G2 事实门", "freshness_audit.py", ["--check", "facts"]),
         ("G3 结构门", "freshness_audit.py", ["--check", "structure"]),
         ("G4 双语门", "freshness_audit.py", ["--check", "bilingual"]),
