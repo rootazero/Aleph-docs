@@ -70,7 +70,7 @@ G1d 的代码侧来自 Aleph 自己承认的权威名单，而不是「扫一遍
 | **历史** | 页面内 `## 历史：<主题>` 小节 |
 工具名写错属于「现状写错」，必须改写；已删除的模块不得留在现状段落里。
 
-## 四、七道门（分级完成的判定机制）
+## 四、九道门（分级完成的判定机制）
 每阶段结束必须全绿才解锁下一阶段；任一门红则该阶段**不完成**。
 
 | 门 | 名称 | 判定 | 命令 |
@@ -78,7 +78,9 @@ G1d 的代码侧来自 Aleph 自己承认的权威名单，而不是「扫一遍
 | **G1** | 锚点门 | 页面里所有形似源码路径的引用在 Aleph 仓库真实存在 | `python3 scripts/anchor_check.py --repo ../Aleph` |
 | **G1b** | 方法册门 | RPC 方法名与代码 `src/gateway/method_census.rs` 一致 | `python3 scripts/method_audit.py --repo ../Aleph` |
 | **G1c** | 符号门 | 反引号里的 Rust/TS 标识符在代码里真实存在 | `python3 scripts/symbol_check.py --repo ../Aleph` |
-| **G1d** | **工具名门（新增）** | 站点宣称的内置工具名必须真实注册；代码注册的工具必须被站点覆盖（或被显式豁免） | `python3 scripts/tool_audit.py --repo ../Aleph` |
+| **G1d** | **工具名门** | 站点宣称的内置工具名必须真实注册；代码注册的工具必须被站点覆盖（或被显式豁免） | `python3 scripts/tool_audit.py --repo ../Aleph` |
+| **G1e** | **规划中门** | 「规划中 / Planned」小节描述的未合并工作确实还没合入 `main` | `python3 scripts/planned_status_audit.py --repo ../Aleph` |
+| **G1f** | **对账门** | 站点更新日志与代码仓 `CHANGELOG.md` / `VERSION` 对得上 | `python3 scripts/changelog_audit.py --repo ../Aleph` |
 | **G2** | 事实门 | 无过期断言；指定页面含目标形态语义 | `python3 scripts/freshness_audit.py --check facts --docs content/docs` |
 | **G3** | 结构门 | `meta.json` 收录完整；站内相对链接可解析 | `python3 scripts/freshness_audit.py --check structure --docs content/docs` |
 | **G4** | 双语门 | zh/en 页面集合一致；同名页 `##` 标题骨架一致 | `python3 scripts/freshness_audit.py --check bilingual --docs content/docs` |
@@ -86,13 +88,35 @@ G1d 的代码侧来自 Aleph 自己承认的权威名单，而不是「扫一遍
 
 ### G1d 的判定细则
 - **文档侧「宣称」**：①表头命中「工具 / 工具名 / 内置工具 / tool / tool name / builtin tool(s)」的表格**首列**
-  反引号 token；②`tool_use("x")` / `allows_tool("x")` / `tool_call("x")` / `invoke_tool("x")` 调用点。
+  反引号 token；②`tool_use("x")` / `allows_tool("x")` / `tool_call("x")` / `invoke_tool("x")` 调用点；
+  ③**散文**：工具词与名字贴在一起的写法（「工具 `x`」/「`x` 是内置工具」/「the `x` tool」）。
+  散文口径在否定句（「不是 `browser` 工具」）、历史语境、量词修饰（「每个 `x` 工具」）与动作/字段语境下不判宣称。
 - **文档侧「覆盖」**：反引号提及**或**正文整词出现（排除 `changelog.mdx`，它记录的是过去版本说过的话）。
 - **幽灵名** = 宣称 ∉ 注册；**未登记** = 注册 ∉ 覆盖。
 - **豁免**：`scripts/tool_audit.py` 的 `EXEMPT_NAMES`，每条都要写明理由（dev-dependency crate、示例假想名、
   内部诊断工具）。
 - **棘轮**：`scripts/baseline.json` 新增 `tool_ghost` / `tool_missing` 两段。只棘轮**已知旧债**，
   阶段中途引入的新失效立即让 G1d 变红；修完一条就棘轮降一条。
+
+### G1e 的判定细则
+- 范围：所有标题含「规划中 / Planned」的 `##`–`####` 小节（zh/en 共 22 节）。
+- **状态标记**：小节的语言必须与状态标记的语言一致（zh 用「状态：规划中」，en 用 `Status: planned`）；
+  引用了分支或提交的小节必须带本语言的状态标记。
+- **提交**：引用的 commit 必须存在；若已是 `main` 的祖先且不在历史语境里，则小节仍写「规划中」= 失效。
+- **分支**：引用的分支若已是 `main` 的祖先 = 失效。
+- **路径**：小节提到的路径若由该分支引入、且现在已经存在于 `main` = 失效（squash 合入也能抓到）。
+- **棘轮**：`scripts/baseline.json` 新增 `planned_stale` 段。
+
+### G1f 的判定细则
+- 上游版本集来自代码仓 `CHANGELOG.md` 的 `## [26.9.1]` 段落；站点版本集来自 `content/docs/{zh,en}/changelog.mdx`
+  的 `## 26.9.1` 标题。
+- **站点 ⊆ 上游**：站点写的版本必须在上游存在（防止编造版本）。
+- **覆盖边界**：以站点最旧的版本条目为边界，其后的每个上游版本都必须在站点有条目（防止上游发版后站点不更新）。
+- **VERSION**：上游 `VERSION` 文件的值必须在站点有条目。
+- **双语**：zh/en 的版本集合与日期集合必须一致；单页不得重复同一版本。
+- **覆盖日期**：frontmatter 里的「截至 / through」必须等于页面最新的日期条目。
+- **滚动条目**：上游最新的滚动条目不得晚于站点最新的（防止站点落后）。
+- **棘轮**：`scripts/baseline.json` 新增 `changelog_drift` 段。
 
 ## 五、阶段路线（逐级解锁）
 ```
@@ -138,4 +162,24 @@ S7 终验 ◀── S6 术语·导航·changelog ◀── S5 规划中区块 �
 `identity-context.mdx` 的示例假想名 `translate` 换成真实存在的 `code_exec`，
 `EXEMPT_NAMES` 随后清空。`capability_projection_diagnostics` 没有走豁免——它是真实注册的工具，
 按内部诊断面的真实语义写进目录页。
+
+## 八、遗留债务收口轮次（2026-11-27）
+第四轮终验留下三条「下次再说」的债务。它们的共同点是**没有门禁守着**，靠人记着；
+本轮把每一条都变成可回归的判定，而不是补一段文字就算完。
+
+| 债务 | 原状 | 收口方式 | 门 |
+|---|---|---|---|
+| ① G1d 宣称口径太窄 | 只有表格首列与四种调用点算宣称，散文里的工具名不判幽灵也不判未登记 | G1d 增加散文宣称层（工具词贴名字的写法），并补齐否定 / 历史 / 量词 / 动作语境的排除项 | G1d |
+| ② 「规划中」小节会过期 | 三个 shell 分支一旦合入 `main`，两处「规划中」小节就变成过期事实，而没人会提醒 | 新增 G1e：检查状态标记语言、引用的提交 / 分支是否已合入、分支引入的路径是否已落地 | G1e |
+| ③ 更新日志两边对不上 | 上游 `CHANGELOG.md` 停在 2026-09-25、`VERSION` 停在 26.9.1，站点只覆盖一部分版本且边界表述不准 | 新增 G1f：站点版本 ⊆ 上游版本、覆盖边界后的上游版本必须有条目、`VERSION` 必须有条目、双语一致 | G1f |
+
+三道门合计把门数从七道提到**九道**，棘轮基线新增 `planned_stale` 与 `changelog_drift` 两段。
+
+债务①在实施中抓到一处真实错误：`concepts/acp-protocol.mdx` 把团队工具写成 `acp_member`，
+注册名是 `team_acp_member`。债务②抓到英文页沿用中文状态标记（`> **状态：规划中**`）。
+债务③把站点覆盖边界改准为「版本条目从 26.6.29 开始，更早的版本请查阅上游 `CHANGELOG.md`」。
+
+本轮**不动** Aleph 代码仓：上游 `CHANGELOG.md` 与 `VERSION` 属发版流程，G1f 的作用是在发版瞬间
+强制站点补条目，而不是替发版做决定。
+
 

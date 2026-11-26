@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the seven documentation gates and print a summary table.
+"""Run the nine documentation gates and print a summary table.
 
 Gates:
   G1 anchor   — every source path the docs cite exists in the Aleph repo
@@ -9,6 +9,10 @@ Gates:
                 exists
   G1d tool    — every builtin tool name the docs present is registered in the
                 code, and every registered tool is covered by the docs
+  G1e planned — every 规划中 / Planned section still describes work that has
+                not landed on main
+  G1f changelog— the site's changelog and the code repository's CHANGELOG.md
+                agree on which releases exist and which the site covers
   G2 facts    — no stale assertions, required semantics present
   G3 structure— navigation covers every page, no dead internal links
   G4 bilingual— zh and en have the same page set and heading skeleton
@@ -49,7 +53,7 @@ def summarize(label: str, cmd: list[str]) -> tuple[str, str, int]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Aleph 文档七道门")
+    parser = argparse.ArgumentParser(description="Aleph 文档九道门")
     parser.add_argument("--repo", default="../Aleph")
     parser.add_argument("--docs", default="content/docs")
     parser.add_argument("--build", action="store_true", help="额外跑 G5 构建门（慢）")
@@ -64,6 +68,8 @@ def main() -> int:
         ("G1b 方法册", [sys.executable, str(SCRIPTS / "method_audit.py"), *common, *update]),
         ("G1c 符号门", [sys.executable, str(SCRIPTS / "symbol_check.py"), *common, *update]),
         ("G1d 工具名门", [sys.executable, str(SCRIPTS / "tool_audit.py"), *common, *update]),
+        ("G1e 规划中门", [sys.executable, str(SCRIPTS / "planned_status_audit.py"), *common, *update]),
+        ("G1f 对账门", [sys.executable, str(SCRIPTS / "changelog_audit.py"), *common, *update]),
         ("G2 事实门", [sys.executable, str(SCRIPTS / "freshness_audit.py"), "--check", "facts", "--docs", args.docs, *update]),
         ("G3 结构门", [sys.executable, str(SCRIPTS / "freshness_audit.py"), "--check", "structure", "--docs", args.docs, *update]),
         ("G4 双语门", [sys.executable, str(SCRIPTS / "freshness_audit.py"), "--check", "bilingual", "--docs", args.docs, *update]),
@@ -71,7 +77,7 @@ def main() -> int:
     if args.build:
         checks.append(("G5 构建门", ["bash", "-lc", "pnpm exec next build && pnpm exec tsc --noEmit && pnpm exec eslint"]))
 
-    print("== Aleph 文档七道门 ==")
+    print("== Aleph 文档九道门 ==")
     failed = 0
     for label, cmd in checks:
         name, state, code = summarize(label, cmd)

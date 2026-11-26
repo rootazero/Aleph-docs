@@ -117,7 +117,7 @@ Aleph 服务端（`aleph-server` 二进制）是 ACP 子进程的 spawner。当�
 ACP 与以下组件集成：
 
 - **网关** —— `extensions.*` 不是 ACP；ACP harness 的 CRUD 在 `acp.*`（`acp.list`、`acp.create`、`acp.update`、`acp.delete`、`acp.test`、`acp.set_enabled`、`acp.presets`、`acp.presets_meta`、`acp.sessions.list`、`acp.sessions.cancel`、`acp.sessions.shutdown`）。
-- **Spawner / SubAgent** —— `acp_member` 内置工具把已配置的 harness 包成队伍成员；`acp_delegate` 工具把一次性任务分派给具名 harness。
+- **Spawner / SubAgent** —— `team_acp_member` 内置工具把已配置的 harness 包成队伍成员；`acp_delegate` 工具把一次性任务分派给具名 harness。
 - **事件总线** —— 每次池变更发布 `acp.sessions.changed`。
 - **持久化** —— `~/.aleph/data/acp_sessions.json` 快照活跃会话，并在启动时回放。
 

@@ -278,19 +278,19 @@ See [JSON-RPC](../api/jsonrpc) for the complete list of error codes.
 
 ## Planned: not yet implemented
 
-> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §10, backpressure, flow control, and resource limits.
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` §10, backpressure, flow control, and resource limits.
 >
 > The blueprint specifies per-subscription limits on pending events and buffered bytes. Ephemeral events may be coalesced or dropped; exhausting a Durable event buffer would disconnect the client or require a resync. Desktop IPC’s current per-connection limits on in-flight requests and bytes are not per-subscription backpressure (`src/gateway/server/connection/local_ipc.rs`).
 
-> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §9, Snapshot + Replay.
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` §9, Snapshot + Replay.
 >
 > Subscription snapshots, cursor-based replay, and resync when history is unavailable remain in the blueprint. The handshake recognizes the feature names but has no implementations to negotiate. The mounted `panel.capabilities.snapshot` method is not an event-stream snapshot (`shared/protocol/src/system_hello.rs`, `src/gateway/handlers/system_hello.rs`, `src/gateway/handlers/panel_capabilities.rs`).
 
-> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §11, binary data channels.
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` §11, binary data channels.
 >
 > Resource references and a dedicated data channel remain in the blueprint. Web v1 Binary messages only carry JSON frames; `BinaryChannel` is a recognized feature name but is not negotiated (`src/gateway/server/connection/web_v1.rs`, `shared/protocol/src/system_hello.rs`, `src/gateway/handlers/system_hello.rs`).
 
-> **状态：规划中** — `docs/research/NSH_PROTOCOL_V1.md` §8, Event Envelope, and §9.5, deduplication and cursors.
+> **Status: planned** — the blueprint is `docs/research/NSH_PROTOCOL_V1.md` §8, Event Envelope, and §9.5, deduplication and cursors.
 >
 > Durable/Ephemeral classes, event-envelope cursor fields, and deduplication semantics remain in the blueprint. Legacy topic events retain the `event` notification envelope shown above (`shared/protocol/src/jsonrpc.rs`).
 

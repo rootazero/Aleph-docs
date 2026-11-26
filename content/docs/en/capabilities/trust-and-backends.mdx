@@ -37,7 +37,7 @@ Activation on the provider side is explicit. `src/capability/provider_registry.r
 
 ### Planned: six kinds of backend
 
-> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §5.1 (backends).
+> **Status: planned** — the blueprint is `docs/research/aleph_modularization_plan.md` §5.1 (backends).
 
 The blueprint splits backends into six kinds, each with its own isolation model and default permissions:
 
@@ -77,7 +77,7 @@ The trust decision happens **at plugin mount time, per plugin id** (`admit` in `
 
 ### Capability authorization
 
-> **状态：规划中** — blueprint `docs/research/aleph_modularization_plan.md` §5.2 (the two trust axes).
+> **Status: planned** — the blueprint is `docs/research/aleph_modularization_plan.md` §5.2 (the two trust axes).
 
 Capability authorization answers "which powers beyond additive registration may it take". The blueprint design is: always deny by default, **not affected by the load trust enforce switch**, with the grant stored on the plugin's entry in `plugins.toml` and bound to the plugin's content hash.
 
@@ -127,7 +127,7 @@ Host-side credential injection keeps injected plaintext out of the guest. Howeve
 
 ### Third-party Rust plugins
 
-> **状态：规划中** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-004 (third-party Rust plugins use WASM / a separate process).
+> **Status: planned** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-004 (third-party Rust plugins use WASM / a separate process).
 
 ADR-004's decision table is: officially bundled capabilities are compiled in statically and allowed; third-party WASM goes through a restricted WASM runtime and is the default preference; third-party process plugins run in a separate process with controlled IPC and are allowed on demand; **loading an arbitrary Rust dynamic library inside the host process is not supported as a general plugin mechanism**.
 
@@ -174,7 +174,7 @@ The path is made of: the panel module is dynamically imported by `interfaces/web
 
 **Same-origin therefore does not mean trusted**: integrity checking and admission still have to happen. `prepare(records, policy: &OwnerTrustPolicy)` in `src/extension/panel_publication/admission.rs` does that, with a 4 MiB limit per entry and a 64 MiB limit per publication; violations produce error codes such as `panel.asset_entry_limit` / `panel.asset_generation_limit` / `panel.asset_outside_root` / `panel.asset_integrity_mismatch`. The panel manifest is `PanelUiManifest` in `src/extension/manifest/types.rs`, carrying `tab_id`, `entry`, `api_major`, `permissions` and `asset_integrity`; its `validate()` yields the error codes `panel.invalid_identity` / `panel.invalid_presentation` / `panel.incompatible_api` / `panel.invalid_entry` / `panel.invalid_integrity`.
 
-> **状态：规划中** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-005 (Agent dynamic UI uses Restricted TSX).
+> **Status: planned** — ADR (accepted) `docs/research/NSH_ADR-001~009.md` §ADR-005 (Agent dynamic UI uses Restricted TSX).
 
 ADR-005 requires that Agent-generated dynamic UI runs only inside an isolated view container and a restricted runtime: no arbitrary shell, process, filesystem or network access, no self-granting of capabilities, no changing approval state or plugin trust level, and three trust tiers by provenance — formal plugin UI (still bound by the host API permissions), Agent-generated ephemeral UI (minimal component set and the strictest resource limits), and UI whose provenance or integrity cannot be verified (not executed at all). None of this layer is implemented yet.
 

@@ -1,4 +1,4 @@
-# Aleph 文档站第四轮终验报告（2026-11）
+# Aleph 文档站终验报告（2026-11）
 
 > 本文件由 `scripts/verification_report.py` 生成**机器部分**，逐阶段结论由主 agent 撰写。
 > 复核命令：`python3 scripts/run_gates.py --repo ../Aleph --build`。
@@ -10,11 +10,13 @@
 | G1 锚点门 | PASS | 页面 330，锚点 6574，失效 0（路径 0，裸文件名 0；新增 0，基线旧债 0；历史免检行 2141） |
 | G1b 方法册 | PASS | census methods: 396   documented dotted tokens: 467<br>ghost (documented, absent from code): 0（新增 0，基线旧债 0）<br>missing (registered, undocumented): 0（新增 0，基线旧债 0） |
 | G1c 符号门 | PASS | 页面 330，失效 0（新增 0，基线旧债 0） |
-| G1d 工具名门 | PASS | registered builtin tools: 209   documented tool claims: 167<br>ghost (documented, not registered): 0（新增 0，基线旧债 0）<br>missing (registered, undocumented): 0（新增 0，基线旧债 0） |
+| G1d 工具名门 | PASS | registered builtin tools: 209   documented tool claims: 175<br>ghost (documented, not registered): 0（新增 0，基线旧债 0）<br>missing (registered, undocumented): 0（新增 0，基线旧债 0） |
+| G1e 规划中门 | PASS | 规划中小节 22（zh 11 / en 11），引用提交 4 次、分支 4 次，失效 0（新增 0，基线旧债 0） |
+| G1f 对账门 | PASS | 上游版本 40 个，站点 zh 11 / en 11 个，覆盖边界 26.6.29，失效 0（新增 0，基线旧债 0） |
 | G2 事实门 | PASS |  |
 | G3 结构门 | PASS |  |
 | G4 双语门 | PASS |  |
-| G5 构建门 | PASS | `next build` / `tsc --noEmit` / `eslint` 退出码 0（73.4s） |
+| G5 构建门 | PASS | `next build` / `tsc --noEmit` / `eslint` 退出码 0（68.1s） |
 
 ## 规模
 
@@ -30,9 +32,11 @@
 | `anchor` | 0 |
 | `bare_name` | 0 |
 | `bilingual` | 0 |
+| `changelog_drift` | 0 |
 | `facts` | 0 |
 | `method_ghost` | 0 |
 | `method_missing` | 0 |
+| `planned_stale` | 0 |
 | `structure` | 0 |
 | `symbol` | 0 |
 | `tool_ghost` | 0 |
@@ -383,6 +387,10 @@
 
 起点 commit `a535ac4`（第三轮终验），终点为本轮 S7。计划见 `docs/superpowers/plans/2026-11-26-aleph-docs-calibration-pass4.md`，台账见 `docs/ROADMAP-2026-11-pass4.md`。
 
+**2026-11-27 追加：遗留债务收口轮次。** 第四轮终验留下三条没有门禁守着的债务，本轮把它们全部变成可回归的判定，
+并新增两道门（G1e、G1f），门数由七道增至九道。计划见 `docs/superpowers/plans/2026-11-27-aleph-docs-debt-round.md`，
+台账见 ROADMAP 第八章。
+
 ### 真值分层（唯一裁决口径）
 沿用第三轮的 T1–T5，本轮追加一条工具面的专用层级：
 
@@ -391,7 +399,7 @@
 ### 逐阶段结论
 | 阶段 | 提交 | 结论 |
 |------|------|------|
-| S0 门禁与基线 | `a860434`、`ecabd85` | 新增 G1d「内置工具名普查门」。代码侧不再正则扫源码树，改用代码自己的权威名单（209 个注册工具）；文档侧把「工具表首列」与 `tool_use("x")` / `allows_tool("x")` / `tool_call("x")` / `invoke_tool("x")` 调用点当作**宣称**，做双向判定：宣称但未注册 = ghost，注册但未文档 = missing。脚本 `scripts/tool_audit.py`，接入 `scripts/run_gates.py`（七道门），`scripts/baseline.json` 增 `tool_ghost` / `tool_missing` 两段。首跑：registered 209 / claims 159 / ghost 9 / missing 24。 |
+| S0 门禁与基线 | `a860434`、`ecabd85` | 新增 G1d「内置工具名普查门」。代码侧不再正则扫源码树，改用代码自己的权威名单（209 个注册工具）；文档侧把「工具表首列」与 `tool_use("x")` / `allows_tool("x")` / `tool_call("x")` / `invoke_tool("x")` 调用点当作**宣称**，做双向判定：宣称但未注册 = ghost，注册但未文档 = missing。脚本 `scripts/tool_audit.py`，接入 `scripts/run_gates.py`（当轮七道门），`scripts/baseline.json` 增 `tool_ghost` / `tool_missing` 两段。首跑：registered 209 / claims 159 / ghost 9 / missing 24。 |
 | S1 工具目录校准 | `26b5852` | 重写 zh/en `tools/builtin.mdx`、`tools/overview.mdx`、`concepts/builtin-tools.mdx`：删掉 9 个幽灵名（`bash_exec`、`config_guide`、`permission_tool`、`scratchpad_registry`、`process_registry`、`command_canonicalize`、`command_ledger`、`crawl4ai`），后四个模块名改写成「这是实现模块，不是注册工具」的散文；补登记 24 个此前全站缺席的工具（工作区 / 项目 / 代理档案、运行时与外部依赖、通话生命周期、团队生命周期与协作、会话折叠还原、浏览器 companion 等）；「注册摘要」从过期的「内置工具不通过 builder 注册」改写为**四个登记面**（目录 178 项 / 仅注册表 23 项 / 目录外 `subagent` + `tool_search` / 按请求注入 `get_tool_schema`），并写明六个 MCP 桥接工具按能力门注册；装配入口更正为 `BuiltinToolRegistry::with_config()`。 |
 | S2 调用面校准 | `6ce9af4` | 全站 20 处 `bash_exec` → `bash`；`tool_use("bash", {"command": …})` 的参数键改成真名 `cmd`；`architecture/tools.mdx` 参数表按 `BashExecArgs` / `CodeExecArgs` / `CodeCheckArgs` 订正（`code_check` 此前误写成 `language` / `code`）；`subagent` 标注为目录外工具；`gateway/methods/memory.mdx` 删掉不存在的 `forget`，并写清删除走 `remember` 的 Remove 操作。 |
 | S3 后台作业现状 | `2a756ee` | 补齐 `bash` 的后台作业模型（zh/en `tools/builtin.mdx` 新增小节 + `architecture/sandbox.mdx` 呼应）：四个 `process_action`、8 KB 部分输出尾、60 / 170 秒等待窗口、3600 秒默认与 4 小时上限、按会话隔离（每会话 8 / 全局 32 / 登记簿 64 / 命令预览 120 字符）、owned worktree 下拒绝后台、内容门与实时尾随、登记簿纯内存而进程流水跨进程、子进程可见 `ALEPH_SESSION_ID` 与 `ALEPH_TOOL_NAME=bash`；并写清「后台只绕开 180 秒前台上限，沙箱管道不变」。 |
@@ -399,6 +407,10 @@
 | S5 未合并分支标「规划中」 | `1d7a3da` | 三个未合并分支（`shell-capability-integration` `ed049d9ac`、`shell-capability-rework` `854505aa6`、`shell-capability-stdin` `523bfe4d0`）的产出在 `architecture/sandbox.mdx` 与 `tools/builtin.mdx` 各加一个「规划中」小节：通用 stdin 续写是 no-go 且结论不撤回，受控实时 JSONL 只是待批准的设计稿；两阶段顺序与只读证据边界（Linux-only、macOS/Windows 未验、设计评审 ≠ 实现批准、独立终审未启动、分支未合并）都写在正文里。 |
 | S6 术语 · 导航 · changelog | `be03568` | 术语表「工具系统」段新增 4 条（后台作业 / 进程登记簿 / 内容门 / 受控 JSONL）；已弃用表新增 `bash_exec` → `bash`（它只是模块文件名 `src/builtin_tools/bash_exec.rs`）；代码 → 文档映射新增 5 条主路径。导航无页面增删（fumadocs 目录式导航，无 `docs.json`）。changelog 页面经核对没有失效工具名，且 Aleph `main` 自上轮未前进，故不新增条目。 |
 | S7 终验 | 本提交 | 本报告；七门（含 G5 构建门）全绿，基线十段全 0。 |
+| D0 债务一：G1d 散文口径 | 见收口轮次 | G1d 增加散文宣称层（「工具 `x`」/「`x` 是内置工具」/「the `x` tool」等写法），并补齐排除项：否定句、历史语境、量词修饰（「每个 `x` 工具」，定冠词 the/a/an 不算量词）、动作与字段语境、复合词、同句并列。否定与历史的作用域细到**列表项**粒度，避免同一条 bullet 列表里的别的条目连坐。抓到的真实错误：`concepts/acp-protocol.mdx` 把团队工具写成 `acp_member`，注册名是 `team_acp_member`（`src/builtin_tools/team/acp_member.rs:115`）。 |
+| D1 债务二：G1e 规划中门 | 见收口轮次 | 新增 `scripts/planned_status_audit.py`：检查 22 个「规划中 / Planned」小节的状态标记语言、引用的提交是否已合入 `main`、引用的分支是否已合入、分支引入的路径是否已落地（能抓 squash 合入）。分支引用必须代码仓真实存在才算数，提交需 8–40 位十六进制。抓到的真实错误：英文页沿用中文状态标记 `> **状态：规划中**`。 |
+| D2 债务三：G1f 对账门 | 见收口轮次 | 新增 `scripts/changelog_audit.py`：站点版本 ⊆ 上游版本；覆盖边界之后的每个上游版本必须在站点有条目；上游 `VERSION` 必须在站点有条目；zh/en 版本与日期集一致；frontmatter 覆盖日期与页面最新日期条目一致。覆盖边界改准为「版本条目从 26.6.29 开始，更早的版本请查阅上游 `CHANGELOG.md`」。上游 `CHANGELOG.md` 与 `VERSION` 属发版流程，本轮不代为修改。 |
+| D3 收口 | 本提交 | 九门（含 G5 构建门）全绿，基线十二段全 0。 |
 
 ### 本轮查证并写进文档的关键代码事实
 - **工具真名是 `bash`**：`src/builtin_tools/bash_exec.rs:376` `const NAME: &'static str = "bash";`，注册表臂在 `src/executor/builtin_registry/definitions.rs:993` `"bash" => Some(Box::new(BashExecTool::new()))`。`bash_exec` 只出现在 gateway 的测试夹具里，不是工具名。
@@ -424,15 +436,26 @@ zh 74 处 / en 26 处，共 18 + 11 页。本轮新增 zh/en 各 2 页（`archit
 - Panel / 插件 UI / 桌面宿主（沿用前轮）。
 - 网关协议与 v1 协议（沿用前轮）。
 
-### 遗留债务
-- G1d 的**宣称**判定只覆盖「工具表首列」与四种调用点写法；纯散文里列出的工具名不会被当成宣称。**missing** 判定用的是全站提及，覆盖面反而更宽，因此散文里的名字不会被判「缺失」也不会被判「幽灵」——若将来文档改成纯散文列工具，需要扩展宣称口径。
-- 三个 shell 分支一旦合入 `main`，`tools/builtin.mdx` 与 `architecture/sandbox.mdx` 的两个「规划中」小节必须改写成现状，并重跑七门（含 G1d）。
-- 代码仓 `CHANGELOG.md` 仍停在 2026-09-25、`VERSION` 仍是 `26.9.1`；站点 changelog 是文档视角的派生摘要，发版前要与上游合并去重。
+### 遗留债务的收口状态（2026-11-27 更新）
+第四轮列出的三条债务已在本轮全部收口，每条都落成可回归的门：
+
+- ~~G1d 的宣称判定只覆盖「工具表首列」与四种调用点写法~~ → **已收口**：G1d 增加散文宣称层（见 D0），
+  散文里的工具名现在会被判幽灵。中文正则用 `(?![A-Za-z])` 而不是 `\b`（Python 的 `\b` 在 CJK 上不成立）。
+- ~~三个 shell 分支一旦合入 `main`，两个「规划中」小节必须改写成现状~~ → **已收口**：G1e 会在分支或提交合入
+  `main` 时把该小节判为失效（见 D1）。两个小节所在页面：`tools/builtin.mdx`、`architecture/sandbox.mdx`。
+- ~~代码仓 `CHANGELOG.md` 停在 2026-09-25、`VERSION` 停在 26.9.1，站点 changelog 与上游对不上~~ → **已收口**：
+  G1f 对账门（见 D2）；上游发版时门会立刻变红，强制站点补条目。
+
+仍然成立的事实（不是待办）：
+
 - G2 / G3 / G4 通过时不打印明细（脚本只输出非零项），报告里三行留空属预期，不是漏跑。
 - 本轮没有增删页面（zh 165 / en 165），路由与目录页无需同步。
 
 ### 复核方法
-- 七门（含构建）：`python3 scripts/run_gates.py --repo ../Aleph --build`
+- 九门（含构建）：`python3 scripts/run_gates.py --repo ../Aleph --build`
+- 单跑 G1d：`python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`
+- 单跑 G1e：`python3 scripts/planned_status_audit.py --repo ../Aleph --docs content/docs --raw`
+- 单跑 G1f：`python3 scripts/changelog_audit.py --repo ../Aleph --docs content/docs --raw`
 - 单跑 G1d：`python3 scripts/tool_audit.py --repo ../Aleph --docs content/docs --raw`
 - 重新生成本报告机器部分：`python3 scripts/verification_report.py --repo ../Aleph --out docs/VERIFICATION-2026-11-pass4.md --since a535ac4 --build`（重跑会保留 `<!-- MANUAL -->` 之间的人工结论）
 - 基线棘轮：`python3 scripts/run_gates.py --repo ../Aleph --update-baseline`

@@ -23,8 +23,10 @@ test fixtures (`fake_tool`, `stub`, `panic`, …) and free of the
 `#[cfg(test)]` stripping that a sweep would need.
 
 The docs side is every place the site presents an identifier *as a tool
-name*: the first cell of a table whose header names tools, and the explicit
-`tool_use("...")` / `allows_tool("...")` call sites.
+name*: the first cell of a table whose header names tools, the explicit
+`tool_use("...")` / `allows_tool("...")` call sites, and the prose that puts
+a *tool* word right next to the name ("工具 `x`", "`x` 是内置工具",
+"the `x` tool").
 
 Two failure modes are reported:
 
@@ -82,6 +84,53 @@ TOOL_HEADER_RE = re.compile(
 )
 TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 CALL_SITE_RE = re.compile(r'''(?:tool_use|allows_tool|tool_call|invoke_tool)\(\s*"([a-z][a-z0-9_]*)"''')
+
+# --- prose side --------------------------------------------------------------
+# 散文里的工具名也算「宣称」。第四轮之前只看表格首列与调用点，散文里
+# 写错的工具名（比如把模块名 `bash_exec` 当成工具）根本不会进门。
+# 下面的规则只认「工具」这个词与名字**贴在一起**的写法，范围窄但不会
+# 把参数名、事件字段、动作名误当成工具。
+PROSE_TOOL_PATTERNS = (
+    # 「工具：`x`」/「tool: `x`」—— 目录式定义。
+    re.compile(r"(?<![A-Za-z])(?:内置|内建)?(?:工具|tool(?:s)?|built-?in tools?)\s*[:：]\s*`([a-z][a-z0-9_]*)`"),
+    # 「工具 `x`」/「tool `x`」—— 工具词在前。
+    re.compile(r"(?<![A-Za-z])(?:内置|内建)?(?:工具|tool(?:s)?|built-?in tools?)\s+`([a-z][a-z0-9_]*)`"),
+    # 「`x` 是内置工具」/「`x` is a tool」。
+    re.compile(r"`([a-z][a-z0-9_]*)`\s*(?:是|为|属于)\s*(?:一个\s*)?(?:内置|内建)?(?:工具|tool)(?![A-Za-z])"),
+    # 「`x` 工具」—— 工具词在后（中文更常见的语序）。
+    re.compile(r"`([a-z][a-z0-9_]*)`\s*(?:内置|内建)?工具"),
+    # 「`x` tool」—— 工具词在后（英文语序）。
+    re.compile(r"`([a-z][a-z0-9_]*)`\s+(?:built-?in\s+)?(?:tool|tools)(?![A-Za-z])", re.IGNORECASE),
+    # 「the `x` tool」—— 带定冠词才算名字，而不是修饰语。
+    re.compile(r"\b(?:the|a|an|its)\s+`([a-z][a-z0-9_]*)`\s+(?:built-?in\s+)?(?:tool|tools)(?![A-Za-z])", re.IGNORECASE),
+)
+# 段落里出现这些词时，整段不当作工具宣称：说的是「没有这个工具」或者
+# 「这段历史」。宁可漏报，也不要把否定句读成宣称。
+NEGATION_RE = re.compile(
+    r"(没有|不是|并非|不再|不存在|\bno\b|\bnot\b|\bnever\b|\bwithout\b)", re.IGNORECASE
+)
+HISTORY_RE = re.compile(
+    r"(历史|早期|之前|以前|原先|当时|撤回|退役|废弃"
+    r"|\bhistory\b|\bhistor\w*\b|\bearlier\b|\bbefore\b|\bprevious\b|\bformer\b"
+    r"|\boriginal\b|\bretired\b|\bremoved\b|\bdeprecated\b)",
+    re.IGNORECASE,
+)
+# 量词：``每个 `x` 工具`` 里的 `x` 是修饰语，不是工具名。定冠词不算
+# 量词（``the `x` tool`` 里的 `x` 才是被指的那个工具）。
+QUANTIFIER_RE = re.compile(
+    r"(每个|所有|任一|任意|某个|某些|任何|若干"
+    r"|\bevery\b|\bany\b|\beach\b|\bsome\b|\bper\b|\ball\b)\s*$",
+    re.IGNORECASE,
+)
+# 「工具动作 `pause`」「工具字段 `run_id`」—— 后面跟的是动作或字段。
+ACTION_CONTEXT_RE = re.compile(
+    r"(动作|参数|字段|选项|键|值|\baction\b|\bfield\b|\bparam\w*\b|\boption\b|\bkey\b|\bvalue\b)\s*$",
+    re.IGNORECASE,
+)
+# 「按工具 `allow`」/「per-tool `concurrency_claim`」—— 工具是量词。
+COMPOUND_RE = re.compile(r"(?:per|each|every|any)[- ]$|(?:按|每|各)\s*(?:工具|tool)?$", re.IGNORECASE)
+# 同一个名字在前面被当成工具点过名：后面跟的是它的动作，不是另一个工具。
+NAMED_TOOL_RE = re.compile(r"`([a-z][a-z0-9_]*)`\s*(?:工具|tool)(?![A-Za-z])", re.IGNORECASE)
 
 # 明确不是 Aleph 内置工具的名字，各自写明理由。
 # 门禁不能因为站点提到一个 Rust crate 或一个示例名就报幽灵。
@@ -318,6 +367,94 @@ def doc_tool_claims(docs: Path, only: set[str] | None = None) -> dict[str, set[s
     return claims
 
 
+def doc_prose_claims(docs: Path, only: set[str] | None = None) -> dict[str, set[str]]:
+    """Tool names the documentation presents in prose, grouped by page.
+
+    A name in prose counts as a claim when a *tool* word sits right next to
+    it: 「工具 `x`」, 「`x` 是内置工具」, 「the `x` tool」.  The rule is
+    deliberately narrow — a unit that denies the tool exists ("不是一个
+    `browser` 工具") or that talks about history is skipped, a determinator
+    in front ("每个 `x` 工具") turns the name into a modifier, and a name
+    that another sentence already introduced as a tool is read as one of
+    that tool's actions.
+    """
+    claims: dict[str, set[str]] = {}
+    for path in sorted(docs.rglob("*.mdx")):
+        if path.name == "changelog.mdx":
+            continue
+        relative = str(path.relative_to(docs))
+        if only is not None and relative not in only:
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        in_code = False
+        paragraph: list[tuple[int, str]] = []
+        for number, line in enumerate(lines, 1):
+            if line.strip().startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                continue
+            if not line.strip():
+                _flush_prose_units(_split_units(paragraph), claims, relative)
+                paragraph = []
+                continue
+            paragraph.append((number, line))
+        _flush_prose_units(_split_units(paragraph), claims, relative)
+    return claims
+
+
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
+def _split_units(paragraph: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Split a paragraph into units.
+
+    A list item is its own unit: the neighbouring bullet that says "不是
+    ACP" must not silence the next bullet that names a tool.  Everything
+    else stays together, so a denial that spans two lines still counts.
+    """
+    units: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    for number, line in paragraph:
+        if LIST_ITEM_RE.match(line) and current:
+            units.append(current)
+            current = []
+        current.append((number, line))
+    if current:
+        units.append(current)
+    return units
+
+
+def _flush_prose_units(
+    units: list[list[tuple[int, str]]],
+    claims: dict[str, set[str]],
+    relative: str,
+) -> None:
+    """Record the prose claims of one unit."""
+    for unit in units:
+        text = "\n".join(line for _, line in unit)
+        if NEGATION_RE.search(text) or HISTORY_RE.search(text):
+            continue
+        for number, line in unit:
+            for pattern in PROSE_TOOL_PATTERNS:
+                for match in pattern.finditer(line):
+                    name = match.group(1)
+                    before_keyword = line[: match.start()]
+                    before_token = line[: match.start(1)]
+                    if before_token.endswith("`"):
+                        before_token = before_token[:-1]
+                    if COMPOUND_RE.search(before_keyword):
+                        continue
+                    if QUANTIFIER_RE.search(before_token):
+                        continue
+                    if ACTION_CONTEXT_RE.search(before_token):
+                        continue
+                    named = list(NAMED_TOOL_RE.finditer(before_token))
+                    if named and named[-1].group(1) != name:
+                        continue
+                    claims.setdefault(name, set()).add(f"{relative}:{number}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default="../Aleph", type=Path)
@@ -339,6 +476,9 @@ def main() -> int:
 
     registered = census_tools(args.repo)
     claimed = doc_tool_claims(args.docs, scope)
+    prose = doc_prose_claims(args.docs, scope)
+    for name, locations in prose.items():
+        claimed.setdefault(name, set()).update(locations)
     mentioned, corpus = doc_tool_mentions(args.docs, scope)
 
     exempt = {name for name in claimed if name in EXEMPT_NAMES}

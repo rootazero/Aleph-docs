@@ -117,7 +117,7 @@ The Aleph server (the `aleph-server` binary) is the spawner for ACP subprocesses
 ACP integrates with:
 
 - **Gateway** — `extensions.*` is not ACP; ACP harness CRUD is `acp.*` (`acp.list`, `acp.create`, `acp.update`, `acp.delete`, `acp.test`, `acp.set_enabled`, `acp.presets`, `acp.presets_meta`, `acp.sessions.list`, `acp.sessions.cancel`, `acp.sessions.shutdown`).
-- **Spawner / SubAgent** — The `acp_member` builtin tool wraps a configured harness as a team member; the `acp_delegate` tool dispatches one-shot tasks to a named harness.
+- **Spawner / SubAgent** — The `team_acp_member` builtin tool wraps a configured harness as a team member; the `acp_delegate` tool dispatches one-shot tasks to a named harness.
 - **Event bus** — `acp.sessions.changed` is published on every pool mutation.
 - **Persistence** — `~/.aleph/data/acp_sessions.json` snapshots live sessions and is replayed at boot.
 
