@@ -10,6 +10,9 @@
     interfaces/ plugins/ scripts/ qa/ tests/ docs/），以及少量根文件名。
   * 裸文件名（不含目录、以 .rs / .py 结尾）另有一道检查：仓库里必须能找到同名文件。
   * 含占位符（{} * < > $ …）的 token 视为通配，跳过并计入 skipped。
+  * 「历史 / 规划中」小节里的 token 免检：那两节按约定描述当时与将来的状态，
+    路径可能已经被删掉，也可能还不存在。免检规则与符号门
+    （scripts/symbol_check.py 的 EXEMPT_HEADING_RE）保持一致，中英文对称。
   * 结尾是 / 的按目录判定，其余按文件判定。
   * `::symbol`、`#anchor` 后缀先剥掉再判定路径。
 
@@ -43,6 +46,14 @@ SOURCE_ROOTS = (
     "qa/",
     "tests/",
     "docs/",
+)
+
+# 免检小节：历史（描述当时）与规划中（描述将来）都不要求当下存在。
+# 中英文必须对称：英文页用 "History:" / "Planned:"，只豁免中文会让英文侧的
+# 同一段历史叙述被误判成现状腐化。
+EXEMPT_HEADING_RE = re.compile(
+    r"历史|规划中|已废弃|历史记录"
+    r"|Historical|History|Superseded|Deprecated|Planned|Planning|Retracted|Removed"
 )
 
 ROOT_FILES = (
@@ -130,6 +141,24 @@ def is_wildcard(token: str) -> bool:
     return bool(PLACEHOLDER.search(token))
 
 
+def exempt_lines(text: str) -> list[bool]:
+    """逐行标记该行是否落在「历史 / 规划中」小节里。"""
+    exempt: list[bool] = []
+    exempt_level: int | None = None
+    for line in text.splitlines():
+        heading = re.match(r"^(#+)\s", line)
+        if heading:
+            level = len(heading.group(1))
+            if exempt_level is not None and level <= exempt_level:
+                exempt_level = None
+            if exempt_level is None and EXEMPT_HEADING_RE.search(line):
+                exempt_level = level
+            exempt.append(False)
+            continue
+        exempt.append(exempt_level is not None)
+    return exempt
+
+
 def check_token(token: str, repo: Path, docs_repo: Path, basename_index: set[str]):
     """返回 (状态, 说明)。状态 ∈ ok / missing / skipped。"""
     if is_wildcard(token):
@@ -183,7 +212,10 @@ def main() -> int:
     pages = sorted(content_root.rglob("*.mdx"))
     for page in pages:
         text = page.read_text(encoding="utf-8")
+        flags = exempt_lines(text)
         for lineno, line in enumerate(text.splitlines(), start=1):
+            if flags[lineno - 1]:
+                continue
             for token in candidate_tokens(line):
                 status, note = check_token(token, repo, docs_repo, basename_index)
                 if status == "ok":
