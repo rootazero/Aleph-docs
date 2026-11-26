@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gate_baseline import load_baseline, split_violations, update_section  # noqa: E402
+from gate_exempt import exempt_lines  # noqa: E402
 
 SOURCE_ROOTS = (
     "src/",
@@ -46,14 +47,6 @@ SOURCE_ROOTS = (
     "qa/",
     "tests/",
     "docs/",
-)
-
-# 免检小节：历史（描述当时）与规划中（描述将来）都不要求当下存在。
-# 中英文必须对称：英文页用 "History:" / "Planned:"，只豁免中文会让英文侧的
-# 同一段历史叙述被误判成现状腐化。
-EXEMPT_HEADING_RE = re.compile(
-    r"历史|规划中|已废弃|历史记录"
-    r"|Historical|History|Superseded|Deprecated|Planned|Planning|Retracted|Removed"
 )
 
 ROOT_FILES = (
@@ -141,24 +134,6 @@ def is_wildcard(token: str) -> bool:
     return bool(PLACEHOLDER.search(token))
 
 
-def exempt_lines(text: str) -> list[bool]:
-    """逐行标记该行是否落在「历史 / 规划中」小节里。"""
-    exempt: list[bool] = []
-    exempt_level: int | None = None
-    for line in text.splitlines():
-        heading = re.match(r"^(#+)\s", line)
-        if heading:
-            level = len(heading.group(1))
-            if exempt_level is not None and level <= exempt_level:
-                exempt_level = None
-            if exempt_level is None and EXEMPT_HEADING_RE.search(line):
-                exempt_level = level
-            exempt.append(False)
-            continue
-        exempt.append(exempt_level is not None)
-    return exempt
-
-
 def check_token(token: str, repo: Path, docs_repo: Path, basename_index: set[str]):
     """返回 (状态, 说明)。状态 ∈ ok / missing / skipped。"""
     if is_wildcard(token):
@@ -208,6 +183,7 @@ def main() -> int:
     missing = []
     skipped = 0
     checked = 0
+    historical = 0
     basename_index = build_basename_index(repo)
     pages = sorted(content_root.rglob("*.mdx"))
     for page in pages:
@@ -215,6 +191,7 @@ def main() -> int:
         flags = exempt_lines(text)
         for lineno, line in enumerate(text.splitlines(), start=1):
             if flags[lineno - 1]:
+                historical += 1
                 continue
             for token in candidate_tokens(line):
                 status, note = check_token(token, repo, docs_repo, basename_index)
@@ -280,7 +257,8 @@ def main() -> int:
         print(
             f"页面 {len(pages)}，锚点 {checked + skipped}，失效 {len(missing)}"
             f"（路径 {len(path_keys)}，裸文件名 {len(bare_keys)}；"
-            f"新增 {len(new_keys)}，基线旧债 {len(known_keys)}）"
+            f"新增 {len(new_keys)}，基线旧债 {len(known_keys)}；"
+            f"历史免检行 {historical}）"
         )
         for line in rel_new:
             print(f"NEW  {line}")

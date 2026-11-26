@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gate_baseline import load_baseline, split_violations, update_section  # noqa: E402
+from gate_exempt import exempt_lines  # noqa: E402
 
 CODE_RE = re.compile(r"`([^`\n]+)`")
 SYMBOL_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)(?:\(\))?$")
@@ -60,14 +61,6 @@ CRATE_ALIASES = {
 CRATE_MENTION_RE = re.compile(r"\b(crate|package|workspace member|workspace crate)s?\b")
 CRATE_MENTION_MAX_DISTANCE = 40
 CRATE_SENTENCE_BREAKS = "。；;！!？?\n"
-
-# 免检小节：历史（描述当时）与规划中（描述将来）都不要求当下存在。
-# 中英文必须对称：英文页用 "History:" / "Planned:" / "Deprecated ..."，
-# 只豁免中文会让英文侧的同一段历史叙述被误判成现状腐化。
-EXEMPT_HEADING_RE = re.compile(
-    r"历史|规划中|已废弃|历史记录"
-    r"|Historical|History|Superseded|Deprecated|Planned|Planning|Retracted|Removed"
-)
 
 # 站点自己造的词、协议名等：形状像符号但不是代码里的标识符。
 SYMBOL_ALLOWLIST = {
@@ -227,24 +220,6 @@ def claims_crate(text: str, start: int, end: int) -> bool:
             continue
         return True
     return False
-
-
-def exempt_lines(text: str) -> list[bool]:
-    """逐行标记该行是否落在「历史 / 规划中」小节里。"""
-    exempt: list[bool] = []
-    exempt_level: int | None = None
-    for line in text.splitlines():
-        heading = re.match(r"^(#+)\s", line)
-        if heading:
-            level = len(heading.group(1))
-            if exempt_level is not None and level <= exempt_level:
-                exempt_level = None
-            if exempt_level is None and EXEMPT_HEADING_RE.search(line):
-                exempt_level = level
-            exempt.append(False)
-            continue
-        exempt.append(exempt_level is not None)
-    return exempt
 
 
 def symbol_candidates(text: str):
