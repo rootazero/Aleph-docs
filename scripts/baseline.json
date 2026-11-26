@@ -6,5 +6,42 @@
   "method_ghost": [],
   "method_missing": [],
   "structure": [],
-  "symbol": []
+  "symbol": [],
+  "tool_ghost": [
+    "bash_exec",
+    "command_canonicalize",
+    "command_ledger",
+    "config_guide",
+    "crawl4ai",
+    "forget",
+    "permission_tool",
+    "process_registry",
+    "scratchpad_registry"
+  ],
+  "tool_missing": [
+    "agent_unbind",
+    "agent_update",
+    "answer_call",
+    "browser_companion",
+    "call_status",
+    "cancel_output",
+    "capability_projection_diagnostics",
+    "context_plugin",
+    "hangup",
+    "hub_catalog_search",
+    "initiate_call",
+    "lifecycle_idle",
+    "lifecycle_request_shutdown",
+    "lifecycle_resolve_shutdown",
+    "memory_runtime_start",
+    "memory_runtime_stop",
+    "project_manage",
+    "runtime_manage",
+    "session_collaborate",
+    "session_decompress",
+    "session_read",
+    "team_acp_member",
+    "tool_usage",
+    "workspace_manage"
+  ]
 }
