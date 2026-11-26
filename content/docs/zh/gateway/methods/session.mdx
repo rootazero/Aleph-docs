@@ -168,13 +168,24 @@ description: "会话管理 RPC 方法"
 
 ### session.compact
 
-手动触发压缩。`KeepLastN` 策略被硬编码(`SESSION_COMPACT_KEEP_LAST_N`);代理循环的自动压缩也使用同一策略。
+手动触发压缩。与自动压缩同一套手动压缩器，只是入口不同。
+
+保留策略是**token 预算**，不是消息条数：预算取自操作员设置 `[context_budget] manual_compact_keep_tokens`，未配置时用默认 `DEFAULT_KEEP_TOKENS`（20 000 token），并夹在 2 000 ~ 400 000 之间。旧的 `KeepLastN{50}` 在两个方向上都错：50 条 `file_read` 结果可能是 20 万 token，50 轮一句话的对话可能只有几百。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `session_key` | string | 是 | 规范 session key |
+| `instructions` | string | 否 | `/compact <instructions>` 的原文，指挥摘要保留什么 |
 
-**响应:** `{ "message", "before_messages", "after_messages", "tokens_saved" }`。`tokens_saved` 是粗略估计(`deleted * 50`)。
+没有逐次调用的保留预算旋钮：那是操作员设置，一个没有调用方的旋钮只会漂移。
+
+**响应:** `{ "message", "compacted", "kept", "tokens_before", "tokens_after", "tokens_saved", "summary" }`。`tokens_saved` 是 `tokens_before - tokens_after` 的饱和减法：摘要比被折叠的内容还长（极小窗口下可能发生）时报 0，而不是下溢。
+
+摘要被追加在它**不**覆盖的那些轮次之后（事件日志只追加），所以摘要前面有一行说明「以下消息是最近保留的原文轮次」；标记行是 `[Context Summary]`。
+
+对话本来就不够长时不会发生压缩：`compacted` 为 0，响应里带 `message` 说明原因，事件日志不改写。
+
+对应工具是 `session_compact`，输出形状是 `{ compacted, kept, tokens_saved, message }`（不带 `summary`）。
 
 ### session.truncate
 

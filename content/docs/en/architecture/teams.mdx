@@ -178,7 +178,15 @@ impl AlephTool for TaskReviewTool {
 
 ### G2 — per-task git-worktree isolation
 
-`execute_member_task` (`src/teams/dispatcher/runner.rs`) optionally wraps each member task in a detached-HEAD git worktree, wrapping `WorktreeSandbox` and pointing the run's `workspace_override` at the worktree so concurrent workers cannot corrupt each other's index. Outside a git repo the call silently falls back to the pre-G2 behaviour and logs a warning.
+`execute_member_task` (`src/teams/dispatcher/runner.rs`) optionally creates a detached-HEAD git worktree for each member task (`git worktree add --detach`, placed under the temp directory with a name like `aleph-subagent-team-{team}-{task}-{uuid}`) and points the run's workspace binding at it so concurrent workers cannot corrupt each other's index. The binding is expressed as `ExecWorkspace::OwnedWorktree` (`src/sandbox/context.rs`): the sandbox reads that path, never owns it, never rebuilds it, and refuses to execute against a missing one instead of creating an empty directory of the same name.
+
+Three hard rules:
+
+- **The source is authorized project attribution, not the daemon's cwd** — `team_worktree_source` resolves the project attribution from the scope first, then takes that project's `workspace_path`. A bound directory that sits inside a Git checkout is refused: "team worktree: the bound directory is inside a Git checkout; bind the checkout root to use a worktree".
+- **Only synchronous delegation shares the caller's checkout** — an asynchronously dispatched member task does not inherit the caller's live checkout; an ordinary caller directory is not a project binding and must not replace the member's default workspace.
+- **The worktree is torn down by RAII** — `WORKTREE_CLEANUP_GRACE_MS` is the grace window between abort-on-timeout and the explicit teardown; the happy path calls `cleanup()` explicitly and panic / timeout / abort fall back to `Drop`.
+
+Without an authorized Git project the member keeps its ordinary sandbox; a setup failure in a selected checkout is reported instead of silently degrading.
 
 ## Team run-mode pin
 

@@ -27,7 +27,7 @@ pub trait Sandbox: Send + Sync + 'static {
 
 生产启动将 `Arc<dyn Sandbox>` 指向 `WorkspaceSandbox`。`WorkspaceSandbox` 拥有三个关注点：
 
-1. **工作空间配置** —— 在第一次 exec 时物化 `~/.aleph/workspaces/{hash(session_id)}/`，在会话期间保持活动状态，在后续调用时重用。
+1. **工作空间配置** —— 第一次 exec 时物化会话工作空间目录，在会话期间保持活动状态，在后续调用时重用。目录位置取决于本次运行获授权的工作空间：发布了工作空间绑定就用它的根，否则回落到 `~/.aleph/workspaces/{hash(session_id)}/`。
 2. **能力执行** —— 根据会话的基线 `SandboxCapabilities` 对每个 `SandboxCommand` 进行分类，通过 `ApprovalGate` 升级超出基线的请求，缓存每会话授权。
 3. **OS 隔离** —— 将实际子进程启动委托给 `OsSandboxDriverTrait` 实现（macOS `sandbox-exec` 或 Linux `bwrap`）。
 
@@ -52,10 +52,12 @@ exec 类工具（`code_exec`、`bash_exec` 等）在启动时注入一个 `Arc<d
 
 ## 生命周期 —— 每会话工作空间
 
-`WorkspaceSandbox` 在 `RwLock` 后面保持一个 `HashMap<SessionId, Arc<SessionWorkspace>>`。`for_session(&sid)` 是入口点：
+`WorkspaceSandbox` 在 `RwLock` 后面保持一个 `HashMap<(SessionId, PathBuf), Arc<SessionWorkspace>>`。`for_session(&sid, cwd, owned)` 是入口点：
 
 - **快速路径**：`read().await` → 缓存命中 → 返回现有的 `Arc<SessionWorkspace>`。
-- **慢速路径**：`write().await` → 双重检查（另一个任务可能已经创建了它） → `tokio::fs::create_dir_all(cwd)` → 插入到映射中。
+- **慢速路径**：`write().await` → 双重检查（另一个任务可能已经创建了它） → `tokio::fs::create_dir_all(cwd)`（owned worktree 跳过：沙箱不拥有那个目录） → 插入到映射中。
+
+键是 `(会话, 根)` 而不是只有会话：一个会话可以在生命周期里换授权根（操作员在对话中途把项目目录改了），而 `granted_elevations` —— 人类已经批准过的能力提升缓存 —— 描述的是**根**不是会话。只按会话做键，会把为项目 A 批的授权交给跑在项目 B 里的命令，还会把会话第一次见到的根钉死整个进程生命周期。
 
 磁盘上的路径是确定性的：
 
@@ -65,12 +67,14 @@ exec 类工具（`code_exec`、`bash_exec` 等）在启动时注入一个 `Arc<d
 
 目录名通过 SHA-256 哈希 JSON 序列化的 `SessionId` 派生，截断为 16 字节（32 个十六进制字符）。这保持了路径简短且安全，无论这些变体可能携带什么字符，都适用于每个 `SessionKey` 变体。
 
+**但这条哈希路径只是回落。** Gateway 运行会把生效的工作空间（项目覆盖目录，否则是 agent 自己的 `~/.aleph/workspaces/{agent_id}`）发布到 `EXEC_WORKSPACE` 上，那才是「一次 shell 调用落在哪里」的唯一答案 —— 与提示词里公布的 `cwd=` 和 `RuntimeContext.working_dir` 文档一致。两者曾经不一致：gateway 把答案注入工具的 `working_dir` 参数，而牢笼仍锚在 `workspaces/<hash(session)>` 上；因为 32 个十六进制字符的目录既不是 agent id 也不是项目路径，**每个没写 `working_dir` 的 shell 调用都会被判「cwd 在工作空间根之外」**。
+
 每个 `SessionWorkspace` 携带：
 
 | 字段 | 类型 | 用途 |
 |-------|------|---------|
 | `cwd` | `PathBuf` | 物化的工作空间目录 |
-| `baseline` | `SandboxCapabilities` | 策略上限（默认：`::strict()`） |
+| `baseline` | `SandboxCapabilities` | 策略上限（默认：`::session_baseline()`） |
 | `granted_elevations` | `RwLock<HashSet<SandboxCapabilities>>` | 用户批准的能力授权缓存 |
 
 ---
@@ -79,28 +83,39 @@ exec 类工具（`code_exec`、`bash_exec` 等）在启动时注入一个 `Arc<d
 
 `WorkspaceSandbox::execute` 实现完整管道：
 
+进入这六步之前先跑一次驱动预检：`self.os_driver.execution_preflight()?`。它只回答「这台机器上原生沙箱的前置条件在不在」，**通过不代表原生启动一定成功**；前置条件缺失就直接返回 `SandboxError::BackendUnavailable`，而不是把命令放到没有隔离的环境里跑。
+
 ### 1. 会话解析
 
-`self.for_session(&cmd.session_id)` → 如果是第一次调用则惰性创建目录；否则缓存的 `Arc<SessionWorkspace>`。
+`self.for_session(&cmd.session_id, jail_root, owned)` → 如果是第一次调用则惰性创建目录；否则缓存的 `Arc<SessionWorkspace>`。
 
 ### 2. cwd 验证
 
-`cmd.cwd` 要么是 `None`（默认为工作空间根目录），要么必须是 `starts_with(&ws.cwd)` 的路径。其他任何路径返回：
+`cmd.cwd` 要么是 `None`（默认为工作空间根目录），要么必须落在工作空间根之内。检查是**符号链接感知**的：根与请求路径都先 `canonicalize` 再比较 —— 纯词法的 `starts_with` 会被工作空间内一条指向外部的软链接骗过。解析不出来（目录不存在、悬空软链接）按「在外面」处理。
+
+其他任何路径返回：
 
 ```rust
 SandboxError::CapabilityDenied {
-    reason: "cwd 在工作空间根目录之外".into(),
+    reason: "cwd outside workspace root".into(),
 }
 ```
+
+这个判定只对**当下**成立。第 3 步的审批等待是有人参与、时长不受控的，等待期间同会话里的另一个命令可以把被批路径的某一段换成软链接。所以只要第 3 步真的等了人，第 4 步用路径之前会用 `revalidate_cwd_containment` 重新确认包含关系，并且执行落在**第二次**解析出的路径上，而不是第一次那个。
 
 ### 3. 能力检查
 
 `cmd.capabilities.is_within(&ws.baseline)` 是快速路径（无需审批）。否则：
 
 1. 查询 `granted_elevations` —— 如果请求在先前授权范围内，通过。
-2. 否则询问 `ApprovalGate::request_approval_for_tool`。
+2. 否则询问 `ApprovalGate::request_approval_for_action`，请求里带的是整个 `ApprovalAction`（命令、程序、能力集），不是工具名 —— 只知道名字的请求方只能渲染名字，而给人看 `bash` 等于什么都没给。
    - `ApprovalOutcome::Approved` → 将 `cmd.capabilities` 插入 `granted_elevations`（未来相同或更窄的请求被缓存）。
-   - `ApprovalOutcome::Denied` 或 `Timeout` → `SandboxError::CapabilityDenied`。
+   - `ApprovalOutcome::Denied`、`Timeout` 或 `Unavailable` → `SandboxError::CapabilityDenied`。
+
+两道防线：
+
+- **拒绝账本** —— 对同一能力指纹的先前拒绝、或超过阈值的会话，直接自动拒绝，不再弹卡。指纹取自**规范化后**的能力摘要，不含模型可控的 `justification` 文本，否则模型换个说法就能造出一个新指纹绕过这道闸。
+- **无人值守税** —— 无人在场的运行（目标循环、心跳、cron 任务）不进入等待：卡片最终也会过期，但等待已经花掉了整个超时。无人值守时门直接返回 `ApprovalOutcome::Unavailable`，一次都不等。
 
 `SandboxCapabilities::is_within` 执行四个单调检查：
 - `fs_read` ⊆（前缀包含）
@@ -137,6 +152,30 @@ SandboxError::CapabilityDenied {
 
 ---
 
+## 工作空间归属 —— ExecWorkspace
+
+沙箱不自己决定「这个会话该在哪个目录里干活」。生效的工作空间由运行时发布：
+
+```rust
+pub enum ExecWorkspace {
+    Directory(PathBuf),
+    OwnedWorktree(Arc<WorktreeHandle>),
+}
+```
+
+**位置**: `src/sandbox/context.rs`
+
+- `Directory` —— 普通目录：项目覆盖目录，或 agent 自己的 `~/.aleph/workspaces/{agent_id}`。
+- `OwnedWorktree` —— 一个**由别人拥有**的 git worktree（例如团队 G2 为成员任务开的 detached-HEAD worktree）。沙箱只读它的路径，不创建、不删除、不修复它。
+
+`ExecWorkspace::root()` 给出根路径，`is_owned_worktree()` 区分两种形态；`OwnedWorktree` 的相等比较用 `Arc::ptr_eq` —— 比较的是同一份所有权，不是同一条路径。
+
+**策略根与启动目录分离。** owned worktree 的情况下，OS profile 用 canonical 化后的 worktree 根作为可写根，而 `CARGO_TARGET_DIR` 指向 `<root>/target`，构建产物不会污染 checkout。owned 根在准备执行时会被重新解析一次：解析结果变了（checkout 被换掉或删掉）就拒绝执行，理由是 `owned worktree root changed while preparing execution`。
+
+**缺失的 worktree 绝不重建。** `resolve_owned_root` 在目标不再是目录时返回 `owned worktree is no longer a directory: <path>`。沙箱不拥有那个目录，所以它既不重建也不在缺失时启动命令 —— 创建一个同名空目录会让命令「成功」地跑在一个没有代码的空 checkout 里。
+
+---
+
 ## 能力模型
 
 `SandboxCapabilities` 是一个普通结构体：
@@ -158,11 +197,13 @@ pub enum NetworkPolicy {
 
 **位置**: `src/sandbox/capabilities.rs`
 
-基线是 `SandboxCapabilities::strict()`（等同于 `::default()`）：
+会话基线是 `SandboxCapabilities::session_baseline()` —— 它等于 `strict()`，只在「fork 算不算提权」这一项上放宽，且只在非 Linux 平台生效（Linux 上 `allow_fork` 买到的是 `--unshare-pid`，不是 fork；那里没有 shell 会要求它，放宽基线只会让更多命令跳过审批）：
 
 - 工作空间 cwd 之外没有文件系统访问（由 OS 驱动程序配置文件自动授予）
 - 没有网络访问
-- 没有子进程生成
+- `spawn_subprocess` 在非 Linux 平台允许，在 Linux 上保持禁止
+
+`strict()` 与 `default()` 仍然保持严格：解释器要求 spawn 子进程时照样走审批。
 
 任何需要更多能力的命令都必须通过 `ApprovalGate` 升级。`granted_elevations` 缓存确保用户每会话只批准一次能力模式。
 
@@ -173,7 +214,7 @@ pub enum NetworkPolicy {
 `ApprovalGate` 处理超出基线能力请求的升级。当工具请求超出 `strict()` 的能力时，沙箱：
 
 1. 检查会话的 `granted_elevations` 缓存
-2. 如果未缓存，调用 `ApprovalGate::request_approval_for_tool(tool_name, reason)`
+2. 如果未缓存，调用 `ApprovalGate::request_approval_for_action(&action)`，请求携带完整动作描述
 3. 批准后，将授予的能力插入缓存
 4. 拒绝或超时时，返回 `SandboxError::CapabilityDenied`
 
@@ -189,6 +230,9 @@ pub enum NetworkPolicy {
 
 ```rust
 pub trait OsSandboxDriverTrait: Send + Sync {
+    /// 拒绝已知缺失的前置条件；通过不代表原生启动一定成功。
+    fn execution_preflight(&self) -> Result<(), SandboxError>;
+
     fn profile_for(
         &self,
         capabilities: &SandboxCapabilities,

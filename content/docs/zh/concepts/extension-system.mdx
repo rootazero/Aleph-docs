@@ -116,6 +116,10 @@ config > workspace > global > bundled
 
 插件卸载在删除文件前完成运行时清理。对 MCP 插件而言，瞬态 server 会从实时管理器移除，进程与工具不会跨越插件生命周期。格式错误的插件结果会作为错误返回，而不是被上报为成功的服务结果。
 
+单插件重载（`reload_plugin`）的顺序是**先预检再拆**：解析与身份校验、WASM guest module 编译（不运行），然后才卸载旧版本并挂载新版本。预检判定新版本有缺陷且旧版本在跑时，重载就地停下，返回 `MountError::ReloadRefused`，旧版本继续服务。准入拒绝（`PrepareError::Refused`）不是缺陷，仍然卸载并记录。
+
+每个成功的生命周期原语（`mount`、`unmount`、`reload_plugin`、`reload`）末尾恰好调用一次 `Views::after_transition`，投影重新发布与钩子同步只在这一处发生。`reload` 是整体换血：卸载全部、重新发现、挂载全部，返回 `ReloadReport`；旧的「重载后清扫孤儿 service」与「MCP server 重新同步」步骤已经删掉，因为 dispose + mount 就是它们近似的效果。
+
 ## 与 Hub 的关系
 
 Hub 目录在 `src/hub/` 实现，把归一化后的目录条目持久化到 `hub_catalog.db`。它提供一个 `InstallSpec`，并把选中的 `Plugin` 入口路由到市场安装器。扩展宿主随后发现并加载已安装插件。

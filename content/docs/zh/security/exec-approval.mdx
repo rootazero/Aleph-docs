@@ -243,8 +243,8 @@ pub enum ApprovalDecisionType {
   —— 已完成命令的 stdout / stderr 的**单一**真实来源：字节级脱敏、
   剥离隐形 / bidi 控制字符、返回 **block-class** 判定。block-class 命中
   （PEM 私钥 —— `leak_detector::BLOCK_CLASS_SECRETS`）让沙箱**失败关闭**，
-  而非返回周围上下文。`WorkspaceSandbox` 与 `WorktreeSandbox` 都把输出
-  路由通过它 —— 底线不可能在执行路径间漂移。
+  而非返回周围上下文。`WorkspaceSandbox` 把输出路由通过它 —— 底线不可能
+  在执行路径间漂移。
 
 两个密钥正则的目录在 `src/secrets/leak_detector.rs` 与
 `src/exec/secret_patterns.rs`，相互对齐（私钥正则两边都是

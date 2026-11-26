@@ -117,6 +117,10 @@ The active record is loaded; overridden records remain visible for diagnostics. 
 
 Unloading a plugin performs runtime cleanup before deleting files. For MCP plugins, transient servers are removed from the live manager so processes and tools do not survive the plugin lifecycle. Malformed plugin results are returned as errors rather than being reported as successful service results.
 
+A single-plugin reload (`reload_plugin`) **preflights before it tears down**: parse and identity check, compile the WASM guest module (without running it), and only then unmount the old version and mount the new one. When the preflight finds the new version defective while an old version is running, the reload stops there and returns `MountError::ReloadRefused` — the previous version keeps serving. An admission refusal (`PrepareError::Refused`) is not a defect, so it still unmounts and records the refusal.
+
+Every successful lifecycle primitive (`mount`, `unmount`, `reload_plugin`, `reload`) calls `Views::after_transition` exactly once at its end, which is the only place projections are republished and hooks are synced. `reload` is a full turnover: unmount everything, rediscover, mount everything, returning a `ReloadReport`. The old post-reload orphan-service sweep and MCP server re-sync are gone, because dispose + mount is what they approximated.
+
 ## Relationship with the Hub
 
 The Hub catalog is implemented in `src/hub/` and persists catalog entries in `hub_catalog.db`. It supplies an `InstallSpec` and routes a selected `Plugin` entry to the marketplace installer. The extension host then discovers and loads the installed plugin.

@@ -60,6 +60,8 @@ description: "插件管理 RPC 方法"
 
 **响应:** `{ "ok": true, "pluginId", "status" }`。
 
+重载**先预检再拆**:新版本先被解析与身份校验,WASM 插件的 guest module 先编译(不运行),此时旧版本仍在服务。预检判定新版本有缺陷且旧版本在跑时,重载就地停下,旧版本继续服务,错误文本是 `plugin '{id}' was not reloaded, the previous version is still running: {reason}`。准入被拒(操作员的决定,不是缺陷)仍然卸载旧版本并记录拒绝。预检覆盖不到的失败(链接/实例化错误、MCP server 启动、service 启动)只在挂载时出现,那时插件处于未挂载状态。
+
 ### plugins.disable（保留安装）
 
 只需停用运行时而不删除目录时,使用 `plugins.disable`,不要调用旧的 load/unload 名称。它创建 `.disabled` 标记并拆除运行时;恢复发现使用 `plugins.enable`。

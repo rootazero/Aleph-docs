@@ -162,6 +162,12 @@ These declarations describe what a plugin may register or request. Tool executio
 
 The watcher reacts to manifest and component changes. `reload` is serialized under the manager load guard, so concurrent reloads cannot overwrite one another's registry state. Plugin unload stops its services, removes runtime registrations, and cleans up transient MCP servers before the plugin is reloaded or deleted.
 
+A single-plugin reload **preflights before it tears down**. The new version is parsed and identity-checked, and a WASM plugin's guest module is compiled (compiled, not run), while the running version keeps serving. If the preflight finds the new version defective, the reload stops there: the old version is not torn down, the plugin row is untouched, and the error is `plugin '{id}' was not reloaded, the previous version is still running: {reason}`.
+
+An admission refusal is not a defect of the new version but the operator's decision, so it still tears down the old version and records the refusal. When no version is running, a failed preflight behaves like a plain mount: the failure lands on the plugin row.
+
+Failures the preflight cannot cover still exist: link/instantiate errors, MCP server start, and service start only appear while mounting, and the plugin is unmounted at that point.
+
 ## Gateway and CLI surfaces
 
 The canonical Claude Code-compatible gateway namespace is singular:

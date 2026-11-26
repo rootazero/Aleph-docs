@@ -178,7 +178,15 @@ impl AlephTool for TaskReviewTool {
 
 ### G2 — 每任务 git worktree 隔离
 
-`execute_member_task`（`src/teams/dispatcher/runner.rs`）可选地为每次成员任务创建 detached-HEAD git worktree，包装 `WorktreeSandbox` 并把 `workspace_override` 指向 worktree——并发 worker 不会互相污染索引。非 git 仓库下静默回退到 G2 前行为并 log 警告。
+`execute_member_task`（`src/teams/dispatcher/runner.rs`）可选地为每次成员任务创建 detached-HEAD git worktree（`git worktree add --detach`，目录在临时目录下，名字形如 `aleph-subagent-team-{team}-{task}-{uuid}`），并把运行的工作空间绑定指向它——并发 worker 不会互相污染索引。绑定通过 `ExecWorkspace::OwnedWorktree` 表达（`src/sandbox/context.rs`）：沙箱只读这个路径，不拥有它、不重建它，缺失时拒绝执行而不是造一个空目录。
+
+三条硬规则：
+
+- **来源是授权项目归属，不是 daemon 的当前目录** —— `team_worktree_source` 先从 scope 解析项目归属，再取该项目的 `workspace_path`。绑定目录若落在某个 Git checkout 内部则拒绝：「team worktree: the bound directory is inside a Git checkout; bind the checkout root to use a worktree」。
+- **同步委托才共享调用方的 checkout** —— 异步派发的成员任务不继承调用方的 live checkout；普通调用方目录也不是项目绑定，不能替换成员的默认工作空间。
+- **worktree 由 RAII 拆** —— `WORKTREE_CLEANUP_GRACE_MS` 是超时中止与显式拆除之间的宽限窗；正常路径显式 `cleanup()`，panic / 超时 / 中止走 `Drop` 兜底。
+
+没有授权 Git 项目时，成员保留普通沙箱；已选定的 checkout 搭建失败则直接报告，不静默降级。
 
 ## 团队 Run Mode Pin
 

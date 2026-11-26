@@ -27,7 +27,7 @@ pub trait Sandbox: Send + Sync + 'static {
 
 Production boot wires an `Arc<dyn Sandbox>` pointing at `WorkspaceSandbox`. `WorkspaceSandbox` owns three concerns:
 
-1. **Workspace provisioning** — materialize `~/.aleph/workspaces/{hash(session_id)}/` on first exec, keep it alive for the session, reuse on subsequent calls.
+1. **Workspace provisioning** — materialize the session workspace directory on first exec, keep it alive for the session, reuse on subsequent calls. Where it lands depends on the workspace this run was authorized for: the published workspace binding if there is one, otherwise `~/.aleph/workspaces/{hash(session_id)}/`.
 2. **Capability enforcement** — classify every `SandboxCommand` against the session's baseline `SandboxCapabilities`, escalate out-of-baseline requests through `ApprovalGate`, cache per-session grants.
 3. **OS isolation** — delegate the actual subprocess launch to an `OsSandboxDriverTrait` implementation (macOS `sandbox-exec` or Linux `bwrap`).
 
@@ -52,10 +52,12 @@ The exec-class tool (`code_exec`, `bash_exec`, etc.) holds an `Arc<dyn Sandbox>`
 
 ## Lifecycle — Per-Session Workspace
 
-`WorkspaceSandbox` keeps a `HashMap<SessionId, Arc<SessionWorkspace>>` behind an `RwLock`. `for_session(&sid)` is the entry point:
+`WorkspaceSandbox` keeps a `HashMap<(SessionId, PathBuf), Arc<SessionWorkspace>>` behind an `RwLock`. `for_session(&sid, cwd, owned)` is the entry point:
 
 - **Fast path**: `read().await` → cache hit → return the existing `Arc<SessionWorkspace>`.
-- **Slow path**: `write().await` → double-check (another task may have created it) → `tokio::fs::create_dir_all(cwd)` → insert into the map.
+- **Slow path**: `write().await` → double-check (another task may have created it) → `tokio::fs::create_dir_all(cwd)` (skipped for an owned worktree: the sandbox does not own that directory) → insert into the map.
+
+The key is `(session, root)`, not the session alone: one session can run under different authorized roots over its life (the operator repoints the project folder mid-conversation), and `granted_elevations` — the cache of capability escalations a human already approved — describes a **root**, not a session. Keying by session alone hands a grant made for project A to a command running in project B, and pins the first root the session ever saw for the whole process lifetime.
 
 The on-disk path is deterministic:
 
@@ -65,12 +67,14 @@ The on-disk path is deterministic:
 
 The directory name is derived by SHA-256 hashing the JSON-serialized `SessionId`, truncated to 16 bytes (32 hex characters). This keeps the path short and safe across every `SessionKey` variant regardless of the characters those variants may carry.
 
+**That hash path is only the fallback.** A gateway run publishes its effective workspace (the project override directory, else the agent's own `~/.aleph/workspaces/{agent_id}`) on `EXEC_WORKSPACE`, and that is the single answer to "where does a shell call land" — the same value the prompt advertises as `cwd=` and that `RuntimeContext.working_dir` documents. The two used to disagree: the gateway injected its answer into the tool's `working_dir` argument while the jail stayed anchored on `workspaces/<hash(session)>`, and since a 32-hex-character directory is neither an agent id nor a project path, **every shell call that omitted `working_dir` was refused as "cwd outside workspace root"**.
+
 Each `SessionWorkspace` carries:
 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `cwd` | `PathBuf` | The materialized workspace directory |
-| `baseline` | `SandboxCapabilities` | Policy ceiling (default: `::strict()`) |
+| `baseline` | `SandboxCapabilities` | Policy ceiling (default: `::session_baseline()`) |
 | `granted_elevations` | `RwLock<HashSet<SandboxCapabilities>>` | Cache of user-approved capability grants |
 
 ---
@@ -79,13 +83,17 @@ Each `SessionWorkspace` carries:
 
 `WorkspaceSandbox::execute` implements the full pipeline:
 
+Before those six steps it runs a driver preflight: `self.os_driver.execution_preflight()?`. It only answers "are the native sandbox prerequisites present on this machine" — **success does not certify a native launch**; a missing prerequisite returns `SandboxError::BackendUnavailable` instead of running the command with no isolation at all.
+
 ### 1. Session Resolve
 
-`self.for_session(&cmd.session_id)` → lazy directory creation if first call; cached `Arc<SessionWorkspace>` otherwise.
+`self.for_session(&cmd.session_id, jail_root, owned)` → lazy directory creation if first call; cached `Arc<SessionWorkspace>` otherwise.
 
 ### 2. cwd Validate
 
-`cmd.cwd` is either `None` (defaults to workspace root) or a path that must `starts_with(&ws.cwd)`. Anything else returns:
+`cmd.cwd` is either `None` (defaults to workspace root) or a path that must land inside the workspace root. The check is **symlink-aware**: both the root and the requested path are `canonicalize`d before comparison — a purely lexical `starts_with` is fooled by a symlink inside the workspace that resolves outside the jail. A path that cannot be resolved (missing directory, dangling link) is treated as outside.
+
+Anything else returns:
 
 ```rust
 SandboxError::CapabilityDenied {
@@ -93,14 +101,21 @@ SandboxError::CapabilityDenied {
 }
 ```
 
+That verdict is only true as of **now**. Step 3's approval wait is human-paced and unbounded, and while the card sits on someone's screen a sibling command in the same workspace can swap a component of the approved path for a symlink. So if — and only if — step 3 actually awaited a human, containment is re-established by `revalidate_cwd_containment` before step 4 uses the path, and the command runs in the path the **second** check resolved, not the first one.
+
 ### 3. Capability Check
 
 `cmd.capabilities.is_within(&ws.baseline)` is the fast path (no approval needed). Otherwise:
 
 1. Consult `granted_elevations` — if the request is within a prior grant, pass.
-2. Otherwise ask `ApprovalGate::request_approval_for_tool`.
+2. Otherwise ask `ApprovalGate::request_approval_for_action`, carrying the whole `ApprovalAction` (command, program, capability set) rather than a tool name — a requester that only knows the name can only render the name, and a human shown `bash` has been shown nothing.
    - `ApprovalOutcome::Approved` → insert `cmd.capabilities` into `granted_elevations` (future same-or-narrower requests are cached).
-   - `ApprovalOutcome::Denied` or `Timeout` → `SandboxError::CapabilityDenied`.
+   - `ApprovalOutcome::Denied`, `Timeout`, or `Unavailable` → `SandboxError::CapabilityDenied`.
+
+Two guards back this up:
+
+- **Denial ledger** — a prior refusal of the same capability fingerprint, or a session past the denial threshold, auto-denies without re-prompting. The fingerprint keys on the *normalized* capability summary, never on the model-controlled `justification` text; folding that in would let the model mint a fresh fingerprint for the same escalation just by rewording its reason.
+- **Unattended tax** — a run with nobody watching (a goal loop, a heartbeat, a cron job) never parks: the card would expire anyway, but the wait would already have cost the full timeout. Unattended, the gate returns `ApprovalOutcome::Unavailable` without waiting once.
 
 `SandboxCapabilities::is_within` enforces four monotonic checks:
 - `fs_read` ⊆ (prefix containment)
@@ -137,6 +152,30 @@ This is the capability-ledger hook; downstream tracing subscribers can sink it t
 
 ---
 
+## Workspace ownership — ExecWorkspace
+
+The sandbox does not decide for itself "which directory should this session work in". The effective workspace is published by the runtime:
+
+```rust
+pub enum ExecWorkspace {
+    Directory(PathBuf),
+    OwnedWorktree(Arc<WorktreeHandle>),
+}
+```
+
+**Location**: `src/sandbox/context.rs`
+
+- `Directory` — an ordinary directory: the project override directory, or the agent's own `~/.aleph/workspaces/{agent_id}`.
+- `OwnedWorktree` — a git worktree **owned by someone else** (for example the detached-HEAD worktree team G2 opens for a member task). The sandbox reads its path; it never creates, deletes, or repairs it.
+
+`ExecWorkspace::root()` gives the root path and `is_owned_worktree()` distinguishes the two shapes; `OwnedWorktree` equality compares with `Arc::ptr_eq` — the same ownership, not merely the same path.
+
+**The policy root and the launch directory are separate.** With an owned worktree, the OS profile takes the canonicalized worktree root as its writable root while `CARGO_TARGET_DIR` points at `<root>/target`, so build artifacts do not pollute the checkout. The owned root is re-resolved while the command is being prepared: if the resolution changed (the checkout was replaced or removed), execution is refused with `owned worktree root changed while preparing execution`.
+
+**A missing worktree is never recreated.** `resolve_owned_root` returns `owned worktree is no longer a directory: <path>` when the target is no longer a directory. The sandbox does not own that directory, so it neither rebuilds it nor launches the command against a missing one — creating an empty directory of the same name would let the command "succeed" inside an empty checkout with no code in it.
+
+---
+
 ## Capability Model
 
 `SandboxCapabilities` is a plain struct:
@@ -158,11 +197,13 @@ pub enum NetworkPolicy {
 
 **Location**: `src/sandbox/capabilities.rs`
 
-The baseline is `SandboxCapabilities::strict()` (equivalent to `::default()`):
+The session baseline is `SandboxCapabilities::session_baseline()` — equal to `strict()` except that `spawn_subprocess` is permitted on non-Linux platforms (on Linux `allow_fork` buys `--unshare-pid`, not forking; no shell there asks for it, and lifting the floor would only widen what skips approval):
 
 - No filesystem access outside the workspace cwd (auto-granted by the OS driver profile)
 - No network access
-- No subprocess spawning
+- `spawn_subprocess` allowed on non-Linux platforms, denied on Linux
+
+`strict()` and `default()` stay tight: an interpreter that asks to spawn children still routes through approval.
 
 Any command that needs more must escalate via `ApprovalGate`. The `granted_elevations` cache ensures a user only approves a capability pattern once per session.
 
@@ -173,7 +214,7 @@ Any command that needs more must escalate via `ApprovalGate`. The `granted_eleva
 `ApprovalGate` handles escalation for out-of-baseline capability requests. When a tool requests capabilities beyond `strict()`, the sandbox:
 
 1. Checks the session's `granted_elevations` cache
-2. If not cached, calls `ApprovalGate::request_approval_for_tool(tool_name, reason)`
+2. If not cached, calls `ApprovalGate::request_approval_for_action(&action)`, carrying the full action description
 3. On approval, inserts the granted capabilities into the cache
 4. On denial or timeout, returns `SandboxError::CapabilityDenied`
 
@@ -189,6 +230,9 @@ The `OsSandboxDriverTrait` is the platform abstraction for OS-level sandboxing:
 
 ```rust
 pub trait OsSandboxDriverTrait: Send + Sync {
+    /// Reject known missing prerequisites; success does not certify a native launch.
+    fn execution_preflight(&self) -> Result<(), SandboxError>;
+
     fn profile_for(
         &self,
         capabilities: &SandboxCapabilities,

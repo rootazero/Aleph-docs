@@ -338,7 +338,7 @@ pub struct RegistryToolAdapter { /* wraps any ToolRegistry as LoopTool */ }
 |---|---|---|
 | `AiProvider` | LLM provider (with failover) | `FailoverProvider`, `HttpProvider` with `AnthropicProtocol` or `OpenAiProtocol` |
 | `ToolService` / `LoopTool` | Tool execution | `BuiltinToolRegistry` + `RegistryToolAdapter` |
-| `Sandbox` | Process isolation | `WorkspaceSandbox`, `WorktreeSandbox`, `OsSandboxDriver` |
+| `Sandbox` | Process isolation | `WorkspaceSandbox`, `NoopSandbox` |
 | `EmbeddingProvider` | Embedding backend | `RemoteEmbeddingProvider` |
 | `Clock` | Injectable clock | `SystemClock`, test fake |
 | `TraceSink` | Harness observability | `GatewayTraceSink`, `SpySink` (tests) |

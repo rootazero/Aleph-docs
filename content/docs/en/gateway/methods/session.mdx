@@ -168,13 +168,24 @@ Get the token / message statistics for a session, with a real per-model USD cost
 
 ### session.compact
 
-Manually trigger a compaction. The `KeepLastN` strategy is hard-coded (`SESSION_COMPACT_KEEP_LAST_N`); the agent loop's automatic compaction uses the same strategy.
+Manually trigger a compaction. It uses the same manual compactor as automatic compaction — only the entry point differs.
+
+The retention policy is a **token budget**, not a message count: the budget comes from the operator setting `[context_budget] manual_compact_keep_tokens`, defaults to `DEFAULT_KEEP_TOKENS` (20 000 tokens), and is clamped to 2 000 – 400 000. The old `KeepLastN{50}` was wrong in both directions — fifty `file_read` results can be 200k tokens, while fifty one-line turns are a few hundred.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `session_key` | string | yes | Canonical session key |
+| `instructions` | string | no | The text after `/compact <instructions>`, steering what the summary keeps |
 
-**Response:** `{ "message", "before_messages", "after_messages", "tokens_saved" }`. `tokens_saved` is a rough estimate (`deleted * 50`).
+There is no per-call retention override: that budget is an operator setting, and a knob with no caller is a knob that drifts.
+
+**Response:** `{ "message", "compacted", "kept", "tokens_before", "tokens_after", "tokens_saved", "summary" }`. `tokens_saved` is a saturating subtraction of `tokens_before - tokens_after`: a summary longer than what it replaced (possible on a tiny window) reports zero rather than underflowing.
+
+The summary is appended *after* the turns it does not cover (the event log is append-only), so a framing line above the marker says so plainly; the marker line is `[Context Summary]`.
+
+When the conversation is already short enough, nothing is compacted: `compacted` is 0, the response carries a `message` explaining why, and the event log is left alone.
+
+The matching tool is `session_compact`, whose output shape is `{ compacted, kept, tokens_saved, message }` (no `summary`).
 
 ### session.truncate
 

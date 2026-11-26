@@ -59,13 +59,15 @@ OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 3-tier
 
 ## Lifecycle — per-session workspace
 
-`WorkspaceSandbox` keeps a `HashMap<SessionId, Arc<SessionWorkspace>>`
-behind an `RwLock`. `for_session(&sid)` is the entry point:
+`WorkspaceSandbox` keeps a `HashMap<(SessionId, PathBuf), Arc<SessionWorkspace>>`
+behind an `RwLock`. `for_session(&sid, cwd, owned)` is the entry point:
 
 - **Fast path**: `read().await` → cache hit → return the existing
   `Arc<SessionWorkspace>`.
 - **Slow path**: `write().await` → double-check (another task may have
   created it) → `tokio::fs::create_dir_all(cwd)` → insert into the map.
+  An owned worktree skips directory creation: the sandbox does not own
+  that directory.
 
 The on-disk path is deterministic:
 
@@ -81,28 +83,42 @@ characters those variants may carry.
 Each `SessionWorkspace` carries:
 
 - `cwd: PathBuf` — the materialized directory
-- `baseline: SandboxCapabilities` — policy ceiling (today: `::strict()`)
+- `baseline: SandboxCapabilities` — policy ceiling (today: `::session_baseline()`)
 - `granted_elevations: RwLock<HashSet<SandboxCapabilities>>` — per-session
   cache of approvals the user has already granted
+
+The key is `(session, root)`, not the session alone: `granted_elevations`
+describes a **root**, not a session, so keying by session alone would hand
+a grant made for project A to a command running in project B.
 
 ## The six-step `execute` pipeline
 
 `WorkspaceSandbox::execute` (`src/sandbox/workspace/mod.rs:206`) implements
-the spec §8 pipeline:
+the spec §8 pipeline. Before the pipeline it runs
+`self.os_driver.execution_preflight()?`: it only answers "are the native
+sandbox prerequisites present on this machine", and success does **not**
+certify a native launch; a missing prerequisite returns
+`SandboxError::BackendUnavailable`.
 
-1. **Session resolve** — `self.for_session(&cmd.session_id)` → lazy dir
-   creation on first call; cached `Arc<SessionWorkspace>` otherwise.
+1. **Session resolve** — `self.for_session(&cmd.session_id, jail_root,
+   owned)` → lazy dir creation on first call; cached
+   `Arc<SessionWorkspace>` otherwise.
 2. **cwd validate** — `cmd.cwd` is either `None` (defaults to workspace
    root) or must `canonicalize + starts_with(&ws.cwd)` (BUG-3 hardening:
    a symlink cannot escape). Anything else returns
    `SandboxError::CapabilityDenied { reason: "cwd outside workspace root" }`.
+   That verdict holds only as of now: if step 3 actually awaited a human,
+   containment is re-established by `revalidate_cwd_containment` before the
+   path is used.
 3. **Capability check** — `cmd.capabilities.is_within(&ws.baseline)` is
    the fast path (no approval). Otherwise consult `granted_elevations`;
    if the request is within a prior grant, pass. Otherwise ask
-   `ApprovalGate::request_approval_for_tool`.
+   `ApprovalGate::request_approval_for_action` (the request carries the
+   whole `ApprovalAction`, not a tool name).
    - `ApprovalOutcome::Approved` → insert `cmd.capabilities` into
      `granted_elevations` (future same-or-narrower requests are cached).
-   - `ApprovalOutcome::Denied` | `Timeout` → `SandboxError::CapabilityDenied`.
+   - `ApprovalOutcome::Denied` | `Timeout` | `Unavailable` →
+     `SandboxError::CapabilityDenied`.
 4. **Profile generate** — `os_driver.profile_for(&caps, &cwd)` returns
    an opaque `OsSandboxProfile` (on macOS, SBPL profile text).
 5. **Run** — `os_driver.run(program, args, env, stdin, cwd, profile,
@@ -118,6 +134,39 @@ Inside the pipeline, `SandboxCapabilities::is_within`
 (`src/sandbox/capabilities.rs:36`) enforces four monotonic checks:
 `fs_read` ⊆ (prefix), `fs_write` ⊆ (prefix), `network` (`None ⊆ AllowHosts ⊆
 AllowAll`), `spawn_subprocess` (false ⊆ any).
+
+## Owned worktrees and workspace ownership
+
+The effective workspace is published by the runtime on `EXEC_WORKSPACE`:
+
+```rust
+pub enum ExecWorkspace {
+    Directory(PathBuf),
+    OwnedWorktree(Arc<WorktreeHandle>),
+}
+```
+
+**Location**: `src/sandbox/context.rs`
+
+`Directory` is an ordinary directory (the project override directory, or
+the agent's own `~/.aleph/workspaces/{agent_id}`); `OwnedWorktree` is a git
+worktree **owned by someone else**, for example the detached-HEAD worktree
+team G2 opens for a member task. The sandbox reads its path: it never
+creates, deletes, or repairs it.
+
+Two hard rules:
+
+- **The policy root and the launch directory are separate** — with an owned
+  worktree the OS profile takes the canonicalized worktree root as its
+  writable root while `CARGO_TARGET_DIR` points at `<root>/target`, so
+  build artifacts do not pollute the checkout. The owned root is
+  re-resolved while the command is prepared; if the resolution changed,
+  execution is refused (`owned worktree root changed while preparing
+  execution`).
+- **A missing worktree is never recreated** — `resolve_owned_root` returns
+  `owned worktree is no longer a directory: <path>` when the target is no
+  longer a directory. Creating an empty directory of the same name would
+  let the command "succeed" inside an empty checkout with no code in it.
 
 ## `SandboxCapabilities`
 

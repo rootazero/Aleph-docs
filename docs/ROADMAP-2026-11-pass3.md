@@ -136,4 +136,5 @@ S8 终验 ◀── S7 术语·导航·changelog ◀── S6 全站符号校准
 | S1 | 完成 | G1 锚点 0（新增 0）；G2 / G3 / G4 各 0；G5 `next build` / `tsc --noEmit` / `eslint` 退出码 0。G1b 剩 2 条（S3 范围）、G1c 剩 125 条（S6 范围），本阶段未新增 | `0af0854`（正文含 `822d7d3`） |
 | S2 | 完成 | G1 锚点 0（新增 0）；G2 / G3 / G4 各 0；G5 `next build` / `tsc --noEmit` / `eslint` 退出码 0。G1b 剩 2 条（S3 范围）、G1c 剩 125 条（均为既有存量，本阶段新增 0） | `10a1153` |
 | S3 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6340）；G1b census 396 方法、ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 剩 125 条（S6 范围），本阶段新增 0 | `69f142f` |
-| S4 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6402）；G1b ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 125 条在本阶段棘轮为基线旧债（S6 范围），本阶段新增 0 | 待提交（`docs(phase-S4): …`） |
+| S4 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6402）；G1b ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 125 条在本阶段棘轮为基线旧债（S6 范围），本阶段新增 0 | `86e99bb` |
+| S5 | 完成 | G1 锚点 0（新增 0，页面 330、锚点 6408）；G1b census 396 方法、ghost 0、missing 0；G2 / G3 / G4 各 0；G5 `next build`（334 静态页）/ `tsc --noEmit` / `eslint` 退出码 0。G1c 125 条均为既有旧债，本阶段新增 0 | 待提交（`docs(phase-S5): …`） |

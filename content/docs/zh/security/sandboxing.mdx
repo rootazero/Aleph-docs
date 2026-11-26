@@ -60,12 +60,14 @@ OsSandboxDriver    ──► macOS sandbox-exec  / Linux bwrap  / Windows 三级
 ## 生命周期 —— 每会话一个工作空间
 
 `WorkspaceSandbox` 在 `RwLock` 后维护一个
-`HashMap<SessionId, Arc<SessionWorkspace>>`。`for_session(&sid)` 是入口：
+`HashMap<(SessionId, PathBuf), Arc<SessionWorkspace>>`。
+`for_session(&sid, cwd, owned)` 是入口：
 
 - **快路径**：`read().await` → 缓存命中 → 返回现有
   `Arc<SessionWorkspace>`。
 - **慢路径**：`write().await` → 双重检查（另一个任务可能已创建）→
-  `tokio::fs::create_dir_all(cwd)` → 插入 map。
+  `tokio::fs::create_dir_all(cwd)` → 插入 map。owned worktree 跳过建目录：
+  沙箱不拥有那个目录。
 
 磁盘路径是确定性的：
 
@@ -80,27 +82,36 @@ JSON-serialized `SessionId` 做 SHA-256，截断到 16 字节（32 个 hex 字�
 每个 `SessionWorkspace` 持有：
 
 - `cwd: PathBuf` —— 物化的目录
-- `baseline: SandboxCapabilities` —— 政策上限（今天：`::strict()`）
+- `baseline: SandboxCapabilities` —— 政策上限（今天：`::session_baseline()`）
 - `granted_elevations: RwLock<HashSet<SandboxCapabilities>>` —— 本会话
   缓存的用户已批准升级
+
+键是 `(会话, 根)` 而不是只有会话：`granted_elevations` 描述的是**根**
+不是会话，只按会话做键会把为项目 A 批的授权交给跑在项目 B 里的命令。
 
 ## 六步 `execute` 管道
 
 `WorkspaceSandbox::execute`（`src/sandbox/workspace/mod.rs:206`）实现 spec §8
-管道：
+管道。进管道之前先跑 `self.os_driver.execution_preflight()?`：它只回答
+「这台机器上原生沙箱的前置条件在不在」，通过**不代表**原生启动一定成功；
+前置条件缺失直接返回 `SandboxError::BackendUnavailable`。
 
-1. **Session resolve** —— `self.for_session(&cmd.session_id)` →
-   首次调用懒创建目录；否则返回缓存的 `Arc<SessionWorkspace>`。
+1. **Session resolve** —— `self.for_session(&cmd.session_id, jail_root,
+   owned)` → 首次调用懒创建目录；否则返回缓存的
+   `Arc<SessionWorkspace>`。
 2. **cwd validate** —— `cmd.cwd` 要么是 `None`（默认为 workspace 根），
    要么必须 `canonicalize + starts_with(&ws.cwd)`（BUG-3 hardening：符号
    链接无法逃出）。其他情况返回 `SandboxError::CapabilityDenied { reason:
    "cwd outside workspace root" }`。
+   这个判定只对当下成立：如果第 3 步真的等了人，路径会在被使用前由
+   `revalidate_cwd_containment` 重新确认包含关系。
 3. **Capability check** —— `cmd.capabilities.is_within(&ws.baseline)` 是
    快路径（不审批）。否则查 `granted_elevations`；请求在已批准的范围内
-   通过。否则问 `ApprovalGate::request_approval_for_tool`。
+   通过。否则问 `ApprovalGate::request_approval_for_action`（请求带的是
+   整个 `ApprovalAction`，不是工具名）。
    - `ApprovalOutcome::Approved` → 把 `cmd.capabilities` 插入
      `granted_elevations`（同一或更窄的未来请求被缓存）。
-   - `ApprovalOutcome::Denied` | `Timeout` →
+   - `ApprovalOutcome::Denied` | `Timeout` | `Unavailable` →
      `SandboxError::CapabilityDenied`。
 4. **Profile generate** —— `os_driver.profile_for(&caps, &cwd)` 返回一个
    不透明的 `OsSandboxProfile`（macOS 上：SBPL profile 文本）。
@@ -118,6 +129,35 @@ JSON-serialized `SessionId` 做 SHA-256，截断到 16 字节（32 个 hex 字�
 （`src/sandbox/capabilities.rs:36`）强制四个单调检查：`fs_read` ⊆（前缀）、
 `fs_write` ⊆（前缀）、`network`（`None ⊆ AllowHosts ⊆ AllowAll`）、
 `spawn_subprocess`（`false ⊆ any`）。
+
+## 拥有型 worktree 与工作空间归属
+
+生效的工作空间由运行时发布到 `EXEC_WORKSPACE`：
+
+```rust
+pub enum ExecWorkspace {
+    Directory(PathBuf),
+    OwnedWorktree(Arc<WorktreeHandle>),
+}
+```
+
+**位置**：`src/sandbox/context.rs`
+
+`Directory` 是普通目录（项目覆盖目录，或 agent 自己的
+`~/.aleph/workspaces/{agent_id}`）；`OwnedWorktree` 是**由别人拥有**的
+git worktree，比如团队 G2 为成员任务开的 detached-HEAD worktree。
+沙箱只读它的路径：不创建、不删除、不修复。
+
+两条硬规则：
+
+- **策略根与启动目录分离** —— owned worktree 下，OS profile 用
+  canonical 化后的 worktree 根作为可写根，`CARGO_TARGET_DIR` 指向
+  `<root>/target`，构建产物不污染 checkout。准备执行时重新解析一次
+  owned 根，结果变了就拒绝执行（`owned worktree root changed while
+  preparing execution`）。
+- **缺失的 worktree 绝不重建** —— `resolve_owned_root` 在目标不再是目录
+  时返回 `owned worktree is no longer a directory: <path>`。创建一个同名
+  空目录会让命令「成功」地跑在没有代码的空 checkout 里。
 
 ## `SandboxCapabilities`
 

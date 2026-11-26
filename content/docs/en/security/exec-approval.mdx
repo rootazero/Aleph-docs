@@ -279,9 +279,8 @@ Two distinct paths, by consumer:
   control characters, and returns a **block-class** verdict. A
   block-class hit (a PEM private key — `leak_detector::BLOCK_CLASS_SECRETS`)
   makes the sandbox **fail closed** rather than return the surrounding
-  context. Both `WorkspaceSandbox` and `WorktreeSandbox` route their
-  output through it, so the floor cannot diverge between execution
-  paths.
+  context. `WorkspaceSandbox` routes its output through it, so the floor
+  cannot diverge between execution paths.
 
 The two secret-pattern catalogs (`src/secrets/leak_detector.rs` and
 `src/exec/secret_patterns.rs`) are kept in sync — the private-key regex

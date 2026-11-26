@@ -60,6 +60,8 @@ Reload an installed plugin's manifest and runtime; this is not a first-time load
 
 **Response:** `{ "ok": true, "pluginId", "status" }`.
 
+A reload **preflights before it tears down**: the new version is parsed and identity-checked, and a WASM plugin's guest module is compiled (compiled, not run), while the running version keeps serving. If the preflight finds the new version defective while an old version is running, the reload stops there, the previous version keeps serving, and the error text is `plugin '{id}' was not reloaded, the previous version is still running: {reason}`. An admission refusal (the operator's decision, not a defect) still unmounts the old version and records the refusal. Failures the preflight cannot cover (link/instantiate errors, MCP server start, service start) only appear while mounting, and the plugin is unmounted at that point.
+
 ### plugins.disable (keep installed)
 
 To stop the runtime without deleting its directory, use `plugins.disable`, not the old load/unload names. It creates the `.disabled` marker and tears down the runtime; use `plugins.enable` to restore discovery.
