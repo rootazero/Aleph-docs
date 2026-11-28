@@ -9,11 +9,11 @@ description: "Gateway 的本地 Unix socket、Web v1 与兼容 WebSocket 入口�
 
 | 入口 | 传输与身份 | RPC 范围 | 实现 |
 |------|-----------|----------|------|
-| Desktop IPC | Unix domain socket；校验对端身份，不授予网络连接权限 | 只读：先 `system.hello`，随后只允许 `health`、`sessions.list` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | Gateway 原生 TLS；`POST /v1/session` 换取会话 cookie，`GET /v1/ws` 校验会话后升级 | 只读：先 `system.hello`，随后只允许 `health`、`sessions.list` | `src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC | Unix domain socket；校验对端身份，不授予网络连接权限 | 首帧为 `system.hello`，之后按[协议 v1 方法清单](../gateway/protocol-v1)放行 | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | Gateway 原生 TLS；`POST /v1/session` 换取会话 cookie，`GET /v1/ws` 校验会话后升级 | 首帧为 `system.hello`，之后按[协议 v1 方法清单](../gateway/protocol-v1)放行 | `src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs` |
 | 兼容 WebSocket | 默认 `ws://127.0.0.1:18790/ws`；`connect` 区分直连环回与出示凭据的远端 | 兼容控制平面；认证与传输门见[网关认证](../gateway/auth) | `src/gateway/config.rs`、`src/gateway/server/connection/upgrade.rs`、`src/gateway/handlers/connect.rs` |
 
-## Desktop IPC：本地只读 socket
+## Desktop IPC 本地套接字
 
 用 `aleph-server start --desktop-ipc <socket>` 显式启用 Unix listener（`src/bin/aleph-server/cli.rs`、`src/bin/aleph-server/commands/start/mod.rs`）。服务端每个 listener 最多同时处理 8 个连接，要求 socket 对端有效用户相同，并且只在存在有效桌面所有者时处理请求。每连接共享 16 MiB 的 wire budget，单次写入期限 5 秒。分发使用占位 IP `0.0.0.0`，不因本地 IPC 获得网络入口的环回特权（`src/gateway/server/connection/local_ipc.rs`）。
 
@@ -43,7 +43,7 @@ description: "Gateway 的本地 Unix socket、Web v1 与兼容 WebSocket 入口�
 
 ### 执行审批
 
-允许页面连接不等于批准执行。Panel 通过 `exec.approval.resolve` 提交用户决策；Gateway 处理审批，执行门按工具和规范化参数绑定授权。可见的审批摘要做脱敏，不拿脱敏值计算授权指纹（`interfaces/webchat/src/api/exec_approval.rs`、`src/gateway/handlers/exec_approvals.rs`、`src/sandbox/exec_approval/action.rs`）。两条只读入口均不开放审批 RPC（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+允许页面连接不等于批准执行。Panel 通过 `exec.approval.resolve` 提交用户决策；Gateway 处理审批，执行门按工具和规范化参数绑定授权。可见的审批摘要做脱敏，不拿脱敏值计算授权指纹（`interfaces/webchat/src/api/exec_approval.rs`、`src/gateway/handlers/exec_approvals.rs`、`src/sandbox/exec_approval/action.rs`）。两个 v1 入口均未挂载执行审批 RPC（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
 ### 凭据存储和日志
 

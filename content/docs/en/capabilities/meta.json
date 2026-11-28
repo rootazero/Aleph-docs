@@ -1,6 +1,7 @@
 {
   "title": "Capabilities & Plugins",
   "pages": [
+    "overview",
     "capability-model",
     "trust-and-backends",
     "slots-and-replacement",

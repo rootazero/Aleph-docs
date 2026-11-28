@@ -1,19 +1,33 @@
 ---
 title: "Changelog"
-description: "Release history, milestones, and notable changes in Aleph (through 2026-11-26)"
+description: "Release history, milestones, and notable changes in Aleph (through 2026-11-28)"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # Changelog
 
-Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-11-26.
+Aleph follows CalVer (e.g. `26.7.21`). Releases ship multiple times per month; the version is kept in lock-step with the `VERSION` file and the `alephcore` crate. Breaking changes are flagged prominently in the release notes, but the API and architecture may evolve until 1.0. This page covers through 2026-11-28.
 
-`VERSION` is still `26.9.1` after 2026-09-25 — the entries from 2026-09-26 to 2026-11-26 below record changes that are **merged on `main` but not yet released**.
+`VERSION` is still `26.9.1` after 2026-09-25 — the entries from 2026-09-26 to 2026-11-28 below record changes that are **merged on `main` but not yet released**.
 
 <Callout type="info">
   This page is a **documentation-focused** summary derived from Aleph's main repository `CHANGELOG.md` and git history — it surfaces **user-visible** changes (features, CLI/RPC, config, security) and omits pure-internal refactor details. For the full record, see the [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md).
 </Callout>
+
+---
+
+## 2026-11-28 — Scoped plugin composition and the Panel RPC surface
+
+- **Scoped plugin composition** (`c1a207dc9`). Packages with the same ID can coexist in global and project scopes. Claude Code, Pi, and DeepSeek Harness imports publish supported declarations through the same plugin manager. See [Plugin Packages](./capabilities/plugin-package).
+- **Paired Linux JSONL input** (`dc934f14c`, `92f0b080b`). Eligible sessions can submit records or send EOF to a fixed jq inspector with operator approval. See [Built-in Tools](./tools/builtin).
+- **Panel RPC methods.** The shared v1 list includes model selection, exact note mutation, clarifications, and voice turns. See [Protocol v1](./gateway/protocol-v1).
+
+---
+
+## 2026-11-27 — NSH replaces the Tauri desktop app
+
+- **NSH desktop packaging** (`f84dffa26`). The NSH host and `aleph-server` are packaged for macOS arm64 and Linux and Windows x64. The NSH WebView loads the shared Leptos/WebAssembly Panel from the Gateway. See [Desktop Hosts](./desktop-hosts/overview).
 
 ---
 

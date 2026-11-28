@@ -90,7 +90,7 @@ Aleph 向世界呈现两张面孔。两者都是纯 I/O 层 —— 它们将用�
 | Web | 浏览器 | 由 Aleph 服务器提供 |
 | macOS / Windows / Linux | 桌面宿主 `desktop/nsh-shell`（NSH） | 窗口容器 + WebView，加载同一个 Panel |
 
-桌面宿主是**薄宿主**：只做窗口容器和原生集成（托盘、召唤热键、`aleph://` URL 方案、通知、设备凭据存取），所有复杂 UI —— 设置页面、对话视图、调试面板 —— 都在 WASM 层（红线 R2）。NSH 托管的是同一个 Panel，不是第二套业务 UI（`docs/reference/DESKTOP_SHELL.md`）。宿主**连接**已存在的 Gateway，不启动、不停止、不重配服务（`desktop/nsh-shell/src/main.rs` 的帮助文本）；唯一例外是默认关闭的 `embedded-core` feature，启用后仅在 `127.0.0.1:18790` 拒绝连接时启动同级 `aleph-server` 二进制（`desktop/host/src/local_server.rs`）。NSH 尚无发布流水线，各平台验收进度见 `docs/reference/DESKTOP_SHELL.md`。
+打包应用默认启用 `embedded-core`。本机模式可接入兼容服务，或在回环端口明确拒绝连接时启动随包的 `aleph-server`（`desktop/host/src/local_server.rs`）。远程模式连接所选 HTTPS Gateway。见 [NSH 桌面宿主](../desktop-hosts/overview)。
 
 桌面侧各目录的分工如下（能力层的细节在下文「肢体 1」）：
 
@@ -289,7 +289,6 @@ aleph/
 └── plugins/                     #    插件示例 + SDK
 ```
 
-仓库里仍保留的 `desktop/shell/` 是过渡期遗留的旧宿主，最终将删除，本站不再描述它。
 
 ## 设计理念
 

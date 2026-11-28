@@ -98,7 +98,7 @@ Message shapes match [JSON-RPC](../api/jsonrpc); `/ws` adds no extra envelope.
 
 - The `timestamp` in the response is an example value; the fields are defined in `src/gateway/handlers/health.rs`.
 - An event is a notification without an `id`, with `method` always `"event"`. Subscribe with `events.subscribe`, whose parameter key is `topics` (`src/gateway/handlers/events.rs`). For the event catalog and the full error-code list, see [Event methods](./methods/events) and [JSON-RPC](../api/jsonrpc).
-- The full RPC catalog is in the [Method reference](./methods). Only `/ws` offers the full method surface; the two v1 entries (Desktop IPC and Web v1) share `V1_METHODS` (`src/gateway/server/connection/mod.rs`) and admit only `health`, `sessions.list`, and `panel.capabilities.snapshot`.
+- The full RPC catalog is in the [Method reference](./methods). Only `/ws` offers the full method surface; the two v1 entries (Desktop IPC and Web v1) share `V1_METHODS` (`src/gateway/server/connection/mod.rs`) and enforce the [Protocol v1 method list](./protocol-v1).
 
 ## History: from an unversioned protocol to v1
 
@@ -106,7 +106,7 @@ Message shapes match [JSON-RPC](../api/jsonrpc); `/ws` adds no extra envelope.
 |------|-----------------|------|
 | `/ws` + `connect` | The handshake result carries only session fields such as `role`, `state_version`, and `keepalive`: no protocol version and no limit negotiation. Message boundaries rely on WebSocket | `src/gateway/handlers/connect.rs` |
 | `system.hello` probe on `/ws` | A version probe after `connect`; the handler comment calls it a legacy probe, and the `limits` in the response are hints, not enforced | `src/gateway/handlers/system_hello.rs` |
-| Protocol v1: Desktop IPC and Web v1 | Bounded length-prefixed frames, `system.hello` must be the first frame, limits are enforced by the transport; the two entries share `V1_METHODS` and mount only `health`, `sessions.list`, and `panel.capabilities.snapshot` | `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs` |
+| Protocol v1: Desktop IPC and Web v1 | Bounded length-prefixed frames, `system.hello` must be the first frame, limits are enforced by the transport; the two entries share `V1_METHODS` and enforce the [Protocol v1 method list](./protocol-v1) | `src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs` |
 
 `/ws` keeps the full RPC surface and `connect` authentication, so older clients need no changes; it has not been removed, but it is no longer where new capabilities land. The Desktop IPC and Web v1 entries of Protocol v1 have landed; see [Protocol v1](./protocol-v1) for the frame format, handshake, and transport matrix. The parts of v1 that are not implemented yet (event replay, snapshots, a binary channel, backpressure policy) are listed in [the planned section of Protocol v1](./protocol-v1#planned-not-yet-implemented).
 

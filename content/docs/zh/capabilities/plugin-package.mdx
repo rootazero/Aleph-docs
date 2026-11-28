@@ -57,11 +57,17 @@ description: "查阅插件目录的清单格式、归一化字段与加载边界
 
 `OwnerTrustPolicy` 在 `enforce` 为 `false` 时全放行，但不绕过第二道启用闸。`PLUGINS_CONFIG_FILE` 定义文件名 `plugins.toml`；数据目录中的该文件保存 `PluginEntryConfig` 的持久偏好，`PluginsConfig::activation` 按来源判定是否启用，无显式偏好的 `ClaudeCache` 插件保持关闭。挂载先检查 owner trust，再检查此偏好：信任拒绝写入 `Blocked`，显式禁用或未启用写入 `Disabled`，不会静默注册能力（`src/extension/plugin_trust.rs`、`src/extension/types/plugins.rs`、`src/extension/plugin_state.rs`、`src/extension/lifecycle.rs`）。
 
-## Claude Code 与 pi 兼容性
+## 导入 Claude Code、Pi 和 DeepSeek Harness 插件包
 
-现行 Claude Code 兼容从 `.claude-plugin/plugin.toml` 和 `.claude-plugin/plugin.json` 读取清单，而不是把 `package.json` 当作这两个解析器的入口。TOML 的 `[aleph]` 与 JSON 的 `aleph` 对象可提供 Aleph 专用声明，解析后可填充 `AlephExtensions` 及其他归一化字段（`src/extension/manifest/cc_plugin_toml.rs`、`src/extension/manifest/cc_plugin_json.rs`、`src/extension/manifest/declared_sections.rs`）。
+`src/extension/manifest/adapters/` 下的适配器把支持的包资源归一化后交给同一个插件管理器。导入的贡献与原生插件共用[作用域、准入与注册规则](../concepts/extensions#发现与优先级)。
 
-> **状态：规划中** — `docs/research/aleph_modularization_plan.md` §10 规划更完整的 Claude Code 钩子翻译，以及 pi 的 npm 资源导入和兼容 sidecar。现有清单解析不代表这些功能已交付，也不代表兼容插件可以绕过准入或授权。
+| 来源 | Aleph 导入的资源 |
+|---|---|
+| Claude Code | `.claude-plugin/plugin.toml` 或 `.claude-plugin/plugin.json` 中支持的 skills、commands、agents、hooks 和 MCP 配置。TOML 的 `[aleph]` 表或 JSON 的 `aleph` 对象可补充 Aleph 声明。来自 Claude Code 缓存的安装仍需操作员启用。 |
+| Pi | `package.json` 中 `pi.skills`、`pi.prompts` 所选的 Markdown 资源及约定目录中的 skills 和 prompts。选择支持路径、glob、排除项及显式空列表。 |
+| DeepSeek Harness | 约定目录 `skills/`，以及 `package.json` 的 `dsh.bundle.patch` 所指包内 YAML 补丁中支持的字面量 stdio 或 Streamable HTTP MCP 声明。 |
+
+插件行通过 `import_diagnostics` 报告跳过的资源，包括 Pi 的可执行扩展或主题，以及 DeepSeek Harness 的运行时节点或动态 YAML。启用的 MCP 贡献遵守既有的就绪、信任和网络策略。支持的导入格式见 `docs/reference/PLUGIN_SYSTEM.md`。
 
 ## 发行、市场与可观测性
 

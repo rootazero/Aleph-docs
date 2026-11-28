@@ -20,8 +20,8 @@ Aleph 网关是客户端与 agent、工具、工作流之间的控制平面：�
 | 入口 | 传输 | 认证方式 | 可用方法范围 | 上限 | 代码位置 |
 |------|------|----------|--------------|------|----------|
 | `/ws` | WebSocket（历史兼容入口） | `connect` 握手换角色 | 完整 RPC 方法集 | 状态上的 `max_connections`；另有按客户端 IP 的并发上限，loopback 豁免 | `src/gateway/server/connection/upgrade.rs` |
-| Desktop IPC | Unix domain socket | 同账号（`require_same_user`） | `health`、`sessions.list`、`panel.capabilities.snapshot`（`V1_METHODS`） | `MAX_CONNECTIONS=8`、`WIRE_BUDGET=16 MiB`、`WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | 原生 TLS 上的 WebSocket | `POST /v1/session` 换会话 cookie | `health`、`sessions.list`、`panel.capabilities.snapshot`（`V1_METHODS`） | `MAX_MESSAGE=1 MiB`、`MAX_SESSIONS=256`、`MAX_SOCKETS=8`、TTL 300s | `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC | Unix domain socket | 同账号（`require_same_user`） | [协议 v1 方法清单](../gateway/protocol-v1) | `MAX_CONNECTIONS=8`、`WIRE_BUDGET=16 MiB`、`WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | 原生 TLS 上的 WebSocket | `POST /v1/session` 换会话 cookie | [协议 v1 方法清单](../gateway/protocol-v1) | `MAX_MESSAGE=1 MiB`、`MAX_SESSIONS=256`、`MAX_SOCKETS=8`、TTL 300s | `src/gateway/server/connection/web_v1.rs` |
 
 ### 兼容 WebSocket 入口
 
@@ -39,13 +39,13 @@ Aleph 网关是客户端与 agent、工具、工作流之间的控制平面：�
 
 ### Desktop IPC 入口
 
-Desktop IPC 是给桌面宿主用的只读入口：Unix domain socket，同账号才能连上。入口由启动参数指定：`--desktop-ipc <socket>`（`src/bin/aleph-server/cli.rs:54`），服务端在 `src/gateway/server/mod.rs:1424` 的 `run_with_desktop_ipc` 里挂起监听。
+Desktop IPC 是桌面宿主的本地 v1 入口：Unix domain socket，同账号才能连上。入口由启动参数指定：`--desktop-ipc <socket>`（`src/bin/aleph-server/cli.rs:54`），服务端在 `src/gateway/server/mod.rs:1424` 的 `run_with_desktop_ipc` 里挂起监听。
 
 连接建立后的约束（`src/gateway/server/connection/local_ipc.rs`）：
 
 - **同账号**：`require_same_user`（`shared/client/src/local_ipc.rs:181`）校验对端 uid，不匹配直接断开。
 - **首帧必须是 `system.hello`**：否则回 `AUTH_REQUIRED` / `system.hello must be first`。
-- **方法白名单**：`execute` 用 `v1_mounted`（`src/gateway/server/connection/mod.rs`）判定，只放行 `V1_METHODS` 里的 `health`、`sessions.list`、`panel.capabilities.snapshot`，其余回 `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`。
+- **方法白名单**：`execute` 用 `v1_mounted`（`src/gateway/server/connection/mod.rs`）判定，按[协议 v1 方法清单](../gateway/protocol-v1)放行，其余回 `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`。
 - **身份**：角色取自 `active_desktop_owner`，调用方用户固定为 `OWNER_USER_ID`。
 - **不授予网络权限**：连接的 origin 记为 `NO_NETWORK_ORIGIN`（0.0.0.0），因此它拿不到任何要求网络来源的权限。
 
@@ -190,7 +190,7 @@ pub fn wall_admits(role: Option<&str>, method: &str) -> bool {
 
 ### 中间件链
 
-`MiddlewareChain::serve_with_panel_context`（`src/gateway/middleware/chain.rs:96`）自外向内是：
+`MiddlewareChain::serve_with_context`（`src/gateway/middleware/chain.rs:76`）自外向内是：
 
 | 层 | 文件 |
 |----|------|
@@ -293,7 +293,7 @@ pub fn wall_admits(role: Option<&str>, method: &str) -> bool {
 
 ## 历史：传输入口的演进
 
-最早只有一个入口：`/ws`，一个 WebSocket 承载全部 RPC 与事件。Desktop IPC 与 Web v1 是后来加进来的，职责被明确切开——Desktop IPC 只读，Web v1 走网络且自带 TLS 与凭据交换。`/ws` 没有下线，它继续承担历史兼容入口的角色，新写的客户端应选 Desktop IPC 或 Web v1。
+最早只有一个入口：`/ws`，一个 WebSocket 承载全部 RPC 与事件。Desktop IPC 与 Web v1 是后来加进来的，职责被明确切开——Desktop IPC 走本地套接字，Web v1 走网络并使用 TLS 与凭据交换。`/ws` 没有下线，它继续承担历史兼容入口的角色，新写的客户端应选 Desktop IPC 或 Web v1。
 
 ## 另请参阅
 

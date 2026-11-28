@@ -3,7 +3,7 @@ title: "Panel 宿主"
 description: "Leptos WASM 与 TSX Panel 的构建产物、嵌入方式和 Gateway 传输"
 ---
 
-本页说明两种 Panel 怎样构建、由谁加载，以及改动后要刷新哪个产物。
+默认发布路径由 NSH WebView 加载 Gateway 提供的 Leptos/WASM Panel；浏览器也打开同一地址。TSX AppView 是 macOS 上显式启用的开发入口。
 
 ## Panel 是什么
 
@@ -45,7 +45,7 @@ Web 打包不会自动启用静态路由。将 Gateway 配置 `[gateway]` 下的
 
 ### 编译开关
 
-`tsx-panel` 默认关闭，当前接入的是 macOS 的 NSH JS 运行时（`desktop/nsh-shell/Cargo.toml`、`desktop/nsh-shell/src/main.rs`）。开启后，如果 `bundle.js` 或 `capabilities.json` 缺失，构建会失败并提示先运行 `just panel-tsx-bundle`（`desktop/nsh-shell/build.rs`）。
+`tsx-panel` 默认关闭，当前接入的是 macOS 的 NSH JS 运行时（`desktop/nsh-shell/Cargo.toml`、`desktop/nsh-shell/src/app.rs`）。开启后，如果 `bundle.js` 或 `capabilities.json` 缺失，构建会失败并提示先运行 `just panel-tsx-bundle`（`desktop/nsh-shell/build.rs`）。
 
 ### 原生组件 `aleph/panel-surface`
 
@@ -74,7 +74,7 @@ Web 打包不会自动启用静态路由。将 Gateway 配置 `[gateway]` 下的
 
 ### 选择渲染器
 
-在支持 `tsx-panel` 的构建中，非 QA 启动设置 `ALEPH_SHELL_PANEL=tsx` 会挂载 `aleph/panel-surface`；未设置时挂载 `web_view`，不同时运行两者。无效或不受支持的显式选择会让壳拒绝启动，而不是回退到 WebView（`desktop/nsh-shell/src/main.rs`）。
+在支持 `tsx-panel` 的构建中，非 QA 启动设置 `ALEPH_SHELL_PANEL=tsx` 会挂载 `aleph/panel-surface`；未设置时挂载 `web_view`，不同时运行两者。无效或不受支持的显式选择会让壳拒绝启动，而不是回退到 WebView（`desktop/nsh-shell/src/app.rs`）。
 
 在 macOS 上，先用 `--desktop-ipc` 指定 socket 路径并启动 Gateway（`src/bin/aleph-server/cli.rs`），再运行：
 
@@ -86,7 +86,7 @@ just shell-tsx-dev /absolute/path/to/socket
 
 ## 宿主与 Panel 的通道
 
-TSX 桌面和 Web 使用上节的宿主函数。下述消息、校验和导航只适用于 NSH 的 Leptos WebView 路径：`desktop/nsh-shell/src/main.rs` 在挂载 `web_view` 时启动桥接，页面通过 `window.nsh.postMessage` 向宿主发消息（`desktop/nsh-shell/src/panel_bridge.js`）。WebView 加载连接目标的根路径，不在 URL 中携带凭据或启动材料（`desktop/nsh-shell/src/shell_host.rs`、`shared/client/src/connection_target.rs`）。
+TSX 桌面和 Web 使用上节的宿主函数。下述消息、校验和导航只适用于 NSH 的 Leptos WebView 路径：`desktop/nsh-shell/src/app.rs` 在挂载 `web_view` 时启动桥接，页面通过 `window.nsh.postMessage` 向宿主发消息（`desktop/nsh-shell/src/panel_bridge.js`）。WebView 加载连接目标的根路径，不在 URL 中携带凭据或启动材料（`desktop/nsh-shell/src/shell_host.rs`、`shared/client/src/connection_target.rs`）。
 
 ### 消息形状
 
@@ -101,7 +101,7 @@ WebView 桥接使用带 `kind` 标签的 JSON。`shared/protocol/src/panel_shell
 
 ### 校验与限制
 
-- 壳启动时生成形如 `aleph-shell-v1:<uuid>:` 的随机前缀，宿主只接收带该前缀的页内消息，JSON 负载上限为 16 KiB（`desktop/nsh-shell/src/main.rs`、`desktop/nsh-shell/src/panel_bridge.rs`）。
+- 壳启动时生成形如 `aleph-shell-v1:<uuid>:` 的随机前缀，宿主只接收带该前缀的页内消息，JSON 负载上限为 16 KiB（`desktop/nsh-shell/src/app.rs`、`desktop/nsh-shell/src/panel_bridge.rs`）。
 - 页内脚本仅在顶层窗口、且 `location.origin` 匹配预期来源时安装。每次加载生成一个 32 字符的小写十六进制 `document`；绑定文档的消息必须匹配当前文档，导航时宿主清理文档状态并使旧凭据租约失效（`desktop/nsh-shell/src/panel_bridge.js`、`desktop/nsh-shell/src/panel_bridge.rs`、`shared/protocol/src/panel_shell.rs`）。
 - 通知标题须非空且不超过 256 字节，正文不超过 2048 字节（`shared/protocol/src/panel_shell.rs`、`desktop/nsh-shell/src/panel_bridge.rs`）。
 
@@ -117,12 +117,12 @@ WebView 桥接使用带 `kind` 标签的 JSON。`shared/protocol/src/panel_shell
 | TSX（NSH 桌面） | `aleph.rpc` 走 `AlephClient::connect_local` 建立的本地 Desktop IPC 连接，macOS 用 Unix socket（`desktop/nsh-shell/src/panel_host.rs`、`shared/client/src/connection.rs`）。 | 同账号由操作系统认证；Unix socket 的父目录须由该用户持有、权限为 `0700`（`shared/client/src/local_ipc.rs`、`src/gateway/server/connection/local_ipc.rs`）。 |
 | TSX（Web） | 同源 `wss://…/v1/ws`，子协议 `aleph.protocol.v1`。二进制消息由 4 字节大端长度和 UTF-8 JSON 组成，首帧为 `system.hello`（`interfaces/panel/web/host.js`、`shared/protocol/src/framing.rs`）。 | 原生 TLS 路由校验来源，`POST /v1/session` 签发短期、仅限当前主机的 Cookie，引用现有的设备凭据（`src/gateway/server/connection/web_v1.rs`）。 |
 
-Desktop IPC 和 Web v1 共用同一份方法列表，共十二个：`health`、`sessions.list`、`panel.capabilities.snapshot`、`graph.query`、`graph.search`、`graph.node_detail`、`chat.history`、`chat.send`、`chat.abort`、`chat.transcript_details`、`trace.tool_output`、`context.breakdown`。其他 RPC 不会从这两个入口进入 Core（`src/gateway/server/connection/mod.rs`、`shared/protocol/src/panel.rs`）。
+Desktop IPC 与 Web v1 共用 Gateway 的[协议 v1 方法清单](../gateway/protocol-v1)，实现见 `src/gateway/server/connection/mod.rs`。
 
 ## 已知限制
 
 - 桌面 TSX 只连本地 Desktop IPC；例如以 `--connect` 指定的 WebSocket 目标会返回 `unavailable`，不会回退到 WebSocket。`ALEPH_SHELL_PANEL_IPC` 是 socket 路径，但布局存储键的 endpoint 部分固定为 `desktop-ipc`，不随 socket 路径变化（`desktop/nsh-shell/src/panel_host.rs`、`interfaces/panel/shell/Shell.tsx`、`shared/ui_logic/src/panel/layout.rs`）。
-- `tsx-panel` 默认关闭；当前桌面发布流水线仍打包过渡期遗留的 Tauri 壳及带 Leptos 资源的 `aleph-server`，没有 NSH TSX 发布步骤（`desktop/nsh-shell/Cargo.toml`、`.github/workflows/aleph-app-release.yml`）。
+- 桌面发布使用默认构建，打包 NSH、`aleph-server` 及其内嵌的 Leptos 资源。`tsx-panel` 默认关闭（`desktop/nsh-shell/Cargo.toml`、`.github/workflows/aleph-app-release.yml`）。
 - TSX 尚未覆盖全部经典 Panel 标签页；需要经典渲染器的标签页会显示不可用提示（`interfaces/panel/shell/Shell.tsx`）。
 - TSX 侧的 `aleph:memory-nebula` 标签页由 Gateway 注入声明，依赖 `graph.query`、`graph.search`、`graph.node_detail` 三个方法都已挂载；未挂载时该标签页不存在（`src/gateway/handlers/panel_capabilities.rs`、`src/gateway/handlers/mod.rs`）。
 

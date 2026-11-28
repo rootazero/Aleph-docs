@@ -102,7 +102,7 @@ enabled = true
 # san = ["aleph.example.com"]
 ```
 
-When `enabled = true` and `cert_path`/`key_path` are empty, the core generates and persists a self-signed certificate. Remote clients use `wss://`; Panel presents a TOFU approval on first connection.
+When TLS is enabled and both `cert_path` and `key_path` are empty, the Gateway generates a self-signed certificate. For remote NSH desktop connections, use an HTTPS Gateway origin with a certificate trusted by the operating system. A generated self-signed certificate is rejected by the NSH connection probe (`desktop/nsh-shell/src/gateway_probe.rs`).
 
 ### Trusted Reverse Proxy
 

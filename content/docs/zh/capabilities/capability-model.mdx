@@ -428,9 +428,9 @@ pub struct BackendLease {
 
 `src/capability/ui.rs` 与 `src/capability/ui_surface.rs` 是**运行时拥有**的 `aleph/ui` 表面能力（`UI_NAMESPACE = "aleph/ui"`），实时 UI 路径由 `src/capability/ui_surface.rs` 与 `src/gateway/capability_ui.rs` 组成（负责渲染与输入传输）。它与插件 UI **无关**：插件 UI 走 `src/extension/panel_publication/`。
 
-## 与旧模型的关系
+## 从插件声明到运行时描述符
 
-旧模型是「插件声明自己有哪种能力」：`src/extension/capability.rs` 的 `CapabilityDeclaration` 枚举，仍被插件清单适配器使用，但只是静态声明。新模型是「运行时把能力描述符化，并让授权、撤销、失效都走同一条路径」。两者的对照与关系图见 [能力与插件](../concepts/capability-system)。
+清单适配器将插件组件解析为 `CapabilityDeclaration`（`src/extension/capability.rs`、`src/extension/manifest/adapter.rs`）。扩展宿主校验声明并将组件交给对应的注册表。可调用工具进入 `ToolHandlerRegistry` 后，`ToolBackendAdapter` 可以把注册项投影为运行时描述符（`src/capability/backend.rs`）。运行时的所有者绑定和租约另由 Zahir 管理。技能、代理等声明继续通过各自的注册表提供功能。参见[扩展](../concepts/extensions)与[能力概览](./overview)。
 
 ## 历史：已删除的 legacy UI 处理器
 
@@ -459,4 +459,4 @@ pub struct BackendLease {
 | **可逆 / 持久效果分类**：owner 释放时统一撤销；跨不可逆边界的 effect 走「落盘意图 → 执行 → 落盘结果」三明治 | 第九节「Reversible Effects 与 Durable Effects」，9.4 | `CapabilityFacet::ExternalEffect`（`src/capability/descriptor.rs`）、`EffectClaim` 与 `OwnershipTree::dispose`（`src/capability/ownership.rs`）；reducer `src/capability/effect_claim.rs` 尚未接线 |
 | **依赖图**：声明依赖，用于装配顺序、撤销顺序与 `doctor` 诊断；依赖不可用时返回结构化「暂不可用」错误 | 第十节「Dependency Graph」，10.2 | `Service` 关系边（`requires` / `provides` / `conflicts`，`crates/aleph-slot-api/src/capability.rs`）与 `BackendLease` 的 `required_resources`（`src/capability/facade.rs`）；没有独立的依赖图，也没有 `doctor` 诊断 |
 
-> **状态：规划中** — 槽位目录、替换机制与统一分发注册表是另一份蓝图 `docs/research/aleph_modularization_plan.md`（第 3、4、8 节）的设计，见 [能力与插件](../concepts/capability-system) 的「规划中」一节。
+> **状态：规划中** — 槽位目录、替换机制与统一分发注册表是另一份蓝图 `docs/research/aleph_modularization_plan.md`（第 3、4、8 节）的设计。参见[槽位与替换](./slots-and-replacement)。

@@ -1,0 +1,30 @@
+---
+title: Everything externally composable is a Capability
+description: How Aleph describes, discovers, invokes, observes, and manages capabilities across runtime boundaries.
+---
+
+A feature that an Agent, Runtime, or another system needs to discover, invoke, replace, subscribe to, or manage is a **Capability**. A provider can expose callable operations and events through the same capability contract. The descriptor gives consumers a shared vocabulary for both behaviors. The design is documented in `docs/research/Everything-externally-composable-is-a-Capability.md`.
+
+## The capability contract
+
+A `CapabilityDescriptor` identifies a capability and records its schema, revision, owner, lifetime, and visibility. Its kind (`CapabilityKind`) classifies the capability, while its facets (`CapabilityFacet`) describe the behaviors available to consumers. A kind such as `Ui` or `Terminal` can have several facets, including `Callable`, `EventSource`, `Subscription`, `ProviderLifecycle`, and `ExternalEffect` (`src/capability/descriptor.rs`).
+
+| Consumer action | Runtime boundary |
+|---|---|
+| Discover | Read descriptors and snapshots through the mounted backend or protocol projection. The backend applies visibility and scope. |
+| Invoke | Resolve the capability through Zahir. The backend lease ties the resolution to an owner generation, and runtime policy checks admission before use. |
+| Subscribe | Capability changes are published through the event path and filtered for the connection's audience. |
+| Manage | The provider registry owns activation and lifecycle. Revocation or a change in owner generation invalidates existing leases. |
+| Replace | The slot contract identifies the assembly point. Configurable replacement and a unified slot catalog are described in [Slots and Replacement](./slots-and-replacement). |
+
+## Production paths
+
+The runtime facade resolves mounted Tool, provider, special, and memory backends. Scoped tools, terminal and shell operations, and the runtime-owned `aleph/ui` surface have their own execution entry points. Other kinds can be named by the contract while their capability-layer adapters await mounting. [Capability Model](./capability-model) lists the mounted paths and the remaining design work.
+
+A plugin contributes components through manifest declarations. The extension host validates and registers those components in the appropriate runtime registries. A callable tool can then be projected through the tool backend as a runtime descriptor. Plugin composition starts with [Plugin Packages](./plugin-package), with registration and lifecycle covered in [Extensions](../concepts/extensions).
+
+## Related pages
+
+- [Capability Model](./capability-model) — descriptors, leases, provider generations, and events
+- [Trust and Backends](./trust-and-backends) — backend evidence and invocation boundaries
+- [Slots and Replacement](./slots-and-replacement) — slot contracts and assembly plans

@@ -214,15 +214,15 @@ Per-session and per-user rate limits prevent abuse.
 
 26.7.17+: the delivery queue keeps permanently-failed outbound messages as dead letters and can re-drive them. Inspecting and re-driving dead letters is **not a Gateway RPC method**; it is the built-in tool `channel_outbox` (ops `status` / `dead_letters` / `redrive`; `redrive` only replays when `confirm_redrive: true` is passed, otherwise it returns a preview). The former `channels.dead_letters` / `channels.redrive_dead_letters` RPCs were removed because no client ever called them; `channels.list` still reports the count of permanently-undelivered pushes.
 
-### Self-Signed TLS + TOFU
+### Gateway TLS and client trust
 
 26.7.17/18+:
 
 - In-process gateway TLS (`[gateway] tls` / `trusted_proxy` / `allow_insecure_remote`)
 - Self-signed cert SAN auto-discovers host's non-loopback interface IPs
 - Drift sidecar + atomic regen marker
-- Client-side TOFU (fingerprint + SAN approval + pinned trust store)
-- macOS WKWebView + iOS Keychain adapters
+- For remote NSH desktop connections, use an HTTPS Gateway origin with a certificate trusted by the operating system. A generated self-signed certificate is rejected by the NSH connection probe (`desktop/nsh-shell/src/gateway_probe.rs`).
+- The iOS Panel can pin certificates in the Keychain through its own WebView trust flow (`mobile/ios/AlephPaneliOS/Views/PanelWebView.swift`).
 
 ### Real Client IP
 

@@ -144,17 +144,11 @@ Panel 侧加载插件标签页和渲染能力 UI 表面的代码全部位于 `in
 
 Gateway 只负责 JSON-RPC 与调用方/会话校验，表面、待确认回执和输入队列都留在 Core（`src/gateway/capability_ui.rs`）。方法为 `capabilities.ui.attach`、`capabilities.ui.invoke`、`capabilities.ui.ack`、`capabilities.ui.submit_input`、`capabilities.ui.detach`（`src/gateway/method_visibility.rs`），显示帧通过主题 `capabilities.ui.display` 推送。Panel 侧渲染在 `interfaces/webchat/src/panel/capability_surface.rs`，同样受 `panel-modular` 门控。
 
-能力本身的模型见 [能力系统](../concepts/capability-system)。
+运行时的描述符与租约见[能力模型](../capabilities/capability-model)。
 
 ## 授权点
 
-TSX 壳通过 `aleph.rpc` 能调什么，不取决于两个宿主适配器，而取决于 Gateway 的 v1 方法集。`src/gateway/server/connection/mod.rs` 把两个 v1 入口（Desktop IPC 与 Web `/v1/ws`）挂到同一份 `V1_METHODS`，避免两端漂移：
-
-```text
-V1_METHODS = ["health", "sessions.list", "panel.capabilities.snapshot"]
-```
-
-`panel.capabilities.snapshot` 是常量 `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`（`shared/protocol/src/panel.rs`）。列表之外的方法在到达 Core 之前就被 `METHOD_NOT_FOUND` 拒绝；变更类方法（如 `PANEL_PROJECT_SELECT_METHOD = "panel.project.select"`）在后续阶段批准前保持关闭（`src/gateway/server/connection/mod.rs` 的 `V1_METHODS` 注释）。
+TSX 壳通过 `aleph.rpc` 调用 Gateway 的共享[协议 v1 方法清单](../gateway/protocol-v1)。Desktop IPC 与 Web `/v1/ws` 都执行 `V1_METHODS`（`src/gateway/server/connection/mod.rs`）。`panel.project.select` 等未挂载的方法在分发前被拒绝。
 
 快照处理在 `src/gateway/handlers/panel_capabilities.rs`：`handle` 读 `manager.panel_ui_capability_snapshot()` 返回标准快照；`handle_select` 目前恒返回 `denied`。也就是说，宿主适配器只负责把调用送到 Gateway，方法是否可用是 Gateway 的单一裁决。
 

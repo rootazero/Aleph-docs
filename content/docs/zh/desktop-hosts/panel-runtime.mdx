@@ -301,7 +301,7 @@ TSX 侧自己渲染四个内置模块（`SHELL_MODULES`，组件在 `interfaces/
 | `aleph:chat` | Chat | `message-circle` | -15 | `interfaces/panel/modules/Chat.tsx` |
 | `aleph:capabilities` | Capabilities | `blocks` | -10 | `interfaces/panel/modules/Capabilities.tsx` |
 
-第五个标签页 `aleph:memory-nebula` 不在这张表里：它的声明由 Gateway 注入能力快照（`src/gateway/handlers/panel_capabilities.rs` 的 `with_memory_nebula`，label `Memory Nebula`、icon `network`、order 0、entry `shell/memory-nebula`），前提是 `graph.query`、`graph.search`、`graph.node_detail` 三个方法都已挂载（`src/gateway/handlers/mod.rs` 的 `memory_nebula_mounted`）。组件是 `interfaces/panel/modules/MemoryNebula.tsx`，它调 `graph.query` 读窗口、调 `graph.search` 搜索、调 `graph.node_detail` 看单个节点。
+第五个标签页 `aleph:memory-nebula` 不在这张表里：它的声明由 Gateway 注入能力快照（`src/gateway/handlers/panel_capabilities.rs` 的 `project_memory_nebula`，label `Memory Nebula`、icon `network`、order 0、entry `shell/memory-nebula`），前提是 `graph.query`、`graph.search`、`graph.node_detail` 三个方法都已挂载（`src/gateway/handlers/mod.rs` 的 `memory_nebula_mounted`）。组件是 `interfaces/panel/modules/MemoryNebula.tsx`，它调 `graph.query` 读窗口、调 `graph.search` 搜索、调 `graph.node_detail` 看单个节点。
 
 - 这四个模块以 `BuiltIn` 声明并入 Core 快照，与 Core 的内置条目走同一套投影校验；Core 已声明同名 key 时保留 Core 的描述符。
 - 快照缺失、格式错误或被投影拒绝时，只保留这几个模块并在 `projectionError` 中报告原因码，绝不挂载被拒快照的任何部分。
@@ -363,7 +363,7 @@ TSX 壳通过 `interfaces/panel/nsh.json` 的 `capabilities` 段里的 `host` �
 | `PanelUiCapabilitySnapshot` | `revision` + `declarations`；`new()` 按来源（内置在前）再按 qualified key 排序 |
 | `PanelProjectSelection` / `PanelUiContextSnapshot` | 项目选择（`project_id`、`generation`）及携带它的快照 |
 
-Gateway 侧，`src/gateway/server/connection/mod.rs` 的 `V1_METHODS` 是 v1 入口共用的方法集，共十二个：`health`、`sessions.list`、`panel.capabilities.snapshot`、`graph.query`、`graph.search`、`graph.node_detail`、`chat.history`、`chat.send`、`chat.abort`、`chat.transcript_details`、`trace.tool_output`、`context.breakdown`。快照 handler 在 `src/gateway/handlers/panel_capabilities.rs`。
+Gateway 的两个 v1 入口共用[协议 v1 方法清单](../gateway/protocol-v1)。快照处理器在 `src/gateway/handlers/panel_capabilities.rs`。
 
 ### 描述符校验
 

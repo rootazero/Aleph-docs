@@ -1,115 +1,47 @@
 ---
-title: "桌面宿主"
-description: "Aleph 桌面端的目标形态 NSH 宿主：它是什么、如何连接 Gateway、提供哪些原生集成，以及当前的平台支持边界"
+title: NSH 桌面宿主
+description: NSH 桌面发布、Gateway 连接、本机服务、Panel WebView 和系统集成。
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
+## 桌面应用如何运行
 
-本页回答两个问题：Aleph 的桌面端到底是什么，以及它如何与 Gateway 配合运行。
+Aleph 桌面应用使用 NSH 0.6.0（`desktop/nsh-shell/Cargo.toml`）。NSH 管理窗口、托盘、快捷键、通知和设备凭据。推理、工具、状态与 Gateway 由独立的 `aleph-server` 进程提供。
 
-## 桌面宿主是什么
+NSH 的 WebView 打开 Gateway 根地址。本机默认是 `http://127.0.0.1:18790/`，远程模式使用保存的 HTTPS Gateway 地址。Gateway 返回相同的 Leptos/WASM Panel，用户也可以直接在浏览器打开。入口见 `desktop/nsh-shell/src/launch.rs`、`desktop/nsh-shell/src/app.rs` 与 `src/gateway/control_plane/server.rs`。构建及可选 TSX AppView 见 [Panel 宿主](./panel)。
 
-桌面宿主是一个薄原生壳：只提供窗口容器、托盘、全局热键、通知、凭据存取和登录项状态读取等系统级集成。业务界面全部在 [Panel](./panel) 里，宿主不持有任何聊天或会话投影（`desktop/nsh-shell/src/shell_host.rs` 的模块注释：`The native shell hosts the canonical Panel; it owns no chat projection.`）。这对应红线 R2：产品 UI 只有一个真值源。
+## 本机与远程连接
 
-桌面宿主的目标形态是 NSH：crate `aleph-nsh-shell`，位于 `desktop/nsh-shell/`，基于 nsh 0.6.0（`nsh-core`、`nsh-base`、`nsh-engine` 均锁定为 `=0.6.0`，见 `desktop/nsh-shell/Cargo.toml`）。NSH 托管的是同一个 Leptos/WASM Panel，不是第二套业务 UI（`docs/reference/DESKTOP_SHELL.md`）。
+| 模式 | 启动与服务生命周期 |
+|---|---|
+| 打包应用，本机目标 | 默认启用 `embedded-core`；宿主尝试接入兼容的本机 Gateway，或启动随包提供的 `aleph-server`。 |
+| 打包应用，远程目标 | 打开所选 Gateway 的 HTTPS 地址。连接表单可保存目标，远程服务由部署方管理。 |
+| 命令行 `--connect <origin>` | 单次连接已运行的 Gateway。远程地址需要 HTTPS，此选项不持久化目标。 |
 
-<Callout type="warn" title="过渡期说明">
-仓库里仍有一个旧桌面壳（`desktop/shell/`），它是过渡期遗留，最终会删除；本站不再描述它的架构。目前发布流水线构建的仍是旧壳，NSH 还没有自己的发布流水线，详见 [构建](../development/building)。
-</Callout>
+NSH 桌面应用连接远程 Gateway 时，使用 HTTPS 源站和操作系统信任的证书。NSH 的连接探测会拒绝自动生成的自签名证书（`desktop/nsh-shell/src/gateway_probe.rs`）。
 
-## 进程模型
+本机准入先检查回环端口。明确的连接拒绝允许启动同目录的服务二进制；兼容但仍在启动的 Gateway 会被轮询；不兼容或无法确认的监听器使启动失败。兼容性检查读取 `/health`、`/ready` 和 Panel 兼容标记，服务身份与用户授权仍由各自的协议处理。见 `desktop/nsh-shell/src/local_service.rs`、`desktop/host/src/local_server.rs` 与 `desktop/host/src/local_server/admission.rs`。
 
-NSH 是一个独立进程，在窗口里加载 Panel 的 WebView。Panel 的地址由连接目标决定：本地目标是 `http://127.0.0.1:18790/`，远程目标是该 origin 的根路径（`shared/client/src/connection_target.rs` 的 `ConnectionTarget::panel_url`）。默认走的就是这条 WebView 路径；只有 `ALEPH_SHELL_PANEL` 设为 `tsx`、构建打开了 `tsx-panel` feature、且不是 QA 启动时，才会切到 TSX Panel 宿主（`desktop/nsh-shell/src/main.rs`），细节交给 [Panel 宿主](./panel)。
-
-### 只连接已存在的 Gateway
-
-`aleph-nsh-shell --help` 的用法文本给出了宿主的语义（`desktop/nsh-shell/src/main.rs`）：
-
-```text
-Usage: aleph-nsh-shell [--connect <origin> | --autostart-status | --desktop-ipc-status <socket>]
-
-Connects to an existing Gateway; does not start, stop or reconfigure a service.
-Use HTTPS for a remote origin. No target or credential URL is persisted.
-```
-
-也就是说，宿主的原生根只拥有窗口回调和任务，不拥有 Gateway 的生命周期。`docs/reference/DESKTOP_SHELL.md` 同样写明 NSH 使用已有的 Gateway，且没有宿主侧的 daemon supervisor 迁移。
-
-### 内嵌启动（`embedded-core` 特性）
-
-上面的语义有一个编译期例外。`desktop/nsh-shell/Cargo.toml` 定义了 feature `embedded-core`（依赖 `aleph-desktop-host` 的 `gateway-admission`），默认不开。启用它并且连接目标是本地（`ConnectionTarget::Local`、非 QA 启动）时，`desktop/nsh-shell/src/shell_host.rs` 的 `acquires_local_server` 为真，`desktop/nsh-shell/src/main.rs` 会在开窗前调用 `aleph_desktop_host::local_server::ensure_compatible_ready()`。
-
-该函数的规则（`desktop/host/src/local_server.rs`、`desktop/host/src/local_server/admission.rs`）：
-
-- 先对 `127.0.0.1:18790` 做 TCP 探测，再取 `/health` 与 `/ready` 两份文档（每份最大 4 KiB），要求两边 `version` 一致。
-- 只有连接被明确拒绝（`ConnectionRefused`）时才允许启动，并且只启动与宿主可执行文件同目录的 `aleph-server`，参数为 `--bundled-content-only`。
-- 端口已有监听但文档不兼容，直接报错 `cannot establish compatible local Gateway readiness`，不启动任何进程。
-- 等待就绪的总时限 40 秒，轮询间隔 400 毫秒，单次探测超时 2 秒。
-
-因此更精确的表述是：默认构建的 NSH 只连接；带 `embedded-core` 的构建在本地目标上只会在端口确实空闲时启动随包的 Gateway，不接管、不停止、不重配已有服务。
+普通退出关闭桌面应用，随包启动的服务可以继续运行。要一并停止本应用持有的服务，选择 **Quit Aleph and Stop Server**（`desktop/nsh-shell/src/app.rs`、`desktop/nsh-shell/src/menu.rs`）。已运行并被接入的兼容服务由原进程持有。
 
 ## 命令行接口
 
-入口在 `desktop/nsh-shell/src/main.rs`，参数只有三种形态，且互斥：
-
-| 调用 | 作用 |
+| 参数 | 行为 |
 |---|---|
-| 无参数 | 连接本地目标 `http://127.0.0.1:18790/` |
-| `--connect <origin>` | 连接指定 origin；远程目标应使用 HTTPS |
-| `--autostart-status` | 只读取当前应用的登录项状态并以 JSON 打印，不修改 |
-| `--desktop-ipc-status <socket>` | 经 Desktop IPC（Unix 上是 Unix domain socket）读取 Gateway 的 `health`，见 [只读 IPC 状态查询](#只读-ipc-状态查询) |
+| `--connect <origin>` | 打开已运行 Gateway 的 Panel。 |
+| `--autostart-status` | 读取桌面应用的登录项状态。 |
+| `--desktop-ipc-status <endpoint>` | 在 Gateway 已启用 Desktop IPC 时，通过本地端点查询一次 `health`。 |
 
-这张表只覆盖宿主 `aleph-nsh-shell`。让 Gateway 挂载 Desktop IPC 监听的是另一个程序的参数：`aleph-server` 的 `--desktop-ipc <endpoint>`（`src/bin/aleph-server/cli.rs`）。两者不要混淆，见 [Desktop IPC 与平台支持](#desktop-ipc-与平台支持)。
-
-`--connect` 的校验在 `desktop/nsh-shell/src/shell_host.rs` 的 `HostSettings::from_launch`：
-
-- 长度不超过 2048 字节，不含 ASCII 控制字符和反斜杠。
-- 远程目标必须是不含用户名、密码、query、fragment 的根 origin（路径只能是 `/`）。
-- 凭据端点必须是 HTTPS 或回环 HTTP，否则拒绝（`Native credentials require HTTPS or loopback HTTP`）。
-- 不持久化目标，也不持久化凭据 URL。
-
-## 连接与握手
-
-### Panel 经 WebView 直连 Gateway
-
-当前二进制里，宿主自己不开 Gateway 连接。Panel 在 WebView 里按既有的 `/ws` 路径连接 Gateway，协议探测由 Gateway 侧的 `system.hello` 处理：它挂在 `connect` 之后，协商兼容的次版本并只回报已实现的特性，客户端 major 不匹配时返回 `INVALID_PARAMS`，且不负责准入和身份（`src/gateway/handlers/system_hello.rs`）。各传输的差异见 [Panel 宿主](./panel) 的传输矩阵。
-
-### 未接入主程序的原生连接层
-
-`desktop/nsh-shell/src/` 下还留有 `connection.rs`、`supervisor.rs`、`session.rs`、`runtime.rs` 和 `components/`。它们没有在 `desktop/nsh-shell/src/main.rs` 中以 `mod` 声明，`desktop/nsh-shell/Cargo.toml` 也没有额外的 `[[bin]]` 或 `[lib]`，所以不属于当前编译出来的二进制。这些文件记录了早期（Phase 2）的原生连接设计，数值如下，仅供理解历史，不要当作现状行为：
-
-| 项目 | 值（`desktop/nsh-shell/src/connection.rs`） |
-|---|---|
-| 地址 | `DAEMON_URL = "ws://127.0.0.1:18790"` |
-| 握手 | `system.hello`，`ProtocolVersion { major: 1, minor: 0 }`，客户端名 `aleph-nsh-desktop`，`ui_runtime: "nsh"` |
-| 请求特性 | `EventReplay`、`Snapshot`、`BinaryChannel` |
-| 校验 | 返回的 `protocol.major != 1` 即失败 |
-| 重连 | 起步 2 秒，上限 30 秒，连续失败最多 10 次 |
-| 超时与轮询 | 连接超时 40 秒，轮询 100 毫秒 |
-
-`desktop/nsh-shell/src/supervisor.rs` 里的端口占用分类（`Free`、`DaemonReady`、`DaemonBooting`、`Foreign`）同样未接入；现行实现见下一节。
-
-## 本地服务就绪判定
-
-「端口有响应」不等于「那是 Aleph」。`desktop/host/src/local_server.rs` 把监听者分成四类（`PortOccupant`）：
-
-| 分类 | 判定 | 含义 |
-|---|---|---|
-| `Free` | TCP 连接被拒绝 | 没有监听者；注释特别说明这不证明之后一定能绑定成功 |
-| `DaemonReady` | `/ready` 返回 200 | 看起来是已就绪的 Gateway，但没有二进制身份证明 |
-| `DaemonBooting` | `/ready` 返回 503 | 看起来是启动中的 Gateway，应等待而不是重启 |
-| `Foreign` | 其它状态码，或连接结果未知 | 无法识别，一律失败关闭 |
-
-只有 `Free` 才可能授权启动；`Foreign` 一律报错、不启动（`ensure_ready` 的错误文本为 `no new daemon was launched`）。连接结果未知（既不是成功也不是被拒绝）同样归入 `Foreign`，不会授权启动。严格版本 `ensure_compatible_ready` 在此之上追加了文档兼容检查，见上文。
+这些参数互斥，定义见 `desktop/nsh-shell/src/cli.rs`。
 
 ## 原生集成
 
-以下行为都在 `desktop/nsh-shell/src/main.rs` 与 `desktop/nsh-shell/src/panel_bridge.rs`。
+以下行为都在 `desktop/nsh-shell/src/app.rs` 与 `desktop/nsh-shell/src/panel_bridge.rs`。
 
 ### 窗口与托盘
 
-- 主窗口默认尺寸 1180×800，应用 ID `com.aleph.nsh-shell`（`desktop/nsh-shell/src/shell_host.rs` 的 `APP_ID`）。
-- 点击关闭按钮只隐藏窗口（`close_on_press = Some(false)` 加 `close_window.hide()`），不退出；macOS 另设 `keep_alive_on_close: true`。
-- 托盘菜单三项：`Show Aleph`、`Enable Notifications`、`Quit Aleph`。
+- 应用窗口与标识由 `desktop/nsh-shell/nsh.json` 声明。
+- 关闭主窗口时宿主隐藏窗口（`desktop/nsh-shell/src/app.rs`）。
+- 托盘提供打开窗口、连接、通知权限、重载与退出等命令。macOS 还有应用菜单。检查更新入口取决于宿主更新配置（`desktop/nsh-shell/src/menu.rs`、`desktop/nsh-shell/src/update.rs`）。
 
 ### 全局热键
 
@@ -184,7 +116,7 @@ Desktop IPC 是 Gateway 的**显式 opt-in 本地只读入口**。代码树里�
 Windows 不是另一套协议。认证通过的连接复用与 Unix 相同的 RPC 循环（`src/gateway/server/connection/local_ipc/windows.rs` 的文件头注释写的是 admitted connections use the shared RPC loop）。
 
 - 限额一致：`MAX_CONNECTIONS = 8`、`WIRE_BUDGET = 16 MiB`、`WRITE_TIMEOUT = 5s`（`src/gateway/server/connection/local_ipc.rs`）。
-- 首帧必须是 `system.hello`；其后的方法只放行 `V1_METHODS`——`health`、`sessions.list`、`panel.capabilities.snapshot`（`src/gateway/server/connection/mod.rs`），Unix 与 Windows 走同一份判定。
+- 首帧为 `system.hello`。后续请求受共享 `V1_METHODS` 白名单约束，见 [协议 v1](../gateway/protocol-v1) 与 `src/gateway/server/connection/mod.rs`。
 - 连接不授予网络来源权限：`NO_NETWORK_ORIGIN` 是 0.0.0.0（`src/gateway/server/connection/local_ipc.rs`）。
 
 ### Windows 生产入口为什么仍然关闭
@@ -199,32 +131,9 @@ Windows 的命名管道实现是完整的：客户端、Gateway 监听器、宿�
 
 解封条件是补齐独立账户（异账户）的授权验收证据。在此之前，总闸 `AVAILABLE` 保持 `cfg!(unix)`（`shared/client/src/local_ipc.rs`）。
 
-## 平台支持现状
+## 发布平台
 
-按 `docs/reference/DESKTOP_SHELL.md` 与代码仓如实记录（对应代码仓 VERSION 26.9.1）：
+发布流程使用 NSH 0.6.0 构建 macOS arm64、Linux x64 与 Windows x64。`scripts/nsh_package.sh` 调用 `nsh package` 并加入 `aleph-server`，macOS 包还包含 `AlephBridge`。见 `.github/workflows/aleph-app-release.yml` 及[构建](../development/building)。
 
-| 平台 | 现状 |
-|---|---|
-| macOS | 常驻窗口、托盘、热键、`aleph://open`、通知和窗口位置有本地证据（回执 `docs/superpowers/runs/2026-11-21-phase10-closeout.md`）；多屏拓扑仍未测试 |
-| Linux | 有入口代码（`desktop/nsh-shell/src/platform.rs` 的 Linux 分支），尚无验收结论 |
-| Windows | 有入口代码，尚无验收结论；Desktop IPC 的命名管道版本已在代码树中实现，但生产入口在 Windows 上仍然关闭，等待独立账户授权证据 |
-
-这不是全面发布：目前没有默认桌面切换、没有宿主侧 daemon supervisor 迁移、没有发布分发，Windows 与 Linux 的 NSH 验收以及旧壳的移除都还没有发生。
-
-> **状态：规划中** — 蓝图为 `docs/research/NSH_ADR-001~009.md` 与 `docs/research/NSH_PROTOCOL_V1.md`（NSH 作为目标宿主与协议），迁移路线见 `docs/superpowers/plans/2026-11-22-nsh-panel-migration-roadmap.md`（三平台、逐面替换证明、真实的 14 天双轨期，之后才移除旧壳）；当前实现见 `desktop/nsh-shell/src/main.rs`。
-
-## 历史：旧桌面壳的 daemon 托管
-
-旧桌面壳（Tauri v2 应用，`desktop/shell/`）的设计是「应用即安装包」：随包带 `aleph-server`，由壳自带的 daemon supervisor 启动、探活并在崩溃后重启，还内置托盘、自动更新、深链、热键、菜单和通知（`docs/reference/DESKTOP_SHELL.md` 的 Daemon lifecycle 与 Build & release 章节，源码见 `desktop/shell/src/daemon.rs`）。
-
-这个形态已被 NSH 取代：NSH 不接管 Gateway 生命周期，只连接已存在的 Gateway。旧壳是过渡期遗留，最终会删除；删除前其发布流水线（`.github/workflows/aleph-app-release.yml`）仍在构建它。
-
-两者的差别：
-
-| 维度 | 旧桌面壳（历史） | NSH（目标） |
-|---|---|---|
-| Gateway 生命周期 | 壳自带 supervisor，启动并接管 `aleph-server` | 默认只连接；`embedded-core` 构建仅在端口空闲时启动随包 Gateway |
-| 发布 | 发布流水线构建 | 暂无发布流水线 |
-| 自动更新、macOS 应用菜单、服务控制 | 有 | 未实现（`desktop/nsh-shell/src/` 中没有对应模块） |
-
-延伸阅读：[Panel 宿主](./panel)。
+- [Panel 宿主](./panel) — 发布与开发使用的渲染器
+- [协议 v1](../gateway/protocol-v1) — Desktop IPC 与 Web v1

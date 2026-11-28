@@ -57,11 +57,17 @@ See `src/extension/manifest/types.rs` and `shared/protocol/src/panel.rs` for fie
 
 With `enforce` set to `false`, `OwnerTrustPolicy` allows every origin, but does not bypass the activation gate. `PLUGINS_CONFIG_FILE` names `plugins.toml`; this file in the data directory stores durable `PluginEntryConfig` preferences. `PluginsConfig::activation` makes an origin-aware decision: a `ClaudeCache` plugin without an explicit preference stays off. Mount admission checks owner trust first, then this preference. A trust refusal records `Blocked`; an explicit disable or missing opt-in records `Disabled`, rather than silently registering capabilities (`src/extension/plugin_trust.rs`, `src/extension/types/plugins.rs`, `src/extension/plugin_state.rs`, `src/extension/lifecycle.rs`).
 
-## Claude Code and pi compatibility
+## Importing Claude Code, Pi, and DeepSeek Harness packages
 
-Current Claude Code compatibility reads `.claude-plugin/plugin.toml` and `.claude-plugin/plugin.json`; these parsers do not take `package.json` as input. The TOML `[aleph]` table and JSON `aleph` object can supply Aleph-specific declarations that populate `AlephExtensions` and other normalized fields (`src/extension/manifest/cc_plugin_toml.rs`, `src/extension/manifest/cc_plugin_json.rs`, `src/extension/manifest/declared_sections.rs`).
+The format adapters in `src/extension/manifest/adapters/` normalize supported package resources for the same plugin manager. Imported contributions use the [same scope, admission, and registration rules](../concepts/extensions#discovery-and-precedence) as native plugins.
 
-> **状态：规划中** — `docs/research/aleph_modularization_plan.md` §10 proposes broader Claude Code hook translation and pi compatibility through npm resource import and a sidecar. Existing manifest parsing does not deliver those features or let compatible plugins bypass admission or authorization.
+| Source | Resources Aleph imports |
+|---|---|
+| Claude Code | Supported skills, commands, agents, hooks, and MCP configuration from `.claude-plugin/plugin.toml` or `.claude-plugin/plugin.json`. The TOML `[aleph]` table or JSON `aleph` object can add Aleph declarations. Claude Code cache installs retain their operator enablement gate. |
+| Pi | Markdown skills and prompts from `package.json` entries `pi.skills`, `pi.prompts`, and conventional directories. Selection honors resource paths, globs, exclusions, and explicit empty lists. |
+| DeepSeek Harness | Conventional `skills/` and supported literal stdio or Streamable HTTP MCP declarations in the package-local YAML patch referenced by `dsh.bundle.patch` in `package.json`. |
+
+The owning plugin row reports skipped resources in `import_diagnostics`, including Pi executable extensions or themes and DeepSeek Harness runtime nodes or dynamic YAML. Enabled MCP contributions use the normal readiness, trust, and network policies. The accepted import formats are documented in `docs/reference/PLUGIN_SYSTEM.md`.
 
 ## Distributions, marketplaces, and observability
 

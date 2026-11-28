@@ -1,19 +1,33 @@
 ---
 title: "更新日志"
-description: "Aleph 的发布历史、里程碑和重要变更（截至 2026-11-26）"
+description: "Aleph 的发布历史、里程碑和重要变更（截至 2026-11-28）"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 # 更新日志
 
-Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。本页覆盖至 2026-11-26。
+Aleph 遵循 CalVer（`26.7.21` 这种格式）。每个月发布若干次，版本号与 `VERSION` 文件和 `alephcore` crate 一致。破坏性变更会在 release notes 中显著标记，但 1.0 之前 API 与架构仍可能演进。本页覆盖至 2026-11-28。
 
-`VERSION` 在 2026-09-25 之后仍是 `26.9.1`——下面 2026-09-26 到 2026-11-26 的条目记录的是 `main` 分支上**已合入但尚未发版**的变更。
+`VERSION` 在 2026-09-25 之后仍是 `26.9.1`——下面 2026-09-26 到 2026-11-28 的条目记录的是 `main` 分支上**已合入但尚未发版**的变更。
 
 <Callout type="info">
   本页是从 Aleph 主仓库 `CHANGELOG.md` 与 git 历史派生的**文档视角**摘要：突出**用户可见**的变化（特性、CLI/RPC、配置、安全），并省略纯内部重构细节。完整记录请参阅 [Aleph `CHANGELOG.md`](https://github.com/rootazero/Aleph/blob/main/CHANGELOG.md)。
 </Callout>
+
+---
+
+## 2026-11-28 — 作用域插件组合与 Panel RPC
+
+- **作用域插件组合**（`c1a207dc9`）。全局和项目作用域可分别安装同 ID 的包。Claude Code、Pi 和 DeepSeek Harness 支持的声明由同一个插件管理器发布。见[插件包](./capabilities/plugin-package)。
+- **Linux 配对 JSONL 输入**（`dc934f14c`、`92f0b080b`）。符合条件的会话经操作员批准后，可向固定 jq 检查器提交记录或发送 EOF。见[内置工具](./tools/builtin)。
+- **Panel RPC 方法**。共享的 v1 清单涵盖模型选择、定址笔记变更、澄清和语音轮次。见[协议 v1](./gateway/protocol-v1)。
+
+---
+
+## 2026-11-27 — NSH 接替 Tauri 桌面应用
+
+- **NSH 桌面打包**（`f84dffa26`）。NSH 宿主与 `aleph-server` 一同打包，目标为 macOS arm64、Linux x64 和 Windows x64。NSH WebView 从 Gateway 加载共享的 Leptos/WebAssembly Panel。见[桌面宿主](./desktop-hosts/overview)。
 
 ---
 

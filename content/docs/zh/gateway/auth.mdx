@@ -9,11 +9,11 @@ description: "Gateway 各入口的认证方式、令牌生命周期与远程 TLS
 
 | 入口 | 身份检查 | 实现 |
 |------|----------|------|
-| Desktop IPC | Unix socket 对端校验；只读，不继承兼容 WS 的环回授权 | `src/gateway/server/connection/local_ipc.rs` |
+| Desktop IPC | Unix socket 对端校验；不继承兼容 WS 的环回授权 | `src/gateway/server/connection/local_ipc.rs` |
 | Web v1 | 原生 TLS；`POST /v1/session` 用有效设备令牌或绑定主体的引导票创建会话，`GET /v1/ws` 要求有效会话 cookie，校验同源和设备主体 | `src/gateway/server/mod.rs`、`src/gateway/server/connection/web_v1.rs` |
 | 兼容 `/ws` | 升级时独立检查传输与 `Origin`，再由 `connect` 认证；缺失或无效凭据的远端连接不能使用已授权的 RPC | `src/gateway/server/connection/upgrade.rs`、`src/gateway/handlers/connect.rs`、`src/gateway/server/connection/mod.rs` |
 
-两条只读入口先用 `system.hello` 协商，不是兼容 `/ws` 的 `connect` 登录流程；其 RPC 范围和跨站防护见 [IPC 协议](../security/ipc)（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
+两个 v1 入口先用 `system.hello` 协商，不是兼容 `/ws` 的 `connect` 登录流程；其 RPC 范围和跨站防护见 [IPC 协议](../security/ipc)（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。
 
 ## 兼容 `/ws` 凭据
 

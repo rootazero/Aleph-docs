@@ -301,7 +301,7 @@ The TSX side renders four built-in modules itself (`SHELL_MODULES`, components i
 | `aleph:chat` | Chat | `message-circle` | -15 | `interfaces/panel/modules/Chat.tsx` |
 | `aleph:capabilities` | Capabilities | `blocks` | -10 | `interfaces/panel/modules/Capabilities.tsx` |
 
-The fifth tab, `aleph:memory-nebula`, is not in that table: its declaration is injected into the capability snapshot by the Gateway (`with_memory_nebula` in `src/gateway/handlers/panel_capabilities.rs` — label `Memory Nebula`, icon `network`, order 0, entry `shell/memory-nebula`), and only when `graph.query`, `graph.search`, and `graph.node_detail` are all mounted (`memory_nebula_mounted` in `src/gateway/handlers/mod.rs`). The component is `interfaces/panel/modules/MemoryNebula.tsx`; it calls `graph.query` for the read window, `graph.search` to search, and `graph.node_detail` to inspect a single node.
+The fifth tab, `aleph:memory-nebula`, is not in that table: its declaration is injected into the capability snapshot by the Gateway (`project_memory_nebula` in `src/gateway/handlers/panel_capabilities.rs` — label `Memory Nebula`, icon `network`, order 0, entry `shell/memory-nebula`), and only when `graph.query`, `graph.search`, and `graph.node_detail` are all mounted (`memory_nebula_mounted` in `src/gateway/handlers/mod.rs`). The component is `interfaces/panel/modules/MemoryNebula.tsx`; it calls `graph.query` for the read window, `graph.search` to search, and `graph.node_detail` to inspect a single node.
 
 - These modules are merged into the Core snapshot as `BuiltIn` declarations, so they pass the same projection validation as Core's own built-ins. When Core already declares the same key, Core's descriptor wins.
 - If the snapshot is missing, malformed or rejected by the projection, only these modules remain and `projectionError` carries the reason code. No part of a rejected snapshot is ever mounted.
@@ -363,7 +363,7 @@ Main types:
 | `PanelUiCapabilitySnapshot` | `revision` + `declarations`; `new()` sorts by origin (built-ins first), then by qualified key |
 | `PanelProjectSelection` / `PanelUiContextSnapshot` | The project selection (`project_id`, `generation`) and the snapshot that carries it |
 
-On the Gateway side, `V1_METHODS` in `src/gateway/server/connection/mod.rs` is the single method set shared by the v1 entry points, twelve methods in all: `health`, `sessions.list`, `panel.capabilities.snapshot`, `graph.query`, `graph.search`, `graph.node_detail`, `chat.history`, `chat.send`, `chat.abort`, `chat.transcript_details`, `trace.tool_output`, and `context.breakdown`. The snapshot handler is in `src/gateway/handlers/panel_capabilities.rs`.
+Both Gateway v1 entry points use the same [Protocol v1 method list](../gateway/protocol-v1). The snapshot handler is in `src/gateway/handlers/panel_capabilities.rs`.
 
 ### Descriptor validation
 

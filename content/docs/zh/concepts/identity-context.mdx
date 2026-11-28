@@ -228,11 +228,11 @@ let identity = metadata.to_identity_context(session_key);
 - `gateway.devices.list` / `gateway.devices.revoke` 管理设备清单
 - 远程会话在 token 轮换时被关闭，**环回会话保留**
 
-### TOFU 信任
+### iOS Panel 证书信任
 
-26.7.18+ 客户端对自签名证书的首次使用信任（Trust-on-First-Use）：
+iOS Panel 通过 `mobile/ios/AlephPaneliOS/Views/PanelWebView.swift` 和 `mobile/ios/AlephPaneliOS/Services/CertTrustStore.swift` 处理自签名证书的首次使用信任（Trust-on-First-Use）。
 
-- 共享决策核心 + 已固定 TOFU 信任存储
+- 在 Keychain 中保存固定的证书指纹
 - SHA-256 指纹 + SAN/subject 解析
 - 审批 splash 页面（指纹 + SAN + TOFU/change 警告）
 - pending-cert 状态与 approve/reject 路径

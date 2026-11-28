@@ -108,21 +108,21 @@ The topmost layer contains all client applications. Every client — the Panel h
 
 **Desktop host (NSH).** The native desktop host is the "last-mile native shell": `desktop/nsh-shell`, crate `aleph-nsh-shell`, built on nsh 0.6.0 (`desktop/nsh-shell/Cargo.toml`). It provides:
 - A native window + WebView hosting the Gateway-served Leptos Panel (`http://127.0.0.1:18790` for the local target, see `shared/client/src/connection_target.rs`)
-- A system tray (`set_tray` in `desktop/nsh-shell/src/main.rs`)
+- A system tray (`set_tray` in `desktop/nsh-shell/src/app.rs`)
 - OS notifications forwarded through the Panel bridge (`desktop/nsh-shell/src/panel_bridge.rs`, protocol types in `shared/protocol/src/panel_shell.rs`)
 - A global summon hotkey (default `mod+shift+a`; `ALEPH_SHELL_HOTKEY=disabled` turns it off)
-- The `aleph://` URL scheme for deep links (`.url_schemes(["aleph"])` in `main.rs`)
+- The `aleph://open` deep link opens Chat (`desktop/nsh-shell/src/deep_link.rs`)
 - A read-only login-item status query (`--autostart-status`, `desktop/nsh-shell/src/autostart.rs`); the host never writes the login item
 - Native storage of device credentials (`desktop/nsh-shell/src/credentials.rs`)
 
-NSH has no auto-updater and no daemon supervisor — it does not own the Gateway's lifetime. Platform acceptance status is tracked in `docs/reference/DESKTOP_SHELL.md`: only macOS has local acceptance evidence so far, and NSH has no release pipeline yet.
+The release workflow (`.github/workflows/aleph-app-release.yml`) packages NSH.
 
 Crucially, the host contains **no business logic and no business UI**. All product UI (chat, memory, settings) lives in the Panel (`interfaces/webchat`, WASM served by the core); NSH hosts the same Panel rather than a second business UI (`docs/reference/DESKTOP_SHELL.md`). All reasoning, tools, and state live in `aleph-server`. This separation means:
 - The host can be updated independently of the core
 - The core can run headless on a server while the host connects remotely
 - The same core serves the desktop host, CLI, and messaging bots simultaneously
 
-**Connect, do not own.** The host connects to an existing Gateway; it does not start, stop, or reconfigure a service (help text in `main.rs`). The one exception is the `embedded-core` feature, which is off by default: when enabled, the local target runs an admission check through `aleph-desktop-host` before opening the Panel, and only launches the sibling `aleph-server` binary when `127.0.0.1:18790` refuses connections (`ensure_compatible_ready` in `desktop/host/src/local_server.rs`). If the port is held by another process or a Gateway is already running, the host neither takes it over nor stops it.
+The packaged app enables `embedded-core` by default. It can attach to a compatible local Gateway or launch its bundled `aleph-server` after a definite loopback connection refusal (`desktop/host/src/local_server.rs`). Remote mode opens the selected HTTPS Gateway. See [NSH Desktop Host](../desktop-hosts/overview).
 
 **Remote Core Support.** The host can connect to a remote `aleph-server` with `--connect <origin>`; a remote origin must use HTTPS. The Panel's directory picker browses the *server's* filesystem via JSON-RPC (`fs.*`, see `src/gateway/lane.rs`), ensuring correct semantics for remote deployments. The host does not read the core's security database; it stores and presents credentials through `credentials.rs`, while the `aleph-server bootstrap-token` subcommand (`src/bin/aleph-server/commands/bootstrap_token.rs`) stays on the core side.
 
@@ -488,7 +488,6 @@ aleph/
 └── plugins/                # Plugin examples and SDK
 ```
 
-The `desktop/shell/` directory that still exists in the repository is the legacy host kept for the transition. It will be removed, and this site no longer documents it.
 
 The workspace root `Cargo.toml` defines shared dependency versions so all members stay in sync.
 
@@ -650,15 +649,15 @@ For the authoritative system architecture, see the canonical [Architecture Refer
 
 It gives the four single-loop failure modes (Goodhart, reference blindness, ring conflict, measurement decay) a topological answer.
 
-### Self-Signed TLS + TOFU
+### Gateway TLS and client trust
 
 26.7.17/18+:
 
 - The gateway terminates TLS in-process (self-signed or user-supplied)
 - Self-signed cert SAN auto-discovers the host's non-loopback interface IPs
 - Drift sidecar + atomic regen marker
-- Client-side TOFU (fingerprint + SAN approval + pinned trust store)
-- macOS WKWebView + iOS Keychain adapters
+- For remote NSH desktop connections, use an HTTPS Gateway origin with a certificate trusted by the operating system. A generated self-signed certificate is rejected by the NSH connection probe (`desktop/nsh-shell/src/gateway_probe.rs`).
+- The iOS Panel can pin certificates in the Keychain through its own WebView trust flow (`mobile/ios/AlephPaneliOS/Views/PanelWebView.swift`).
 
 ### Real Cost and Token Accounting
 

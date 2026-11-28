@@ -7,7 +7,7 @@ description: "Start Aleph and connect to a local or remote Gateway"
 
 Download an artifact actually published for the current version from [GitHub Releases](https://github.com/rootazero/Aleph/releases). Package formats vary by release and platform; use the files attached to that release as the source of truth.
 
-The desktop shell handles windows, tray, notifications, and OS integration. The `aleph-server` core owns inference, tools, and state.
+The desktop release uses NSH. At first launch, use the bundled local `aleph-server` or select a remote HTTPS Gateway in the connection form. Desktop and browser open the same Panel. See [NSH Desktop Host](../desktop-hosts/overview).
 
 ## Run from Source
 
@@ -87,7 +87,7 @@ port = 18790
 enabled = true
 ```
 
-When `cert_path` and `key_path` are empty, Aleph generates a self-signed certificate. The remote WebSocket URL is `wss://<host>:18790/ws`; Panel presents a TOFU approval for the certificate fingerprint and SANs on first connection.
+When TLS is enabled and both `cert_path` and `key_path` are empty, the Gateway generates a self-signed certificate. The remote WebSocket URL is `wss://<host>:18790/ws`. For remote NSH desktop connections, use an HTTPS Gateway origin with a certificate trusted by the operating system. A generated self-signed certificate is rejected by the NSH connection probe (`desktop/nsh-shell/src/gateway_probe.rs`).
 
 ## Next Steps
 

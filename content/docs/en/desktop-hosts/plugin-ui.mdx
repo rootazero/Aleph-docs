@@ -144,17 +144,11 @@ Protocol constants live in `shared/protocol/src/capability.rs`: `MAX_UI_TEXT_BYT
 
 The Gateway owns only JSON-RPC and caller/session checks; the surface, pending acknowledgements, and the input queue stay in Core (`src/gateway/capability_ui.rs`). The methods are `capabilities.ui.attach`, `capabilities.ui.invoke`, `capabilities.ui.ack`, `capabilities.ui.submit_input`, and `capabilities.ui.detach` (`src/gateway/method_visibility.rs`); display frames are pushed on the topic `capabilities.ui.display`. The Panel renders them in `interfaces/webchat/src/panel/capability_surface.rs`, which is likewise gated by `panel-modular`.
 
-For the capability model itself, see [Capability system](../concepts/capability-system).
+See [Capability Model](../capabilities/capability-model) for runtime descriptors and leases.
 
 ## The authorization point
 
-What the TSX shell may call through `aleph.rpc` does not depend on either host adapter; it depends on the Gateway's v1 method set. `src/gateway/server/connection/mod.rs` mounts the two v1 entries (Desktop IPC and Web `/v1/ws`) onto one `V1_METHODS` list so they cannot drift apart:
-
-```text
-V1_METHODS = ["health", "sessions.list", "panel.capabilities.snapshot"]
-```
-
-`panel.capabilities.snapshot` is the constant `PANEL_UI_CAPABILITY_SNAPSHOT_METHOD` (`shared/protocol/src/panel.rs`). Anything outside the list is rejected with `METHOD_NOT_FOUND` before it reaches Core; mutating methods such as `PANEL_PROJECT_SELECT_METHOD = "panel.project.select"` stay off until a later stage approves them (the `V1_METHODS` comment in `src/gateway/server/connection/mod.rs`).
+The TSX shell uses the Gateway’s shared [Protocol v1 method list](../gateway/protocol-v1) through `aleph.rpc`. Both Desktop IPC and Web `/v1/ws` enforce `V1_METHODS` (`src/gateway/server/connection/mod.rs`). Unmounted calls such as `panel.project.select` are rejected before dispatch.
 
 The snapshot handler is `src/gateway/handlers/panel_capabilities.rs`: `handle` reads `manager.panel_ui_capability_snapshot()` and returns the canonical snapshot; `handle_select` currently always returns `denied`. In other words, a host adapter only delivers the call to the Gateway — method availability is the Gateway's single ruling.
 

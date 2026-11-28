@@ -47,6 +47,10 @@ Fetch one node's full row, markdown content (read from disk via `notes_dir()`), 
 
 **Response:** `NoteDetailResponse`: `{ "node": { ...NoteNodeDto... }, "content", "backlinks": [ ...path... ], "outgoing": [ ...OutgoingLinkDto... ] }`. `outgoing` carries `to` (resolved or raw), `raw`, `relation?`, `label?`, `confidence`, `resolved_by?`, `status` (`active` / `dangling` / `tombstone`).
 
+### graph.mutate_note
+
+Applies an update, rename, or deletion to a specific note. Pass `address` with `agent_id` and `node_id`, the note’s `revision`, an `idempotency_key`, and `action`. The action uses `type: "update"` with `content`, `type: "rename"` with `title`, or `type: "delete"`. Success returns the resulting `address` and a `status` of `updated`, `renamed`, or `deleted`. The handler checks access to the target and validates the revision before mutation (`shared/protocol/src/memory_graph.rs`, `src/gateway/handlers/graph/mutate.rs`).
+
 ### graph.update_note
 
 Persist the edited markdown for a single note verbatim — the body is written byte-for-byte (not the lossy `KnowledgeNote::to_markdown` reconstruction), so hand-edited prose, headings, and code blocks survive. The incoming content is scanned for exfiltration payloads before persisting (exfiltration-only scope so a user's own security-research notes are not rejected).

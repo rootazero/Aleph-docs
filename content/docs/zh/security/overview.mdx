@@ -19,7 +19,7 @@ description: "Gateway 认证、执行审批、沙箱和审计各自负责什么�
 
 Gateway 默认在环回地址上监听。兼容 `/ws` 只对未带设备凭据的直连环回提供隐式 `operator` 授权；远端需要有效设备令牌、引导票或旧共享令牌。非环回明文连接默认被拒绝；可用原生 TLS 或为兼容入口配置受信 TLS 代理。浏览器通过来源检查并不意味着通过身份验证（`src/gateway/config.rs`、`src/gateway/server/mod.rs`、`src/gateway/server/connection/upgrade.rs`、`src/gateway/handlers/connect.rs`）。
 
-默认连接地址不是所有入口共同的信任模型。Desktop IPC 通过 Unix socket 校验对端；Web v1 使用原生 TLS、同源检查与设备会话。两者均只开放有限的只读 RPC（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。详见[网关认证](../gateway/auth)和 [IPC 协议](./ipc)。
+默认连接地址不是所有入口共同的信任模型。Desktop IPC 通过 Unix socket 校验对端；Web v1 使用原生 TLS、同源检查与设备会话。两者均执行共享的[协议 v1 方法清单](../gateway/protocol-v1)（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`）。详见[网关认证](../gateway/auth)和 [IPC 协议](./ipc)。
 
 ### 远程 TLS 与客户端信任
 

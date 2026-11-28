@@ -160,12 +160,12 @@ On legacy `/ws`, `system.hello` is an optional version probe after `connect`. It
 
 | Endpoint | Transport | Authentication | Methods | Source |
 |----------|-----------|----------------|---------|--------|
-| Desktop IPC (Unix) | Unix domain socket with length-prefixed frames | OS verifies that the peer is the same user; grants no network privileges | `system.hello` first, then the 12 mounted methods listed below | `src/gateway/server/connection/local_ipc.rs`, `shared/client/src/local_ipc.rs` |
+| Desktop IPC (Unix) | Unix domain socket with length-prefixed frames | OS verifies that the peer is the same user; grants no network privileges | `system.hello` first, then the 19 mounted methods listed below | `src/gateway/server/connection/local_ipc.rs`, `shared/client/src/local_ipc.rs` |
 | Desktop IPC (Windows, not exposed) | Local named-pipe code is in the tree | Account authentication is implemented but not enabled | None: both the client connection and the Gateway listener are gated | `shared/client/src/local_ipc/windows.rs`, `src/gateway/server/connection/local_ipc/windows.rs`, `shared/client/src/local_ipc.rs` |
-| Web v1 | WebSocket over native TLS; exactly one frame per Binary message | Same-origin check and session cookie; exchange a device token or bootstrap ticket for a session | `system.hello` first, then the 12 mounted methods listed below | `src/gateway/server/connection/web_v1.rs`, `src/gateway/server/mod.rs` |
+| Web v1 | WebSocket over native TLS; exactly one frame per Binary message | Same-origin check and session cookie; exchange a device token or bootstrap ticket for a session | `system.hello` first, then the 19 mounted methods listed below | `src/gateway/server/connection/web_v1.rs`, `src/gateway/server/mod.rs` |
 | Legacy `/ws` (compatibility) | WebSocket Text messages without a length prefix | Checks transport security and `Origin` (if present) at upgrade, then authenticates with `connect` | Full legacy RPC surface, subject to authorization; see [Method Reference](./methods) | `src/gateway/server/connection/upgrade.rs`, `src/gateway/server/connection/mod.rs` |
 
-The handshake handles `system.hello` separately; it is not part of the post-handshake method list. Both v1 endpoints share `V1_METHODS` and `v1_mounted()`, and they mount these 12 methods:
+The handshake handles `system.hello` separately; it is not part of the post-handshake method list. Both v1 endpoints share `V1_METHODS` and `v1_mounted()`, and they mount these 19 methods:
 
 | Method | Purpose |
 |--------|---------|
@@ -173,7 +173,11 @@ The handshake handles `system.hello` separately; it is not part of the post-hand
 | `sessions.list` | Session list |
 | `panel.capabilities.snapshot` | Panel capability snapshot (`PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`) |
 | `graph.query` / `graph.search` / `graph.node_detail` | Memory-graph query, search and node detail |
-| `chat.history` / `chat.send` / `chat.abort` | The chat trio |
+| `graph.mutate_note` | Update, rename, or delete a note at a known revision |
+| `chat.history` / `chat.send` / `chat.abort` | Read history, send, or abort a chat turn |
+| `chat.models.list` | List usable chat model choices |
+| `clarification.pending` / `clarification.resolve` | Read and resolve a pending clarification |
+| `voice.turn.transcribe` / `voice.turn.synthesize` / `voice.turn.cancel` | Transcribe, synthesize, or cancel a voice turn |
 | `chat.transcript_details` | Presentation-layer changes of tool calls |
 | `trace.tool_output` | Tool output |
 | `context.breakdown` | Context breakdown |
@@ -307,16 +311,8 @@ These files do not implement v1 connection replay or recovery:
 
 ## Migration and compatibility
 
-- **New clients:** Use opt-in Desktop IPC or Web v1 over native TLS, depending on the deployment. Send `system.hello` first, check the returned protocol version and limits, then call the mounted read-only methods. Desktop IPC’s `AlephClient::connect_local` neither falls back to a network transport nor uses device credentials (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`, `src/gateway/server/mod.rs`, `shared/client/src/connection.rs`).
-- **Existing clients:** Keep using `/ws` and `connect`. Optionally call `system.hello` afterward to probe the version; its reported limits are advisory. Clients that need event subscriptions or write operations should still use the legacy RPC endpoint (`src/gateway/server/connection/mod.rs`, `src/gateway/handlers/system_hello.rs`).
-
-## History: NSH Phase 2 native connection design
-
-<Callout type="warn">
-`desktop/nsh-shell/src/connection.rs` is the Phase 2 native connection design. It is **not** declared as a `mod` in `desktop/nsh-shell/src/main.rs` and is not part of the current NSH binary. `desktop/nsh-shell/Cargo.toml` has no additional `[[bin]]` or `[lib]` targets. `desktop/nsh-shell/src/runtime.rs`, `desktop/nsh-shell/src/session.rs`, `desktop/nsh-shell/src/supervisor.rs`, and `desktop/nsh-shell/src/components/mod.rs` are also not wired into the binary. Do not treat these files as current connection behavior.
-</Callout>
-
-The historical `build_hello_params()` set `platform` to `std::env::consts::OS` and `ui_runtime` to `nsh`. That client rejected a server response with a major other than 1 (`desktop/nsh-shell/src/connection.rs`). See [Desktop Hosts](../desktop-hosts/overview) for current host connections.
+- **New clients:** Use opt-in Desktop IPC or Web v1 over native TLS, depending on the deployment. Send `system.hello` first, check the returned protocol version and limits, then call the mounted methods. Desktop IPC’s `AlephClient::connect_local` neither falls back to a network transport nor uses device credentials (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`, `src/gateway/server/mod.rs`, `shared/client/src/connection.rs`).
+- **Existing clients:** Keep using `/ws` and `connect`. Optionally call `system.hello` afterward to probe the version; its reported limits are advisory. Clients that need event subscriptions or methods outside the v1 list should still use the legacy RPC endpoint (`src/gateway/server/connection/mod.rs`, `src/gateway/handlers/system_hello.rs`).
 
 ## See also
 

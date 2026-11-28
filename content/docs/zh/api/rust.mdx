@@ -24,11 +24,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | 最低 Rust 版本 | 1.99 |
 | Crate 类型 | `rlib` |
 | 异步运行时 | Tokio（多线程） |
-| 同一 crate 的二进制 | `aleph-server`、`aleph-migrate`、`aleph-panel-native-qa-gateway` |
+| 同一 crate 的二进制 | `aleph-server`、`aleph-migrate` |
 
 crate 只产出 `rlib`：`cdylib` 那一半在 2026-04 的仓库合并后已无消费者（`alephcore` 不导出任何 `extern "C"` 符号），随发布的是 Panel 自己的 WASM 产物。
 
-`aleph-server` 是 Gateway 守护进程，`aleph-migrate` 做配置迁移，`aleph-panel-native-qa-gateway` 需要 `native-qa` 特性，只用于原生 QA。
+`aleph-server` 是 Gateway 守护进程，`aleph-migrate` 执行配置迁移。
 
 ## 模块层次结构
 
@@ -308,7 +308,6 @@ pub trait HarnessCallback: Send {
 | （默认） | `default = []`——不打开任何特性 |
 | `loom` | 并发模型检查（替换标准同步原语） |
 | `test-helpers` | 集成测试辅助 |
-| `native-qa` | 原生 QA 面板网关（`aleph-panel-native-qa-gateway` 二进制） |
 | `control-plane` | 嵌入式控制平面（Panel 资产） |
 | `disabled-tests` | 等待重写的被禁用测试模块 |
 | `plugin-wasm` | WASM 插件运行时（目前是预留占位） |

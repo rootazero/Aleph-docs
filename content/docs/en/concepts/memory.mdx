@@ -56,7 +56,7 @@ Gateway / Agent Loop
 | Trait | File | Purpose | Primary Caller |
 |-------|------|---------|-----------------|
 | `NoteStore` | `src/memory/notes/store.rs` | Note index, wikilinks, FTS, vector search, community cache, sources, neighbours, graph | `NoteFactRetrieval`, `NoteIndexer`, `GoalLessonsPromote` |
-| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | Raw memory CRUD + `is_processed` flag + `find_by_path` / `get_raws_by_ids` / `get_raws_by_session` / `get_raw_by_source` | `CompoundIngestor`, `SessionCompactor`, dream `signal` table |
+| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | Raw memory CRUD + `is_processed` flag + `find_by_path` / `get_raws_by_ids` / `get_raw_by_source` | `CompoundIngestor`, `SessionCompactor`, dream `signal` table |
 | `DreamStore` | `src/memory/store/mod.rs` | Dream status + daily insights + `best_health` checkpoint | `DreamDaemon` |
 | `CompressionStore` | `src/memory/store/mod.rs` | Compression-run audit metadata (incl. `feedback_distill` watermark / lesson management) | `CompoundIngestor` |
 

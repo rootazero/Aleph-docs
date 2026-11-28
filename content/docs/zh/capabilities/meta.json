@@ -1,6 +1,7 @@
 {
   "title": "能力与插件",
   "pages": [
+    "overview",
     "capability-model",
     "trust-and-backends",
     "slots-and-replacement",

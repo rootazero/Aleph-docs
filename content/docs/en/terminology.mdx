@@ -124,8 +124,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Desktop Host** | 桌面宿主 | A thin native shell: window container, tray, global hotkey, notifications, credential storage, login-item status — and **no chat or session projection of its own** (`desktop/nsh-shell/src/shell_host.rs`) |
 | **Panel** | 面板 | The single source of truth for the business UI: Rust + Leptos/WASM in `interfaces/webchat/`. NSH hosts this one Panel; it is not a second business UI |
 | **Panel Runtime** | 面板运行时 | The modular runtime inside the Panel: `TabRegistry` (`shared/ui_logic/src/panel/registry.rs`), `PanelProjection` (`shared/ui_logic/src/panel/projection.rs`), `PanelLoader` (`interfaces/webchat/src/panel/loader.rs`), `PanelSdk` (`interfaces/webchat/src/panel/sdk.rs`); `panel-modular` is an opt-in feature |
-| **Legacy Shell** | 旧桌面壳 | The transition-era Tauri v2 app (`desktop/shell/`): its own daemon supervisor, tray, auto-update, deep links, hotkey, menus, notifications. **It will be removed** |
-| **embedded-core** | 内嵌核心 | An opt-in NSH compile-time feature (off by default): on a local target with the port genuinely free, it may start the bundled `aleph-server` next to the host; when the port is taken it only checks compatibility and never takes over an existing service |
+| **embedded-core** | 本机服务启动 | Default NSH build feature. Connects to a compatible local Gateway or starts the bundled `aleph-server` after a definite loopback connection refusal. |
 | **aleph:// deep link** | aleph:// 深链 | The URL scheme NSH registers; today only the exact `aleph://open` is recognised (opens Chat), every other `aleph://` URL is ignored |
 
 ## Capability Model and Slots
@@ -187,7 +186,7 @@ This page establishes canonical names for Aleph concepts to ensure consistency a
 | **Protocol v1** | 协议 v1 | The new transport protocol with version negotiation: 4-byte big-endian length-prefixed framing plus the `system.hello` handshake (`shared/protocol/src/framing.rs`, `shared/protocol/src/system_hello.rs`) |
 | **Frame** | 帧 | The transport unit: length prefix plus payload; the default per-frame cap is `DEFAULT_MAX_PAYLOAD_BYTES = 8_388_608` (8 MiB) |
 | **system.hello** | system.hello | The handshake request sent once a connection is established: negotiates the protocol minor version and features; a major mismatch returns `INVALID_PARAMS` |
-| **Desktop IPC** | 桌面 IPC | The read-only transport over a Unix socket (`--desktop-ipc <socket>`), `src/gateway/server/connection/local_ipc.rs` |
+| **Desktop IPC** | 桌面 IPC | Opt-in local v1 transport over a Unix socket (`--desktop-ipc <socket>`), `src/gateway/server/connection/local_ipc.rs` |
 | **Web v1** | Web v1 | The new transport over native TLS: `POST /v1/session` plus `GET /v1/ws`, `src/gateway/server/connection/web_v1.rs` |
 | **Legacy /ws** | 旧 /ws 入口 | The old unversioned WebSocket entry point (`ws://127.0.0.1:18790/ws`); it does not use length-prefixed framing |
 | **Trace** | 追踪 | Execution event stream for observability |

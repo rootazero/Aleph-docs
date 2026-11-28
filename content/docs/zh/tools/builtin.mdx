@@ -45,6 +45,7 @@ trait，使用静态分发以获得最大性能，并由 executor 的 builtin �
 | `wait` | 阻塞到结束并返回完整输出；等待窗口默认 60 秒，可用 `timeout` 延长，最长 170 秒。窗口用完仍在跑则返回 `running` 状态。 |
 | `kill` | 终止该后台进程。 |
 | `list` | 列出本会话的后台进程。 |
+| `read` | 读取通过内容门的新输出。可传入不透明的 `cursor`，下次用返回的 `next_cursor` 续读。每条输出流会报告数据是否丢失、被暂扣或仍在等待。 |
 
 要点：
 
@@ -57,7 +58,7 @@ trait，使用静态分发以获得最大性能，并由 executor 的 builtin �
   每会话最多 8 个运行中、全局最多 32 个，登记簿最多 64 条，命令预览截到 120 字符
   （`src/builtin_tools/process_registry.rs:64`）。
 - **不能活过 owned worktree**。工作空间是 owned worktree 时后台模式被拒绝，
-  报错是 `bash: background commands cannot outlive an owned worktree; run in the foreground`。
+  报错是 `bash: background commands cannot outlive an owned worktree; run without background or yield_ms`。
 - **输出先过内容门**。实时尾随的原始字节先经 `src/builtin_tools/partial_output.rs`
   的内容门过滤才允许被 `poll` / `wait` 读到；实时缓冲在 `src/sandbox/live_tail.rs`。
 - **登记簿在内存，流水在磁盘**。`ProcessRegistry` 是纯内存结构，守护进程重启后
@@ -66,26 +67,15 @@ trait，使用静态分发以获得最大性能，并由 executor 的 builtin �
 
 ---
 
-## 规划中：受控 stdin / EOF
+## Linux 配对会话的受控 JSONL 输入
 
-> **状态：规划中** — 通用 stdin 续写方案是 **no-go**，证据见
-> `docs/superpowers/runs/2026-11-26-shell-capability-stdin-verification.md`，
-> 这个结论不被撤回。替代方案「受控实时 JSONL」目前只是设计稿
-> （`docs/superpowers/specs/2026-11-26-shell-capability-jsonl-design.md`，待批准），
-> 代码在未合并的分支 `shell-capability-stdin`（`523bfe4d0`）上。
+Aleph 只在符合条件且有操作员值守的 Linux 配对路径上开放此输入模式。Gateway 通过受监督的 Workspace 和 Bubblewrap 路径启动固定的 jq 检查器。普通 Bash 命令无法接收交互式输入。
 
-现状：`bash` 不接受交互式 stdin，`process_action` 只有 `poll`、`wait`、`kill`、
-`list` 四个动作，没有写入或关闭输入的入口。
+- 启动时传 `stdin_profile: "jsonl_inspect"`，并传 `background: true` 或 `yield_ms`。启动参数限于这些字段。`yield_ms` 取 1 至 10,000，以毫秒为单位设置首次观察窗口。
+- 传 `process_action: "write_stdin"`、`process_id` 与 `record` 提交一条 JSON 值，包括 `null`。每次写入均需重新审批。序列化后每条记录最多 4096 字节（含换行），已接收记录总计最多 16 KiB。Gateway 会拒绝超限数据。
+- 传 `process_action: "close_stdin"` 与 `process_id` 发送 EOF。首次 EOF 需操作员批准。用 `process_action: "read"` 按游标续读结果。检查器返回根值的类型，并在根值为容器时返回其长度。
 
-规划中的受控 JSONL 形态：显式 `stdin_profile: "jsonl_inspect"` 启动一个受监督的
-`bash` 作业，必须同时给 `background: true` 或 `yield_ms`，不接受调用方自选程序、
-参数、环境或启动 stdin；`process_action: "write_stdin"` 每次只接受一条 JSON 记录
-（序列化后连换行不超过 4096 字节，整条输入流不超过 16 KiB，超限拒绝而不是截断），
-`close_stdin` 关闭写端；读侧用 `process_action: "read"` 按游标取结果。首发只启动
-受信任的宿主 jq，输出只有根类型与容器长度，不回显值。每次写入都要一次新的
-人工批准，不接受长期授权。
-
-这些都还没有实现；`main` 上的行为就是上面「后台作业」一节写的那样。
+参数定义见 `src/builtin_tools/bash_jsonl.rs`，配对 Gateway 的执行路径和输入限额见 `src/gateway/execution_engine/shell_effect.rs` 与 `src/sandbox/shell_input.rs`。
 
 ---
 

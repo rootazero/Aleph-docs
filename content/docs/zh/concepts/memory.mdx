@@ -56,7 +56,7 @@ Gateway / Agent Loop
 | Trait | 文件 | 用途 | 主要调用者 |
 |-------|------|------|-------------|
 | `NoteStore` | `src/memory/notes/store.rs` | 笔记索引、wikilink、FTS、向量搜索、社区缓存、来源、邻近、图 | `NoteFactRetrieval`、`NoteIndexer`、`GoalLessonsPromote` |
-| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | 原始记忆 CRUD + `is_processed` 标记 + `find_by_path` / `get_raws_by_ids` / `get_raws_by_session` / `get_raw_by_source` | `CompoundIngestor`、`SessionCompactor`、dream `signal` 表 |
+| `RawMemoryStore` | `src/memory/store/raw_memory.rs` | 原始记忆 CRUD + `is_processed` 标记 + `find_by_path` / `get_raws_by_ids` / `get_raw_by_source` | `CompoundIngestor`、`SessionCompactor`、dream `signal` 表 |
 | `DreamStore` | `src/memory/store/mod.rs` | 梦境状态 + 每日洞察 + `best_health` checkpoint | `DreamDaemon` |
 | `CompressionStore` | `src/memory/store/mod.rs` | 压缩运行审计元数据（含 `feedback_distill` 水位 / 课程管理） | `CompoundIngestor` |
 

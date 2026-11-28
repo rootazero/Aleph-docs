@@ -118,20 +118,21 @@ Plugin scopes are resolved in this order when an agent and project are present:
 
 Plugin origins resolve duplicate IDs as `Config > Workspace > Global > Bundled`. A higher-priority candidate becomes active and lower-priority candidates are retained as overridden records. A `.disabled` marker skips a plugin directory.
 
+Each canonical scope chooses one winning installation per plugin ID. The project and local project directories share the same project scope, and a project and global scope can each own a package with the same ID. Within an authorized project, a bare ID selects the whole project package even when it is disabled or lacks the requested contribution. Outside an authorized project, ordinary calls only see global packages. `plugins.list` returns `scope_kind` and an exact `selector` (`g:<id>` for global or `p:<digest>` for project), which the Gateway resolves under the caller’s authority. WASM and MCP registration and retirement follow that exact owner (`src/extension/visibility.rs`, `src/extension/plugin_target.rs`, `src/extension/lifecycle.rs`).
+
 ## Names and registration
 
 Plugin components use `plugin:component` qualified names. Built-ins keep short names. The registry also keeps short-name compatibility keys; a conflicting short name does not remove either qualified component, and the first registered owner wins the short key.
 
-`CapabilityDeclaration` is the common registration model for plugins (a declaration model — the runtime capability model is a different thing, it lives in `src/capability/`, see [Capability Model](/docs/en/capabilities/capability-model)):
+Manifest adapters convert plugin components to `CapabilityDeclaration` values (`src/extension/capability.rs`). The registrar validates and dispatches them by category.
 
-- `Tool`
-- `Hook`
-- `Service`
-- `Skill`
-- `Agent`
-- `McpServer`
+| Tier | Declarations |
+|---|---|
+| Core | `Tool`, `Hook`, `Skill` |
+| Important | `Agent` |
+| Pluggable | `Service`, `McpServer`, `Context` |
 
-Plugin `commands/` Markdown is represented in the skill registration store as a command-type skill, rather than a separate capability enum.
+Markdown under `commands/` registers as a command-type skill. A `Context` declaration carries a context descriptor and its WASM transport export. Invocation checks authorization separately. See [Capability Model](../capabilities/capability-model) for runtime descriptors, ownership, and leases.
 
 ## MCP plugin wiring
 
@@ -198,7 +199,6 @@ The plural `plugins.*` methods remain compatibility aliases. Marketplace install
 
 ## Related pages
 
-- [Extension System](./extension-system) — cross-kind architecture
 - [Skills](./skills) — SKILL.md authoring
 - [Extensions Store](./extensions-store) — Hub catalog and installation
-- [Capability System](./capability-system) — capability declarations and runtime ledger
+- [Capability Overview](../capabilities/overview) — contracts and production paths

@@ -228,11 +228,11 @@ let identity = metadata.to_identity_context(session_key);
 - `gateway.devices.list` / `gateway.devices.revoke` manage the device list
 - Remote sessions are closed on token rotation; **loopback sessions are preserved**
 
-### TOFU Trust
+### iOS Panel certificate trust
 
-26.7.18+ client-side Trust-on-First-Use for self-signed certificates:
+The iOS Panel handles Trust-on-First-Use for self-signed certificates through `mobile/ios/AlephPaneliOS/Views/PanelWebView.swift` and `mobile/ios/AlephPaneliOS/Services/CertTrustStore.swift`.
 
-- Shared decision core + pinned TOFU trust store
+- Pinned fingerprints stored in the Keychain
 - SHA-256 fingerprint + SAN/Subject parsing
 - Approval splash page (fingerprint + SAN + TOFU/change warning)
 - Pending-cert state with approve/reject paths

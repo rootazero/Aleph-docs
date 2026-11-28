@@ -93,7 +93,11 @@ Aleph/
     └── webchat/                # 基于 Web 的聊天界面（WASM）
 ```
 
-桌面宿主的目标形态是 NSH（`desktop/nsh-shell/Cargo.toml`，nsh `0.6.0`）。在**过渡期**，当前桌面发行包仍构建**遗留** Tauri 壳（`desktop/shell/`；CI 见 `.github/workflows/aleph-app-release.yml`，本地打包入口是 `justfile` 的 `just shell-build`）。旧壳最终**将删除**；NSH 尚无自己的发布流水线（`justfile`、`.github/workflows/`）。参阅[桌面宿主概览](../desktop-hosts/overview)。
+### 打包 NSH 桌面应用
+
+安装 NSH 0.6.0 后在目标平台运行 `just shell-build`。它先构建共享 WASM Panel 与 `aleph-server`，再通过 `scripts/nsh_package.sh` 执行 `nsh package`，将服务加入 `target/nsh-out/` 下的桌面应用。macOS 包还包含 `AlephBridge`。开发模式用 `just shell-dev` 调用 `nsh run`（`justfile`）。
+
+发布 CI 先检查已提交的 WebChat dist 与 WebView 基线，再为 macOS arm64、Linux x64、Windows x64 打包（`.github/workflows/aleph-app-release.yml`）。可选 TSX AppView 见 [Panel 宿主](../desktop-hosts/panel)。
 
 工作区版本见 `VERSION`；共享依赖、成员全表和发布配置见 `Cargo.toml`。
 

@@ -19,7 +19,7 @@ This page explains how the Gateway identifies callers and how tool permissions, 
 
 The Gateway listens on loopback by default. Compatibility `/ws` grants implicit `operator` access only to direct loopback clients that omit device credentials. Remote callers need a valid device token, bootstrap ticket, or legacy shared token. Plaintext remote connections are denied by default; use native TLS or a trusted TLS-terminating proxy for the compatibility endpoint. Passing a browser origin check does not authenticate the caller (`src/gateway/config.rs`, `src/gateway/server/mod.rs`, `src/gateway/server/connection/upgrade.rs`, `src/gateway/handlers/connect.rs`).
 
-The default network address does not define trust for every entry point. Desktop IPC verifies the Unix socket peer; Web v1 uses native TLS, same-origin checks, and device sessions. Both expose only a limited set of read-only RPCs (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`). See [Gateway authentication](../gateway/auth) and [IPC protocol](./ipc).
+The default network address does not define trust for every entry point. Desktop IPC verifies the Unix socket peer; Web v1 uses native TLS, same-origin checks, and device sessions. Both enforce the shared [Protocol v1 method list](../gateway/protocol-v1) (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`). See [Gateway authentication](../gateway/auth) and [IPC protocol](./ipc).
 
 ### Remote TLS and Client Trust
 

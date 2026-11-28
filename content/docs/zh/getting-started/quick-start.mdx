@@ -7,7 +7,7 @@ description: "启动 Aleph 并连接本地或远程 Gateway"
 
 从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) 下载当前版本实际提供的安装包。不同版本和平台的产物格式可能不同，请以 Release 附件为准。
 
-桌面壳负责窗口、托盘、通知和系统集成；推理、工具与状态由 `aleph-server` 核心提供。
+桌面发布使用 NSH。首次启动可使用随包提供的本机 `aleph-server`，也可在连接表单选择远程 HTTPS Gateway。桌面与浏览器打开同一套 Panel。见 [NSH 桌面宿主](../desktop-hosts/overview)。
 
 ## 从源码运行
 
@@ -87,7 +87,7 @@ port = 18790
 enabled = true
 ```
 
-`cert_path` 与 `key_path` 留空时会生成自签名证书。远程 WebSocket 地址为 `wss://<host>:18790/ws`；Panel 首次连接时通过 TOFU 审批证书指纹与 SAN。
+启用 TLS 后，若 `cert_path` 与 `key_path` 均为空，Gateway 会生成自签名证书。远程 WebSocket 地址为 `wss://<host>:18790/ws`。NSH 桌面应用连接远程 Gateway 时，使用 HTTPS 源站和操作系统信任的证书。NSH 的连接探测会拒绝自动生成的自签名证书（`desktop/nsh-shell/src/gateway_probe.rs`）。
 
 ## 下一步
 

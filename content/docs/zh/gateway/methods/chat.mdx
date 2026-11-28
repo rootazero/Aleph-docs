@@ -49,6 +49,10 @@ description: "面向聊天客户端的高层 RPC 方法：发送、中止、历�
 
 `context_tokens` / `context_window` / `total_tokens` 记录在 assistant 回合上，因此 Panel 重载后上下文占用条仍然能重新投影。
 
+## chat.models.list
+
+从 Gateway 当前发布的 provider 快照读取可用聊天模型。无需参数，返回 `items`，每项包含 `provider`、`model`、`provider_label` 和 `model_label`。选择模型时一并传回 `provider` 与 `model` 的原始 ID。快照尚未发布时，Gateway 返回服务不可用错误（`src/gateway/handlers/chat.rs`、`shared/protocol/src/providers/wire.rs`）。
+
 ## chat.clear
 
 清空指定会话的聊天历史。

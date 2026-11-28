@@ -93,7 +93,11 @@ Aleph/
     └── webchat/                # Web-based chat interface (WASM)
 ```
 
-NSH is the target desktop host (`desktop/nsh-shell/Cargo.toml`, nsh `0.6.0`). During the transition, current desktop releases still build the legacy Tauri shell (`desktop/shell/`): CI uses `.github/workflows/aleph-app-release.yml`, and local packaging uses `just shell-build` in `justfile`. The legacy shell will be removed; NSH does not yet have a release pipeline of its own (`justfile`, `.github/workflows/`). See the [desktop host overview](../desktop-hosts/overview).
+### Package the NSH desktop app
+
+Install NSH 0.6.0 and run `just shell-build` on the target platform. It builds the shared WASM Panel and `aleph-server`, then runs `nsh package` through `scripts/nsh_package.sh` and adds the server to the app under `target/nsh-out/`. The macOS package also includes `AlephBridge`. `just shell-dev` starts the development host with `nsh run` (`justfile`).
+
+Release CI checks the committed WebChat dist and WebView baseline before packaging for macOS arm64, Linux x64, and Windows x64 (`.github/workflows/aleph-app-release.yml`). [Panel Host](../desktop-hosts/panel) covers the optional TSX AppView.
 
 See `VERSION` for the workspace version and `Cargo.toml` for shared dependencies, the full member list, and release profiles.
 

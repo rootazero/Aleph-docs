@@ -24,11 +24,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | Minimum Rust version | 1.99 |
 | Crate types | `rlib` |
 | Async runtime | Tokio (multi-threaded) |
-| Binaries in the same crate | `aleph-server`, `aleph-migrate`, `aleph-panel-native-qa-gateway` |
+| Binaries in the same crate | `aleph-server`, `aleph-migrate` |
 
 The crate produces an `rlib` only: the `cdylib` half had no consumer after the 2026-04 repository merge (`alephcore` exports no `extern "C"` symbols), and the WASM artifact that does ship belongs to Panel.
 
-`aleph-server` is the Gateway daemon, `aleph-migrate` performs config migrations, and `aleph-panel-native-qa-gateway` requires the `native-qa` feature and exists only for native QA.
+`aleph-server` is the Gateway daemon. `aleph-migrate` performs configuration migrations.
 
 ## Module Hierarchy
 
@@ -309,7 +309,6 @@ Implement this trait to receive live events while the agent runs. The built-in i
 | (default) | `default = []` — no feature is enabled |
 | `loom` | Concurrency model checking (replaces the standard sync primitives) |
 | `test-helpers` | Integration test helpers |
-| `native-qa` | Native QA panel gateway (the `aleph-panel-native-qa-gateway` binary) |
 | `control-plane` | Embedded control plane (Panel assets) |
 | `disabled-tests` | Disabled test modules awaiting rewrite |
 | `plugin-wasm` | WASM plugin runtime (currently a reserved placeholder) |

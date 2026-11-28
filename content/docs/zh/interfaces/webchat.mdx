@@ -52,6 +52,8 @@ Panel 是一个单页应用（SPA）。macOS 应用、[桌面宿主](/docs/zh/de
 
 ## Panel 拓扑
 
+浏览器与发布版 NSH WebView 都打开 Gateway 根地址。发布版 `aleph-server` 在构建时嵌入 `interfaces/webchat/dist/`（`src/gateway/control_plane/assets.rs`）。可选 TSX AppView 见 [Panel 宿主](../desktop-hosts/panel)。
+
 `PanelMode` 有 **10 个变体**：Chat、Dashboard、Memory、Agents、Teams、Projects、Terminal、Extensions、Settings、More。主切换器 `ALL_MODES: [PanelMode; 8]` 包含其中八项（不含 Extensions 和 More），Settings 也在切换器内。定义与导航见 `interfaces/webchat/src/components/mode_sidebar.rs`、`interfaces/webchat/src/components/nav_menu.rs`。
 
 | 分区 | 路由 | 用途 |

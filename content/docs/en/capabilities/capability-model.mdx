@@ -428,9 +428,9 @@ This table distinguishes production wiring, test-only logic, and retained contra
 
 `src/capability/ui.rs` and `src/capability/ui_surface.rs` are the **runtime-owned** `aleph/ui` surface capability (`UI_NAMESPACE = "aleph/ui"`). The live UI path runs through `src/capability/ui_surface.rs` and `src/gateway/capability_ui.rs` for rendering and input transport. It has **nothing to do** with plugin UI: plugin UI goes through `src/extension/panel_publication/`.
 
-## Relation to the old model
+## From plugin declarations to runtime descriptors
 
-The old model is "a plugin declares which capabilities it has": the `CapabilityDeclaration` enum in `src/extension/capability.rs`, still used by the plugin manifest adapters but only a static declaration. The new model is "the runtime turns capabilities into descriptors and routes authorization, revocation, and invalidation through one path". The comparison and a relationship diagram are in [Capabilities and Plugins](../concepts/capability-system).
+Manifest adapters parse plugin components into `CapabilityDeclaration` values (`src/extension/capability.rs`, `src/extension/manifest/adapter.rs`). The extension host validates those declarations and registers each component with its owning registry. Once a callable tool reaches `ToolHandlerRegistry`, `ToolBackendAdapter` can project that entry as a runtime descriptor (`src/capability/backend.rs`). Zahir manages the runtime owner binding and lease. Skills and agents continue to operate through their respective registries. See [Extensions](../concepts/extensions) and the [Capability Overview](./overview).
 
 ## History: the removed legacy UI handler
 
@@ -459,4 +459,4 @@ To recover the old implementation, use git: `git log --diff-filter=D -- src/capa
 | **Reversible / durable effect classification**: uniform undo on owner release; effects that cross an irreversible boundary follow an "intent → execute → result" sandwich | Section 9, "Reversible Effects 与 Durable Effects", subsection 9.4 | `CapabilityFacet::ExternalEffect` (`src/capability/descriptor.rs`), `EffectClaim`, and `OwnershipTree::dispose` (`src/capability/ownership.rs`); the reducer `src/capability/effect_claim.rs` is not wired yet |
 | **Dependency graph**: declared dependencies drive assembly order, revocation order, and `doctor` diagnostics; an unavailable dependency returns a structured "temporarily unavailable" error | Section 10, "Dependency Graph", subsection 10.2 | `Service` relation edges (`requires` / `provides` / `conflicts`, `crates/aleph-slot-api/src/capability.rs`) and `BackendLease`'s `required_resources` (`src/capability/facade.rs`); there is no separate dependency graph and no `doctor` diagnostic |
 
-> **Status: planned** — the slot catalog, replacement mechanism, and unified dispatch registry come from a separate blueprint, `docs/research/aleph_modularization_plan.md` (sections 3, 4, and 8). See the "Planned" section of [Capabilities and Plugins](../concepts/capability-system).
+> **Status: planned** — the slot catalog, replacement mechanism, and unified dispatch registry come from a separate blueprint, `docs/research/aleph_modularization_plan.md` (sections 3, 4, and 8). See [Slots and Replacement](./slots-and-replacement).

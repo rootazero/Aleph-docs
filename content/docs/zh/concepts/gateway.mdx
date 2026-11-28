@@ -214,15 +214,15 @@ pub struct RateLimiter {
 
 26.7.17+：投递队列会把永久投递失败的出站消息保存为死信，并可重新投递。死信的查看与重投递**不是 Gateway RPC 方法**，而是内建工具 `channel_outbox`（`status` / `dead_letters` / `redrive` 三个 op；`redrive` 需 `confirm_redrive: true` 才会真正重投，省略时只返回预览）。曾有的 `channels.dead_letters` / `channels.redrive_dead_letters` RPC 因没有任何客户端调用已移除；`channels.list` 仍会给出永久未送达推送的数量。
 
-### 自签名 TLS + TOFU
+### Gateway TLS 与客户端信任
 
 26.7.17/18+：
 
 - 进程内 gateway TLS（`[gateway] tls` / `trusted_proxy` / `allow_insecure_remote`）
 - 自签名证书 SAN 自动覆盖主机非环回接口 IP
 - 漂移检测 sidecar + 原子 regen marker
-- 客户端 TOFU（fingerprint + SAN 审批 + 固定信任存储）
-- macOS WKWebView + iOS Keychain 适配器
+- NSH 桌面应用连接远程 Gateway 时，使用 HTTPS 源站和操作系统信任的证书。NSH 的连接探测会拒绝自动生成的自签名证书（`desktop/nsh-shell/src/gateway_probe.rs`）。
+- iOS Panel 通过自身的 WebView 信任流程在 Keychain 中固定证书（`mobile/ios/AlephPaneliOS/Views/PanelWebView.swift`）。
 
 ### 真实客户端 IP
 

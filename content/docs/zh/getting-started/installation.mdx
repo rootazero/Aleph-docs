@@ -7,7 +7,7 @@ description: "安装 Aleph 桌面应用或从源码构建"
 
 请从 [GitHub Releases](https://github.com/rootazero/Aleph/releases) 选择当前版本实际发布的平台安装包。产物格式与平台覆盖会随 Release 变化，不应假设每个版本都同时包含 `.dmg`、`.msi`、`.deb` 或 `.AppImage`。
 
-桌面应用由薄系统壳和 `aleph-server` 核心组成。壳负责窗口、托盘、通知和平台集成；核心负责推理、工具、状态与 Gateway。
+桌面发布使用 NSH。首次启动可使用随包提供的本机 `aleph-server`，也可在连接表单选择远程 HTTPS Gateway。桌面与浏览器打开同一套 Panel。见 [NSH 桌面宿主](../desktop-hosts/overview)。
 
 ## 从源码构建
 

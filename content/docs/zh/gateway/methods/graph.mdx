@@ -47,6 +47,10 @@ description: "知识图谱 RPC 方法"
 
 **响应:** `NoteDetailResponse`: `{ "node": { ...NoteNodeDto... }, "content", "backlinks": [ ...path... ], "outgoing": [ ...OutgoingLinkDto... ] }`。`outgoing` 包含 `to`(解析或原始)、`raw`、`relation?`、`label?`、`confidence`、`resolved_by?`、`status`(`active` / `dangling` / `tombstone`)。
 
+### graph.mutate_note
+
+更新、重命名或删除指定笔记。传入由 `agent_id` 和 `node_id` 组成的 `address`、笔记的 `revision`、`idempotency_key` 以及 `action`。`action.type` 为 `update` 时附带 `content`，为 `rename` 时附带 `title`，为 `delete` 时无需其他字段。成功时返回操作后的 `address` 和 `status`，状态为 `updated`、`renamed` 或 `deleted`。处理器在变更前检查调用方能否访问目标，并校验修订版本（`shared/protocol/src/memory_graph.rs`、`src/gateway/handlers/graph/mutate.rs`）。
+
 ### graph.update_note
 
 逐字持久化单个笔记的编辑后 markdown——正文**逐字节**写入(不是有损的 `KnowledgeNote::to_markdown` 重建),所以手写的散文、标题、代码块都能保留。持久化之前会扫描输入内容中的数据外泄载荷(仅外泄范围,所以用户自己的安全研究笔记不会被拒)。

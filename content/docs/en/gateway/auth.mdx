@@ -9,11 +9,11 @@ This page explains how local and remote clients obtain Gateway permissions, and 
 
 | Entry point | Identity check | Implementation |
 |-------------|----------------|----------------|
-| Desktop IPC | Verifies the Unix socket peer; read-only and does not inherit the compatibility WS loopback grant | `src/gateway/server/connection/local_ipc.rs` |
+| Desktop IPC | Verifies the Unix socket peer; does not inherit the compatibility WS loopback grant | `src/gateway/server/connection/local_ipc.rs` |
 | Web v1 | Native TLS; `POST /v1/session` creates a session from a valid device token or principal-bound bootstrap ticket, and `GET /v1/ws` requires a valid session cookie, matching origin, and current device principal | `src/gateway/server/mod.rs`, `src/gateway/server/connection/web_v1.rs` |
 | Compatibility `/ws` | The upgrade checks transport and `Origin` separately, then `connect` authenticates the connection. Remote callers with missing or invalid credentials cannot use authenticated RPCs. | `src/gateway/server/connection/upgrade.rs`, `src/gateway/handlers/connect.rs`, `src/gateway/server/connection/mod.rs` |
 
-The two read-only entry points negotiate with `system.hello`, not with the compatibility `/ws` `connect` flow. See [IPC protocol](../security/ipc) for their RPC scope and cross-site protections (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
+The two v1 entry points negotiate with `system.hello`, not with the compatibility `/ws` `connect` flow. See [IPC protocol](../security/ipc) for their RPC scope and cross-site protections (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
 
 ## Compatibility `/ws` Credentials
 

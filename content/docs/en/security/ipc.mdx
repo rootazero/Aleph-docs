@@ -9,11 +9,11 @@ This page explains how the Panel and local clients reach the Gateway, and where 
 
 | Entry point | Transport and identity | RPC scope | Implementation |
 |-------------|------------------------|-----------|----------------|
-| Desktop IPC | Unix domain socket; verifies the peer without granting network privileges | Read-only: `system.hello` first, then only `health` and `sessions.list` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | Native Gateway TLS; `POST /v1/session` issues a session cookie, and `GET /v1/ws` checks the session before upgrading | Read-only: `system.hello` first, then only `health` and `sessions.list` | `src/gateway/server/mod.rs`, `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC | Unix domain socket; verifies the peer without granting network privileges | `system.hello` first, then the [Protocol v1 method list](../gateway/protocol-v1) | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | Native Gateway TLS; `POST /v1/session` issues a session cookie, and `GET /v1/ws` checks the session before upgrading | `system.hello` first, then the [Protocol v1 method list](../gateway/protocol-v1) | `src/gateway/server/mod.rs`, `src/gateway/server/connection/web_v1.rs` |
 | Compatibility WebSocket | Default URL `ws://127.0.0.1:18790/ws`; `connect` distinguishes direct loopback from remote callers presenting credentials | Compatibility control plane; see [Gateway authentication](../gateway/auth) for authentication and transport gates | `src/gateway/config.rs`, `src/gateway/server/connection/upgrade.rs`, `src/gateway/handlers/connect.rs` |
 
-## Desktop IPC: A Local Read-Only Socket
+## Desktop IPC over a local socket
 
 Enable the Unix listener explicitly with `aleph-server start --desktop-ipc <socket>` (`src/bin/aleph-server/cli.rs`, `src/bin/aleph-server/commands/start/mod.rs`). The server handles up to 8 concurrent connections per listener. The listener requires a peer with the same effective user, and serving requests requires an active desktop owner. Each connection has a shared 16 MiB wire budget and a 5-second write deadline. Dispatch uses the placeholder IP `0.0.0.0`, so local IPC does not inherit the loopback privileges of the network entry point (`src/gateway/server/connection/local_ipc.rs`).
 
@@ -43,7 +43,7 @@ Enable the Unix listener explicitly with `aleph-server start --desktop-ipc <sock
 
 ### Execution Approval
 
-Permission to connect is not permission to execute. The Panel submits the user's decision through `exec.approval.resolve`. The Gateway handles approval, and the execution gate binds grants to the tool and normalized arguments. The visible approval summary is redacted; the grant fingerprint is not computed from the redacted values (`interfaces/webchat/src/api/exec_approval.rs`, `src/gateway/handlers/exec_approvals.rs`, `src/sandbox/exec_approval/action.rs`). Neither read-only entry point exposes approval RPCs (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
+Permission to connect is not permission to execute. The Panel submits the user's decision through `exec.approval.resolve`. The Gateway handles approval, and the execution gate binds grants to the tool and normalized arguments. The visible approval summary is redacted; the grant fingerprint is not computed from the redacted values (`interfaces/webchat/src/api/exec_approval.rs`, `src/gateway/handlers/exec_approvals.rs`, `src/sandbox/exec_approval/action.rs`). The two v1 entry points leave execution approval RPCs unmounted (`src/gateway/server/connection/local_ipc.rs`, `src/gateway/server/connection/web_v1.rs`).
 
 ### Credential Storage and Logs
 

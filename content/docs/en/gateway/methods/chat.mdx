@@ -49,6 +49,10 @@ Reads the chat history.
 
 `context_tokens` / `context_window` / `total_tokens` are persisted on assistant turns, so the Panel gauge re-projects on reload.
 
+## chat.models.list
+
+Lists usable chat model choices from the Gateway’s current provider snapshot. Takes no parameters and returns `items`, each with `provider`, `model`, `provider_label`, and `model_label`. Send the opaque `provider` and `model` IDs together when selecting a model. The Gateway returns a service-unavailable error if the snapshot has yet to be published (`src/gateway/handlers/chat.rs`, `shared/protocol/src/providers/wire.rs`).
+
 ## chat.clear
 
 Clears the chat history of a session.

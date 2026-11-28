@@ -124,8 +124,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Desktop Host** | 桌面宿主 | 薄原生壳：只提供窗口容器、托盘、全局热键、通知、凭据存取、登录项状态读取等系统级集成；**不持有任何聊天或会话投影**（`desktop/nsh-shell/src/shell_host.rs`） |
 | **Panel** | 面板 | 业务界面的唯一真值源：Rust + Leptos/WASM，代码在 `interfaces/webchat/`；NSH 托管的就是这一个 Panel，不是第二套业务 UI |
 | **Panel Runtime** | 面板运行时 | Panel 内部的模块化运行时：`TabRegistry`（`shared/ui_logic/src/panel/registry.rs`）、`PanelProjection`（`shared/ui_logic/src/panel/projection.rs`）、`PanelLoader`（`interfaces/webchat/src/panel/loader.rs`）、`PanelSdk`（`interfaces/webchat/src/panel/sdk.rs`）；`panel-modular` 是 opt-in feature |
-| **Legacy Shell** | 旧桌面壳 | 过渡期遗留的 Tauri v2 应用（`desktop/shell/`）：自带 daemon supervisor、托盘、自动更新、深链、热键、菜单、通知。**最终会删除** |
-| **embedded-core** | 内嵌核心 | NSH 的编译期可选特性（默认关）：本地目标且端口确实空闲时，允许启动同目录随包的 `aleph-server`；端口已被占用时只做兼容性检查，不接管已有服务 |
+| **embedded-core** | 本机服务启动 | NSH 默认构建特性，可接入兼容的本机 Gateway，或在回环端口明确拒绝连接后启动随包提供的 `aleph-server`。 |
 | **aleph:// deep link** | aleph:// 深链 | NSH 注册的 URL scheme；当前只识别精确的 `aleph://open`（打开 Chat），其余 `aleph://` URL 被忽略 |
 
 ## 能力模型与插槽
@@ -187,7 +186,7 @@ description: "Aleph 概念的标准化术语和翻译"
 | **Protocol v1** | 协议 v1 | 带版本协商的新传输协议：4 字节大端长度前缀分帧 + `system.hello` 握手（`shared/protocol/src/framing.rs`、`shared/protocol/src/system_hello.rs`） |
 | **Frame** | 帧 | 长度前缀 + 负载的传输单元；默认单帧上限 `DEFAULT_MAX_PAYLOAD_BYTES = 8_388_608`（8 MiB） |
 | **system.hello** | system.hello | 连接建立后的握手请求：协商协议次版本与特性；major 不匹配返回 `INVALID_PARAMS` |
-| **Desktop IPC** | 桌面 IPC | Unix socket 上的只读传输（`--desktop-ipc <socket>`），`src/gateway/server/connection/local_ipc.rs` |
+| **Desktop IPC** | 桌面 IPC | 通过 Unix socket 显式开启的本地 v1 传输（`--desktop-ipc <socket>`），`src/gateway/server/connection/local_ipc.rs` |
 | **Web v1** | Web v1 | 原生 TLS 的新传输：`POST /v1/session` + `GET /v1/ws`，`src/gateway/server/connection/web_v1.rs` |
 | **Legacy /ws** | 旧 /ws 入口 | 无版本号的旧 WebSocket 入口（`ws://127.0.0.1:18790/ws`），不使用长度前缀分帧 |
 | **Trace** | 追踪 | 用于可观察性的执行事件流 |

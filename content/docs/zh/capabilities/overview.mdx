@@ -1,0 +1,30 @@
+---
+title: 一切可外部组合的东西都是能力
+description: Aleph 如何跨运行时边界描述、发现、调用、观察与管理能力。
+---
+
+凡是 Agent、Runtime 或其他系统需要动态发现、调用、替换、订阅或管理的功能，都是 **Capability（能力）**。同一个 provider 可以通过能力契约公开可调用操作和事件，消费方通过描述符了解这些行为。设计见 `docs/research/Everything-externally-composable-is-a-Capability.md`。
+
+## 能力契约
+
+`CapabilityDescriptor` 标识一个能力，并记录它的 schema、修订号、所有者、生命周期和可见性。种类（`CapabilityKind`）用于分类，行为面（`CapabilityFacet`）描述消费方可使用的行为。`Ui` 或 `Terminal` 等种类可以组合多个行为面，包括 `Callable`、`EventSource`、`Subscription`、`ProviderLifecycle` 和 `ExternalEffect`（`src/capability/descriptor.rs`）。
+
+| 消费方操作 | 运行时边界 |
+|---|---|
+| 发现 | 通过已挂载的后端或协议投影读取描述符和快照，后端应用可见性与作用域。 |
+| 调用 | 经 Zahir 解析能力。后端租约绑定所有者代，运行时策略在使用前判断是否准入。 |
+| 订阅 | 能力变更经事件路径发布，并按连接的受众过滤。 |
+| 管理 | provider 注册表负责激活与生命周期，撤销或所有者换代会使既有租约失效。 |
+| 替换 | 槽位契约标识组装位置。可配置替换与统一槽位目录见[槽位与替换](./slots-and-replacement)。 |
+
+## 生产路径
+
+运行时门面可解析已挂载的 Tool、provider、特殊和记忆后端。作用域工具、终端与 Shell 操作，以及运行时拥有的 `aleph/ui` 表面各有执行入口。其余种类由契约命名，可执行适配器需等对应后端挂载。[能力模型](./capability-model)列出了已挂载路径与仍处于设计阶段的工作。
+
+插件通过清单声明贡献组件。扩展宿主校验这些声明并将组件发布到对应的运行时注册表。可调用工具随后可经工具后端投影为运行时描述符。[插件包](./plugin-package)介绍清单与发布方式，[扩展](../concepts/extensions)说明注册与生命周期。
+
+## 相关页面
+
+- [能力模型](./capability-model) — 描述符、租约、provider 代与事件
+- [信任与后端](./trust-and-backends) — 后端证据与调用边界
+- [槽位与替换](./slots-and-replacement) — 槽位契约与组装规划

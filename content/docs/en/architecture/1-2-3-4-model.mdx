@@ -91,7 +91,7 @@ A single Leptos codebase (`interfaces/webchat`) compiled to WASM serves as the U
 | Web | Browser | Served by the Aleph server |
 | macOS / Windows / Linux | Desktop host `desktop/nsh-shell` (NSH) | Window container + WebView loading the same Panel |
 
-The desktop host is a **thin host**: it provides only the window container and native integrations (tray, summon hotkey, the `aleph://` URL scheme, notifications, device-credential storage). All complex UI -- settings pages, conversation views, debug panels -- lives in the WASM layer (redline R2). NSH hosts the same Panel, not a second business UI (`docs/reference/DESKTOP_SHELL.md`). The host **connects** to an existing Gateway; it does not start, stop, or reconfigure a service (help text in `desktop/nsh-shell/src/main.rs`). The one exception is the `embedded-core` feature, which is off by default: when enabled, it launches the sibling `aleph-server` binary only if `127.0.0.1:18790` refuses connections (`desktop/host/src/local_server.rs`). NSH has no release pipeline yet; per-platform acceptance status is tracked in `docs/reference/DESKTOP_SHELL.md`.
+The packaged app enables `embedded-core` by default. It can attach to a compatible local Gateway or launch its bundled `aleph-server` after a definite loopback connection refusal (`desktop/host/src/local_server.rs`). Remote mode opens the selected HTTPS Gateway. See [NSH Desktop Host](../desktop-hosts/overview).
 
 How the desktop-side directories divide the work (the capability layer is detailed under "Limb 1" below):
 
@@ -291,7 +291,6 @@ aleph/
 └── plugins/                     #    Plugin examples + SDK
 ```
 
-The `desktop/shell/` directory that still exists in the repository is the legacy host kept for the transition. It will be removed, and this site no longer documents it.
 
 ## Design Philosophy
 

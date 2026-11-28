@@ -53,6 +53,8 @@ The Panel is a single-page application (SPA). The same JSON-RPC protocol used by
 
 ## Panel Topology
 
+Browsers and the released NSH WebView open the Gateway root. The release `aleph-server` embeds `interfaces/webchat/dist/` at build time (`src/gateway/control_plane/assets.rs`). See [Panel Host](../desktop-hosts/panel) for the optional TSX AppView.
+
 `PanelMode` has **10 variants**: Chat, Dashboard, Memory, Agents, Teams, Projects, Terminal, Extensions, Settings, and More. The primary switcher, `ALL_MODES: [PanelMode; 8]`, contains eight entries (excluding Extensions and More), including Settings. See `interfaces/webchat/src/components/mode_sidebar.rs` and `interfaces/webchat/src/components/nav_menu.rs`.
 
 | Section | Route | Purpose |

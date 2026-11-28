@@ -118,20 +118,21 @@ PluginLoader
 
 插件源在出现重复 ID 时按 `Config > Workspace > Global > Bundled` 排序。最高优先级候选项被激活，较低优先级条目保留为 `overridden`。`.disabled` 标记会让目录被跳过。
 
+同一规范作用域下，每个插件 ID 只选中一份安装。项目目录和本机项目目录共用项目作用域，同 ID 的插件包可以分别属于项目与全局。在已授权的项目内，裸 ID 选择整个项目插件包，即使该包已停用或缺少请求的贡献。没有已授权的项目上下文时，普通调用只看到全局包。`plugins.list` 返回 `scope_kind` 和精确的 `selector`（全局 `g:<id>` 或项目 `p:<digest>`），Gateway 按调用方权限解析该实例。WASM 与 MCP 的注册和退役都遵循精确的所有者身份（`src/extension/visibility.rs`、`src/extension/plugin_target.rs`、`src/extension/lifecycle.rs`）。
+
 ## 命名与注册
 
 插件组件使用 `plugin:component` 限定名，内置组件保持短名。注册表同时保留短名兼容键；短名冲突不会移除任一限定组件，且先注册者保留短名 key。
 
-`CapabilityDeclaration` 是插件层的统一注册模型（声明模型，不等于运行时能力模型——后者在 `src/capability/`，见[能力模型](/docs/zh/capabilities/capability-model)）：
+清单适配器将插件组件转换为 `CapabilityDeclaration`（`src/extension/capability.rs`）。注册器按类别进行校验和分发。
 
-- `Tool`
-- `Hook`
-- `Service`
-- `Skill`
-- `Agent`
-- `McpServer`
+| 层级 | 声明 |
+|---|---|
+| Core | `Tool`、`Hook`、`Skill` |
+| Important | `Agent` |
+| Pluggable | `Service`、`McpServer`、`Context` |
 
-插件的 `commands/` Markdown 在技能注册表中以命令型技能存放，不再有独立 capability 枚举。
+`commands/` 下的 Markdown 按命令型技能注册。`Context` 声明携带上下文描述符和 WASM 传输出口，调用时另行检查授权。运行时的能力描述符、所有权与租约见[能力模型](../capabilities/capability-model)。
 
 ## MCP 插件接线
 
@@ -198,7 +199,6 @@ Watcher 监听清单与组件变更。`reload` 在 load guard 下串行化，并
 
 ## 相关页面
 
-- [扩展系统](./extension-system) — 跨 Kind 架构
 - [技能](./skills) — SKILL.md 编写
 - [扩展商店](./extensions-store) — Hub 目录与安装
-- [能力系统](./capability-system) — 能力声明与运行时账本
+- [能力概览](../capabilities/overview) — 能力契约与生产路径

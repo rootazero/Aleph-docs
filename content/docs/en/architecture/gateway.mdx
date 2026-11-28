@@ -20,8 +20,8 @@ The three entries share one RPC execution and event dispatch core. They differ i
 | Entry | Transport | Authentication | Method surface | Limits | Code |
 |-------|-----------|----------------|----------------|--------|------|
 | `/ws` | WebSocket (compatibility entry) | `connect` handshake for a role | Full RPC method set | The state's `max_connections`, plus a per-client-IP concurrency cap with a loopback exemption | `src/gateway/server/connection/upgrade.rs` |
-| Desktop IPC | Unix domain socket | Same user account (`require_same_user`) | `health`, `sessions.list`, `panel.capabilities.snapshot` (`V1_METHODS`) | `MAX_CONNECTIONS=8`, `WIRE_BUDGET=16 MiB`, `WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
-| Web v1 | WebSocket over native TLS | Session cookie obtained from `POST /v1/session` | `health`, `sessions.list`, `panel.capabilities.snapshot` (`V1_METHODS`) | `MAX_MESSAGE=1 MiB`, `MAX_SESSIONS=256`, `MAX_SOCKETS=8`, TTL 300s | `src/gateway/server/connection/web_v1.rs` |
+| Desktop IPC | Unix domain socket | Same user account (`require_same_user`) | [Protocol v1 method list](../gateway/protocol-v1) | `MAX_CONNECTIONS=8`, `WIRE_BUDGET=16 MiB`, `WRITE_TIMEOUT=5s` | `src/gateway/server/connection/local_ipc.rs` |
+| Web v1 | WebSocket over native TLS | Session cookie obtained from `POST /v1/session` | [Protocol v1 method list](../gateway/protocol-v1) | `MAX_MESSAGE=1 MiB`, `MAX_SESSIONS=256`, `MAX_SOCKETS=8`, TTL 300s | `src/gateway/server/connection/web_v1.rs` |
 
 ### Compatibility WebSocket Entry
 
@@ -39,13 +39,13 @@ The per-client-IP concurrency cap exempts loopback, because the panel and local 
 
 ### Desktop IPC Entry
 
-Desktop IPC is the read-only entry for the desktop host: a Unix domain socket that only the same user account can reach. The entry point is a startup flag, `--desktop-ipc <socket>` (`src/bin/aleph-server/cli.rs:54`), and the server binds the listener in `run_with_desktop_ipc` at `src/gateway/server/mod.rs:1424`.
+Desktop IPC is the local v1 entry for the desktop host: a Unix domain socket that only the same user account can reach. The entry point is a startup flag, `--desktop-ipc <socket>` (`src/bin/aleph-server/cli.rs:54`), and the server binds the listener in `run_with_desktop_ipc` at `src/gateway/server/mod.rs:1424`.
 
 Once a connection is established, the following constraints apply (`src/gateway/server/connection/local_ipc.rs`):
 
 - **Same user account**: `require_same_user` (`shared/client/src/local_ipc.rs:181`) checks the peer uid and disconnects on mismatch.
 - **The first frame must be `system.hello`**: otherwise the gateway replies `AUTH_REQUIRED` / `system.hello must be first`.
-- **Method allowlist**: `execute` decides with `v1_mounted` (`src/gateway/server/connection/mod.rs`) and lets through only `health`, `sessions.list`, and `panel.capabilities.snapshot` from `V1_METHODS`; everything else gets `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`.
+- **Method allowlist**: `execute` decides with `v1_mounted` (`src/gateway/server/connection/mod.rs`) and enforces the [Protocol v1 method list](../gateway/protocol-v1); everything else gets `METHOD_NOT_FOUND` / `method not mounted on Desktop IPC`.
 - **Identity**: the role comes from `active_desktop_owner`, and the caller user is pinned to `OWNER_USER_ID`.
 - **No network rights**: the connection's origin is recorded as `NO_NETWORK_ORIGIN` (0.0.0.0), so it never receives a permission that requires a network origin.
 
@@ -191,7 +191,7 @@ The method registry is `HandlerRegistry` (`src/gateway/handlers/mod.rs:1229`). `
 
 ### The Middleware Chain
 
-`MiddlewareChain::serve_with_panel_context` (`src/gateway/middleware/chain.rs:96`) runs outer to inner:
+`MiddlewareChain::serve_with_context` (`src/gateway/middleware/chain.rs:76`) runs outer to inner:
 
 | Layer | File |
 |-------|------|
@@ -294,7 +294,7 @@ The items below have a complete design in the blueprint, but no implementation e
 
 ## History: How the Transport Entries Evolved
 
-There was originally one entry, `/ws`, with a single WebSocket carrying all RPC and events. Desktop IPC and Web v1 came later, and their responsibilities were cut apart deliberately: Desktop IPC is read-only, while Web v1 is the network entry with its own TLS and credential exchange. `/ws` was not retired; it continues to serve as the compatibility entry, and new clients should pick Desktop IPC or Web v1. The old desktop shell that predates the current NSH host is a transitional leftover and is on its way out.
+There was originally one entry, `/ws`, with a single WebSocket carrying all RPC and events. Desktop IPC and Web v1 came later, and their responsibilities were cut apart deliberately: Desktop IPC uses a local socket, and Web v1 uses TLS and a credential exchange over the network. `/ws` was not retired; it continues to serve as the compatibility entry, and new clients should pick Desktop IPC or Web v1.
 
 ## See Also
 

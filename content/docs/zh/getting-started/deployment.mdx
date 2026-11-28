@@ -69,7 +69,7 @@ enabled = true
 # san = ["aleph.example.com"]
 ```
 
-`cert_path` 与 `key_path` 为空时会生成自签名证书。远程客户端连接 `wss://<host>:18790/ws`，Panel 首次连接通过 TOFU 审批证书。
+启用 TLS 后，若 `cert_path` 与 `key_path` 均为空，Gateway 会生成自签名证书。远程 WebSocket 地址为 `wss://<host>:18790/ws`。NSH 桌面应用连接远程 Gateway 时，使用 HTTPS 源站和操作系统信任的证书。NSH 的连接探测会拒绝自动生成的自签名证书（`desktop/nsh-shell/src/gateway_probe.rs`）。
 
 ## 反向代理
 

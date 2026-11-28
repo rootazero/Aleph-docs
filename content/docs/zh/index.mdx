@@ -23,7 +23,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 - **原生性能** — 100% Rust 核心，无解释型语言
 - **壳核分离** — 桌面壳纯 OS 集成；核心可独立运行
 - **远程核心 + 自签名 TLS** — 桌面壳可通过 Tailnet/VPN 连接远程 `aleph-server`；SAN 自动覆盖本机非环回接口 IP；漂移 sidecar 原子 regen
-- **TOFU 证书信任** — 桌面面板内完成指纹 + SAN 审批与本地固定（macOS WKWebView + iOS Keychain 适配器）
+- **Gateway TLS** — NSH 通过 HTTPS 和系统信任的证书连接远程 Gateway，iOS Panel 有独立的证书固定流程。
 - **集群联邦** — 一个中心核编排多台机器（节点）作为执行臂；节点键按 Unicode 归一化（CJK 节点名正确）
 - **三层安全模型** — 失败关闭的审批 / 沙箱 / 配对，加上 `exec_tier`、会话模式、能力账本
 - **治理拓扑层（loop_graph）** — 团队节点 / 独立证据审计员（`loop-auditor`） / 胜利声明 watcher / 客观 ACL
@@ -37,57 +37,9 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 ## 架构
 
-```
-    ┌────────────────────────────────────────────────────────────────────────┐
-    │ Capability 契约层: capability / plugin / slot                          │
-    └───────────────────────────────────▲────────────────────────────────────┘
-                                        │
-    ┌──────────────────┐   ┌───────────────────────────┐   ┌──────────────────┐
-    │ Leptos/WASM      │◄─►│ shared/ui_logic/src/panel │◄─►│ TSX (nsh)        │
-    │ interfaces/      │   │ 运行时中立的模型          │   │ interfaces/      │
-    │ webchat/         │   │ 仅依赖 aleph_protocol     │   │ panel/           │
-    └──────────────────┘   └───────────────────────────┘   └──────────────────┘
+**NSH 桌面与共享 Panel。** 桌面发布使用 NSH 0.6.0。桌面 WebView 和浏览器打开 Gateway 提供的 Leptos/WASM Panel。打包应用可启动随包提供的本机 `aleph-server`，也可连接远程 Gateway。macOS 开发者可显式启用 TSX AppView。详见 [NSH 桌面宿主](/zh/desktop-hosts/overview)和 [Panel 宿主](/zh/desktop-hosts/panel)。
 
-    Panel / CLI / TUI / Telegram / Discord / iMessage
-                    │
-                    WebSocket (JSON-RPC 2.0, wss:// 可选)
-                    ▼
-    ┌────────────────────────────────────────────────────────────────────────┐
-    │                       Aleph 核心 (aleph-server)                        │
-    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
-    │  │ Gateway          │  │ Harness          │  │ Tool Registry        │  │
-    │  │ (TLS/TOFU)       │  │ (Think→Act)      │  │ (builtin/MCP/plugin) │  │
-    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
-    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
-    │  │ Thinker          │  │ Session          │  │ Memory + Loop        │  │
-    │  │ (PromptBuilder)  │  │ Service          │  │ Graph (governance)   │  │
-    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
-    │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │
-    │  │ Approval /       │  │ Extension        │  │ Heartbeat / Cron     │  │
-    │  │ Guardrails       │  │ / Skill          │  │ 调度与探测           │  │
-    │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │
-    └────────────────────────────────────────────────────────────────────────┘
-                                        │
-                                        经认证的执行调度
-                                        ▼
-                                  集群节点（远程执行体）
-```
-
-**两套渲染器，共享模型。** Leptos/WASM（`interfaces/webchat/`）与 TSX（`interfaces/panel/`）共享 `shared/ui_logic/src/panel/` 的运行时中立模型；模型只依赖 `aleph_protocol`（`shared/ui_logic/src/panel/mod.rs`）。可用 tab 取决于运行时：TSX 目前只实现 overview、sessions、capabilities 三个内置 tab，其余面向 Leptos DOM/WASM 的 tab 显示为 unavailable（`interfaces/panel/src/lib.rs`）。这不意味着 TSX 已取代 Leptos。
-
-**桌面宿主双轨。** 过渡期遗留的 Tauri 壳仍承担发版中的桌面应用（`desktop/shell/`，crate `aleph-desktop-shell`）；发布流水线仍在该目录运行构建（`.github/workflows/aleph-app-release.yml`）。目标形态是 NSH 0.6.0 宿主（`desktop/nsh-shell/`，crate `aleph-nsh-shell`，版本见 `desktop/nsh-shell/Cargo.toml`），目前没有对应发版流水线（`.github/workflows/`）。它默认承载同一份 Leptos/WASM Panel，不是另一套业务 UI；只有启用 `tsx-panel` feature、设置 `ALEPH_SHELL_PANEL=tsx` 且不处于 QA 模式时才切换到 TSX surface（`desktop/nsh-shell/src/main.rs`）。
-
-NSH 接入已经运行的 Gateway，不默认管理其生命周期（`desktop/nsh-shell/src/main.rs`）；显式启用 `embedded-core` 时才有本地核心启动路径（`desktop/host/src/local_server.rs`）。这不代表默认桌面切换、守护进程监管迁移、发版分发、Windows/Linux NSH 验收或遗留 Tauri 移除已完成；旧宿主仍可用，并曾作为 G7 对照（`docs/reference/DESKTOP_SHELL.md`）。iPhone / iPad 宿主位于 `mobile/ios/AlephPaneliOS/`，设备支持见 `mobile/ios/project.yml`；它通过全屏 WKWebView 承载同一份 WASM Panel，而非独立 iOS 业务 UI（`mobile/ios/AlephPaneliOS/Views/PanelWebView.swift`）。
-
-<Callout type="info">
-
-> **状态：规划中** — 蓝图出处：`docs/research/Everything-externally-composable-is-a-Capability.md`
->
-> **Everything externally composable is a Capability.** 总原则要求所有需要动态发现、调用、替换、订阅或管理的外部可组合能力都通过 Capability 契约表达（`AGENTS.md`）；这是设计方向，不表示所有入口已完成统一。
-
-</Callout>
-
-能力契约已在 `src/capability/` 落地；从[能力模型](/capabilities/capability-model)了解当前边界。
+**一切可外部组合的东西都是能力。** 可由 Agent、Runtime 或其他系统动态发现、调用、替换、订阅或管理的功能，都采用 Capability 契约。[能力导览](/zh/capabilities/overview)讲解生产路径中的描述符、租约与 provider 生命周期。
 
 **第三双生子：会话模式。** `chat` / `work` / `code` 是与 `exec_tier`（执行审批等级）、`think_level`（思考预算）并列的第三个用户可调维度。它**只对工具呈现面**做静态分区（progressive-disclosure + deferred-tool tier），不影响权限——权限仍由 `exec_tier` 与审批门控制。可在面板 composer pill、Settings → Policies 或 `session_set_mode` 工具里切换。
 
@@ -137,20 +89,20 @@ cargo build --bin aleph-server --release
   />
   <Card
     icon="🏗️"
-    title="桌面宿主"
-    description="了解桌面应用的两条宿主路线与各自的交付边界"
-    href="./desktop-hosts/overview"
+    title="NSH 桌面宿主"
+    description="NSH 发布、Gateway 连接、本机服务与共享 Panel"
+    href="/zh/desktop-hosts/overview"
   />
   <Card
     icon="🔧"
     title="能力与插件"
-    description="从能力模型了解如何发现、信任和组合插件能力"
-    href="./capabilities/capability-model"
+    description="了解如何发现、调用、替换、订阅和管理能力"
+    href="/zh/capabilities/overview"
   />
   <Card
     icon="🔌"
     title="Gateway RPC"
-    description="WebSocket 协议、TLS + TOFU、认证、方法族与注册状态"
+    description="WebSocket 协议、TLS、认证、方法族与注册状态"
     href="./gateway/protocol-v1"
   />
   <Card
@@ -168,7 +120,7 @@ cargo build --bin aleph-server --release
   <Card
     icon="🔒"
     title="安全"
-    description="执行审批、失败关闭的策略、TLS / TOFU、配对、签名操作账本"
+    description="执行审批、失败关闭的策略、TLS、配对、签名操作账本"
     href="./security/exec-approval"
   />
   <Card

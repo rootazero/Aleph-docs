@@ -160,12 +160,12 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 
 | 入口 | 传输 | 认证 | 能调用什么 | 代码 |
 |------|------|------|-----------|------|
-| Desktop IPC（Unix） | Unix domain socket，长度前缀帧 | 操作系统校验对端为同一用户，不授予网络权限 | 首帧 `system.hello`；之后是挂载清单里的 12 个方法（见下） | `src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs` |
+| Desktop IPC（Unix） | Unix domain socket，长度前缀帧 | 操作系统校验对端为同一用户，不授予网络权限 | 首帧 `system.hello`；之后是挂载清单里的 19 个方法（见下） | `src/gateway/server/connection/local_ipc.rs`、`shared/client/src/local_ipc.rs` |
 | Desktop IPC（Windows，未开放） | 本地命名管道代码已入库 | 已实现账户认证，未启用 | 无：客户端连接和 Gateway 监听均受可用性开关限制 | `shared/client/src/local_ipc/windows.rs`、`src/gateway/server/connection/local_ipc/windows.rs`、`shared/client/src/local_ipc.rs` |
-| Web v1 | 原生 TLS 上的 WebSocket；每条 Binary 消息恰好一帧 | 同源校验与会话 cookie；以设备令牌或引导票换取会话 | 首帧 `system.hello`；之后是挂载清单里的 12 个方法（见下） | `src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs` |
+| Web v1 | 原生 TLS 上的 WebSocket；每条 Binary 消息恰好一帧 | 同源校验与会话 cookie；以设备令牌或引导票换取会话 | 首帧 `system.hello`；之后是挂载清单里的 19 个方法（见下） | `src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs` |
 | 旧 `/ws`（兼容） | WebSocket Text 消息，无长度前缀 | 升级时检查传输安全与 `Origin`（若提供），再由 `connect` 认证 | 旧版完整 RPC 面，仍受授权限制，见[方法参考](./methods) | `src/gateway/server/connection/upgrade.rs`、`src/gateway/server/connection/mod.rs` |
 
-`system.hello` 在握手时单独处理，不属于握手后的挂载清单。两个 v1 入口共用 `V1_METHODS` 与 `v1_mounted()`，挂载的是这 12 个方法：
+`system.hello` 在握手时单独处理，不属于握手后的挂载清单。两个 v1 入口共用 `V1_METHODS` 与 `v1_mounted()`，挂载的是这 19 个方法：
 
 | 方法 | 说明 |
 |------|------|
@@ -173,7 +173,11 @@ NSH 有两种 Panel 宿主形态，不能用同一种传输概括。
 | `sessions.list` | 会话列表 |
 | `panel.capabilities.snapshot` | Panel 能力快照（`PANEL_UI_CAPABILITY_SNAPSHOT_METHOD`） |
 | `graph.query` / `graph.search` / `graph.node_detail` | 记忆图谱的查询、搜索与节点详情 |
-| `chat.history` / `chat.send` / `chat.abort` | 聊天三件套 |
+| `graph.mutate_note` | 按已知修订版本更新、重命名或删除笔记 |
+| `chat.history` / `chat.send` / `chat.abort` | 读取聊天历史、发送消息或中止轮次 |
+| `chat.models.list` | 列出可用的聊天模型 |
+| `clarification.pending` / `clarification.resolve` | 读取和处理待答澄清 |
+| `voice.turn.transcribe` / `voice.turn.synthesize` / `voice.turn.cancel` | 转写、合成或取消语音轮次 |
 | `chat.transcript_details` | 工具调用的呈现层变更 |
 | `trace.tool_output` | 工具输出 |
 | `context.breakdown` | 上下文构成 |
@@ -307,16 +311,8 @@ v1 直接订阅事件总线，因此丢帧会以 `Lagged` 的形式出现在这�
 
 ## 迁移与兼容
 
-- **新客户端**：按部署环境选择显式开启的 Desktop IPC 或原生 TLS 上的 Web v1。先发送 `system.hello`，核对返回的协议版本与限额，再调用挂载的只读方法。Desktop IPC 的 `AlephClient::connect_local` 不回退到网络传输，也不使用设备凭据（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs`、`shared/client/src/connection.rs`）。
-- **旧客户端**：继续使用 `/ws` 与 `connect`；需要时再调用 `system.hello` 探测版本，响应中的限额仅作提示。需要事件订阅或写操作的客户端仍应使用旧 RPC 入口（`src/gateway/server/connection/mod.rs`、`src/gateway/handlers/system_hello.rs`）。
-
-## 历史：NSH Phase 2 原生连接设计
-
-<Callout type="warn">
-`desktop/nsh-shell/src/connection.rs` 是 Phase 2 的原生连接设计，**没有**出现在 `desktop/nsh-shell/src/main.rs` 的 `mod` 声明里，因此不在当前编译出的 NSH 二进制中；`desktop/nsh-shell/Cargo.toml` 也没有额外的 `[[bin]]` 或 `[lib]`。`desktop/nsh-shell/src/runtime.rs`、`desktop/nsh-shell/src/session.rs`、`desktop/nsh-shell/src/supervisor.rs` 和 `desktop/nsh-shell/src/components/mod.rs` 同样未接入该二进制。不要将这些文件当作现行连接行为。
-</Callout>
-
-历史设计的 `build_hello_params()` 取 `std::env::consts::OS` 作为 `platform`，并用 `nsh` 作为 `ui_runtime`；历史客户端收到非 1 的 major 会判定握手失败（`desktop/nsh-shell/src/connection.rs`）。现行宿主连接方式见[桌面宿主](../desktop-hosts/overview)。
+- **新客户端**：按部署环境选择显式开启的 Desktop IPC 或原生 TLS 上的 Web v1。先发送 `system.hello`，核对返回的协议版本与限额，再调用挂载的方法。Desktop IPC 的 `AlephClient::connect_local` 不回退到网络传输，也不使用设备凭据（`src/gateway/server/connection/local_ipc.rs`、`src/gateway/server/connection/web_v1.rs`、`src/gateway/server/mod.rs`、`shared/client/src/connection.rs`）。
+- **旧客户端**：继续使用 `/ws` 与 `connect`；需要时再调用 `system.hello` 探测版本，响应中的限额仅作提示。需要事件订阅或 v1 清单之外的方法的客户端仍应使用旧 RPC 入口（`src/gateway/server/connection/mod.rs`、`src/gateway/handlers/system_hello.rs`）。
 
 ## 另请参阅
 
